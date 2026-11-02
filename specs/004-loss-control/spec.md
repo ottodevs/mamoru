@@ -320,7 +320,7 @@ simulator today, not yet in the domain list), `EXIT_LOSS_CONTROL` (ExitRequest c
 `EXIT_PARTIAL_IMPACT`, `EXIT_SWAP_WAIT_TWAP`, `BUCKET_FROZEN`, `BUCKET_PARKED`, `BUCKET_REENTERED`.
 
 Phase 3 (shadow only): `RISK_RERANGE_BUDGET_SPENT`, `RISK_ACTION_BUDGET_SPENT`, `RISK_ACTION_BUDGET_UNREAD`, `REENTRY_COOLDOWN_SHADOW`,
-`REENTRY_REVALIDATION_SHADOW`, `RISK_PURGA_RECHECK_FAILED`.
+`REENTRY_REVALIDATION_SHADOW`, `RISK_PURGA_RECHECK_FAILED`, `RISK_PURGA_RECHECK_UNREAD`.
 
 ## Lab plan
 
@@ -392,10 +392,10 @@ A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v
 | LC-T7 | `conservador-live-v3` with `guards.mode = 'shadow'`; two weeks of would-be codes on live | `/ops` shows them |
 | LC-T8 | App: bucket state lines, history with trigger and threshold, risk page copy (#58) | UI scenario per state |
 | LC-T9 | `guards.mode = 'enforce'` after Ot's GO on the Lab table and the shadow log, and only once D5 is resolved | Ot GO |
-| LC-T10 | Phase 3 shadow rows: `includedAt` on every engine op kind, the `engine-ops` route on both operators and the action budget over the union (`RISK_ACTION_BUDGET_UNREAD` when the peer cannot be read), the re-range row while `maxPerWeek` is unset, re-entry attempt records; cooldown and re-validation rows wired to the exit path once LC-T4 lands; the weekly Purga re-check per held pool (time of the last check persisted with the bucket state, so a restart neither skips nor repeats a week) and its internal alert | decide unit tests per code; a restart or replayed review counts nothing twice; a row without `includedAt` is skipped; a held pool whose Purga fails gets one row and one alert per week, no exit; no state or proposal change with the rows present |
-| LC-T11 | Lab: replay `base-2025-10-crash-10m`, `base-2025-02-crash-10m` and `sep2026` with the phase 3 rows; `range.maxPerWeek` = 2 against no cap (an engineering setting, so the Lab may enforce it), and the would-be `RISK_ACTION_BUDGET_SPENT` codes in shadow; drawdown, gas and return per window | Lab note |
+| LC-T10 | Phase 3 shadow rows (section above): `Observation.rotation` filled by the operator; `includedAt` on every counted op kind and the `bop` mark; `GET /internal/engine-ops/<safe>` on both operators and `actionBudgetShadowRisk` after `decide` over the union (`RISK_ACTION_BUDGET_UNREAD` when a configured peer cannot be read); the re-range row while `maxPerWeek` is unset or above 2; the shadow store `shadow-rotation.json` (attempts, unplaced deposits, Purga alert times); `purga-reviews.json` for every policy pool of both registries and the Purga row with its alert; cooldown and re-validation wired to the `left` records once LC-T4 lands | decide unit tests per code; `actionBudgetShadowRisk` tests: 5 counted ops hold the 6th, a `bop` entry and an exit leg do not count, an op in flight counts and a failed one is dropped, a re-range dated by `rerangeAt` counts, a configured peer that answers 401 gives the unread row, a peer answering the empty body for a Safe it does not run is a clean read, a body without `bridged` is unread, no peer counts the local list; a Monad entry placing USDC bridged from a Base deposit is BOP; 5 counted ops plus a BOP entry give no row (and no peer call on Base); a deposit, then a re-range, then the entry placing the deposit: the entry is still BOP; a BOP entry that fails leaves the next entry BOP; a 400 USDC Growth share bridged to Monad leaves nothing unplaced on Base once minted, and a failed Growth burn leaves the 400 free on Base and its retry consumes it once; USDC bridged by a rebalance is not BOP on Monad; a re-read of `bridged` after the BOP entry confirmed adds no record and the next entry counts; an entry larger than the free ledger counts; a withdrawn or 31-day-old deposit makes nothing BOP; a held proposal is not an attempt; a replayed review writes no second attempt; a pool held with `purgaReviewedAt` 91 days old gives the row on every review and one alert in 7 days, no exit; identity missing gives the unread row and no alert; an entry into a failing pool the account never held carries the row; re-validation with an unreadable identity or a `left` code without an evaluator does not pass and names it; `premiseHash`, `decisionId`, bucket state and proposal unchanged with every row present |
+| LC-T11 | Lab: replay `base-2025-10-crash-10m`, `base-2025-02-crash-10m` and `sep2026` with the phase 3 rows (`rotation` from the simulator's own run, no peer); `range.maxPerWeek` = 2 against no cap (an engineering setting, so the Lab may enforce it), and the would-be `RISK_ACTION_BUDGET_SPENT` codes in shadow; drawdown, gas and return per window | Lab note |
 | LC-T12 | Monad: a data source for WMON/USDC (GeckoTerminal now lists it on network `monad`; PR #205 reads it on the Monad operator, own TVL series for the lookbacks), then datasets and the oracle choice; the phase 1 and 2 rows on the Monad operator | dataset id; phase 1-2 rows readable on Monad |
-| LC-T13 | Incident exits: a producer for `RISK_INCIDENT_EXIT` (spec 001) from pool pause, oracle pause, bridge or admin change, upgrade and exploit feeds (Packaging section F), plus the manual `IncidentFlag` | own ticket |
+| LC-T13 | Incident exits: a producer for `RISK_INCIDENT_EXIT` (spec 001) from pool pause, oracle pause, bridge or admin change, upgrade and exploit feeds (Packaging section F), plus the manual `IncidentFlag`. Shadow first like every Packaging row (gate `packaging:incident`); acting needs D5 resolved and Ot's GO on its shadow log | own ticket |
 
 ## Packaging shadow rules (phase 1, otto/mamoru#101)
 
@@ -452,48 +452,171 @@ are not read. Reaches `decide` as `Observation.poolDepth`, read only by the shad
 
 Source: Packaging §5.3 (global rotation limit, per-bucket cooldowns, re-entry). Same contract as phases 1 and 2: shadow
 only, every row writes to `Decision.shadowRisk` outside the premise hash, nothing acts (constitution VI), and no
-acceptance row depends on a Packaging number changing behaviour.
+acceptance row depends on a Packaging number changing behaviour. Gate: the policy lists `packaging:rotation` in
+`policy.shadow` (the same switch as `packaging:tvl`, not `guards.mode`, so LC-T9 flipping `guards.mode` to `enforce`
+leaves these rows in shadow).
 
 The Packaging caps activity: at most 2 rebalances per week, at most 5 portfolio actions per month (exits not counted),
 at most 1 re-entry attempt per pool per cooldown. On the October 2025 replay the live policy made 12 re-ranges in one
 week, each one selling the fall ("Measured exposure"): a re-range budget is the cheapest form of "do not chase".
 
-| Rule | Condition (would hold the operation) | Code | `window` |
+| Rule | Condition (would hold the proposal) | Code | `window` |
 |---|---|---|---|
-| Action budget | the proposal is an engine operation of kind entry, `rerange`, reduce, idle convert or ratio convert, and the account already has 5 confirmed ones in the window; exit legs and harvests do not count | `RISK_ACTION_BUDGET_SPENT` | `30d` |
-| Re-range budget, cap unset | `range.maxPerWeek` absent or above 2 for the pool, and the pool already has 2 confirmed re-ranges in the window (`rerangeHistoryOf`, #218) when a re-range is proposed | `RISK_RERANGE_BUDGET_SPENT` | `7d` |
-| Cooldown | an automatic re-entry attempt into a pool less than the cooldown after the bucket left it, or less than the cooldown after the previous attempt into that pool: stables 7 d, btc-usdc 4 d, risk 10 d | `REENTRY_COOLDOWN_SHADOW` | per bucket |
-| Re-validation | an automatic re-entry while any Purga check or any rule of this spec (shadow rows included) does not pass for the pool; the entry carries the blocking rule's code | `REENTRY_REVALIDATION_SHADOW` | none |
-| Purga while invested (D11) | once every 7 days per pool the account holds, the same Purga checks as an entry (`purgaIdentity` and the pool's Purga facts in the registry) do not pass. Would-be action: no new deposits into that pool (the position stays) and an internal alert, one `ops-mamoru` post and an `/ops` row with pool, failed check and time; nothing to the owner. Never an exit by itself: an exit comes from an incident (LC-T13) or another rule | `RISK_PURGA_RECHECK_FAILED` | `7d` |
+| Action budget | the decision proposes a countable op (below) and the account already has 5 counted ops in the 30 days before the review's block timestamp. `pool`: the proposal's pool | `RISK_ACTION_BUDGET_SPENT` | `30d` |
+| Action budget unread | a peer operator is configured and its list could not be read (below) | `RISK_ACTION_BUDGET_UNREAD` | `30d` |
+| Re-range budget, cap unset | a re-range is proposed, `range.maxPerWeek` is absent or above 2, and the pool already has 2 re-ranges in the rolling 7 days before the review (`recentReranges`, the same list and window as #218's `DECIDE_RANGE_WEEKLY_CAP`, merges excluded) | `RISK_RERANGE_BUDGET_SPENT` | `7d` |
+| Cooldown | an entry is proposed into a pool the bucket left on a rule, less than the cooldown after it left (stables 7 d, btc-usdc 4 d, risk 10 d), or less than the cooldown after the previous attempt into that pool | `REENTRY_COOLDOWN_SHADOW` | none |
+| Re-validation | not in cooldown, an entry is proposed into a pool the bucket left on a rule, and at least one check of the closed set below does not pass. `label`: the codes that do not pass, sorted, comma separated | `REENTRY_REVALIDATION_SHADOW` | none |
+| Purga while invested (D11) | the pool fails Purga: `purgaIdentity` gives `NO_GO`, or its `purgaReviewedAt` in the registry is absent or more than 90 days before the review. Fires for a pool the account holds a position in, and for any entry or increase proposed into a failing pool, held or not | `RISK_PURGA_RECHECK_FAILED` | none |
 
-Notes:
+### Inputs and where each rule runs
+
+`decide` stays pure. Phase 3 reads one new shadow-only field, `Observation.rotation`, supplied by the operator for a
+policy that lists `packaging:rotation`, never hashed (same rule as `poolStats` and `poolDepth`: the premise body never
+sees it, so nothing in it can move `premiseHash` or `decisionId`):
+
+```ts
+rotation?: {
+  ops: { chain: number; opId: string; kind: 'entry' | 'rerange' | 'reduce' | 'idle-convert' | 'ratio-convert'; at: bigint; bop?: true }[] // this chain, counted ops, 30 days
+  left: { bucket: string; pool: string; at: bigint; code: string }[] // pools a bucket left on a rule (LC-T4), with the exit's inclusion time
+  attempts: { pool: string; at: bigint }[] // re-entry attempts, 30 days
+  purgaReviewedAt: Record<string, string> // pool name -> ISO date of its last Purga review
+}
+```
+
+- Re-range budget, cooldown, re-validation and Purga while invested are computed inside `decide` from the observation.
+- The action budget is computed after `decide`, by a pure function `actionBudgetShadowRisk(decision, rotation, peerOps, bop)`
+  that the engine calls only when the decision proposes a countable op, and whose rows the engine appends to
+  `Decision.shadowRisk` before it is logged or stored. The peer list is read only for those reviews (below), so a review
+  that proposes nothing countable makes no peer call, and `decide` never does I/O.
+- Lab and backtest: the simulator fills `rotation` from its own run (its journal of ops and exits) and has no peer, so
+  `peerOps` is the empty list of a successful read. With no peer configured the local list is the account's whole
+  history: correct for a single-chain account, and the reason the unread row exists only where a peer is configured.
+
+### Counting the action budget
+
+- Counted ops: entry, `rerange`, reduce, idle convert and ratio convert, from the engine's own decisions. Exit legs
+  (`close_position` or a vault withdrawal with an exit cause, `exit_convert`), harvests and bridge legs never count.
+  A vault withdrawal without an exit cause is a reduce and counts; with one it is an exit leg and does not.
+- BOP (the Packaging's exception) is tied to the deposit, not to the order of ops. The engine keeps an unplaced
+  ledger in the shadow store, per chain: `{ source, amount, at }`, where `source` is an owner deposit (`txHash` +
+  `logIndex`) or, on the receiving chain, USDC that arrived by a `bridge_out` the account's engine made from a deposit
+  (v6: the Growth share of every Base deposit goes to Monad; read from the bridge journal by `move_id`).
+  - An entry or idle convert is BOP when its USDC size is at most the ledger's free total (unplaced minus reserved);
+    a larger one counts, whole. When a BOP op is sent it reserves its size from the oldest records; confirmed, the
+    reservation is consumed; failed, refused or pre-empted, it is released, so the retry is BOP again.
+  - A `bridge_out` from a deposit follows the burn's state in the Base operator's bridge journal (`bridge-monad.ts`,
+    which burns on Base and mints on Monad with its own Monad relayer): `sending` and `burned` reserve the amount on
+    Base; `minted` consumes it there and creates the record on Monad; `failed` and `dropped` release it on Base. Both
+    happen only before anything burned (the userOp reverted, or its nonce went without it); once `burned`, the only
+    next state is `minted` (`bridge-monad.ts` on main, 2 Nov), so a release never frees USDC that left Base. The
+    journal entry carries `fromDeposit` (the source records and amounts) when the engine proposed the burn from the
+    ledger. A retried burn after a failure reserves again from the released records, once.
+  - The Monad record's data path: the `bridged` part of the Base operator's `/internal/engine-ops/<safe>` answer
+    (below), the minted burns with `fromDeposit`. The Monad engine reads it with the same reader whenever it would
+    propose an entry or idle convert, and adds a record per new `moveId` (dated `depositAt`, so it expires with the
+    deposit). USDC that arrives without such an entry (a rebalance moved across) is never BOP. A failed read gives
+    `RISK_ACTION_BUDGET_UNREAD`, never a guessed BOP.
+  - An owner withdrawal consumes free records from the newest. A record older than 30 days after its deposit expires
+    (the budget window).
+  - The shadow store keeps every source key it has ingested (`txHash` + `logIndex`, or `moveId`) with its state
+    (free, reserved, consumed) until that 30-day expiry, so a re-scan of deposits or a re-read of `bridged` never adds a
+    consumed source again.
+  - Reading the shadow log: in shadow the ops the budget would have held are still sent, and they count, so after a
+    first hold the log can show more `RISK_ACTION_BUDGET_SPENT` rows than enforce would; LC-T11, where the Lab
+    enforces, is the faithful measure.
+  - The engine (operator), not `decide`, decides BOP for the proposal before the budget step and passes it in. A BOP
+    proposal is not countable: no row, and no peer call beyond the one that established it (none on Base, where the
+    ledger is local; on Monad the read of `bridged` above). The stored op carries `bop: true` so the peer's list does not
+    count it either. The proposal itself is unchanged.
+
+  A weekly depositor therefore never spends the budget by depositing, on either chain.
+- An op counts from the moment it is sent, dated by the review's block timestamp, until it is confirmed (then dated by
+  its inclusion: `includedAt`, added by LC-T10 to every counted kind; a re-range stored before the field uses its
+  `rerangeAt`) or fails, is refused or is pre-empted (then it is dropped). Counting the op in flight is what keeps two
+  quick proposals, or one on each chain, from both seeing 4.
+- The rest of the residual: two operators sending an op in the same 2 s, each before the other's list shows it, can
+  reach 6. The same bound as the exposure cap of #212, accepted there.
+- A row stored before LC-T10 with neither `includedAt` nor `rerangeAt` is skipped: the budget under-counts for at most
+  30 days after the field ships, never over-counts.
+
+Across chains (the Packaging counts the portfolio): each operator answers `GET /internal/engine-ops/<safe>?since=<unix>`
+with one body, `{ ops: { chain, opId, kind, at, bop? }[], bridged: { moveId, amount, depositAt, mintedBlock }[] }`:
+its counted ops for that Safe with `at` at or after `since`, and the minted deposit burns with `depositAt` at or after
+`since` (always empty on Monad, which burns nothing). The empty answer is `{ "ops": [], "bridged": [] }`; a body
+missing either key is malformed. Same address on every chain (the CREATE2 Safe
+of #212), same authentication as `/internal/exposure`: an operator-to-operator read signed like `GET /metrics` with the
+shared `OPERATOR_SECRET` (`metricsSignature` over method, path and the unix minute; the path carries the Safe, the
+`since` query is not signed: a replay inside the minute reads the same Safe, as with #212), never an owner signature. The engine reads it through
+the same reader as #212's `PeerExposure`: at most 2 s old, 5 s timeout. It counts the union of both lists,
+deduplicated by `chain` + `opId`. A Safe the peer runs nothing for, or has no counted ops for, is `200` with the empty body, a
+successful empty read (most accounts have no Monad sleeve). Unread is only: unreachable, 401, a 404 for the route
+itself (a peer on older code), 5xx, timeout or a malformed body. Those give `RISK_ACTION_BUDGET_UNREAD`, never a
+local-only count reported as the account's.
+
+### Re-entry
+
+- A pool "left on a rule" is a `left` record: written by the exit path (LC-T4) when a bucket's exit leg confirms, with
+  that leg's inclusion time and the rule's code. Before LC-T4 no bucket leaves a pool on a rule, so the cooldown and
+  re-validation rows have nothing to read and stay silent. A record is dropped once its bucket re-enters the pool.
+- An attempt is a decision that proposes an entry into a pool with a `left` record and that no phase 3 row held: the
+  op an enforcing engine would have sent. A proposal that the cooldown or re-validation row held is not an attempt, so
+  in enforce mode a held proposal never restarts its own cooldown. The engine writes `{ pool, at }` with the review's
+  block timestamp after it logs the decision; the same `(pool, at)` is never written twice, so a restart or a replayed
+  review adds nothing.
+- The closed set for re-validation, on the pool being entered:
+  - the phase 1 and 2 rows that would exit (`RISK_POOL_TVL_DROP`, `RISK_POOL_VOLUME_LOW`, `RISK_POOL_EEL_LOW`,
+    `RISK_EXIT_SLIPPAGE`, `RISK_POSITION_RATIO`), except the ones D12 exempts on a stables pool;
+  - their unread rows (`RISK_POOL_STATS_UNREAD`, `RISK_POOL_DEPTH_UNREAD`): missing data does not pass (D8);
+  - `purgaIdentity` and the pool's `purgaReviewedAt`, as in the Purga row; here an unreadable identity
+    (`RISK_PURGA_RECHECK_UNREAD`) does not pass either (D8);
+  - the condition of the `left` record's own code, evaluated on this observation. A code with no evaluator on a single
+    observation (`EXIT_LOSS_CONTROL`, account-level and history-dependent, or any code phase 3 does not know) does not
+    pass and is listed by its own code: such a pool comes back only through the owner or a later rule change.
+
+  `RISK_EXIT_SLIPPAGE` and `RISK_POSITION_RATIO` on a pool the account holds nothing in are evaluated at the proposed
+  entry's size (the non-USDC leg it would buy, and that size over EEL), the size a later full exit would sell.
+
+  It never includes phase 3 rows (no circularity) or the account-level action budget. A pool whose phase 1 and 2 rows do
+  not run (no stats source) passes those two items as absent, not as failed. Once LC-T12 (PR #205) merges every policy pool
+  has one, and before LC-T4 no `left` record exists, so the case does not arise on live.
+- Cooldown and re-validation are checked in that order. A proposal in cooldown gets only the cooldown row.
+
+### Purga while invested (D11)
+
+- Runs on every review of both operators, for every pool the account holds a position in. It needs no I/O:
+  `purgaIdentity` reads the observation's pool identity against the registry, and `purgaReviewedAt` is the ISO date of
+  the last Purga review by Ot or Brais, per pool, kept in `packages/registry/purga-reviews.json` beside the registry,
+  not in its entries (so writing a date never moves a registry, policy or premise hash). The operator passes the dates
+  in as `rotation.purgaReviewedAt`; LC-T10 fills the file for every policy pool from the review notes. Re-checking the identity catches a registry or pool change; the date catches the slow criteria (audits, age,
+  team, DeFiSafety, L2Beat) that no code reads: a pool nobody has re-reviewed in 90 days fails.
+- An identity that cannot be checked (`PURGA_IDENTITY_INCOMPLETE`, the observation lacks the pool's identity) is
+  `RISK_PURGA_RECHECK_UNREAD`, not a failure, and sends no alert.
+- Would-be action: no new money into a failing pool. Every entry or increase proposed into it carries the row, whether
+  the account holds a position there or not, so the shadow log and the Lab count every deposit it would have held. Never an exit by itself: an exit comes from
+  an incident (LC-T13) or another rule. Today, with LC-T13 in shadow too, a pool failing Purga has no exit path, and that
+  is the intended default.
+- Real, also in shadow: an internal alert. The operator, not `decide`, posts one line to `ops-mamoru` and shows an
+  `/ops` row (pool, failed check, time) when the row starts firing for a pool the account holds, at most once per pool
+  per 7 days. A failing pool nobody holds gives the rows on proposals but no alert. The
+  owner sees nothing.
+
+### State
+
+Everything phase 3 remembers (`attempts`, the unplaced deposits, the Purga alert times) lives in the operator's shadow store
+(`shadow-rotation.json` in its state directory), never in the bucket state and never in the premise. `left` comes from the
+bucket state LC-T4 writes, read only. "No state or proposal change with the rows present" (LC-T10) refers to the bucket
+state, the premise and the proposal; the shadow store is the rows' own memory.
+
+### Notes
 
 - **Re-range budget: already built.** The Packaging's "2 rebalances per week" is the weekly re-range cap of #218
-  (`range.maxPerWeek` in the engine settings, per pool, enforced, `DECIDE_RANGE_WEEKLY_CAP`). It is an engineering
-  setting set from `/ops`; the Packaging value for it is 2. The live engine settings do not set it today, so the
-  shadow row above reports what a cap of 2 would have held until `/ops` sets it.
-- **Re-entry attempt.** An attempt is a decision that proposes an entry into a pool the bucket left on a rule, whether
-  the entry later confirms, fails or is refused. The engine records `{ pool, at }` per attempt (block timestamp of the
-  review) next to the bucket state, so a run of failed attempts is limited by the same cooldown as the first.
-- **Action budget counting.** Same mechanism as #218's `rerangeHistoryOf`: a stored op counts only when `confirmed`,
-  dated by the block timestamp of its inclusion, written when the engine confirms it (no clock guess, survives a
-  restart). Today only re-ranges carry that timestamp (`rerangeAt`); LC-T10 adds `includedAt` to every engine op kind
-  above, with the op kind kept as the decision produced it. A row without `includedAt` predates the field and is
-  skipped, so the budget under-counts for 30 days after the field ships, never over-counts. A pre-empted, refused or
-  failed op never counts.
-- The action budget is per account across chains, as the Packaging counts the portfolio. Each operator has its own
-  journal, and the D1 yield ledger holds gas and fees, not op kinds or times. Data path: each operator answers a new
-  signed, read-only route `GET /accounts/<key>/engine-ops?since=<unix>` with its confirmed ops
-  `{ chain, opId, kind, includedAt }` (the operator's existing signed API, same keys); when a review proposes an op that counts,
-  the engine reads the peer operator's list for that account fresh, at that review (peer URL in the operator config,
-  5 s timeout, no cache), and counts the union of both lists, deduplicated by `chain` + `opId`. Peer unreachable, slow
-  or malformed: the row is `RISK_ACTION_BUDGET_UNREAD`, never a local-only count reported as the account's. Reviews
-  that propose nothing countable read nothing.
-- The action budget can be computed on live once `includedAt` ships. The re-entry rows have nothing to read until the exit path exists
-  (LC-T4): before that, no bucket ever leaves a pool on a rule, so they stay silent.
+  (`range.maxPerWeek` in the engine settings, per pool, enforced, `DECIDE_RANGE_WEEKLY_CAP`, rolling 7 days). It is an
+  engineering setting set from `/ops`; the Packaging value for it is 2. The row above reports what a cap of 2 would have
+  held while `/ops` leaves it unset or above 2, and goes silent once it is set to 2 or less.
 - After the stables bucket moves to an ERC-4626 vault (#210, PR #152) it has no range and makes no re-range; its
-  deposits and withdrawals count in the action budget as entries and reduces.
-- Monad: the counters need no outside source, so they run on both operators (the action budget over the union above). The pool rules of phases 1 and 2
+  deposits and withdrawals count in the action budget as entries and reduces (BOP and exit causes as above).
+- Monad: the counters and the Purga row need no outside source and run on both operators. The phase 1 and 2 pool rows
   run on the Monad operator from LC-T12 (PR #205).
 
 ## Decisions for Ot
@@ -518,5 +641,6 @@ Provisional defaults for the Packaging rules (Ot, 27 Oct; discussion open with B
 - **D9.** IL / rally exit (Packaging's price rules): shadow only.
 - **D10.** ENY / APY exit: only once ENY leaves shadow.
 - **D11.** Safety Score: dropped. Covered by incidents (LC-T13) plus the Purga re-run: before every re-entry
-  (`REENTRY_REVALIDATION_SHADOW`) and once a week while invested (`RISK_PURGA_RECHECK_FAILED`, internal alert only, no
-  new deposits, never an exit by itself; Ot 2 Nov, recommended default while Brais has not answered).
+  (`REENTRY_REVALIDATION_SHADOW`) and while invested (`RISK_PURGA_RECHECK_FAILED`: identity at every review, and a
+  Purga review by Ot or Brais older than 90 days fails; internal alert at most once a week per pool, no new deposits,
+  never an exit by itself; Ot 2 Nov, recommended default while Brais has not answered).
