@@ -5516,6 +5516,23 @@ export class Operator {
     return { accountKey: v.accountKey, chainId: BRIDGE_MONAD_CHAIN_ID, address: v.address as Address, owners: acc.ctx.owners, saltNonce: acc.ctx.saltNonce, passkey: acc.ctx.passkey, remote: t.spec }
   }
 
+  /**
+   * otto/mamoru#278: a V4 home's review found its remote bucket above target and band: the remote Safe is asked for
+   * the excess, once (one open return per account), and never while the account is stopping or migrating.
+   */
+  private async askReturn(acc: AccountState, amount: bigint, remoteValue: bigint): Promise<void> {
+    const r = this.cfg.returnHome
+    const peer = this.cfg.remotePeers?.[BRIDGE_MONAD_CHAIN_ID]
+    if (!r || !peer?.release || !peer.releaseStatus || !this.onV4(acc) || !acc.active || r.busy(acc.accountKey)) return
+    // Never against a bridge the other way still in flight (the review that found the excess saw none; one signed
+    // since would be on the bridge journal).
+    if (this.stopInFlight(acc) || this.migrationHold(acc) || this.cfg.bridgeMonad?.pending(acc.accountKey)) return
+    const remote = this.v4RemoteContext(acc)
+    if (!remote) return
+    const e = await r.request(acc.accountKey, acc.ctx.address as Address, remote, peer as Required<Pick<RemotePeer, 'release' | 'releaseStatus'>>, amount, remoteValue)
+    console.log(`[return] ${acc.accountKey}: asked ${remote.address} for ${amount} home (${e.id})`)
+  }
+
   /** otto/mamoru#278: every minute (with tickOneAuth), each V4 home's open return is followed and minted. */
   async tickReturns(): Promise<void> {
     const r = this.cfg.returnHome
@@ -6721,6 +6738,8 @@ export class Operator {
             if (last?.detail) logErr(prefix, last.detail)
             else console.log(prefix)
             safeMetrics(() => this.engineHealth.record(acc.accountKey, true, d.code, undefined))
+            // otto/mamoru#278: Growth above its target and band on the remote Safe: ask it for the excess.
+            if (d.returnDue) await this.askReturn(acc, d.returnDue.amount, r.observation.remote?.value ?? 0n).catch((e) => logErr(`[return] ${acc.accountKey}:`, e))
             // otto/mamoru#8: this review's own balance read (no extra RPC call), against the account's alert threshold.
             safeMetrics(() => this.recordGasReserve(acc, r.observation.native, r.observation.gas))
             // otto/mamoru#262: and a low reserve is refilled, off the review's path (it never waits on the relayer).

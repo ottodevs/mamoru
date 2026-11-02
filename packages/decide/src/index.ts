@@ -150,6 +150,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // Target weights: pools whose idle volatile the allocation is about to mint.
   let pendingMint: ReadonlySet<string> | undefined
   let waiting: Waiting[] = []
+  let returnDue: Decision['returnDue']
   // otto/mamoru#215: the local entry a bridge took the review from, used when the bridge cannot go.
   let displaced: Proposal | undefined
   if (policy.allocation === 'target-weights') {
@@ -162,6 +163,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     // Lab (#101 round 3): a bucket frozen by the depeg guard says so, not that it waits for a fall.
     for (const b of a.buckets) buckets.push({ bucket: b.bucket, code: depegged && b.bucket === 'stables' && b.code === 'DECIDE_ENTRY_PAUSED_FALL' ? 'RISK_DEPEG_PAIRED' : b.code })
     waiting = a.waiting
+    if (!obs.intents.paused) returnDue = a.returnDue
     trail.push(...a.trail)
     if (a.proposal) {
       enterEvaluated = true
@@ -299,7 +301,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // otto/mamoru#219: a rerange's `why` and old range are for the owner's history only; the premise stays today's.
   const premiseHash = hashOf(proposal?.kind === 'rerange' ? { ...body, proposal: premiseOf(proposal) } : body)
   // `waiting` moves with every price, so it is reported beside the decision and never part of its premise or id.
-  return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body, ...(waiting.length ? { waiting } : {}), ...(shadowRisk.length ? { shadowRisk } : {}) } as Decision
+  return { decisionId: hashOf({ observationRef, premiseHash }), premiseHash, observationRef, ...body, ...(waiting.length ? { waiting } : {}), ...(returnDue ? { returnDue } : {}), ...(shadowRisk.length ? { shadowRisk } : {}) } as Decision
 }
 
 /** otto/mamoru#223: the re-range codes that say why an out-of-range position waits. */

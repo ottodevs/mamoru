@@ -1,4 +1,4 @@
-import type { ReasonCode } from '@mamoru/domain'
+import type { ChainId, ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasIncrease, hasManageAny, preferenceTotal, type PolicyVersion } from '@mamoru/policy'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { safeSavings } from '../enter/index.ts'
@@ -54,6 +54,8 @@ export type Allocation = {
   waiting: Waiting[]
   /** otto/mamoru#215: the local proposal a bridge-out took the review from, for when the bridge cannot go. */
   displaced?: Proposal
+  /** otto/mamoru#278: the remote bucket's excess over its target and band, due home (the operator asks for it). */
+  returnDue?: { bucket: string; chainId: ChainId; amount: bigint }
 }
 
 /** The pool priced at its TWAP tick (slot0 when the TWAP is unavailable; the EHG then refuses to act on it). */
@@ -384,6 +386,17 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     picked = null
     break
   }
+  // otto/mamoru#278 (spec 002 FR-XCH-014 a): the other way. A remote bucket above its target by more than the band, by
+  // at least what an entry must be worth (the same ceiling both ways), is due home: the operator asks the remote Safe
+  // for the excess. Never while anything is in flight either way, or with the sleeve not ready.
+  let returnDue: { bucket: string; chainId: ChainId; amount: bigint } | undefined
+  for (const rb of policy.remoteBuckets ?? []) {
+    if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n || total === 0n) break
+    const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
+    const excess = obs.remote.value - target
+    if (excess < entryMin || excess * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
+    returnDue = { bucket: rb.id, chainId: rb.chainId, amount: excess }
+  }
   if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'
   // Each bucket's wait was measured against the same free savings: together they cannot hold more than what is free
   // once this review's entry has taken its savings. Clipped in the order they were found.
@@ -395,5 +408,5 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     if (amount >= minEntry) clipped.push({ ...w, amount })
     left -= amount
   }
-  return { total, free, buckets, proposal, trail, pendingMint, waiting: clipped, ...(displaced ? { displaced } : {}) }
+  return { total, free, buckets, proposal, trail, pendingMint, waiting: clipped, ...(displaced ? { displaced } : {}), ...(returnDue ? { returnDue } : {}) }
 }

@@ -469,6 +469,26 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     expect((more.waiting ?? []).some((x) => x.code === 'DECIDE_WAIT_BRIDGE')).toBe(true)
   })
 
+  test('otto/mamoru#278: Growth well above its target on the sleeve: the excess is due home, beside the decision', () => {
+    // Total 1,000: target 150 on Monad; 400 there is 250 over.
+    const d = decide(v6Obs({ balances: { USDC: 600n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 400n * USDC, inFlight: 0n, ready: true } }), V6)
+    expect(d.returnDue).toEqual({ bucket: 'growth', chainId: 143, amount: 250n * USDC })
+    expect(d.proposal?.kind).not.toBe('bridge_out')
+  })
+
+  test('otto/mamoru#278: no return inside the band, below an entry, with anything in flight, the sleeve not ready, or the review paused', () => {
+    const base = { balances: { USDC: 850n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }
+    // 152 against 150: inside the 3 % band.
+    expect(decide(v6Obs({ ...base, remote: { value: 152n * USDC, inFlight: 0n, ready: true } }), V6).returnDue).toBeUndefined()
+    const over = { balances: { USDC: 600n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }
+    expect(decide(v6Obs({ ...over, remote: { value: 400n * USDC, inFlight: 1n, ready: true } }), V6).returnDue).toBeUndefined()
+    expect(decide(v6Obs({ ...over, remote: { value: 400n * USDC, inFlight: 0n, ready: false } }), V6).returnDue).toBeUndefined()
+    const paused = v6Obs({ ...over, remote: { value: 400n * USDC, inFlight: 0n, ready: true } })
+    expect(decide({ ...paused, intents: { paused: true, exitRequested: false } }, V6).returnDue).toBeUndefined()
+    // A tiny account: the excess is under what an entry must be worth.
+    expect(decide(v6Obs({ balances: { USDC: 60_000n, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 40_000n, inFlight: 0n, ready: true } }), V6).returnDue).toBeUndefined()
+  })
+
   test('otto/mamoru#215: Growth at its target on the sleeve: no bridge', () => {
     const d = decide(v6Obs({ balances: { USDC: 850n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 150n * USDC, inFlight: 0n, ready: true } }), V6)
     expect(d.proposal?.kind).not.toBe('bridge_out')

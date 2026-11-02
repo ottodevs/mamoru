@@ -428,4 +428,9 @@ export type Decision = {
    * (the amounts move with every price). Absent when nothing waits.
    */
   waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY'; amount: bigint }[]
+  /**
+   * otto/mamoru#278: a remote bucket's excess over its target and band, due home: the operator asks the remote Safe to
+   * send it back. Outside the premise hash and the id, as `waiting`. Absent: nothing due (or the review was paused).
+   */
+  returnDue?: { bucket: string; chainId: ChainId; amount: bigint }
 }
