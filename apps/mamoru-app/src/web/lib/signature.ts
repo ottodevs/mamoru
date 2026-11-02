@@ -2,7 +2,7 @@ import { signedFacts } from '../components/approval-dialog.tsx'
 
 /**
  * otto/mamoru#19: every passkey prompt is preceded by one plain line saying what that signature does and what it
- * cannot do. Copy agreed with Brais on 20-oct (noema 1-projects/titan26/brand/ux-beta-feedback-2026-10-20, screens 6a-6c).
+ * cannot do. Copy agreed with Brais on 20-oct (noema 1-projects/mamoru/brand/ux-beta-feedback-2026-10-20, screens 6a-6c).
  */
 export const signatureCopy = {
   create: {
