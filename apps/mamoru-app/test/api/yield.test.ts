@@ -16,7 +16,7 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     expect(view).toEqual({ asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null, lastBalance: null, earnedDaily: null })
   })
 
-  test('accruedUsd and earnedSoFarUsd come from account_snapshot_latest once it has a row, collected folded in as 0 when none is known', async () => {
+  test('accruedUsd comes from account_snapshot_latest once it has a row; earnedSoFarUsd is 0 there until something is collected (#341)', async () => {
     db.raw.exec(
       `INSERT INTO account_snapshot_latest (chain_id, address, account_key, env, block, read_at, deployed, idle_usdc, lp_usdc, fees_usdc, owed_usdc, total_usdc, positions_json, updated_at)
        VALUES (${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1000, '2026-10-16T09:00:00.000Z', 1, 1000000, 5000000, 1234, 0, 6001234, '[]', '2026-10-16T09:00:05.000Z')`,
@@ -24,7 +24,7 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
     expect(view.asOf).toBe('2026-10-16T09:00:00.000Z')
     expect(view.accruedUsd).toBe('1234')
-    expect(view.earnedSoFarUsd).toBe('1234')
+    expect(view.earnedSoFarUsd).toBe('0')
     expect(view.collectedUsd).toBeNull()
     expect(view.gasPaidWei).toBeNull()
     // otto/mamoru#208: what Home shows, as a past reading, when the live /funding read fails.
@@ -38,7 +38,7 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     )
   }
 
-  test('a receipt newer than the latest snapshot (a Stop collected what it still shows as accrued) withholds accrued and earned-so-far, never adds them twice', async () => {
+  test('a receipt newer than the latest snapshot (a Stop collected what it still shows as accrued) withholds accrued; earned-so-far is the collected alone, never both', async () => {
     db.raw.exec(
       `INSERT INTO account_snapshot_latest (chain_id, address, account_key, env, block, read_at, deployed, idle_usdc, lp_usdc, fees_usdc, owed_usdc, total_usdc, positions_json, updated_at)
        VALUES (${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1000, '2026-10-16T09:00:00.000Z', 1, 0, 0, 1000000, 0, 1000000, '[]', '2026-10-16T09:00:05.000Z')`,
@@ -48,9 +48,10 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     let view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
     expect(view.collectedUsd).toBe('1000000')
     expect(view.accruedUsd).toBeNull()
-    expect(view.earnedSoFarUsd).toBeNull()
+    expect(view.earnedSoFarUsd).toBe('1000000')
     db.raw.exec(`UPDATE account_snapshot_latest SET fees_usdc = 0, updated_at = '2026-10-16T09:10:05.000Z'`)
     view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
+    expect(view.accruedUsd).toBe('0')
     expect(view.earnedSoFarUsd).toBe('1000000')
   })
 
@@ -60,6 +61,17 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
     expect(view.collectedUsd).toBe('150')
     expect(view.gasPaidWei).toBe('3000000000000000')
+  })
+
+  test('otto/mamoru#341: earnedSoFarUsd is the lifetime collected only, never the fees still accrued in a position', async () => {
+    seedReceipts(db, '2026-10-15', 393_813, '1')
+    db.raw.exec(
+      `INSERT INTO account_snapshot_latest (chain_id, address, account_key, env, block, read_at, deployed, idle_usdc, lp_usdc, fees_usdc, owed_usdc, total_usdc, positions_json, updated_at)
+       VALUES (${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1000, '2026-10-16T09:00:00.000Z', 1, 0, 0, 83473, 0, 0, '[]', '2026-10-16T09:00:05.000Z')`,
+    )
+    const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
+    expect(view.accruedUsd).toBe('83473')
+    expect(view.earnedSoFarUsd).toBe('393813')
   })
 
   function seedPositionDaily(db: ReturnType<typeof memoryD1>, day: string, tokenId: number, value: number, accrued: number, hold: number, fee: number | null) {
@@ -112,7 +124,7 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
     expect(view.valueVsHoldUsd).toBeNull()
   })
-  test('otto/mamoru#234: earnedDaily is each day close of the last 30 days, accrued plus every receipt collected up to that day', async () => {
+  test('otto/mamoru#234: earnedDaily is each day close of the last 30 days: every receipt collected up to that day, never the accrued (#341)', async () => {
     const dailyRow = (day: string, fees: number) =>
       db.raw.exec(
         `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc, gas_paid_wei)
@@ -126,9 +138,9 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     seedReceipts(db, '2026-09-05', 1000, '1')
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY, new Date('2026-10-01T12:00:00.000Z'))
     expect(view.earnedDaily).toEqual([
-      { day: '2026-09-02', earnedUsd: '20' },
-      { day: '2026-09-10', earnedUsd: '1040' },
-      { day: '2026-10-01', earnedUsd: '1007' },
+      { day: '2026-09-02', earnedUsd: '0' },
+      { day: '2026-09-10', earnedUsd: '1000' },
+      { day: '2026-10-01', earnedUsd: '1000' },
     ])
   })
 })

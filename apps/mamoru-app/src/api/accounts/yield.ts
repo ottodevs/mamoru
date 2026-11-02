@@ -9,23 +9,24 @@ import { feeReadinessUsd } from '../yield-ledger.ts'
 type LatestRow = { fees_usdc: number; total_usdc: number; read_at: string; positions_json: string; updated_at: string }
 type DailyRow = { day: string; collected_usdc: number | null; gas_paid_wei: string | null; updated_at: string }
 type PositionRow = { value_usd: number; accrued_usd_close: number; hold_value_usd: number }
-type EarnedDayRow = { day: string; fees_close_usdc: number }
+type EarnedDayRow = { day: string }
 
 /**
- * otto/mamoru#234: earned at each of the last 30 UTC days' close: that day's accrued fees plus everything collected
- * up to and on it. Collected comes from the receipts, the same rows `earnedSoFarUsd` sums (account_daily misses a
- * day an account stopped before its close), so the line and the figure beside it agree. The window is a range on
- * account_daily's primary key (`day` first), never a scan of every account's history.
+ * otto/mamoru#234: earned at each of the last 30 UTC days' close: everything collected up to and on it (#341: earned
+ * is what was harvested, never fees still in a position). Collected comes from the receipts, the same rows
+ * `earnedSoFarUsd` sums (account_daily misses a day an account stopped before its close), so the line and the figure
+ * beside it agree. The window is a range on account_daily's primary key (`day` first), never a scan of every
+ * account's history.
  */
 async function earnedDaily(db: Db, chainId: number, accountKey: string, receipts: DailyRow[], today: string): Promise<{ day: string; earnedUsd: string }[] | null> {
   const from = new Date(Date.parse(`${today}T00:00:00.000Z`) - 29 * 86_400_000).toISOString().slice(0, 10)
   const rows = await db
-    .prepare('SELECT day, fees_close_usdc FROM account_daily WHERE day >= ? AND chain_id = ? AND account_key = ? ORDER BY day ASC')
+    .prepare('SELECT day FROM account_daily WHERE day >= ? AND chain_id = ? AND account_key = ? ORDER BY day ASC')
     .bind(from, chainId, accountKey)
     .all<EarnedDayRow>()
   if (rows.results.length === 0) return null
   const collectedBy = (day: string) => receipts.reduce((n, r) => (r.day <= day && r.collected_usdc != null ? n + BigInt(r.collected_usdc) : n), 0n)
-  return rows.results.map((r) => ({ day: r.day, earnedUsd: (BigInt(r.fees_close_usdc) + collectedBy(r.day)).toString() }))
+  return rows.results.map((r) => ({ day: r.day, earnedUsd: collectedBy(r.day).toString() }))
 }
 
 const dayOf = (iso: string): string => iso.slice(0, 10)
@@ -90,8 +91,8 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
 
   // A receipt written after the latest snapshot (both Worker clock; one pull writes the snapshot first, same
   // `now`) may have collected fees that snapshot still counts as accrued: a Stop collects everything, and a stopped
-  // account is not read again. Adding the two would count those fees twice, so accrued and earned-so-far are
-  // withheld until a snapshot newer than every receipt reconciles them; collected stays.
+  // account is not read again. Accrued is withheld until a snapshot newer than every receipt reconciles it; collected
+  // stays.
   const stale = latest !== null && daily.results.some((r) => r.updated_at > latest.updated_at)
   const valueVsHold = stale ? null : await openPositionsValueVsHold(db, chainId, accountKey, latest)
   const accrued = latest && !stale ? BigInt(latest.fees_usdc) : null
@@ -99,7 +100,9 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     asOf: stale ? null : (latest?.read_at ?? null),
     accruedUsd: accrued !== null ? accrued.toString() : null,
     collectedUsd: anyCollected ? collected.toString() : null,
-    earnedSoFarUsd: accrued !== null ? (accrued + collected).toString() : null,
+    // otto/mamoru#341 (Brais, 2 Nov): earned so far is what was harvested, priced when collected and frozen, so it
+    // never goes down with the price. A measured account with nothing collected yet has earned 0, not unknown.
+    earnedSoFarUsd: anyCollected || latest ? collected.toString() : null,
     gasPaidWei: anyGas ? gas.toString() : null,
     valueVsHoldUsd: valueVsHold !== null ? valueVsHold.toString() : null,
     feeAccruedUsd: anyFeeAccrued ? feeAccrued.toString() : null,
