@@ -107,8 +107,8 @@ const opGasOf = (k: keyof typeof SIBLING_GAS) => SIBLING_GAS[k].verificationGasL
 export const SIBLING_HANDLE_OPS_OVERHEAD = 200_000n
 /** The highest fee a sibling op signs (its maxFeePerGas): the relayer's own ceiling, under GasPolicyV2's 5 gwei. */
 export const SIBLING_MAX_FEE = 3_000_000_000n // = MAX_GAS_PRICE_WEI (declared below)
-/** A swap sized down to V4's room stays this far (bps) under it (V4's valuation is not exactly linear in the amount). */
-export const SIBLING_ROOM_MARGIN_BPS = 100n
+/** A swap's value (as V4 values it) stays this far (bps) under V4's room: the band moves before the op runs. */
+export const SIBLING_ROOM_MARGIN_BPS = 300n
 /** The op search stops this many blocks behind the head: a provider's logs may lag its state (review r2 of #238). */
 export const SIBLING_SCAN_LAG = 12n
 /** The outstanding nonce's op is searched SIBLING_SCAN_CHUNKS log chunks a pass, from where the last pass stopped. */
@@ -1917,7 +1917,8 @@ export class BridgeOut {
         const entry = (await this.l1.readContract({ address: d.registry, abi: mamoruRegistryAbi, functionName: 'poolOf', args: [SIBLING_POOL] })) as { twapWindow: number; twapShortWindow: number; bandTicks: number; anchorTick: number; anchorBand: number; ratioBps: number; active: boolean }
         const info = (await this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'poolInfo', args: [SIBLING_POOL] })) as { token0: Address; token1: Address; fee: number; in1: boolean; stablePair: boolean }
         const left = (await this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'budgetLeft', args: [safe, SIBLING_POOL, entry.ratioBps] })) as readonly bigint[]
-        const room = left.reduce((m, x) => (x < m ? x : m))
+        // Kept SIBLING_ROOM_MARGIN_BPS under it: the band can move before the op runs (deadline SIBLING_SWAP_DEADLINE_SEC).
+        const room = (left.reduce((m, x) => (x < m ? x : m)) * (10_000n - SIBLING_ROOM_MARGIN_BPS)) / 10_000n
         const zeroForOne = getAddress(info.token0) === getAddress(L1_WETH)
         const valued = async (a: bigint) => {
           const b = await this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'swapBounds', args: [SIBLING_POOL, L1_WETH, a] })
@@ -1926,7 +1927,7 @@ export class BridgeOut {
         }
         let at = await valued(amount)
         if (at.v > room) {
-          amount = (amount * room * (10_000n - SIBLING_ROOM_MARGIN_BPS)) / (at.v * 10_000n)
+          amount = (amount * room) / at.v
           if (amount < SIBLING_MIN_SWAP_WEI) return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: V4's room is ${room} USD units, no swap now`, undefined)
           at = await valued(amount)
           if (at.v > room) return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: V4 values the sized swap above its room, no swap now`, undefined)
@@ -1958,7 +1959,9 @@ export class BridgeOut {
     const txGas = opGasOf(kind) + SIBLING_HANDLE_OPS_OVERHEAD
     // The nonce's ledger entry, from the first op ever signed with it, before anything else sees this one (the simulation
     // shows it to the RPC: review r2 of #238); a later one with the same nonce keeps it.
-    if (!c.opNonce || c.opNonce.nonce !== nonce.toString()) {
+    // Never backwards: a nonce below the ledger's is a provider behind the chain (a higher one went to recoverNonce above).
+    if (c.opNonce && nonce < BigInt(c.opNonce.nonce)) return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: provider behind (nonce ${nonce} < ${c.opNonce.nonce}), nothing signed`, undefined)
+    if (!c.opNonce) {
       c.opNonce = { nonce: nonce.toString(), from: block.number!.toString(), scan: block.number!.toString() }
       this.save()
     }
