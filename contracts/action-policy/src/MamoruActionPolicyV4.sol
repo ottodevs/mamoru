@@ -1128,13 +1128,10 @@ contract MamoruActionPolicyV4 {
         } else {
             if (domain == ch.domain || MamoruV4Chains.byDomain(domain).chainId == 0) revert BadBridge(3);
             if (!REGISTRY.routeOn(domain)) revert NotListed(address(uint160(domain)));
-            Remote memory r = _remote[domain][account];
-            Ready memory y = _ready[domain][account];
             // r4 P0: readiness is the guardian's, for this remote and these owners; r3 P0-1: any owner change since
             // (a rotation in progress) stops every burn until the remote is re-registered and read back again.
-            if (r.remote == address(0) || y.remote != r.remote || y.ownersHash != r.ownersHash) revert RemoteNotReady(domain);
-            if (HELPER.ownersHashOf(account) != r.ownersHash) revert RemoteNotReady(domain);
-            recipient = r.remote;
+            if (!isReady(account, domain)) revert RemoteNotReady(domain);
+            recipient = _remote[domain][account].remote;
         }
         _pull(token, account, amount);
         _approve(token, TOKEN_MESSENGER, amount);
@@ -1301,6 +1298,15 @@ contract MamoruActionPolicyV4 {
 
     function readyOf(address account, uint32 domain) external view returns (Ready memory) {
         return _ready[domain][account];
+    }
+
+    /// Whether `bridge` would burn to the account's remote on `domain` now: registered, marked ready by the guardian
+    /// for the same owners hash, and the account's owners unchanged since (any owner change clears it, I4).
+    function isReady(address account, uint32 domain) public view returns (bool) {
+        Remote memory r = _remote[domain][account];
+        Ready memory y = _ready[domain][account];
+        return r.remote != address(0) && y.remote == r.remote && y.ownersHash == r.ownersHash
+            && HELPER.ownersHashOf(account) == r.ownersHash;
     }
 
     /// The relayer's permissionless deployment of the registered remote, from the account's current owners (equal to
