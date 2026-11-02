@@ -320,7 +320,7 @@ simulator today, not yet in the domain list), `EXIT_LOSS_CONTROL` (ExitRequest c
 `EXIT_PARTIAL_IMPACT`, `EXIT_SWAP_WAIT_TWAP`, `BUCKET_FROZEN`, `BUCKET_PARKED`, `BUCKET_REENTERED`.
 
 Phase 3 (shadow only): `RISK_RERANGE_BUDGET_SPENT`, `RISK_ACTION_BUDGET_SPENT`, `RISK_ACTION_BUDGET_UNREAD`, `REENTRY_COOLDOWN_SHADOW`,
-`REENTRY_REVALIDATION_SHADOW`.
+`REENTRY_REVALIDATION_SHADOW`, `RISK_PURGA_RECHECK_FAILED`.
 
 ## Lab plan
 
@@ -392,9 +392,9 @@ A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v
 | LC-T7 | `conservador-live-v3` with `guards.mode = 'shadow'`; two weeks of would-be codes on live | `/ops` shows them |
 | LC-T8 | App: bucket state lines, history with trigger and threshold, risk page copy (#58) | UI scenario per state |
 | LC-T9 | `guards.mode = 'enforce'` after Ot's GO on the Lab table and the shadow log, and only once D5 is resolved | Ot GO |
-| LC-T10 | Phase 3 shadow rows: `includedAt` on every engine op kind, the `engine-ops` route on both operators and the action budget over the union (`RISK_ACTION_BUDGET_UNREAD` when the peer cannot be read), the re-range row while `maxPerWeek` is unset, re-entry attempt records; cooldown and re-validation rows wired to the exit path once LC-T4 lands | decide unit tests per code; a restart or replayed review counts nothing twice; a row without `includedAt` is skipped; no state or proposal change with the rows present |
+| LC-T10 | Phase 3 shadow rows: `includedAt` on every engine op kind, the `engine-ops` route on both operators and the action budget over the union (`RISK_ACTION_BUDGET_UNREAD` when the peer cannot be read), the re-range row while `maxPerWeek` is unset, re-entry attempt records; cooldown and re-validation rows wired to the exit path once LC-T4 lands; the weekly Purga re-check per held pool (time of the last check persisted with the bucket state, so a restart neither skips nor repeats a week) and its internal alert | decide unit tests per code; a restart or replayed review counts nothing twice; a row without `includedAt` is skipped; a held pool whose Purga fails gets one row and one alert per week, no exit; no state or proposal change with the rows present |
 | LC-T11 | Lab: replay `base-2025-10-crash-10m`, `base-2025-02-crash-10m` and `sep2026` with the phase 3 rows; `range.maxPerWeek` = 2 against no cap (an engineering setting, so the Lab may enforce it), and the would-be `RISK_ACTION_BUDGET_SPENT` codes in shadow; drawdown, gas and return per window | Lab note |
-| LC-T12 | Monad: a data source for WMON/USDC (GeckoTerminal does not cover it, #171), datasets, oracle choice; then the phase 1 and 2 rows on the Monad operator | dataset id; phase 1-2 rows readable on Monad |
+| LC-T12 | Monad: a data source for WMON/USDC (GeckoTerminal now lists it on network `monad`; PR #205 reads it on the Monad operator, own TVL series for the lookbacks), then datasets and the oracle choice; the phase 1 and 2 rows on the Monad operator | dataset id; phase 1-2 rows readable on Monad |
 | LC-T13 | Incident exits: a producer for `RISK_INCIDENT_EXIT` (spec 001) from pool pause, oracle pause, bridge or admin change, upgrade and exploit feeds (Packaging section F), plus the manual `IncidentFlag` | own ticket |
 
 ## Packaging shadow rules (phase 1, otto/mamoru#101)
@@ -464,6 +464,7 @@ week, each one selling the fall ("Measured exposure"): a re-range budget is the 
 | Re-range budget, cap unset | `range.maxPerWeek` absent or above 2 for the pool, and the pool already has 2 confirmed re-ranges in the window (`rerangeHistoryOf`, #218) when a re-range is proposed | `RISK_RERANGE_BUDGET_SPENT` | `7d` |
 | Cooldown | an automatic re-entry attempt into a pool less than the cooldown after the bucket left it, or less than the cooldown after the previous attempt into that pool: stables 7 d, btc-usdc 4 d, risk 10 d | `REENTRY_COOLDOWN_SHADOW` | per bucket |
 | Re-validation | an automatic re-entry while any Purga check or any rule of this spec (shadow rows included) does not pass for the pool; the entry carries the blocking rule's code | `REENTRY_REVALIDATION_SHADOW` | none |
+| Purga while invested (D11) | once every 7 days per pool the account holds, the same Purga checks as an entry (`purgaIdentity` and the pool's Purga facts in the registry) do not pass. Would-be action: no new deposits into that pool (the position stays) and an internal alert, one `ops-mamoru` post and an `/ops` row with pool, failed check and time; nothing to the owner. Never an exit by itself: an exit comes from an incident (LC-T13) or another rule | `RISK_PURGA_RECHECK_FAILED` | `7d` |
 
 Notes:
 
@@ -492,8 +493,8 @@ Notes:
   (LC-T4): before that, no bucket ever leaves a pool on a rule, so they stay silent.
 - After the stables bucket moves to an ERC-4626 vault (#210, PR #152) it has no range and makes no re-range; its
   deposits and withdrawals count in the action budget as entries and reduces.
-- Monad: the counters need no outside source, so they run on both operators (the action budget over the union above). The pool rules of phases 1 and 2 stay
-  Base-only until LC-T12.
+- Monad: the counters need no outside source, so they run on both operators (the action budget over the union above). The pool rules of phases 1 and 2
+  run on the Monad operator from LC-T12 (PR #205).
 
 ## Decisions for Ot
 
@@ -516,4 +517,6 @@ Provisional defaults for the Packaging rules (Ot, 27 Oct; discussion open with B
   `RISK_POOL_STATS_UNREAD` and `RISK_POOL_TVL_UNREAD`.
 - **D9.** IL / rally exit (Packaging's price rules): shadow only.
 - **D10.** ENY / APY exit: only once ENY leaves shadow.
-- **D11.** Safety Score: dropped. Covered by incidents plus the Purga re-run.
+- **D11.** Safety Score: dropped. Covered by incidents (LC-T13) plus the Purga re-run: before every re-entry
+  (`REENTRY_REVALIDATION_SHADOW`) and once a week while invested (`RISK_PURGA_RECHECK_FAILED`, internal alert only, no
+  new deposits, never an exit by itself; Ot 2 Nov, recommended default while Brais has not answered).
