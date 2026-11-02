@@ -94,6 +94,11 @@ describe('rates over the working capital', () => {
     expect(r.pct).toBeNull()
     expect(r.gap).toBe('no-data')
   })
+  test('on Home: a ledger day more than 6 h old is not shown; the positions open now stand in', () => {
+    const old = { asOf: new Date(Date.now() - 7 * 60 * 60_000).toISOString(), day: [{ pool: 'pool:USDC/USDT/100', usdSeconds: 1 }], month: [] }
+    const { html } = render(<Indicators f={brais} apy={at12} price={null} worked={old} />)
+    expect(html).toMatch(/data-testid="rate-current"[^>]*>[^<]*(<[^>]+>)*12/)
+  })
   test('on Home: 12% under "APY · 24h avg" with most of the money idle', () => {
     const { html } = render(<Indicators f={brais} apy={at12} price={null} />)
     expect(html).toMatch(/data-testid="rate-current"[^>]*>[^<]*(<[^>]+>)*12/)
