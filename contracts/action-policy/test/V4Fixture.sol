@@ -15,7 +15,8 @@ import {
     CollectParams,
     IncreaseLiquidityParams
 } from "../src/MamoruActionPolicyV4.sol";
-import {MamoruRegistry} from "../src/MamoruRegistry.sol";
+import {MamoruV4Lens} from "../src/MamoruV4Lens.sol";
+import {MamoruV4Table} from "../src/MamoruV4Table.sol";
 import {MamoruGasPolicyV2} from "../src/MamoruGasPolicyV2.sol";
 import {ConfigIdV4, PackedUserOperationV4, Session, PolicyData, ActionData} from "../src/SmartSessionTypes.sol";
 
@@ -104,10 +105,11 @@ interface IModRegT {
 }
 
 /**
- * Spec 010 T4 (otto/mamoru#292): the shared fork fixture of MamoruActionPolicyV4's tests. Anvil semantics on a public
- * archive RPC at a pinned block, never a live chain. The stack is deployed the way T7 will: MamoruRegistry and
- * MamoruGasPolicyV2 through the canonical deterministic deployer (CREATE2, chain-independent init code), then V4 with
- * the same arguments, so the same salts give the same addresses on every fork.
+ * Spec 010 T4 + A1 (otto/mamoru#292, #316): the shared fork fixture of MamoruActionPolicyV4's tests. Anvil semantics on
+ * a public archive RPC at a pinned block, never a live chain. The stack is deployed the way T7 will: MamoruGasPolicyV2
+ * through the canonical deterministic deployer (CREATE2, chain-independent init code, no argument), then V4 with the gas
+ * policy as its only argument, so the same salts give the same addresses on every fork. No registry, no guardian: the
+ * eligible pools and the listed vaults are the code's (MamoruV4Classes).
  */
 abstract contract V4Fixture is Test {
     address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
@@ -125,7 +127,6 @@ abstract contract V4Fixture is Test {
     address constant RHINESTONE_ATTESTER = 0x000000333034E9f539ce08819E12c1b8Cb29084d;
     address constant TIME_FRAME = 0x8177451511dE0577b911C254E9551D981C26dc72;
     bytes32 constant SCHEMA = 0x93d46fcca4ef7d66a413c7bde08bb1ff14bacbd04c4069bb24cd7c21729d7bf1;
-    uint256 constant DELAY = 72 hours;
 
     // Base (packages/registry/base.json)
     uint256 constant BASE_BLOCK = 53_140_000;
@@ -156,12 +157,11 @@ abstract contract V4Fixture is Test {
     uint32 constant DOMAIN_BASE = 6;
     uint32 constant DOMAIN_MONAD = 15;
 
-    MamoruRegistry reg;
+    MamoruV4Table table;
     MamoruGasPolicyV2 gasPol;
     MamoruActionPolicyV4 v4;
     MamoruV4Helper helper;
-    address admin = makeAddr("team safe 2-of-2");
-    address guardian = makeAddr("guardian watchdog");
+    MamoruV4Lens lens;
     address acct = makeAddr("account");
     address attacker = makeAddr("attacker");
     ConfigIdV4 constant ID = ConfigIdV4.wrap(bytes32(uint256(0xC0)));
@@ -187,52 +187,19 @@ abstract contract V4Fixture is Test {
     }
 
     function _deployStack() internal {
-        reg = MamoruRegistry(
-            _create2(abi.encodePacked(type(MamoruRegistry).creationCode, abi.encode(admin, guardian, DELAY)), "mamoru.registry")
-        );
-        gasPol = MamoruGasPolicyV2(_create2(abi.encodePacked(type(MamoruGasPolicyV2).creationCode, abi.encode(guardian)), "mamoru.gas.v2"));
+        table = MamoruV4Table(_create2(type(MamoruV4Table).creationCode, "mamoru.v4.table"));
+        gasPol = MamoruGasPolicyV2(_create2(abi.encodePacked(type(MamoruGasPolicyV2).creationCode, abi.encode(table)), "mamoru.gas.v2"));
         v4 = MamoruActionPolicyV4(
-            _create2(
-                abi.encodePacked(type(MamoruActionPolicyV4).creationCode, abi.encode(address(reg), address(gasPol), guardian)),
-                "mamoru.v4"
-            )
+            _create2(abi.encodePacked(type(MamoruActionPolicyV4).creationCode, abi.encode(address(gasPol), table)), "mamoru.v4")
         );
         helper = v4.HELPER();
+        // CREATE2 too: the same address on every fork, like the stack it reads
+        lens = MamoruV4Lens(_create2(abi.encodePacked(type(MamoruV4Lens).creationCode, abi.encode(v4)), "mamoru.v4.lens"));
     }
 
-    // ------------------------------------------------------------ registry (admin, through the delay)
-
-    function _execAfterDelay(MamoruRegistry.Kind k, bytes32 key, bytes memory params) internal {
-        uint256 n = reg.nonce();
-        vm.prank(admin);
-        reg.queue(k, key, params);
-        vm.warp(vm.getBlockTimestamp() + DELAY);
-        vm.roll(vm.getBlockNumber() + DELAY / 2);
-        vm.prank(admin);
-        reg.execute(k, key, params, n);
-    }
-
-    function _listPool(address pool, uint24 band, int24 anchorTick, uint24 anchorBand, uint16 ratio) internal {
-        _execAfterDelay(
-            MamoruRegistry.Kind.Pool,
-            bytes32(uint256(uint160(pool))),
-            abi.encode(uint32(1800), uint32(300), band, anchorTick, anchorBand, ratio)
-        );
-    }
-
-    function _listVault(address vault, uint16 ratio) internal {
-        _execAfterDelay(MamoruRegistry.Kind.Vault, bytes32(uint256(uint160(vault))), abi.encode(ratio));
-    }
-
-    function _route(uint32 domain) internal {
-        _execAfterDelay(MamoruRegistry.Kind.Route, bytes32(uint256(domain)), abi.encode(true));
-    }
-
-    /// The production lists on Base: stables (band 10, parity anchor 40), BTC and ETH (band 100), V6's ratios.
-    function _listBase() internal {
-        _listPool(POOL_STABLE, 10, 0, 40, 5_000);
-        _listPool(POOL_BTC, 100, 0, 0, 3_500);
-        _listPool(POOL_ETH, 100, 0, 0, 1_500);
+    /// The sub-bucket key of a pool's class (MamoruV4Classes): its volatile asset, or the stable class's key.
+    function _key(address pool) internal view returns (address key) {
+        (,, key) = helper.priced(pool);
     }
 
     // ------------------------------------------------------------ the account
@@ -257,7 +224,7 @@ abstract contract V4Fixture is Test {
     }
 
     function _swapParams(address pool, address tokenIn, uint256 amountIn) internal view returns (SwapParams memory s) {
-        (uint256 minOut, uint160 limit) = helper.swapBounds(pool, tokenIn, amountIn);
+        (uint256 minOut, uint160 limit) = lens.swapBounds(pool, tokenIn, amountIn);
         s = SwapParams(pool, tokenIn, amountIn, minOut, limit, vm.getBlockTimestamp());
     }
 
@@ -437,7 +404,7 @@ abstract contract V4Fixture is Test {
     }
 
     function _baseCaps() internal pure returns (MamoruGasPolicyV2.Caps memory) {
-        return MamoruGasPolicyV2.Caps(10_000_000, 3_000_000, 2_000_000, 200_000, 100_000_000, 0, 0.002 ether, 1 days);
+        return MamoruGasPolicyV2.Caps(10_000_000, 3_000_000, 2_000_000, 200_000, 100_000_000, 0);
     }
 
     function _pid(Session memory s) internal pure returns (bytes32) {
@@ -450,12 +417,44 @@ abstract contract V4Fixture is Test {
         bytes callData;
     }
 
-    function _single(address target, bytes memory data) internal pure returns (bytes memory) {
+    /// A raw single-mode `execute` (the gas policy refuses it for a session: tests of that refusal only).
+    function _rawSingle(address target, bytes memory data) internal pure returns (bytes memory) {
         return abi.encodeWithSignature("execute(bytes32,bytes)", bytes32(0), abi.encodePacked(target, uint256(0), data));
     }
 
-    function _batch(Execution[] memory xs) internal pure returns (bytes memory) {
+    /// A raw batch, exactly as given (no leading clock).
+    function _rawBatch(Execution[] memory xs) internal pure returns (bytes memory) {
         return abi.encodeWithSignature("execute(bytes32,bytes)", bytes32(uint256(1) << 248), abi.encode(xs));
+    }
+
+    /// A session batch (spec 010 I6, I9): `V4.clock(now)` first, then `xs`.
+    function _batch(Execution[] memory xs) internal view returns (bytes memory) {
+        Execution[] memory ys = new Execution[](xs.length + 1);
+        ys[0] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.clock, (vm.getBlockTimestamp())));
+        for (uint256 i; i < xs.length; i++) {
+            ys[i + 1] = xs[i];
+        }
+        return _rawBatch(ys);
+    }
+
+    /// One call as a session batch: [clock, call].
+    function _single(address target, bytes memory data) internal view returns (bytes memory) {
+        Execution[] memory xs = new Execution[](1);
+        xs[0] = Execution(target, 0, data);
+        return _batch(xs);
+    }
+
+    /// The four calls that wrap an approval in a session batch (spec 009 POL-07): approve, use, reset, assertZero.
+    function _approved(address token, uint256 amount, address target, bytes memory data)
+        internal
+        view
+        returns (Execution[] memory xs)
+    {
+        xs = new Execution[](4);
+        xs[0] = Execution(token, 0, abi.encodeWithSelector(0x095ea7b3, address(v4), amount));
+        xs[1] = Execution(target, 0, data);
+        xs[2] = Execution(token, 0, abi.encodeWithSelector(0x095ea7b3, address(v4), uint256(0)));
+        xs[3] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.assertZero, (token)));
     }
 
     /// Gas fields of the userOps the tests send: verification 3M, call 2M, preVerification 100k, 0.05 gwei max fee.
@@ -554,32 +553,82 @@ abstract contract V4Fixture is Test {
         assertTrue(ISmartSessionT(SMART_SESSION).isPermissionEnabled(pid, safe), "V4 session enabled");
     }
 
+    // ------------------------------------------------------------ CCTP V2 messages between V4 instances (A1, T1c)
+
+    address constant MESSAGE_TRANSMITTER = 0x81D40F21F12A8F0E3252Bccb954D722d4c464B64;
+    bytes32 constant MESSAGE_SENT = keccak256("MessageSent(bytes)");
+    uint256 constant TEST_ATTESTER_KEY = uint256(keccak256("mamoru.v4.test-attester"));
+    uint256 cctpNonce = 0xc0ffee;
+
+    /// The message V4's `announceReady` emitted through the transmitter in `logs` (MessageSent(bytes)).
+    function _sentMessage(Vm.Log[] memory logs) internal pure returns (bytes memory m) {
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].emitter == MESSAGE_TRANSMITTER && logs[i].topics[0] == MESSAGE_SENT) {
+                return abi.decode(logs[i].data, (bytes));
+            }
+        }
+        revert("no MessageSent");
+    }
+
+    /// What Circle's attestation service does to a V2 message before signing it: a unique nonce (bytes 12..44) and the
+    /// finality the source executed at (bytes 144..148). MessageV2: version 0..4, source 4..8, destination 8..12, nonce
+    /// 12..44, sender 44..76, recipient 76..108, destinationCaller 108..140, minFinality 140..144, finalityExecuted
+    /// 144..148, body 148...
+    function _attestable(bytes memory m, uint32 finality) internal returns (bytes memory out) {
+        out = m;
+        bytes32 nonce = bytes32(++cctpNonce);
+        for (uint256 i; i < 32; i++) {
+            out[12 + i] = nonce[i];
+        }
+        for (uint256 i; i < 4; i++) {
+            out[144 + i] = bytes1(uint8(finality >> (8 * (3 - i))));
+        }
+    }
+
+    /// On the current fork, makes a test key the transmitter's only needed attester (the attester manager's own call,
+    /// pranked) and returns its attestation of `m`: a stand-in for Circle's attesters, never a weaker check.
+    function _attest(bytes memory m) internal returns (bytes memory sig) {
+        (, bytes memory mgr) = MESSAGE_TRANSMITTER.staticcall(abi.encodeWithSignature("attesterManager()"));
+        address manager = abi.decode(mgr, (address));
+        vm.startPrank(manager);
+        (bool ok,) = MESSAGE_TRANSMITTER.call(abi.encodeWithSignature("enableAttester(address)", vm.addr(TEST_ATTESTER_KEY)));
+        ok; // already enabled on a second call
+        (ok,) = MESSAGE_TRANSMITTER.call(abi.encodeWithSignature("setSignatureThreshold(uint256)", uint256(1)));
+        vm.stopPrank();
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(TEST_ATTESTER_KEY, keccak256(m));
+        sig = abi.encodePacked(r, s, v);
+    }
+
+    /// Delivers `m` (as emitted on the source fork) on the current fork, at `finality`: anyone may call receiveMessage.
+    function _deliver(bytes memory m, uint32 finality) internal returns (bool ok, bytes memory ret) {
+        bytes memory a = _attestable(m, finality);
+        bytes memory sig = _attest(a);
+        (ok, ret) = MESSAGE_TRANSMITTER.call(abi.encodeWithSignature("receiveMessage(bytes,bytes)", a, sig));
+    }
+
     /// The stack deployed through ModuleRegistry.deployModule (CREATE2 from the module registry), so V4 and the gas
     /// policy have module records and a Safe can self-attest them for the production enable flow (T7's path on the
     /// home chain). Single-chain tests only; the cross-chain tests use the deterministic deployer (`_deployStack`).
     function _deployStackViaModuleRegistry() internal {
         bytes32 resolverUID = IModRegT(MODULE_REGISTRY).findModule(TIME_FRAME).resolverUID;
+        table = MamoruV4Table(_create2(type(MamoruV4Table).creationCode, "mamoru.v4.table"));
         vm.startPrank(makeAddr("deployer"));
-        reg = MamoruRegistry(
-            IModRegT(MODULE_REGISTRY).deployModule(
-                bytes32(uint256(1)), resolverUID, abi.encodePacked(type(MamoruRegistry).creationCode, abi.encode(admin, guardian, DELAY)), "", ""
-            )
-        );
         gasPol = MamoruGasPolicyV2(
             IModRegT(MODULE_REGISTRY).deployModule(
-                bytes32(uint256(2)), resolverUID, abi.encodePacked(type(MamoruGasPolicyV2).creationCode, abi.encode(guardian)), "", ""
+                bytes32(uint256(2)), resolverUID, abi.encodePacked(type(MamoruGasPolicyV2).creationCode, abi.encode(table)), "", ""
             )
         );
         v4 = MamoruActionPolicyV4(
             IModRegT(MODULE_REGISTRY).deployModule(
                 bytes32(uint256(3)),
                 resolverUID,
-                abi.encodePacked(type(MamoruActionPolicyV4).creationCode, abi.encode(address(reg), address(gasPol), guardian)),
+                abi.encodePacked(type(MamoruActionPolicyV4).creationCode, abi.encode(address(gasPol), table)),
                 "",
                 ""
             )
         );
         vm.stopPrank();
         helper = v4.HELPER();
+        lens = new MamoruV4Lens(v4);
     }
 }

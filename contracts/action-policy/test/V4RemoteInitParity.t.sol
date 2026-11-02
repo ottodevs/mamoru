@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {MamoruActionPolicyV4, MamoruV4Helper, InitV4} from "../src/MamoruActionPolicyV4.sol";
 import {MamoruGasPolicyV2} from "../src/MamoruGasPolicyV2.sol";
+import {MamoruV4Table} from "../src/MamoruV4Table.sol";
 import {MamoruRemoteSafe, ISharedSignerV4} from "../src/MamoruRemoteSafe.sol";
 
 interface ISafeOwnersParity {
@@ -25,15 +26,15 @@ contract V4RemoteInitParityTest is Test {
 
     function setUp() public {
         j = vm.readFile(string.concat(vm.projectRoot(), "/test/fixtures/v4-remote-init.json"));
-        address guardian = vm.parseJsonAddress(j, ".guardian");
+        MamoruV4Table table = new MamoruV4Table();
         address gasDeployer = vm.parseJsonAddress(j, ".gasDeployer");
         vm.setNonce(gasDeployer, uint64(vm.parseJsonUint(j, ".gasNonce")));
         vm.prank(gasDeployer);
-        gasPol = new MamoruGasPolicyV2(guardian);
+        gasPol = new MamoruGasPolicyV2(table);
         address v4Deployer = vm.parseJsonAddress(j, ".v4Deployer");
         vm.setNonce(v4Deployer, uint64(vm.parseJsonUint(j, ".v4Nonce")));
         vm.prank(v4Deployer);
-        v4 = new MamoruActionPolicyV4(vm.parseJsonAddress(j, ".registry"), address(gasPol), guardian);
+        v4 = new MamoruActionPolicyV4(address(gasPol), table);
         home = vm.parseJsonAddress(j, ".home");
         vm.etch(home, hex"00");
     }
@@ -72,7 +73,7 @@ contract V4RemoteInitParityTest is Test {
         // MamoruV4Helper.sessions is public: the remote's one session, abi.encode(Session[1]).
         (bool ok, bytes memory out) = address(v4.HELPER()).staticcall(
             abi.encodeWithSignature(
-                "sessions(address,address,uint128,uint32,(uint256,uint32,address,address,address,address[2],address[2],address,address[2],uint256,(uint64,uint32,uint32,uint32,uint64,uint32,uint128,uint32)))",
+                "sessions(address,address,uint128,uint32,(uint256,uint32,address,address,address,address[2],address[2],address,uint128,uint32,(uint64,uint32,uint32,uint32,uint64,uint32)))",
                 home,
                 vm.parseJsonAddress(j, ".sessionKey"),
                 uint128(vm.parseJsonUint(j, ".capUsd")),
@@ -104,7 +105,7 @@ contract V4RemoteInitParityTest is Test {
         }
         bytes memory init = abi.encode(InitV4(uint128(vm.parseJsonUint(j, ".capUsd")), 1, address(0), 0, admit));
         assertEq(keccak256(init), keccak256(vm.parseJsonBytes(j, ".homeSession.init")), "InitV4");
-        bytes memory caps = abi.encode(MamoruGasPolicyV2.Caps(10_000_000, 3_000_000, 2_000_000, 200_000, 100_000_000, 0, 0.002 ether, 1 days));
+        bytes memory caps = abi.encode(MamoruGasPolicyV2.Caps(10_000_000, 3_000_000, 2_000_000, 200_000, 100_000_000, 0));
         assertEq(keccak256(caps), keccak256(vm.parseJsonBytes(j, ".homeSession.gasInit")), "MamoruGasPolicyV2.Caps (Base)");
     }
 
@@ -116,8 +117,6 @@ contract V4RemoteInitParityTest is Test {
         uint32 d;
         uint64 e;
         uint32 f;
-        uint128 g;
-        uint32 h;
     }
 
     struct ChainT {
@@ -129,8 +128,8 @@ contract V4RemoteInitParityTest is Test {
         address[2] stables;
         address[2] assets;
         address wrapped;
-        address[2] vaultFactories;
-        uint256 gasReview;
+        uint128 gasPerWindow;
+        uint32 gasWindow;
         GasCapsT remoteCaps;
     }
 
@@ -143,7 +142,7 @@ contract V4RemoteInitParityTest is Test {
         c.stables = [0x754704Bc059F8C67012fEd69BC8A327a5aafb603, address(0)];
         c.assets = [0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A, address(0)];
         c.wrapped = 0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A;
-        c.gasReview = 5 ether;
-        c.remoteCaps = GasCapsT(1_000_000_000, 3_000_000, 2_000_000, 200_000, 1_000_000_000_000, 0, 1 ether, 1 days);
+        (c.gasPerWindow, c.gasWindow) = (1 ether, 1 days);
+        c.remoteCaps = GasCapsT(1_000_000_000, 3_000_000, 2_000_000, 200_000, 1_000_000_000_000, 0);
     }
 }

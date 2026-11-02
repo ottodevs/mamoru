@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity ^0.8.28;
 
+import {Vm} from "forge-std/Test.sol";
 import {V4Fixture, IERC20T, IEntryPointT, ISmartSessionT} from "./V4Fixture.sol";
 import {MamoruActionPolicyV4, InitV4, SwapParams} from "../src/MamoruActionPolicyV4.sol";
 import {MamoruGasPolicyV2} from "../src/MamoruGasPolicyV2.sol";
-import {MamoruRegistry} from "../src/MamoruRegistry.sol";
 import {MamoruV4Chains} from "../src/MamoruV4Chains.sol";
 import {ConfigIdV4, PackedUserOperationV4, Session, PolicyData, ActionData} from "../src/SmartSessionTypes.sol";
 
@@ -51,8 +51,9 @@ contract ChainsProbe {
  * otto/mamoru#307 on forks of Ethereum and Base: an account whose ETH sits on Ethereum at its own address (the same
  * SafeProxyFactory CREATE2 address as on Base, as Guillermo's #117) gets a V4 SIBLING session there, enabled by ONE
  * owner signature in a SmartSession UNSAFE_ENABLE userOp (no attestation needed on a Safe set up before V4 existed).
- * The session wraps the native ETH, swaps it to USDC on the listed Uniswap pool under V4's price checks, and burns the
- * USDC through CCTP to the account's own address on Base, only after the guardian read that address back.
+ * The session wraps the native ETH, swaps it to USDC on an eligible Uniswap pool under V4's price checks, and burns the
+ * USDC through CCTP to the account's own address on Base, only after the home chain's V4 proved that address ready with
+ * a CCTP message (spec 010 A1: `announceReady` on Base, delivered here; no guardian).
  *
  *   nix shell nixpkgs#foundry --command forge test --match-path test/V4EthereumSiblingFork.t.sol -vv
  * ETHEREUM_FORK_RPC_URL overrides the archive RPC (default eth.drpc.org, which serves state at the pinned block).
@@ -75,6 +76,7 @@ contract V4EthereumSiblingForkTest is V4Fixture {
     uint256 ethFork;
     uint256 baseFork;
     address safe;
+    address baseHome;
     Session sibling;
     bytes32 pid;
 
@@ -84,16 +86,12 @@ contract V4EthereumSiblingForkTest is V4Fixture {
         vm.selectFork(baseFork);
         _deployStack();
         address baseV4 = address(v4);
-        address baseHome = _newSafe(117); // the home account, deployed here to read it back; it may as well be counterfactual
+        baseHome = _newSafe(117); // the home account, running V4 on Base (A1: it proves itself ready from there)
+        _init(baseHome);
         vm.selectFork(ethFork);
         _deployStack();
         assertEq(address(v4), baseV4, "V4 at the same address on Ethereum and Base");
-        // The L1 pool's ring holds 723 observations: a 720 s window (180 s short) fits it without raising it.
-        _execAfterDelay(
-            MamoruRegistry.Kind.Pool,
-            bytes32(uint256(uint160(E_POOL))),
-            abi.encode(uint32(720), uint32(180), uint24(100), int24(0), uint24(0), uint16(10_000))
-        );
+        // The L1 reference pool's ring holds 723 observations: Ethereum's class uses a 720 s window (180 s short).
         safe = _newSafe(117);
         assertEq(safe, baseHome, "the account's address is the same on both chains (same factory, same initializer)");
         vm.deal(safe, ETH_HELD);
@@ -104,7 +102,7 @@ contract V4EthereumSiblingForkTest is V4Fixture {
     // ------------------------------------------------------------ helpers
 
     function _ethCaps() internal pure returns (MamoruGasPolicyV2.Caps memory) {
-        return MamoruGasPolicyV2.Caps(100_000_000, 3_000_000, 2_000_000, 200_000, 5_000_000_000, 0, 0.01 ether, 1 days);
+        return MamoruGasPolicyV2.Caps(100_000_000, 3_000_000, 2_000_000, 200_000, 5_000_000_000, 0);
     }
 
     function _siblingSession(address account, uint32 homeDomain) internal view returns (Session memory s) {
@@ -169,26 +167,35 @@ contract V4EthereumSiblingForkTest is V4Fixture {
         (ok,) = ENTRY_POINT.call(abi.encodeCall(IEntryPointT.handleOps, (ops, payable(bundler))));
     }
 
-    /// wrap `amount` of the account's ETH, approve V4, swap it on the listed pool (V4's own bounds).
+    /// wrap `amount` of the account's ETH, approve V4, swap it on the eligible pool (V4's own bounds), reset, assert.
     function _wrapSwap(uint256 amount) internal view returns (bytes memory) {
-        (uint256 minOut, uint160 limit) = helper.swapBounds(E_POOL, E_WETH, amount);
-        Execution[] memory xs = new Execution[](3);
-        xs[0] = Execution(E_WETH, amount, abi.encodeWithSignature("deposit()"));
-        xs[1] = Execution(E_WETH, 0, abi.encodeWithSelector(0x095ea7b3, address(v4), amount));
-        xs[2] = Execution(
-            address(v4),
-            0,
-            abi.encodeCall(MamoruActionPolicyV4.swap, (SwapParams(E_POOL, E_WETH, amount, minOut, limit, vm.getBlockTimestamp())))
+        (uint256 minOut, uint160 limit) = lens.swapBounds(E_POOL, E_WETH, amount);
+        Execution[] memory sw = _approved(
+            E_WETH, amount, address(v4), abi.encodeCall(MamoruActionPolicyV4.swap, (SwapParams(E_POOL, E_WETH, amount, minOut, limit, vm.getBlockTimestamp())))
         );
+        Execution[] memory xs = new Execution[](5);
+        xs[0] = Execution(E_WETH, amount, abi.encodeWithSignature("deposit()"));
+        for (uint256 i; i < 4; i++) {
+            xs[i + 1] = sw[i];
+        }
         return _batch(xs);
     }
 
-    /// approve V4 for exactly `amount`, then V4.bridge (I1: V4 pulls, burns, resets its allowance).
+    /// approve V4 for exactly `amount`, then V4.bridge (I1: V4 pulls, burns, resets its allowance), reset, assert.
     function _bridgeCall(uint32 domain, uint256 amount) internal view returns (bytes memory) {
-        Execution[] memory xs = new Execution[](2);
-        xs[0] = Execution(E_USDC, 0, abi.encodeWithSelector(0x095ea7b3, address(v4), amount));
-        xs[1] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.bridge, (domain, E_USDC, amount)));
-        return _batch(xs);
+        return _batch(_approved(E_USDC, amount, address(v4), abi.encodeCall(MamoruActionPolicyV4.bridge, (domain, E_USDC, amount))));
+    }
+
+    /// A1: on Base, anyone calls `announceReady(home, Ethereum)`; V4 there reads the home Safe back and sends a CCTP
+    /// message, delivered here through the pinned transmitter (a test attester stands in for Circle's).
+    function _provenReady() internal {
+        vm.selectFork(baseFork);
+        vm.recordLogs();
+        v4.announceReady(baseHome, DOMAIN_ETHEREUM, address(0));
+        bytes memory m = _sentMessage(vm.getRecordedLogs());
+        vm.selectFork(ethFork);
+        (bool ok,) = _deliver(m, 2000);
+        assertTrue(ok, "receiveMessage on Ethereum");
     }
 
     function _enabledAndSwapped() internal returns (uint256 usdc) {
@@ -218,7 +225,7 @@ contract V4EthereumSiblingForkTest is V4Fixture {
         assertEq(p.byChainId(143).wrapped, M_WMON);
         // the pinned stack has the expected code on Ethereum (V4 runs this at every enable)
         helper.checkStack();
-        assertEq(gasPol.gasReview(), 0.02 ether);
+        assertEq(p.byChainId(1).gasPerWindow, 0.01 ether, "Ethereum's gas rate G");
         // CCTP: USDC burnable on the canonical messenger here, USDT not
         assertEq(helper.poolInfo(E_POOL).token0, E_USDC);
     }
@@ -285,14 +292,13 @@ contract V4EthereumSiblingForkTest is V4Fixture {
         assertGt(usdc, 100e6, "0.05 ETH became USDC under V4's bounds");
         assertEq(IERC20T(E_WETH).balanceOf(safe), 0, "all the wrapped ETH swapped");
         assertLt(safe.balance, ETH_HELD - 0.05 ether + 1, "the rest stays as gas");
-        // the bridge home waits for the guardian
+        // the bridge home waits for readiness
         assertFalse(v4.isReady(safe, DOMAIN_BASE));
         (bool ok,) = _runOp(safe, _bridgeCall(DOMAIN_BASE, usdc), pid);
-        assertFalse(ok, "no burn before the guardian read the home back");
+        assertFalse(ok, "no burn before the home is proven ready");
         assertEq(IERC20T(E_USDC).balanceOf(safe), usdc);
-        // the guardian read it back on Base (same address, same owners): ready
-        vm.prank(guardian);
-        v4.setReady(safe, DOMAIN_BASE, safe);
+        // Base's V4 read the home back there (same address, same owners) and said so by CCTP: ready
+        _provenReady();
         assertTrue(v4.isReady(safe, DOMAIN_BASE));
         watchEmitter = TOKEN_MESSENGER;
         watchWord = bytes32(uint256(uint160(safe)));
@@ -303,8 +309,7 @@ contract V4EthereumSiblingForkTest is V4Fixture {
 
     function test_sibling_bridgeOnlyHome() public {
         uint256 usdc = _enabledAndSwapped();
-        vm.prank(guardian);
-        v4.setReady(safe, DOMAIN_BASE, safe);
+        _provenReady();
         (bool ok,) = _runOp(safe, _bridgeCall(DOMAIN_MONAD, usdc), pid);
         assertFalse(ok, "a sibling bridges only to its home domain");
         vm.prank(safe);
@@ -314,29 +319,27 @@ contract V4EthereumSiblingForkTest is V4Fixture {
 
     function test_sibling_readinessRules() public {
         _enabledAndSwapped();
-        vm.startPrank(guardian);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.RemoteNotReady.selector, DOMAIN_MONAD));
-        v4.setReady(safe, DOMAIN_MONAD, safe); // not its home domain
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.RemoteNotReady.selector, DOMAIN_BASE));
-        v4.setReady(safe, DOMAIN_BASE, attacker); // not the account itself
+        (, bytes memory oh) = address(helper).staticcall(abi.encodeWithSignature("ownersHashOf(address)", safe));
+        bytes32 h = abi.decode(oh, (bytes32));
+        bytes32 me = bytes32(uint256(uint160(address(v4))));
+        vm.startPrank(MESSAGE_TRANSMITTER);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadMessage.selector, 4));
+        v4.handleReceiveFinalizedMessage(DOMAIN_MONAD, me, 2000, abi.encode(safe, safe, h)); // not its home domain
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadMessage.selector, 5));
+        v4.handleReceiveFinalizedMessage(DOMAIN_BASE, me, 2000, abi.encode(safe, attacker, h)); // not the account itself
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadMessage.selector, 6));
+        v4.handleReceiveFinalizedMessage(DOMAIN_BASE, me, 2000, abi.encode(safe, safe, keccak256("other owners")));
         vm.stopPrank();
-        vm.prank(attacker);
-        vm.expectRevert(MamoruActionPolicyV4.OnlyGuardian.selector);
-        v4.setReady(safe, DOMAIN_BASE, safe);
-        vm.prank(guardian);
-        v4.setReady(safe, DOMAIN_BASE, safe);
+        _provenReady();
         assertTrue(v4.isReady(safe, DOMAIN_BASE));
         assertFalse(v4.isReady(safe, DOMAIN_MONAD));
-        // an owner change on the sibling stops every burn until the guardian reads it back again
+        // an owner change on the sibling stops every burn until the home chain proves it ready again
         assertTrue(_ownerTx(safe, safe, abi.encodeWithSignature("addOwnerWithThreshold(address,uint256)", makeAddr("new owner"), 1), 0));
         assertFalse(v4.isReady(safe, DOMAIN_BASE), "owners changed: not ready");
         uint256 usdc = IERC20T(E_USDC).balanceOf(safe);
         vm.prank(safe);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.RemoteNotReady.selector, DOMAIN_BASE));
         v4.bridge(DOMAIN_BASE, E_USDC, usdc);
-        vm.prank(guardian);
-        v4.clearReady(safe, DOMAIN_BASE);
-        assertFalse(v4.isReady(safe, DOMAIN_BASE));
     }
 
     /// Unwrapping pays the account back through WETH9's 2300-gas transfer: the Safe proxy, warm inside its own
@@ -370,11 +373,14 @@ contract V4EthereumSiblingForkTest is V4Fixture {
         }
     }
 
-    /// Review of #209: a route to Ethereum is CCTP domain 0, and the registry takes it like any other.
+    /// Review of #209 + A1: Ethereum is CCTP domain 0 and a chain of the table, so it is a route like any other: a
+    /// home account on Base registers its remote there (no route flag to set).
     function test_routeToEthereumDomainZero() public {
         vm.selectFork(baseFork);
-        _route(DOMAIN_ETHEREUM);
-        assertTrue(reg.routeOn(DOMAIN_ETHEREUM));
+        vm.prank(baseHome);
+        address r = v4.registerRemote(DOMAIN_ETHEREUM, makeAddr("sk"));
+        assertTrue(r != address(0));
+        assertEq(v4.remoteOf(baseHome, DOMAIN_ETHEREUM).remote, r);
     }
 
     function _ownerTxValue(address s, address to, uint256 value, bytes memory data) internal returns (bool ok) {
