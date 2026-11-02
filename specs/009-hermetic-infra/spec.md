@@ -146,35 +146,52 @@ bundler.
 
 **Bundler accounting.** Mamoru's bundler submits **one userOp per bundle** and simulates it right before private
 submission. Admission requires that simulation, and a `preVerificationGas` that covers the estimated L1 data fee with a
-margin. The bundle's beneficiary must be a declared Mamoru beneficiary for that chain; the declared set is updated
+margin. The op's own `verificationGasLimit` and `callGasLimit` must be at most the simulated gas plus a margin; ops
+with looser limits are not admitted to the private path. The transaction's gas limit is derived from the op's limits
+(EntryPoint v0.7 reverts the whole `handleOps` with `AA95` if the transaction cannot cover them). At most one op per
+account is in flight at a time. The bundle's beneficiary must be a declared Mamoru beneficiary for that chain; the declared set is updated
 before a rotated beneficiary is first used. Per bundle, the submitter's total fee (including the L1 data fee on Base)
 must be ≤ that op's `actualGasCost` + a per-chain tolerance in wei.
 
 - **What a strike costs Mamoru.** A bundle that reverts on chain after passing simulation emits no event, and Mamoru
   pays its fee: that is a strike. With one op per bundle and simulation just before submission, a strike needs the op
   to be invalidated between simulation and inclusion. Only someone who can act on the account can do that, through a
-  conflicting nonce, a session revoke or draining the prefund, and they pay for that transaction themselves. The
-  bundler sets the transaction's gas limit to the simulated gas plus a margin, never to the policy caps. Per-strike
-  bound:
+  conflicting nonce, a session revoke or draining the prefund, and they pay for that transaction themselves. This
+  holds for POL-12 accounts only: under V3, validation reads the oracle and `block.timestamp`, so any third party can
+  invalidate an op by moving the price. Because of the admission rule, the transaction's gas limit is the op's tight
+  limits plus overhead, not the policy caps. Per-strike bound:
   - **Base:** the op's maximum prefund at the `MamoruGasPolicy` caps, (3M + 2M + 200k gas) × 0.1 gwei =
-    5.2 × 10¹⁴ wei, plus the one-op L1 data fee bound (T9 measures it; about 5 × 10¹³ wei). In total
+    5.2 × 10¹⁴ wei, plus the one-op L1 data fee bound (T10 measures it; about 5 × 10¹³ wei). In total
     ≤ 5.7 × 10¹⁴ wei (0.00057 ETH).
   - **Monad:** gas is charged on the transaction's gas limit, so the bound is that limit × price, at most
-    5.2M gas × 1,000 gwei = 5.2 × 10¹⁸ wei (5.2 MON) at the caps. In practice it is the simulated gas plus the margin.
+    5.2M gas × 1,000 gwei = 5.2 × 10¹⁸ wei (5.2 MON) at the caps. Under the admission rule it is the op's tight limits
+    plus overhead.
   - **Ethereum:** 0. Mamoru's bundler submits nothing there; G7 goes through Pimlico.
 - **What it costs the attacker.** At least the invalidating transaction. A fresh Sybil account also costs its own Safe
   deploy (a user-paid userOp), and after one strike it is routed away (below), so each Sybil yields at most one strike.
   On Base and Ethereum, where a reverted bundle is charged for gas used and validation fails early, attacker cost is
   roughly equal to or greater than Mamoru's loss per strike. On Monad, the gas-limit charge can make Mamoru's loss
   larger than the attacker's. The backstop below bounds the total either way.
-- **Per-account strike.** An account with a strike is routed to public bundlers for N days (N set by T11; default 7).
+- **V3 accounts until migration.** Strike routing and the backstop hand-off rely on POL-12, because public bundlers do
+  not take V3 session ops. For an account still on V3:
+  - after a strike, or when the backstop is spent, Mamoru's bundler stops submitting its session ops for N days, or
+    until the reset;
+  - the user, or a self-hosted agent, can still submit them by direct `handleOps`;
+  - its owner ops stay public-bundler eligible.
+
+  This is disclosed as a degradation until the account migrates to V-next (GRD-03). A V3 strike is not attributed to
+  the account, since a third party can cause it.
+- **Per-account strike (POL-12 accounts).** An account with a strike is routed to public bundlers for N days (N set
+  by T11; default 7).
   Its user still pays, it is still served, and its automation continues through the public bundler (POL-12). Other
   accounts are unaffected. Reverts that Mamoru's bundler causes itself, for example its own fallback racing a pending
   transaction, are not strikes: the private submission is cancelled or replaced before any public fallback. They
   still count toward the backstop.
 - **Float-protection backstop.** A per-chain daily wei budget covers every revert at Mamoru's cost. When it is spent,
   Mamoru's bundler hands **all** ops on that chain to public bundlers until the window resets. Automation continues
-  and users pay. Hosted automation never stops because of the budget. The remaining dependency is public bundler
+  and users pay. Hosted automation for V-next accounts never stops because of the budget; for V3 accounts see the
+  previous item. Draining the Monad backstop is cheap, because a strike costs Mamoru more than the attacker there,
+  but its only effect is routing to the public bundler. `/ops` monitors public bundler availability per chain. The remaining dependency is public bundler
   availability on that chain: Pimlico's public bundler accepts EntryPoint v0.7 on Base, Ethereum and Monad (verified
   2026-11-02).
 - **Never blocks a user.** Being routed elsewhere is not being refused:
@@ -326,9 +343,15 @@ bounded by the owner's allowance.
     caps, and the batch shape.
   - **Dynamic checks move to execution:** the TWAP band, position identity and the per-period and total budget run
     inside the batch. The policy requires a call to an immutable, ownerless `MamoruExecGuard` before the action (the
-    same pattern as `AllowanceCheck`). The guard reads the oracle, enforces and records the account's budget in
+    same pattern as `AllowanceCheck`). Validation binds the guard to the action it protects:
+    - exactly one guard call per guarded action, placed immediately before it;
+    - the guard's arguments (pool, token, amount, position id) equal to the values decoded from that action's calldata;
+    - the default, revert-on-failure execution type only. Try mode (`execType 0x01`) is refused, because it would
+      swallow a guard revert. The guard reads the oracle, enforces and records the account's budget in
     storage keyed by the calling account, and reverts the batch on any breach. A breach then costs the account the
-    gas of a reverted execution; the user pays and nothing moves.
+    gas of a reverted execution; the user pays and nothing moves. Hosted automation simulates execution, guard
+    included, and does not submit an op whose guard would revert. The POL-11 gas ceiling stays counted in validation,
+    in storage associated with the account, so a misbehaving key's reverted executions remain bounded.
   - **Time windows** that must be known at validation use `validAfter`/`validUntil` in `validationData`, as
     TimeFramePolicy does.
   - **Tests (T5):** a standards-compliant bundler admits session ops, and every dynamic bound in POL-02/03/07 still
