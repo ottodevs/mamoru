@@ -8,6 +8,7 @@ import type { AccountContext, Address } from '@mamoru/domain'
 import type { MonadSender } from '../src/bridge-monad.ts'
 import { TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
 import type { ReleaseView } from '../src/release.ts'
+import { RemotePeer } from '../src/remote-peer.ts'
 import { RETURN_ATTEST_FIRST_POLL_MS, RETURN_MINT_PENDING_MS, ReturnHome, type ReturnEntry, type ReturnPeer } from '../src/return-home.ts'
 
 const HOME = '0x00000000000000000000000000000000000000a1' as Address
@@ -31,7 +32,7 @@ const attester = privateKeyToAccount(generatePrivateKey())
 const attest = async (m: Hex) => ({ message: m, attestation: await attester.sign({ hash: keccak256(m) }) })
 
 /** The peer: answers per id; `burnAt` is the call (1-based) from which the release is reported burned. */
-function peerOf(o: { burned?: { amount?: bigint }; cancelled?: boolean; lose?: number; refuse?: number } = {}): ReturnPeer & { asked: string[]; statuses: number } {
+function peerOf(o: { burned?: { amount?: bigint }; cancelled?: boolean; lose?: number; refuse?: number; code?: string } = {}): ReturnPeer & { asked: string[]; statuses: number } {
   const known = new Map<string, bigint>()
   let lose = o.lose ?? 0
   const p = {
@@ -40,7 +41,7 @@ function peerOf(o: { burned?: { amount?: bigint }; cancelled?: boolean; lose?: n
     release: async (_r: AccountContext, id: string, amount: bigint): Promise<ReleaseView> => {
       p.asked.push(id)
       if (lose-- > 0) throw new Error('timeout')
-      if (o.refuse) throw Object.assign(new Error('refused'), { status: o.refuse, code: 'RELEASE_OPEN' })
+      if (o.refuse) throw Object.assign(new Error('refused'), { status: o.refuse, code: o.code ?? 'RELEASE_OPEN' })
       known.set(id, amount)
       return { id, amount: amount.toString(), chainId: 8453, state: 'open' }
     },
@@ -214,19 +215,31 @@ describe('return home (otto/mamoru#278, Base side)', () => {
     expect(s.rel!.sent).toHaveLength(1)
   })
 
-  test('review r1: a request the peer refuses (4xx) is cancelled and holds nothing; no answer keeps it', async () => {
-    const s = setup()
-    const p = peerOf({ refuse: 409 })
-    const e = await s.r.request('acc-1', HOME, REMOTE, p, AMOUNT, FLOOR)
-    expect(s.j().returns[e.id]).toMatchObject({ state: 'cancelled', note: 'refused by the peer: 409 RELEASE_OPEN' })
-    expect(s.r.busy('acc-1')).toBe(false)
-    expect(s.r.floor('acc-1')).toBe(0n)
-    // Refused on a later re-ask (the peer did not know it, then refuses): cancelled too.
+  test('review r2: only a refusal proving the peer holds nothing cancels (400 BAD_REQUEST, 404 NOT_A_REMOTE); a 409 keeps it holding', async () => {
+    for (const [status, code] of [[400, 'BAD_REQUEST'], [404, 'NOT_A_REMOTE']] as const) {
+      const s = setup()
+      const e = await s.r.request('acc-1', HOME, REMOTE, peerOf({ refuse: status, code }), AMOUNT, FLOOR)
+      expect(s.j().returns[e.id]).toMatchObject({ state: 'cancelled', note: `refused by the peer: ${status} ${code}` })
+      expect(s.r.busy('acc-1')).toBe(false)
+      expect(s.r.floor('acc-1')).toBe(0n)
+    }
+    const open = setup()
+    const o = await open.r.request('acc-1', HOME, REMOTE, peerOf({ refuse: 409, code: 'RELEASE_OPEN' }), AMOUNT, FLOOR)
+    expect(open.j().returns[o.id]!.state).toBe('requested')
+    expect(open.r.busy('acc-1')).toBe(true)
+    // Refused on a later re-ask (the peer did not know it, then says not a remote): cancelled too.
     const later = setup()
-    const lost = peerOf({ lose: 1 })
-    const l = await later.r.request('acc-1', HOME, REMOTE, lost, AMOUNT, FLOOR)
-    await later.r.tick(() => ({ remote: REMOTE, peer: peerOf({ refuse: 400 }) }))
+    const l = await later.r.request('acc-1', HOME, REMOTE, peerOf({ lose: 1 }), AMOUNT, FLOOR)
+    await later.r.tick(() => ({ remote: REMOTE, peer: peerOf({ refuse: 404, code: 'NOT_A_REMOTE' }) }))
     expect(later.j().returns[l.id]!.state).toBe('cancelled')
+  })
+
+  test('review r2: the real RemotePeer throws a refusal with the status and code ReturnHome reads', async () => {
+    const fetchFn = async () => new Response(JSON.stringify({ code: 'NOT_A_REMOTE', error: 'no' }), { status: 404 })
+    const peer = new RemotePeer(143, 'http://peer', 'secret', fetchFn as never)
+    const s = setup()
+    const e = await s.r.request('acc-1', HOME, REMOTE, peer, AMOUNT, FLOOR)
+    expect(s.j().returns[e.id]).toMatchObject({ state: 'cancelled', note: 'refused by the peer: 404 NOT_A_REMOTE' })
   })
 
   test('review r1: until the burn is known the remote value floor is the value asked at; burned or closed, none', async () => {

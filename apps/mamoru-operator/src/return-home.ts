@@ -8,7 +8,8 @@
 //   cancelled  the peer reports it withdrawn before any burn
 // One open return per account. While one is open the account's bridges wait in both directions (`busy`); until its
 // burn is known the remote value never reads below the value it was asked at (`floor`), and a burned one counts as
-// value in flight until it is minted (`inFlight`). A request the peer refuses is cancelled here and holds nothing. A
+// value in flight until it is minted (`inFlight`). A request the peer proves it holds nothing for (bad request, not a
+// remote there) is cancelled here; any other refusal keeps it open and holding. A
 // burn never minted (attestation never matching, mints reverting) keeps the account's bridges waiting and is logged:
 // that money is in transit and nothing else moves until someone looks.
 
@@ -161,8 +162,9 @@ export class ReturnHome {
   }
 
   /**
-   * POST release for this entry. The peer refusing it (an HTTP 4xx: not a remote there, a bad amount, another request
-   * open there) cancels it here, so it never holds the account; no answer keeps it, asked again on the next tick.
+   * POST release for this entry. A refusal that proves the peer holds nothing for it (400 BAD_REQUEST, 404
+   * NOT_A_REMOTE) cancels it here, so it never holds the account. Anything else keeps it and holds the account, logged:
+   * no answer (asked again on the next tick), or another release open there this journal does not know (409).
    */
   private async ask(e: ReturnEntry, remote: AccountContext, peer: ReturnPeer): Promise<void> {
     try {
@@ -170,12 +172,12 @@ export class ReturnHome {
     } catch (err) {
       const status = (err as { status?: unknown }).status
       const code = (err as { code?: unknown }).code
-      if (typeof status === 'number' && status >= 400 && status < 500) {
+      if ((status === 400 && code === 'BAD_REQUEST') || (status === 404 && code === 'NOT_A_REMOTE')) {
         this.update(e, { state: 'cancelled', note: `refused by the peer: ${status} ${typeof code === 'string' ? code : ''}`.trim() })
         console.error(`[return] ${e.accountKey} ${e.id}: refused by the peer (${status} ${String(code ?? '')}); cancelled`)
         return
       }
-      console.error(`[return] ${e.accountKey} ${e.id}: asked, no answer yet (${(err as Error).message?.split('\n')[0]}); asked again on the next tick`)
+      console.error(`[return] ${e.accountKey} ${e.id}: not taken yet (${typeof status === 'number' ? `${status} ${String(code ?? '')}` : (err as Error).message?.split('\n')[0]}); kept, asked again on the next tick`)
     }
   }
 
