@@ -670,8 +670,6 @@ export class Engine {
       maxPriorityFeePerGas: MAX_PRIORITY_FEE_PER_GAS,
       savingsAsset: this.cfg.policy.savingsAsset,
       ethPricePool: this.cfg.nativePricePool ?? ETH_PRICE_POOL,
-      // otto/mamoru#101 (shadow): the pools' TVL is read, in the same batch, only for a policy that lists it.
-      ...(this.cfg.policy.shadow.includes('packaging:tvl') ? { poolTvl: true } : {}),
       ...(this.cfg.registry ? { registry: this.cfg.registry } : {}),
       // otto/mamoru#210: the vaults of a vault bucket; a policy without one reads none.
       ...(this.cfg.policy.buckets.some((b) => b.vaults?.length) ? { vaults: this.cfg.policy.buckets.flatMap((b) => b.vaults ?? []) } : {}),

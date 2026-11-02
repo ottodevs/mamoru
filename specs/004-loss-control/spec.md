@@ -399,18 +399,22 @@ changes, so no `policyHash` changes. Nothing acts: a row says what would have ex
 
 | Rule | Condition (would EXIT) | Code | `window` |
 |---|---|---|---|
-| PR1 floor | pool TVL (on-chain, token balances at TWAP) under 2,000,000 USDC | `RISK_POOL_TVL_FLOOR` | none |
 | A. TVL change | TVL now vs 1 day ago at or under -12% | `RISK_POOL_TVL_DROP` | `1d` |
 | A. TVL change | vs 7 days ago at or under -20% | `RISK_POOL_TVL_DROP` | `7d` |
 | A. TVL change | vs 30 days ago at or under -30% | `RISK_POOL_TVL_DROP` | `30d` |
 | B. Activity | `Volume7d` under `max(TVL * ratio, floor)` by bucket: stables 0.35x / 1,000,000, btc-usdc 0.25x / 300,000, risk 0.05x / 20,000 (USD) | `RISK_POOL_VOLUME_LOW` | `7d` |
 | B. Activity, stables only | volume of the last full day under 30% of the 28 day daily average | `RISK_POOL_VOLUME_LOW` | `28d` |
 | C. Unreadable | a figure a rule needs is missing, stale or not a number; the rules that can be computed still are | `RISK_POOL_STATS_UNREAD` | none |
-| PR1 unreadable | on-chain pool balance not readable | `RISK_POOL_TVL_UNREAD` | none |
 | B. EEL (gate `packaging:eel`) | EEL under the bucket minimum (USD): stables 600,000, btc-usdc 350,000, risk 75,000. EEL = largest sell size whose price impact is within the bucket limit: stables 200 bps, btc-usdc 200, risk 500 | `RISK_POOL_EEL_LOW` | none |
 | E. Exit slippage | quoted slippage (impact at the combined size of the account's non-USDC legs in the pool, which a full exit sells, plus the pool fee) at or over: stables 300 bps, btc-usdc 300, risk 600 | `RISK_EXIT_SLIPPAGE` | none |
 | E. Position ratio | account value in the pool (both legs) over EEL above: stables 1000 bps, btc-usdc 1000, risk 500 | `RISK_POSITION_RATIO` | none |
 | Depth unreadable | no curve, an all-null or malformed one, older than 6 h, or an exit size past the last ladder point with every quote good ("beyond ladder"); the callback present but failing gives an empty object, so every USDC pool is unread (no callback, as on Monad, stays silent, #171) | `RISK_POOL_DEPTH_UNREAD` | none |
+
+No TVL floor (D15, Brais 2 Nov: the Packaging's 2M entry minimum is dropped for a pool Mamoru itself chose and
+recommends). Every policy pool is one, so the PR1 floor row and its unreadable row are gone, and the engine no longer
+reads the pools' token balances for them. The codes `RISK_POOL_TVL_FLOOR` and `RISK_POOL_TVL_UNREAD` stay in the domain
+list for the shadow logs already written; a pool Mamoru did not choose (none today) would bring the floor back. The TVL
+change rows, the activity rows and the EEL minimums are unchanged.
 
 Units in an entry: `RISK_POOL_TVL_DROP` carries basis points (`threshold` -1200, `metric` the measured change);
 `RISK_POOL_VOLUME_LOW` carries raw savings units (USDC, 6 decimals). `RISK_POOL_EEL_LOW` carries raw savings units

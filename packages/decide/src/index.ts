@@ -12,7 +12,6 @@ import { releaseOf } from './release/index.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, mergeOf, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, GuardNote, Observation, Proposal, RerangeProposal, ShadowNote, ShadowRisk } from './types.ts'
 import { withinCap } from './cap.ts'
-import { tvlShadowRisk } from './shadow-tvl.ts'
 import { poolStatsShadowRisk } from './shadow-pool-stats.ts'
 import { poolDepthShadowRisk } from './shadow-pool-depth.ts'
 
@@ -21,7 +20,6 @@ export { capRoomOf, placedOf, withinCap } from './cap.ts'
 export { estimateFees } from './harvest/index.ts'
 export { safeSavings } from './enter/index.ts'
 export { amountsForLiquidity, bucketVaults, inSavings, poolTvlInSavings, vaultValue, volatileOf } from './value.ts'
-export { PACKAGING_TVL_FLOOR_USDC, tvlShadowRisk } from './shadow-tvl.ts'
 export { PACKAGING_STABLES_DAY_PCT, PACKAGING_TVL_DROP_PCT, PACKAGING_VOLUME_RULES, poolStatsShadowRisk } from './shadow-pool-stats.ts'
 export { eelOf, impactAt, PACKAGING_EEL_CAP_USD, PACKAGING_EEL_RULES, poolDepthShadowRisk } from './shadow-pool-depth.ts'
 export { fallBpsOf, fallFreezeOf, marketOf, type CumulativePoint } from './guard/index.ts'
@@ -214,9 +212,10 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   if (enterEvaluated && policy.shadow.includes('packaging:eny')) {
     shadow.push({ code: 'ENY_SHADOW', note: 'packaging:eny is not evaluated in v1 and has no effect on the decision' })
   }
-  // otto/mamoru#101 phase 1: Packaging's pool TVL floor, shadow only, outside the hashed body (Decision.shadowRisk).
+  // otto/mamoru#101 phase 1: Packaging's TVL change and activity rules, shadow only, outside the hashed body
+  // (Decision.shadowRisk). No TVL floor: every policy pool is one Mamoru chose and recommends (D15, Brais 2 Nov).
   const shadowRisk: ShadowRisk[] = [
-    ...(policy.shadow.includes('packaging:tvl') ? [...tvlShadowRisk(obs, policy, policyPools), ...poolStatsShadowRisk(obs, policy, policyPools)] : []),
+    ...(policy.shadow.includes('packaging:tvl') ? poolStatsShadowRisk(obs, policy, policyPools) : []),
     // otto/mamoru#101 phase 1c: Packaging's EEL, exit slippage and position ratio (Observation.poolDepth), gated by packaging:eel.
     ...(policy.shadow.includes('packaging:eel') ? poolDepthShadowRisk(obs, policy, policyPools) : []),
   ]
