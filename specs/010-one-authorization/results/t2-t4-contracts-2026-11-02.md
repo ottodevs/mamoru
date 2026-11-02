@@ -196,8 +196,9 @@ Build ONE owner Safe transaction (MultiSend 1.4.1, delegatecall), in this order:
    SmartSession's events, cross-checked with `SmartSession.getPermissionIDs(account)`.
 2. `SmartSession.revokeEnableSignature(id)` for every old id (review r1 of #200, P1). `removeSession` leaves the id's
    ENABLE nonce as it is, so an unused owner-signed ENABLE payload from a v2-v6 renewal would re-enable the old session
-   later. Revoking bumps `getNonce(id, account)`. Include ids whose sessions are already removed when any ENABLE payload
-   was ever produced for them.
+   later. Revoking bumps `getNonce(id, account)`. The id list is a SUPERSET: every permission id in SmartSession's
+   `SessionCreated` events for the Safe, plus every id in accounts.json, whether still enabled or not. Revoking an id
+   that never had a payload is harmless (it only bumps a nonce).
 3. `ModuleRegistry.trustAttesters` + `attest` for V4 and MamoruGasPolicyV2 (the production enable flow).
 4. `SmartSession.enableSessions([the V4 session])`, with the account's positions in `InitV4.admit`.
 5. `MamoruMigrationCheck.assertMigrated(account, [V4 permission id], oldIds, noncesBefore)`. `noncesBefore[i]` is
@@ -205,3 +206,14 @@ Build ONE owner Safe transaction (MultiSend 1.4.1, delegatecall), in this order:
    Safe transaction) unless V4's session is the only one enabled and every old nonce moved.
 
 Measured: 1,728,621 gas for three old sessions (9 + 9 + 3 actions).
+
+**Rule (review r2 of #200, P1): Mamoru never asks the passkey to sign a SmartSession ENABLE payload.** Checked on
+origin/main: `SMART_SESSION_MODE_ENABLE` (packages/account/sessions/index.ts) is used only by the test fixture
+packages/scenarios/fixtures/session-op.ts; every owner signature in apps/ and packages/ is a Safe transaction hash
+(enableSessions inside execTransaction; remote sessions committed in the Safe setup); an ENABLE digest is a different
+EIP-712 hash, so no other owner signature can stand in for one. The set of signed-but-unused payloads is therefore
+empty. `packages/account/sessions/no-enable-mode.test.ts` keeps it so: it fails if any non-test file under apps/ or
+packages/ (packages/scenarios and fixtures exempt) references the ENABLE mode, `0x01` as a SmartSession signature mode,
+or an enable-digest helper. A future multichain-enable design (#230) must revoke by nonce and get its own review first.
+Residual covered on chain: an old id that is still enabled but missing from the list reverts the migration through
+`assertMigrated` ("the V4 session is the only one enabled").
