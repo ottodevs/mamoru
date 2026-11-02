@@ -59,6 +59,10 @@ audit. The executor is the fallback if the ERC-7562 point below ever matters.
 
 ### ERC-7562
 
+> Superseded for the next policy version by spec 009 POL-12 (`specs/009-hermetic-infra/spec.md`): validation becomes
+> ERC-7562 compliant, and the oracle, position and budget checks move to an execution-phase `MamoruExecGuard` call
+> that the policy requires in the batch. V2/V3 as deployed keep the design below until each account migrates.
+
 `checkAction` runs in `validateUserOp`. It reads storage of other contracts (the pool's oracle observations,
 `NonfungiblePositionManager.positions/ownerOf`) and `block.timestamp`. A public ERC-4337
 mempool would reject such userOps. Mamoru bundles its own (`apps/mamoru-operator/src/bundler.ts`: simulate with

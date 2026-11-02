@@ -356,6 +356,17 @@ bounded by the owner's allowance.
     TimeFramePolicy does.
   - **Tests (T5):** a standards-compliant bundler admits session ops, and every dynamic bound in POL-02/03/07 still
     holds with its check run in execution.
+  - **Supersedes spec 007 in part.** For V-next, POL-12 replaces these parts of spec 007
+    (`specs/007-onchain-action-policy/spec.md`):
+    - the validation-phase oracle and position reads in its table: (a) price range from the pool TWAPs, (b) the
+      admission read, and (c) budgets charged at validation;
+    - its "ERC-7562" section, which accepted non-compliant validation because Mamoru bundles its own ops.
+
+    Spec 007 named a constrained executor module as the fallback for public bundlers. POL-12 takes a different route:
+    a required guard call in the batch. The guard is not an installed module and has no authority over the Safe. It
+    can only revert, and it records only the calling account's own budget. Spec 007's bounds themselves (the range
+    formula, admitted positions, the token bucket plus `total`, the generation) are kept as the rules the guard
+    enforces. V2 and V3 as deployed keep spec 007's validation-phase design until each account migrates.
 - **POL-11: Gas ceiling per generation.** `MamoruGasPolicy` per-op caps (`maxFeePerGas` × (verificationGasLimit +
   callGasLimit + preVerificationGas + paymaster gas limits), every one of them capped; `permitERC4337Paymaster` stays
   false so paymaster fields are 0) times
