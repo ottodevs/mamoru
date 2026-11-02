@@ -117,3 +117,15 @@ describe('a bridge to the Monad sleeve (otto/mamoru#215)', () => {
     expect(progressLine({ step: 'bridging', pool: 'pool:WMON/USDC/3000', since: AT, bridge: { chainId: 143, amountUsdc: '1500000000', state: 'burned' } })).toBe('Moving 1,500.00 USDC to Monad (arrives in about 20 minutes)')
   })
 })
+
+// otto/mamoru#340: a deposit is a row of the savings history, with its amount and who sent it.
+describe('deposit rows', () => {
+  const deposit = base({ opId: `dep-0x${'1'.repeat(64)}-3`, kind: 'deposit', amountUsdc: '25000000', from: `0x${'ab'.repeat(20)}`, txHash: `0x${'1'.repeat(64)}`, block: 101 })
+  test('opLine says what came in and from where', () => {
+    expect(opLine(deposit)).toBe('Added 25.00 USDC from 0xabab…abab')
+    expect(opLine({ ...deposit, from: undefined, amountUsdc: undefined })).toBe('Added USDC')
+  })
+  test('historyOps lists it', () => {
+    expect(historyOps([deposit]).map((o) => o.opId)).toEqual([deposit.opId])
+  })
+})

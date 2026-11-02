@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { FundingView } from '@mamoru/domain'
 import { QueryClient } from '@tanstack/react-query'
-import { fetchFreshFunding, fundingInterval, queryKeys } from '../../src/web/api/queries.ts'
+import { depositArrived, fetchFreshFunding, FUNDING_IDLE_MS, fundingInterval, queryKeys } from '../../src/web/api/queries.ts'
 import { fixtureFunding } from '../../src/web/fixtures/client.ts'
 
 // otto/mamoru#135: a home tab polled funding every 6 s regardless of what was happening, 24/7. The cadence is
@@ -110,5 +110,23 @@ describe('fetchFreshFunding', () => {
     const result = await fetchFreshFunding(qc, { funding: async () => Promise.reject(new Error('offline')) }, 'k')
     expect(result).toBeUndefined()
     expect(qc.getQueryData<FundingView>(key)).toEqual(stale)
+  })
+})
+
+// otto/mamoru#340: the history is polled only while an op is in flight; Home asks it again when a deposit lands.
+describe('depositArrived', () => {
+  const f = (usdc: string, address = '0xAbc') => ({ address, usdc }) as Pick<FundingView, 'address' | 'usdc'>
+  test('the idle USDC went up on the same Safe', () => {
+    expect(depositArrived(f('5000000'), f('30000000'))).toBe(true)
+    expect(depositArrived(f('5000000', '0xABC'), f('30000000', '0xabc'))).toBe(true)
+  })
+  test('not on the first read, a fall, no change, or another Safe', () => {
+    expect(depositArrived(undefined, f('30000000'))).toBe(false)
+    expect(depositArrived(f('30000000'), f('5000000'))).toBe(false)
+    expect(depositArrived(f('5000000'), f('5000000'))).toBe(false)
+    expect(depositArrived(f('5000000', '0x1'), f('30000000', '0x2'))).toBe(false)
+  })
+  test('Home polls funding every 15 s when nothing moves', () => {
+    expect(FUNDING_IDLE_MS).toBe(15_000)
   })
 })

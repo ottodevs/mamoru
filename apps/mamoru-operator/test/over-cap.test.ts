@@ -46,7 +46,9 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
   /** What the simulation answers ('ok', 'revert' or 'down') and what happens on chain while the relayer sends. */
   const knobs = { sim: 'ok' as 'ok' | 'revert' | 'down', call: 'ok' as 'ok' | 'revert' | 'down', execOk: true, onSend: (_tx: { to: string }) => {}, relayerWei: 10n ** 18n, failBeforeSending: false, relayerPending: 0, grantsEnabled: false as boolean | null, enabled: new Set<string>(), batchGrants: false, head: 100n, batchedGrantReads: 0, multicalls: 0, pending: null as { grants?: { permissionId: string }[]; revokes?: string[] } | null, logs: [] as { stx: Hex; hash: Hex; block: bigint }[], enabledFromBlock: 0n, noHistory: false, usdt: 0n, spotTick: 0, twapTick: 0 as number | null, blockHashes: new Map<bigint, Hex>(),
     /** otto/mamoru#163: the Safe nonce at a past block (default: today's), Safe txs of others run at a block, and a node that cannot serve a block's logs by hash. */
-    nonceAt: null as ((block: bigint) => bigint) | null, foreign: [] as { stx: Hex; hash: Hex; block: bigint }[], blockLogsDown: false, guard: `0x${'0'.repeat(64)}` as Hex, forks: new Map<Hex, bigint>(), parents: new Map<bigint, Hex>() }
+    nonceAt: null as ((block: bigint) => bigint) | null, foreign: [] as { stx: Hex; hash: Hex; block: bigint }[], blockLogsDown: false, guard: `0x${'0'.repeat(64)}` as Hex, forks: new Map<Hex, bigint>(), parents: new Map<bigint, Hex>(),
+    /** otto/mamoru#340: USDC Transfer logs to the Safe (a deposit, or Mamoru's own money coming back). */
+    transfers: [] as { from: Hex; value: bigint; block: bigint; tx: Hex; logIndex: number }[] }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -70,7 +72,12 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
     getTransactionReceipt: async () => {
       throw new Error('no receipt')
     },
-    getLogs: async (a: { blockHash?: Hex } = {}) => {
+    getLogs: async (a: { blockHash?: Hex; event?: { name?: string }; fromBlock?: bigint; toBlock?: bigint } = {}) => {
+      if (a.event?.name === 'Transfer') {
+        return knobs.transfers
+          .filter((t) => t.block >= a.fromBlock! && t.block <= a.toBlock!)
+          .map((t) => ({ args: { from: t.from, to: SAFE, value: t.value }, transactionHash: t.tx, logIndex: t.logIndex, blockNumber: t.block }))
+      }
       // EIP-234, a block's logs by its hash: every Safe execution of that block, ours and others', in order.
       if (a.blockHash) {
         if (knobs.blockLogsDown) throw new Error('HTTP request failed. Status: 503')
@@ -3334,6 +3341,95 @@ describe('fresh funding: a read at most 2 s old, never held back by an earlier o
     fail = false
     w.chain.usdc = 7_000_000n
     expect((await w.op.funding(ctx, true)).usdc).toBe('7000000')
+  })
+})
+
+// otto/mamoru#340 (beta report): a deposit moves nothing of the account, so Home showed the balance from before it
+// until the cache aged out, and the savings history never listed it at all.
+describe('a deposit shows at once in funding and in the history', () => {
+  const WALLET = `0x${'ab'.repeat(20)}` as Hex
+  const at = (ms: number) => setSystemTime(new Date(1_790_000_000_000 + ms))
+  afterEach(() => setSystemTime())
+  const reads = (op: Operator) => {
+    const client = (op as unknown as { client: { call: (a: { to: string }) => Promise<unknown> } }).client
+    let n = 0
+    const { call } = client
+    client.call = (a) => (a.to.toLowerCase() === address('Multicall3', baseRegistry).toLowerCase() && n++, call(a))
+    return () => n
+  }
+  /** A stored account (the state file's own record), holding `usdc`, its first look for deposits done. */
+  const stored = async (usdc: bigint) => {
+    at(0)
+    const w = world(usdc)
+    w.op.account(ctx)
+    expect((await w.op.funding(ctx)).usdc).toBe(usdc.toString())
+    return w
+  }
+  const land = (w: ReturnType<typeof world>, from: Hex, value: bigint, block: bigint) => {
+    w.chain.usdc += value
+    w.knobs.transfers.push({ from, value, block, tx: keccak256(stringToHex(`deposit-${block}`)), logIndex: 3 })
+    w.knobs.head = block
+  }
+
+  test('the next plain poll reads the new balance, not the cached one, and GET /ops lists the deposit', async () => {
+    const w = await stored(5_000_000n)
+    land(w, WALLET, 25_000_000n, 101n)
+    at(4_000)
+    expect((await w.op.funding(ctx)).usdc).toBe('30000000')
+    const rows = w.op.ops(ctx, null).ops.filter((o) => o.kind === 'deposit')
+    expect(rows).toEqual([expect.objectContaining({ kind: 'deposit', state: 'confirmed', amountUsdc: '25000000', from: WALLET, block: 101, txHash: keccak256(stringToHex('deposit-101')) })])
+    // Kept in the state file next to the ops, never among them (nothing that settles or retries ops sees one).
+    expect(w.state.accounts[ctx.accountKey]!.ops.some((o) => (o.kind as string) === 'deposit')).toBe(false)
+    expect(w.state.accounts[ctx.accountKey]!.deposits).toHaveLength(1)
+  })
+
+  test('the same deposit read again (a restart, an overlapping look) is one row', async () => {
+    const w = await stored(5_000_000n)
+    land(w, WALLET, 25_000_000n, 101n)
+    at(4_000)
+    await w.op.funding(ctx)
+    // A restarted operator starts from the saved cursor, which may be behind the last look.
+    w.state.accounts[ctx.accountKey]!.depositsSeen = { safe: SAFE.toLowerCase(), block: '90' }
+    ;(w.op as unknown as { depositLooks: Map<string, unknown> }).depositLooks.clear()
+    at(8_000)
+    await w.op.funding(ctx)
+    expect(w.op.ops(ctx, null).ops.filter((o) => o.kind === 'deposit')).toHaveLength(1)
+  })
+
+  test("Mamoru's own money coming back (a pool, a vault, a CCTP mint) is not a deposit", async () => {
+    const w = await stored(5_000_000n)
+    land(w, address('pool:USDC/cbBTC/500', baseRegistry).toLowerCase() as Hex, 1_000_000n, 101n)
+    land(w, address('vault:gtUSDCp', baseRegistry).toLowerCase() as Hex, 2_000_000n, 102n)
+    land(w, `0x${'0'.repeat(40)}`, 3_000_000n, 103n)
+    at(4_000)
+    await w.op.funding(ctx)
+    expect(w.op.ops(ctx, null).ops.some((o) => o.kind === 'deposit')).toBe(false)
+  })
+
+  test('with the deposit look current, polls every 15 s cost one balance read a minute, as the 60 s poll did', async () => {
+    const w = await stored(5_000_000n)
+    const count = reads(w.op)
+    for (let t = 15_000; t < 60_000; t += 15_000) {
+      at(t - 4_000)
+      await w.op.funding(ctx)
+      at(t)
+      await w.op.funding(ctx)
+    }
+    expect(count()).toBe(0)
+    at(60_000)
+    await w.op.funding(ctx)
+    expect(count()).toBe(1)
+  })
+
+  test('a deposit look that fails falls back to the 15 s age', async () => {
+    const w = await stored(5_000_000n)
+    const client = (w.op as unknown as { client: { getLogs: (a: { event?: { name?: string } }) => Promise<unknown> } }).client
+    const { getLogs } = client
+    client.getLogs = (a) => (a.event?.name === 'Transfer' ? Promise.reject(new Error('rpc down')) : getLogs(a))
+    land(w, WALLET, 25_000_000n, 101n)
+    at(16_000)
+    expect((await w.op.funding(ctx)).usdc).toBe('30000000')
+    expect(w.op.ops(ctx, null).ops.some((o) => o.kind === 'deposit')).toBe(false)
   })
 })
 

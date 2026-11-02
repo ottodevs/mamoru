@@ -236,6 +236,14 @@ if (historyOn)
     liveState.ops.push({ opId: 'h-enter-2', kind: 'enter', state: 'confirmed', pool: 'pool:USDC/USDT/100', txHash: `0x${'3'.repeat(64)}`, updatedAt: new Date().toISOString() } as OpView)
   }, 4000)
 
+// ?deposit (dev only, otto/mamoru#340): 6 s in, 25 USDC lands from a wallet with nothing of the account moving. Home
+// shows the new balance and the history row within one funding poll, with no refresh.
+if (param('deposit'))
+  setTimeout(() => {
+    liveState.funding = { ...liveState.funding, usdc: (BigInt(liveState.funding.usdc) + 25_000_000n).toString(), block: liveState.funding.block + 3 }
+    liveState.ops.push({ opId: `dep-0x${'2'.repeat(64)}-0`, kind: 'deposit', state: 'confirmed', amountUsdc: '25000000', asset: 'USDC', from: `0x${'ab'.repeat(20)}`, txHash: `0x${'2'.repeat(64)}`, block: liveState.funding.block, updatedAt: new Date().toISOString() })
+  }, 6000)
+
 function fixtureTx(summary: string[]): OwnerTxToSign {
   liveState.n += 1
   return {

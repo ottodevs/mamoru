@@ -5,6 +5,7 @@ import type { SessionGrant } from '@mamoru/policy'
 import type { SafeTx } from '@mamoru/account/live'
 import type { Execution } from '@mamoru/account/safe'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
+import type { DepositRow } from './deposits.ts'
 import type { SponsorEntry } from './sponsorship.ts'
 import type { OpFacts } from './yield-receipts.ts'
 import type { OneAuthState } from './one-auth.ts'
@@ -138,6 +139,9 @@ export type AccountState = {
   /** Engine loops started in this epoch; part of engine op ids so a restart never reuses one. */
   runs?: number
   ops: StoredOp[]
+  /** otto/mamoru#340: USDC sent to the Safe from outside Mamoru, oldest first (deposits.ts), and how far its logs were read. */
+  deposits?: DepositRow[]
+  depositsSeen?: { safe: string; block: string }
   /**
    * otto/mamoru#140 (Sol review round 2 of #64): engine ops whose signed bytes may still be included (Engine.carried),
    * handed to every later engine of the account until the nonce at `safe` passes them or they land.

@@ -78,8 +78,22 @@ export function fundingInterval(data: Pick<FundingView, 'progress' | 'engine'> |
   return intervalMs
 }
 
-/** #255: the funding poll when nothing is moving, in step with the page's other 60 s reads. */
-export const FUNDING_IDLE_MS = 60_000
+/**
+ * #255: the funding poll when nothing is moving. otto/mamoru#340: 15 s, not 60 s: a deposit moves nothing of the
+ * account, so this poll is the only way Home learns of one. It costs no more chain reads than the 60 s poll did:
+ * the operator looks for a deposit on each poll (one log read) and, while that look is current, answers from a
+ * read up to 60 s old, going to the chain at once when it found one.
+ */
+export const FUNDING_IDLE_MS = 15_000
+
+/**
+ * otto/mamoru#340: the Safe's idle USDC went up between two funding reads, most often a deposit landing. The
+ * history (GET /ops) is polled only while an op is in flight, so Home asks it again then, for the deposit's row.
+ */
+export function depositArrived(before: Pick<FundingView, 'address' | 'usdc'> | undefined, after: Pick<FundingView, 'address' | 'usdc'> | undefined): boolean {
+  if (!before || !after || before.address.toLowerCase() !== after.address.toLowerCase()) return false
+  return BigInt(after.usdc) > BigInt(before.usdc)
+}
 
 /**
  * What the Safe holds now. FUNDING_IDLE_MS by default; 4 s while `inFlight` (an owner op the caller is watching, or an
@@ -96,6 +110,8 @@ export function useFunding(accountKey: string | undefined, enabled: boolean, int
     queryFn: () => api.funding(accountKey as string, fresh ? { fresh: true } : undefined),
     enabled: enabled && accountKey !== undefined,
     refetchInterval: (q) => fundingInterval(q.state.data, inFlight, intervalMs),
+    // otto/mamoru#340: back on the tab (a deposit is sent from another app), read at once, not at the next tick.
+    refetchOnWindowFocus: true,
   })
 }
 

@@ -54,6 +54,9 @@ export function opLine(op: OpView): string {
     case 'transfer':
       if (failed) return 'Withdrawal needs another approval'
       return withdrewLine(op, done)
+    // otto/mamoru#340: USDC sent to the account from outside Mamoru; the operator lists it once it is on chain.
+    case 'deposit':
+      return `${op.amountUsdc ? `Added ${usd(op.amountUsdc)} USDC` : 'Added USDC'}${op.from ? ` from ${shortHex(op.from)}` : ''}`
     case 'exit':
       if (owner(op)) {
         if (failed) return 'Stop needs another approval'

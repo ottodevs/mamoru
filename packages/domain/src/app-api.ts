@@ -393,7 +393,8 @@ export type OwnerSignature = {
 }
 export type OpView = {
   opId: string
-  kind: 'activate' | 'enter' | 'reduce' | 'transfer' | 'exit' | 'renew' | 'migrate-v4'
+  /** otto/mamoru#340: 'deposit' is USDC sent to the Safe from outside Mamoru (opId `dep-<tx>-<logIndex>`, always confirmed). */
+  kind: 'activate' | 'enter' | 'reduce' | 'transfer' | 'exit' | 'renew' | 'migrate-v4' | 'deposit'
   state: 'proposed' | 'submitted' | 'confirmed' | 'failed'
   code?: string
   txHash?: Hex0x
@@ -403,6 +404,8 @@ export type OpView = {
   amountUsdc?: string
   asset?: string
   to?: Hex0x
+  /** deposit: the address that sent it. */
+  from?: Hex0x
   /** activate failed with DEPOSIT_OVER_CAP: amountUsdc is the deposit found, capUsdc the cap it exceeded. */
   capUsdc?: string
   /** renew: it only added the grants the account lacked (re-range and harvest in more pools), nothing was renewed. */

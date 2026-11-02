@@ -2,7 +2,7 @@ import type { ApyView, FundingView, Hex0x, OpView, OverCap, PriceDivergenceWarni
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useSession, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
+import { depositArrived, FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useSession, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
 import { WithdrawReview } from '../components/withdraw-review.tsx'
@@ -148,7 +148,7 @@ export const homeCopy = {
   overCapAct: (o: OverCap) => `Withdraw ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC`,
 }
 
-const KIND: Record<OpView['kind'], string> = { activate: 'Start', enter: 'Position', reduce: 'Position', transfer: 'Withdraw', exit: 'Stop', renew: 'Approval', 'migrate-v4': 'Approval' }
+const KIND: Record<OpView['kind'], string> = { activate: 'Start', enter: 'Position', reduce: 'Position', transfer: 'Withdraw', exit: 'Stop', renew: 'Approval', 'migrate-v4': 'Approval', deposit: 'Deposit' }
 
 function plural(n: number, one: string, many: string) {
   return `${n} ${n === 1 ? one : many}`
@@ -1255,6 +1255,13 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const otherChainsUsdc = !multichain ? 0n : !sessionData ? null : !monadSleeve ? 0n : monadFunding.data ? split(monadFunding.data, null).total : null
   // The session ended while Home was open: ask again, and the first screen offers the sign-in.
   const qc = useQueryClient()
+  // otto/mamoru#340: a deposit raised the idle balance: the history is asked again for its row (the operator keeps
+  // the row before it answers with the new balance, so the one read after this shows it).
+  const lastFunding = useRef(funding.data)
+  useEffect(() => {
+    if (depositArrived(lastFunding.current, funding.data)) void qc.invalidateQueries({ queryKey: queryKeys.ops(accountKey) })
+    if (funding.data) lastFunding.current = funding.data
+  }, [funding.data, qc, accountKey])
   const signedOut = funding.error instanceof ApiRequestError && funding.error.status === 401
   useEffect(() => {
     if (signedOut) void qc.invalidateQueries({ queryKey: queryKeys.session })
