@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type WhatsNew, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
@@ -45,12 +45,13 @@ import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TW
 import { Engine, engineGas, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
 import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
+import { buildMoneyMap, chainLegOf, unreadLeg } from './money-map.ts'
 import type { GuardReadsState } from './guard-reads-state.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { Observation, PeerPositionObs, Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
-import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, nativePricePool, positionUsdc, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
+import { MAX_INVENTORY, POSITION_DUST_USDC, amountsForLiquidity, idleTokens, inUsdc, livePool, nativePricePool, positionUsdc, positionView, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
 import { balanceMoves, DEPOSIT_CONFIRM_BLOCKS, DEPOSIT_PAGE_BLOCKS, depositId, depositOpView, depositRange, depositsOf, mergeDeposits, readTransfersIn, type DepositRow } from './deposits.ts'
 import { elsewhereOf, exposureOf, joinReads, totalOf, type ChainExposure, type ExposureWire, type PeerExposure, type PeerRead } from './exposure.ts'
@@ -360,7 +361,7 @@ const SIM_TRIES = 3
 /** otto/mamoru#140 (part2 #4): positions one Stop closes; the rest stay in the Safe and the next Stop closes them. */
 export const MAX_STOP_POSITIONS = 8
 /** Positions worth less than this (raw USDC, 0.01) are not unwound by a Stop nor counted by a withdrawal: dust or unsolicited. */
-export const POSITION_DUST_USDC = 10_000n
+export { POSITION_DUST_USDC }
 /** Positions a withdrawal plans from, and funding shows, at most (largest first). */
 export const MAX_SIZING_POSITIONS = 16
 /** Outstanding prepares per account (oldest dropped) and in all (refused past it). */
@@ -525,7 +526,7 @@ export type OperatorConfig = {
    * account's engine reads its remote value from it and records every bridge-out in it before signing. Absent: no
    * account has a remote value, and no bridge-out is ever signed.
    */
-  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending'>
+  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs'>
   /** otto/mamoru#278 (Base): a V4 home's returns from its remote Safe, followed to the mint here. Absent: none asked. */
   returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'floor' | 'open' | 'request' | 'lastClosedAt'>
   /**
@@ -1747,6 +1748,107 @@ export class Operator {
   }
 
   /** `fresh`: a read at most FUNDING_FRESH_READ_MS old (a deposit lands without anything of the account moving). */
+  /** USDC supplied to vaults as working-capital rows (one per vault held), as funding and the money map show them. */
+  private vaultRows(r: SafeRead): FundingView['positions'] {
+    return (r.vaults ?? [])
+      .filter((v) => v.shares > 0n)
+      .map((v) => ({
+        tokenId: v.name,
+        pool: v.name,
+        liquidity: v.shares.toString(),
+        inRange: true,
+        amountUsdc: v.assets.toString(),
+        amountCbbtc: '0',
+        amounts: [{ token: 'USDC', amount: v.assets.toString(), decimals: 6, valueUsdc: v.assets.toString() }],
+        valueUsdc: v.assets.toString(),
+        vault: { name: v.name, label: vaultLabel(v.name, this.cfg.registry), shares: v.shares.toString(), withdrawableUsdc: v.maxWithdraw.toString() },
+      }))
+  }
+
+  /**
+   * otto/mamoru#269, DISPLAY ONLY (nothing here feeds the cap, the exposure or the engine): the account's own Safes on
+   * Monad as the engine's `remote` resolves them (V4: the registered remote, then the retired design-C Safe; any other
+   * account: `acc.remote`), and every Safe a burn of the account went to, until a live read shows it empty.
+   */
+  private remoteSafes(acc: AccountState): { key: string; safe: Address }[] {
+    const bridge = this.cfg.bridgeMonad
+    const out: { key: string; safe: Address }[] = []
+    const add = (key: string, safe: Address) => {
+      if (!out.some((x) => x.safe.toLowerCase() === safe.toLowerCase())) out.push({ key, safe })
+    }
+    if (this.onV4(acc)) {
+      const v = acc.oneAuth?.remote
+      const old = this.designC(acc)
+      if (v?.address) add(acc.accountKey, v.address as Address)
+      if (old && old.chainId === BRIDGE_MONAD_CHAIN_ID) add(`${acc.accountKey}#retired`, old.address as Address)
+    } else if (acc.remote && acc.remote.chainId === BRIDGE_MONAD_CHAIN_ID) add(acc.accountKey, acc.remote.address as Address)
+    // Every Safe an owner approval of this account provisioned on Monad (rotations leave the older ones here as long as the
+    // operator keeps the op), and the one an armed activation will provision.
+    for (const o of acc.ops) if (o.ownerRemote && o.ownerRemote.chainId === BRIDGE_MONAD_CHAIN_ID) add(`${acc.accountKey}#past:${o.ownerRemote.address.toLowerCase()}`, o.ownerRemote.address as Address)
+    if (acc.armed?.remote && acc.armed.remote.chainId === BRIDGE_MONAD_CHAIN_ID) add(`${acc.accountKey}#past:${acc.armed.remote.address.toLowerCase()}`, acc.armed.remote.address as Address)
+    // Without the bridge leg nothing can be read (the account's Safes show unread), and the journal is not there to ask.
+    if (bridge) for (const r of bridge.recipients(acc.accountKey)) add(`${acc.accountKey}#past:${r.toLowerCase()}`, r)
+    return out
+  }
+
+  /** The Monad legs of the money map, each read at most as often as the funding cache reads Base; never throws. */
+  private async remoteLegs(acc: AccountState, deadline: number): Promise<{ safe: Address; key: string; leg: MoneyChain }[]> {
+    const bridge = this.cfg.bridgeMonad
+    if (!bridge) return []
+    const age = (this.cfg.rpcBudget?.over(Date.now()) ?? false) ? FUNDING_STALE_MS : FUNDING_FRESH_MS
+    try {
+      return await Promise.all(this.remoteSafes(acc).map(async (s) => ({ ...s, leg: await bridge.sleeveLeg(s.key, s.safe, age, deadline) })))
+    } catch (e) {
+      logErr(`[money] ${acc.accountKey} Monad legs:`, e)
+      return []
+    }
+  }
+
+  private readonly homeReadAt = new WeakMap<SafeRead, number>()
+
+  /**
+   * otto/mamoru#269: the money map. Total = Σ chains + Σ in flight (buildMoneyMap), always. The in-flight rows are the
+   * burns of the bridge journal that the engine's own rule (inFlightOf) still counts; the Ethereum to Base route amount is a
+   * row of its own. A Monad Safe that could not be read at all is on the map, unread, and the map says it is not complete.
+   */
+  private async moneyMapOf(acc: AccountState, safe: Address, r: SafeRead, legsP: Promise<{ safe: Address; key: string; leg: MoneyChain }[]>, engine: FundingView['engine'], deadline: number): Promise<MoneyMap> {
+    const bridge = this.cfg.bridgeMonad
+    const legs = await legsP
+    const waiting = acc.active ? engine?.waiting?.[0] : undefined
+    const readAt = this.homeReadAt.get(r) ?? Date.now()
+    const home = chainLegOf({
+      chainId: this.cfg.chainId,
+      safe,
+      registry: this.cfg.registry,
+      r,
+      held: this.heldPositions(acc, r).filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n),
+      extraPositions: this.vaultRows(r),
+      at: new Date(readAt).toISOString(),
+      stale: Date.now() - readAt > FUNDING_FRESH_MS,
+      gasSymbol: 'ETH',
+      reserveTarget: this.policyOf(acc).gasReserveWei.toString(),
+      ...(waiting ? { why: { code: waiting.code, ...(engine?.reviewedAt ? { since: engine.reviewedAt } : {}) } } : {}),
+    })
+    const route = this.bridgeInFlight?.(acc.accountKey) ?? 0n
+    const flight = bridge
+      ? await bridge.moneyInFlight(acc.accountKey, r.block, (b) => {
+          const l = legs.find((x) => x.safe.toLowerCase() === b.recipient.toLowerCase())?.leg
+          if (l) return { ...(l.read.at !== null ? { block: BigInt(l.read.block) } : {}), stale: l.read.stale }
+          // A Safe the account tracks but has no leg for now (its read failed as a whole) is unread, not forgotten.
+          return this.remoteSafes(acc).some((x) => x.safe.toLowerCase() === b.recipient.toLowerCase()) ? { stale: true } : undefined
+        }, deadline)
+      : { rows: [] as MoneyInFlight[], unsure: false }
+    const inFlight: MoneyInFlight[] = [
+      ...(route > 0n ? [{ id: 'ethereum-route', kind: 'bridge' as const, from: 1, to: this.cfg.chainId, recipient: safe, amountUsdc: route.toString(), stage: 'burned' as const, feeUsdc: '0', finality: 'standard' as const }] : []),
+      ...flight.rows,
+    ]
+    const missing = this.remoteSafes(acc).filter((x) => !legs.some((l) => l.safe.toLowerCase() === x.safe.toLowerCase()))
+    const unread = missing.map((x) => unreadLeg({ chainId: BRIDGE_MONAD_CHAIN_ID, safe: x.safe, gasSymbol: 'MON', known: null }))
+    // A past Safe a live read shows empty is forgotten.
+    if (bridge) for (const l of legs) if (l.key.includes('#past:') && l.leg.read.at !== null) bridge.releaseRecipient(acc.accountKey, l.safe, { block: l.leg.read.block, stale: l.leg.read.stale, empty: l.leg.idle.length === 0 && l.leg.positions.every((p) => BigInt(p.valueUsdc ?? '0') === 0n) && !l.leg.partial })
+    return buildMoneyMap([home, ...legs.map((l) => l.leg), ...unread], inFlight)
+  }
+
   async funding(ctx: AccountContext, fresh = false): Promise<FundingView> {
     const { acc, live } = this.account(ctx, { readOnly: true })
     // In the background: the row follows on the next poll, and a slow read never holds the balance up.
@@ -1755,12 +1857,19 @@ export class Operator {
     if (this.cfg.oneAuth) void this.refreshOneAuth(acc).catch((e) => logErr(`[v4] ${acc.accountKey} inventory:`, e))
     // The app is open on this account: an armed activation is watched at full pace again.
     if (acc.armed) this.armSeen.set(acc.accountKey, Date.now())
+    // otto/mamoru#269 (display only): the Monad Safes are read alongside the reads below, never ahead of them.
+    const deadline = Date.now() + (this.cfg.bridgeMonad?.legBudgetMs() ?? 0)
+    const legs = this.remoteLegs(acc, deadline)
     const [r, peers] = await Promise.all([this.fundingRead(acc, live.safe, fresh), this.peerRead(acc, PEER_FUNDING_MAX_AGE_MS)])
     // otto/mamoru#212: the cap holds the account's total across every chain, idle and placed.
     const total = totalOf(this.localExposure(acc, r)) + (peers.ok ? peers.chains.reduce((s, e) => s + totalOf(e), 0n) : 0n)
     const cap = this.effectiveCap(acc)
+    const engine = this.engineView(acc)
+    // Display only: a failure here never fails the balance.
+    const money = await this.moneyMapOf(acc, live.safe, r, legs, engine, deadline).catch((e: unknown) => (logErr(`[money] ${acc.accountKey}:`, e), undefined))
     return {
       address: live.safe,
+      ...(money ? { money } : {}),
       deployed: r.deployed,
       block: Number(r.block),
       usdc: r.usdc.toString(),
@@ -1776,38 +1885,12 @@ export class Operator {
       active: acc.active,
       approval: this.approvalView(acc),
       idle: idleTokens(r, this.cfg.registry),
-      engine: this.engineView(acc),
+      engine,
       positions: [
         // A position the engine emptied (liquidity and owed fees 0, NFT not burned) is no longer working capital: no row.
-        ...this.sizingPositions(acc, r).filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n).map((p) => ({
-        tokenId: p.tokenId.toString(),
-        pool: p.pool,
-        liquidity: p.liquidity.toString(),
-        inRange: p.inRange,
-        amountUsdc: (p.token0 === 'USDC' ? p.amount0 : p.amount1).toString(),
-        amountCbbtc: (p.token0 === 'cbBTC' ? p.amount0 : p.token1 === 'cbBTC' ? p.amount1 : 0n).toString(),
-        amounts: [
-          { token: p.token0, amount: p.amount0.toString(), decimals: entry(p.token0, this.cfg.registry).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token0, p.amount0, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry).toString() },
-          { token: p.token1, amount: p.amount1.toString(), decimals: entry(p.token1, this.cfg.registry).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token1, p.amount1, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry).toString() },
-        ],
-        valueUsdc: positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, this.cfg.registry).toString(),
-        // otto/mamoru#233: where the pool's price sits in the position's range, for the gauge by "In range".
-        range: { lower: p.tickLower, upper: p.tickUpper, tick: r.prices[p.pool]!.tick },
-      })),
+        ...this.sizingPositions(acc, r).filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n).map((p) => positionView(p, r, this.cfg.registry)),
         // otto/mamoru#210: USDC supplied to a vault is working capital too, one row per vault held.
-        ...(r.vaults ?? [])
-          .filter((v) => v.shares > 0n)
-          .map((v) => ({
-            tokenId: v.name,
-            pool: v.name,
-            liquidity: v.shares.toString(),
-            inRange: true,
-            amountUsdc: v.assets.toString(),
-            amountCbbtc: '0',
-            amounts: [{ token: 'USDC', amount: v.assets.toString(), decimals: 6, valueUsdc: v.assets.toString() }],
-            valueUsdc: v.assets.toString(),
-            vault: { name: v.name, label: vaultLabel(v.name, this.cfg.registry), shares: v.shares.toString(), withdrawableUsdc: v.maxWithdraw.toString() },
-          })),
+        ...this.vaultRows(r),
       ],
       progress: this.progressOf(acc),
     }
@@ -1941,6 +2024,7 @@ export class Operator {
       this.store.save()
     }
     const r = await readSafe(this.client, safe, this.cfg.registry, { ...(asked ? { admitted: asked.map((id) => BigInt(id)) } : {}), ...(vaults ? { vaults } : {}) })
+    this.homeReadAt.set(r, Date.now())
     // Sol review #6: the record holds what the Safe still owns, so it stays bounded. Pruned from a read that saw every
     // NFT (enumerated) or checked the admitted ids one by one (ownerOf), never from a capped enumeration.
     const sawAll = r.byId ? (asked?.length ?? 0) <= MAX_INVENTORY : (r.positionCount ?? 0) <= MAX_INVENTORY
@@ -7209,22 +7293,7 @@ function isRevert(e: unknown): boolean {
   return false
 }
 
-/**
- * Every token of the USDC pools the Safe holds outside a position, with its value in USDC at the pool's price. A
- * swap leaves its output there until the mint that follows; leaving it out would show the account short of it.
- */
-export function idleTokens(r: Awaited<ReturnType<typeof readSafe>>, registry: Registry): NonNullable<FundingView['idle']> {
-  const out: NonNullable<FundingView['idle']> = []
-  for (const [token, amount] of Object.entries(r.tokens)) {
-    if (amount === 0n) continue
-    const pool = token === 'USDC' ? undefined : usdcPools(registry).find((p) => r.prices[p] && (entry(p, registry).token0 === token || entry(p, registry).token1 === token))
-    if (token !== 'USDC' && !pool) continue
-    const valueUsdc = pool ? inUsdc(pool, token, amount, r.prices[pool]!.sqrtPriceX96, registry) : amount
-    out.push({ token, amount: amount.toString(), decimals: entry(token, registry).decimals ?? 18, valueUsdc: valueUsdc.toString() })
-  }
-  // USDC first, then by value.
-  return out.sort((a, b) => (a.token === 'USDC' ? -1 : b.token === 'USDC' ? 1 : Number(BigInt(b.valueUsdc) - BigInt(a.valueUsdc))))
-}
+export { idleTokens }
 
 /** True when the node refused a relayer transaction for lack of ETH (geth: `insufficient funds for gas * price + value`). */
 function relayerShort(e: unknown): boolean {

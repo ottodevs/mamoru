@@ -4,13 +4,13 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { concat, encodeAbiParameters, encodeEventTopics, encodeFunctionResult, keccak256, pad, parseAbiItem, toHex, zeroHash, type Hex, type Log, type PublicClient } from 'viem'
+import { concat, getAddress, encodeAbiParameters, encodeEventTopics, encodeFunctionResult, keccak256, pad, parseAbiItem, toHex, zeroHash, type Hex, type Log, type PublicClient } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { address, baseRegistry, entry, messageTransmitterV2Abi, monadRegistry, tokenMessengerV2Abi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import type { BridgeSigning } from '@mamoru/scenarios/driver/engine.ts'
 import { afterAll } from 'bun:test'
-import { BASE_USDC, BRIDGE_FAIL_COOLDOWN_MS, burnOf, inFlightOf, MONAD_MINT_PENDING_MS, MonadBridge, SETTLE_CHUNKS_PER_TICK, SETTLE_LOG_CHUNK, sleeveValueAtTwap, type BridgeBurn, type MonadSender } from '../src/bridge-monad.ts'
+import { BASE_USDC, BRIDGE_FAIL_COOLDOWN_MS, burnOf, inFlightBurns, inFlightOf, MONAD_MINT_PENDING_MS, MonadBridge, SETTLE_CHUNKS_PER_TICK, SETTLE_LOG_CHUNK, sleeveValueAtTwap, type BridgeBurn, type MonadSender } from '../src/bridge-monad.ts'
 import { Relayer } from '../src/relayer.ts'
 import { cctpMessageKey, MESSAGE_TRANSMITTER_V2, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
 import type { SafeRead } from '../src/chain.ts'
@@ -749,5 +749,123 @@ describe('one authorization (V4, otto/mamoru#293): V4 is the depositor and the m
     const s = setup()
     s.bridge.recordSending('acc-1', signing())
     expect(s.j().burns[UOP]!.depositor).toBeUndefined()
+  })
+})
+
+// ---- otto/mamoru#269: the view carries the whole trail of a burn, with its arrival window. ----
+describe('the bridge view and the attestation time (otto/mamoru#269)', () => {
+  const iso = (ms: number) => new Date(ms).toISOString()
+
+  test('sending: the recipient and nothing else; a Brais-shaped trail grows with each step, and the ETA is burnedAt + 13..19 min', async () => {
+    let now = T0
+    const att = await attest(message({ nonce: 42n, executed: true }))
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris: { [BURN_TX]: [att] } })
+    s.bridge.recordSending('acc-1', signing())
+    expect(s.bridge.view(UOP)).toEqual({ chainId: 143, amountUsdc: AMOUNT.toString(), state: 'sending', recipient: getAddress(MONAD_SAFE) })
+
+    await s.bridge.tick()
+    const burnedAt = iso(T0)
+    expect(s.bridge.view(UOP)).toEqual({
+      chainId: 143, amountUsdc: AMOUNT.toString(), state: 'burned', burnTx: BURN_TX, burnedAt, recipient: getAddress(MONAD_SAFE),
+      eta: { from: iso(T0 + 13 * 60_000), to: iso(T0 + 19 * 60_000), late: false },
+    })
+
+    // Iris answers complete at the first poll after the first delay: attestedAt is kept, before the mint is even tried.
+    now += 6 * 60_000
+    const attestedAt = iso(now)
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.attestedAt).toBe(attestedAt)
+    const minted = s.bridge.view(UOP)!
+    expect(minted).toMatchObject({ state: 'minted', burnTx: BURN_TX, burnedAt, attestedAt, mintedAt: attestedAt, recipient: getAddress(MONAD_SAFE) })
+    expect(minted.mintTx).toBeDefined()
+    expect(minted.eta).toBeUndefined() // arrived: no window any more
+  })
+
+  test('attestedAt is the first complete answer and is not moved by later polls; a pending attestation leaves it unset', async () => {
+    let now = T0
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris: {} })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    now += 6 * 60_000
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.attestedAt).toBeUndefined()
+    expect(s.bridge.view(UOP)!.attestedAt).toBeUndefined()
+  })
+
+  test('4: attestedAt is not set by an attestation that fails the nonce or signature checks, and is set by the first valid one', async () => {
+    let now = T0
+    const bad = { message: message({ nonce: 42n, executed: true }), attestation: await privateKeyToAccount(generatePrivateKey()).sign({ hash: keccak256(message({ nonce: 42n, executed: true })) }) }
+    const good = await attest(message({ nonce: 42n, executed: true }))
+    const iris: Record<string, { message: Hex; attestation: Hex }[]> = { [BURN_TX]: [bad] }
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    now += 6 * 60_000
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.attestedAt).toBeUndefined()
+    expect(s.j().burns[UOP]!.state).toBe('burned')
+    iris[BURN_TX] = [good]
+    now += 2 * 60_000
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.attestedAt).toBe(new Date(now).toISOString())
+  })
+
+  test('gate 2: an attestation whose nonce belongs to another burn leaves attestedAt unset', async () => {
+    let now = T0
+    const att = await attest(message({ nonce: 42n, executed: true }))
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris: { [BURN_TX]: [att] } })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    // another burn of the journal already holds nonce 42
+    ;(s.bridge as unknown as { journal: { burns: Record<string, unknown> } }).journal.burns[`0x${'99'.repeat(32)}`] = { ...s.j().burns[UOP]!, id: `0x${'99'.repeat(32)}`, cctpNonce: u(42n, 32), state: 'minted' }
+    now += 6 * 60_000
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.attestedAt).toBeUndefined()
+  })
+
+  test('late: past burnedAt + 19 min and still burned', async () => {
+    let now = T0
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }) })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    now = T0 + 19 * 60_000
+    expect(s.bridge.view(UOP)!.eta!.late).toBe(false)
+    now = T0 + 19 * 60_000 + 1
+    expect(s.bridge.view(UOP)!.eta!.late).toBe(true)
+  })
+
+  test('a failed burn has no arrival window', async () => {
+    const s = setup({ base: baseClient({ safe: 1_020n, landed: { block: 1_010n, success: false } }) })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    expect(s.bridge.view(UOP)).toMatchObject({ state: 'failed', recipient: getAddress(MONAD_SAFE) })
+    expect(s.bridge.view(UOP)!.eta).toBeUndefined()
+  })
+
+  test('the money map counts the very burns inFlightOf counts: same rule, same settled check', async () => {
+    const s = setup({ base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }) })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    for (const [state, minted, block] of [['burned', undefined, 5_000n], ['minted', '5001', 5_000n], ['minted', '5001', 5_001n], ['failed', undefined, 0n]] as const) {
+      const b = s.bridge.burns()[0]!
+      Object.assign(b, { state, mintedBlock: minted })
+      const { rows } = await s.bridge.moneyInFlight('acc-1', 1_020n, () => ({ block, stale: false }))
+      expect(rows.reduce((sum, r) => sum + BigInt(r.amountUsdc), 0n)).toBe(inFlightOf(s.bridge.burns(), 'acc-1', block))
+      expect(inFlightBurns(s.bridge.burns(), 'acc-1', block).length).toBe(rows.length)
+    }
+  })
+
+  test('a burn that landed after the home read the caller pairs it with is in that read, not in flight (a cached funding read)', async () => {
+    const s = setup({ base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }) })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick() // burned at block 1010
+    const leg = () => ({ block: 0n, stale: false })
+    expect((await s.bridge.moneyInFlight('acc-1', 1_005n, leg)).rows).toHaveLength(0)
+    expect((await s.bridge.moneyInFlight('acc-1', 1_010n, leg)).rows).toHaveLength(1)
+    expect((await s.bridge.moneyInFlight('acc-1', undefined, leg)).rows).toHaveLength(1)
+    // The engine's remote value does not use the new branch: unproven for every engine path, so it keeps counting the burn.
+    const live = s.bridge as unknown as { readSleeve: () => Promise<{ value: bigint; block: bigint; ready: boolean }> }
+    live.readSleeve = async () => ({ value: 0n, block: 5_000n, ready: true })
+    expect((await s.bridge.remote('acc-1', MONAD_SAFE, 1_800, 1_005n)).inFlight).toBe(AMOUNT)
   })
 })

@@ -1,13 +1,14 @@
 import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getAddress, isAddressEqual, pad, parseAbiItem, parseEventLogs, type Hex, type Log, type PublicClient, type TransactionReceipt } from 'viem'
-import { ReasonError, type Address, type BridgeProgress } from '@mamoru/domain'
+import { ReasonError, type Address, type BridgeProgress, type MoneyChain, type MoneyInFlight } from '@mamoru/domain'
 import { address, baseRegistry, entry, entryPointV07Abi, messageTransmitterV2Abi, monadRegistry, safe7579Abi, smartSessionAbi, tokenMessengerV2Abi, type Registry } from '@mamoru/registry'
 import { userOpLogs } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import type { BridgeSigning } from '@mamoru/scenarios/driver/engine.ts'
 import { amountsForLiquidity, inUsdc, readSafe, usdcPools, type SafeRead } from './chain.ts'
+import { chainLegOf, etaOf, heldAboveDust, unreadLeg } from './money-map.ts'
 import { attestationValid, CCTP_DOMAIN_BASE, CCTP_DOMAIN_MONAD, cctpAttestation, cctpMessageKey, decodeCctpMessage, MESSAGE_TRANSMITTER_V2, mintIsFor, receiveMessageData } from './cctp.ts'
 import { Lock } from './lock.ts'
 import { logErr, redactSecrets } from './metrics.ts'
@@ -55,6 +56,15 @@ export const SETTLE_CHUNKS_PER_TICK = 5
 export const BRIDGE_FAIL_COOLDOWN_MS = 30 * 60_000
 export const BRIDGE_FAIL_COOLDOWN_MAX_MS = 24 * 3600_000
 /** Minted burns are kept this long for the ops history, then pruned. */
+/** A failed on-chain check of a burn is not asked again for this long. */
+export const SETTLE_FAIL_TTL_MS = 5_000
+/**
+ * otto/mamoru#269: a read of a Monad Safe for the money map is given up after this long (funding never waits on a dead
+ * RPC). Measured from lady against the public Monad RPCs, a readSafe takes 80-200 ms warm and ~360 ms cold (1-2 round
+ * trips); 5 s is ~14x the worst cold sample, so a slow but live provider passes. Only one read of a Safe is ever running:
+ * a hung one is not restarted by later polls.
+ */
+export const MONAD_LEG_TIMEOUT_MS = 5_000
 export const MINTED_KEEP_MS = 30 * 24 * 3600_000
 /** Native USDC on Base: the token the session burns (the message's burnToken). */
 export const BASE_USDC: Address = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
@@ -94,6 +104,8 @@ export type BridgeBurn = {
   /** The attested CCTP nonce, once known. */
   cctpNonce?: Hex
   attestPolledAt?: string
+  /** otto/mamoru#269: when Circle's attestation of this burn was first seen complete (and checked to be this burn). */
+  attestedAt?: string
   mintTx?: Hex
   mintAt?: string
   /** Review of #144: how many receiveMessage of this burn reverted; each waits longer, and past MONAD_MINT_MAX_REVERTS none is sent. */
@@ -107,9 +119,13 @@ type Journal = {
   burns: Record<string, BridgeBurn>
   mintDays: Record<string, { n: number; wei: string }>
   /** Last sleeve value read per account (raw USDC, without in flight), and its Monad block. */
-  sleeves: Record<string, { value: string; block: string; at: string }>
+  sleeves: Record<string, { value: string; block: string; at: string; safe?: string }>
   /** Review round 2 of #144: per account, bridge-outs that failed in a row and until when the sleeve reads not ready. */
   cooldowns: Record<string, { failures: number; until: string; code: string }>
+  /** otto/mamoru#269: the last good display total of each remote Safe (slot0, as funding shows it), by `${key}@${safe}`: what the money map falls back to, flagged stale, when Monad cannot be read. */
+  shown: Record<string, { totalUsdc: string; block: string; at: string }>
+  /** otto/mamoru#269: every Safe a burn of the account went to, kept until a read shows it empty (not pruned with the burns). */
+  pastRecipients: Record<string, Address[]>
 }
 
 /** What the ops view shows of a bridge. */
@@ -135,12 +151,13 @@ class MintBudget extends Error {}
  * read, or minted at or before the sleeve's block).
  */
 export function inFlightOf(burns: readonly BridgeBurn[], accountKey: string, sleeveBlock: bigint, settled: ReadonlySet<string> = new Set()): bigint {
-  let sum = 0n
-  for (const b of burns) {
-    if (b.accountKey !== accountKey || settled.has(b.id)) continue
-    if (IN_FLIGHT.has(b.state) || (b.state === 'minted' && (b.mintedBlock === undefined || BigInt(b.mintedBlock) > sleeveBlock))) sum += BigInt(b.amount)
-  }
-  return sum
+  return inFlightBurns(burns, accountKey, sleeveBlock, settled).reduce((sum, b) => sum + BigInt(b.amount), 0n)
+}
+
+/** The burns inFlightOf counts, one by one: the single rule behind both the engine's remote value and the money map (otto/mamoru#269). */
+export function inFlightBurns(burns: readonly BridgeBurn[], accountKey: string, sleeveBlock: bigint | ((b: BridgeBurn) => bigint), settled: ReadonlySet<string> = new Set()): BridgeBurn[] {
+  const at = (b: BridgeBurn) => (typeof sleeveBlock === 'function' ? sleeveBlock(b) : sleeveBlock)
+  return burns.filter((b) => b.accountKey === accountKey && !settled.has(b.id) && (IN_FLIGHT.has(b.state) || (b.state === 'minted' && (b.mintedBlock === undefined || BigInt(b.mintedBlock) > at(b)))))
 }
 
 /**
@@ -226,11 +243,28 @@ export class MonadBridge {
   }
 
   private load(): Journal {
-    const empty: Journal = { burns: {}, mintDays: {}, sleeves: {}, cooldowns: {} }
+    const empty: Journal = { burns: {}, mintDays: {}, sleeves: {}, cooldowns: {}, shown: {}, pastRecipients: {} }
     if (!existsSync(this.file)) return empty
     // An unreadable journal stops the operator: starting empty would forget burns in flight and bridge them again.
     const j = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Journal>
-    return { burns: j.burns ?? {}, mintDays: j.mintDays ?? {}, sleeves: j.sleeves ?? {}, cooldowns: j.cooldowns ?? {} }
+    const past: Record<string, Address[]> = { ...(j.pastRecipients ?? {}) }
+    // A journal from before pastRecipients (the field is absent): its burns' recipients are seeded once. Never again: a
+    // recipient released since would come back with every restart while its old burns are still journaled.
+    if (j.pastRecipients === undefined) {
+      // Also every Safe the engine ever recorded a sleeve for (its account is the key before any '#'): a rotated Safe whose
+      // burns were pruned long ago is still known there.
+      for (const [k, e] of Object.entries(j.sleeves ?? {})) {
+        if (!e.safe) continue
+        const list = (past[k.split('#')[0]!] ??= [])
+        if (!list.some((a) => a.toLowerCase() === e.safe!.toLowerCase())) list.push(getAddress(e.safe))
+      }
+    }
+    for (const b of j.pastRecipients === undefined ? Object.values(j.burns ?? {}) : []) {
+      if (b.state === 'failed' || b.state === 'dropped') continue
+      const list = (past[b.accountKey] ??= [])
+      if (!list.some((a) => a.toLowerCase() === b.recipient.toLowerCase())) list.push(b.recipient)
+    }
+    return { burns: j.burns ?? {}, mintDays: j.mintDays ?? {}, sleeves: j.sleeves ?? {}, cooldowns: j.cooldowns ?? {}, shown: j.shown ?? {}, pastRecipients: past }
   }
 
   private save(): void {
@@ -297,10 +331,17 @@ export class MonadBridge {
       nonce: b.nonce.toString(),
       fromBlock: b.prepareBlock.toString(),
     }
+    const kept = this.journal.pastRecipients[accountKey]
+    const hadRecipient = !!kept?.some((a) => a.toLowerCase() === b.recipient.toLowerCase())
+    if (!hadRecipient) this.journal.pastRecipients[accountKey] = [...(kept ?? []), getAddress(b.recipient)]
     try {
       this.save()
     } catch (e) {
       delete this.journal.burns[id]
+      if (!hadRecipient) {
+        if (kept) this.journal.pastRecipients[accountKey] = kept
+        else delete this.journal.pastRecipients[accountKey]
+      }
       throw e
     }
     this.unsigned.add(id)
@@ -375,7 +416,7 @@ export class MonadBridge {
       // A lagging provider: its older read could miss a mint the journal already places at or before the last block.
       read = { value: BigInt(last.value), block: BigInt(last.block), ready: read.ready }
     } else if (!last || last.value !== read.value.toString() || BigInt(last.block) < read.block) {
-      this.journal.sleeves[accountKey] = { value: read.value.toString(), block: read.block.toString(), at: this.iso() }
+      this.journal.sleeves[accountKey] = { value: read.value.toString(), block: read.block.toString(), at: this.iso(), safe: safe.toLowerCase() }
       try {
         this.save()
       } catch (e) {
@@ -431,7 +472,256 @@ export class MonadBridge {
     if (!userOpHash) return undefined
     const b = this.journal.burns[userOpHash.toLowerCase()]
     if (!b) return undefined
-    return { chainId: b.chainId, amountUsdc: b.amount, state: b.state === 'dropped' ? 'failed' : b.state }
+    return { chainId: b.chainId, amountUsdc: b.amount, state: b.state === 'dropped' ? 'failed' : b.state, ...this.trail(b) }
+  }
+
+  /**
+   * otto/mamoru#269: what the journal knows of a burn beyond its state (all optional): the burn's transaction and time,
+   * the attestation, the mint, the receiving Safe and, while burned, the arrival window (burnedAt + 13..19 min) with
+   * `late` once past it. A minted burn's time is when the journal saw it minted.
+   */
+  private trail(b: BridgeBurn): Omit<BridgeProgress, 'chainId' | 'amountUsdc' | 'state'> {
+    return {
+      ...(b.txHash ? { burnTx: b.txHash } : {}),
+      ...(b.burnedAt ? { burnedAt: b.burnedAt } : {}),
+      ...(b.attestedAt ? { attestedAt: b.attestedAt } : {}),
+      ...(b.mintTx ? { mintTx: b.mintTx } : {}),
+      ...(b.state === 'minted' ? { mintedAt: b.updatedAt } : {}),
+      recipient: b.recipient,
+      ...(b.state === 'burned' && b.burnedAt ? { eta: etaOf(b.burnedAt, this.now()) } : {}),
+    }
+  }
+
+  /** Time left (ms) of `deadline`, or the whole leg timeout when there is none. */
+  private left(deadline?: number): number {
+    return deadline === undefined ? this.legTimeoutMs : Math.max(1, deadline - Date.now())
+  }
+
+  /** The bound funding gives all its Monad reads together (otto/mamoru#269). */
+  legBudgetMs(): number {
+    return this.legTimeoutMs
+  }
+
+  /** Whether the CCTP nonce of `b` is used on Monad at `block`, bounded like every Monad read that funding waits on. */
+  private usedAt(b: BridgeBurn, block: bigint, ms: number): Promise<{ settled: boolean; unsure: boolean }> {
+    return this.memoCheck(`${b.id}|u|${block}`, async () => (await withTimeout(this.monad.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'usedNonces', args: [b.cctpNonce!], blockNumber: block }), ms)) !== 0n)
+  }
+
+  /** otto/mamoru#269 (display): a check of the chain at a block is a fact that does not change, kept (a failure only for a few seconds, so a dead RPC is not asked on every poll). */
+  private readonly settledMemo = new Map<string, { settled: boolean; ok: boolean; at: number }>()
+  private async memoCheck(key: string, run: () => Promise<boolean>): Promise<{ settled: boolean; unsure: boolean }> {
+    const hit = this.settledMemo.get(key)
+    if (hit && (hit.ok || this.now() - hit.at < SETTLE_FAIL_TTL_MS)) return { settled: hit.settled, unsure: !hit.ok }
+    if (this.settledMemo.size > 2_000) this.settledMemo.clear()
+    try {
+      const settled = await run()
+      this.settledMemo.set(key, { settled, ok: true, at: this.now() })
+      return { settled, unsure: false }
+    } catch {
+      this.settledMemo.set(key, { settled: false, ok: false, at: this.now() })
+      return { settled: false, unsure: true }
+    }
+  }
+
+  /**
+   * otto/mamoru#269, DISPLAY ONLY (the engine and the cap never call this): the money map's in-flight rows for an account.
+   * They are the burns the engine's own rule (inFlightBurns, the rule inFlightOf sums) counts, against the Monad block each
+   * recipient Safe was read at: in flight until minted at or before that block, on Monad from then on. The checks the engine's
+   * `settledAt` makes are made here too, but kept per (burn, block) and never against a stale read:
+   * - a 'sending' burn whose EntryPoint nonce is unmoved at `baseBlock` has not left the home read;
+   * - a 'burned' burn above `baseBlock` is still in the home read the map is paired with;
+   * - a minted burn whose CCTP nonce is used at the recipient's read block is in that read;
+   * - a minted burn to a Safe `legOf` does not know is settled (a recipient is only forgotten after an empty read).
+   * A burn minted with no `mintedBlock` (old entries only) and one resting on a stale or missing read stay counted and
+   * flagged `unsure`; a failed check does the same. Without a `baseBlock` every 'sending' and 'burned' burn counts.
+   */
+  async moneyInFlight(
+    accountKey: string,
+    baseBlock: bigint | undefined,
+    legOf: (b: BridgeBurn) => { block?: bigint; stale: boolean } | undefined,
+    /** Absolute time (ms) by which the Monad part of funding must be done; every chain read here stays inside it. */
+    deadline?: number,
+  ): Promise<{ rows: MoneyInFlight[]; unsure: boolean }> {
+    const mine = this.burns().filter((b) => b.accountKey === accountKey)
+    const settled = new Set<string>()
+    const failed = new Set<string>()
+    // The checks that ask a chain run together, all inside the one deadline funding gives its Monad part.
+    const jobs: Promise<void>[] = []
+    const check = (b: BridgeBurn, run: Promise<{ settled: boolean; unsure: boolean }>) =>
+      jobs.push(
+        run.then((r) => {
+          if (r.settled) settled.add(b.id)
+          if (r.unsure) failed.add(b.id)
+        }),
+      )
+    for (const b of mine) {
+      const l = legOf(b)
+      const ms = this.left(deadline)
+      if (b.state === 'sending' && baseBlock !== undefined) {
+        check(b, this.memoCheck(`${b.id}|n|${baseBlock}`, async () => (await withTimeout(this.base.readContract({ address: address('EntryPointV07', this.baseRegistryOf), abi: entryPointV07Abi, functionName: 'getNonce', args: [b.account, BigInt(b.nonceKey)], blockNumber: baseBlock }), ms)) <= BigInt(b.nonce)))
+      } else if (b.state === 'burned' && baseBlock !== undefined && b.burnBlock !== undefined && BigInt(b.burnBlock) > baseBlock) {
+        settled.add(b.id)
+      } else if (b.state === 'minted') {
+        // Settled only for a recipient the caller does not track at all (forgotten after a live empty read). A tracked Safe
+        // that has no live read now keeps its minted burn in flight, flagged unsure.
+        if (!l) {
+          if (b.mintedBlock !== undefined) settled.add(b.id)
+        } else if (!l.stale && l.block !== undefined && b.cctpNonce && b.mintedBlock !== undefined && BigInt(b.mintedBlock) > l.block) check(b, this.usedAt(b, l.block, ms))
+      } else if (b.state === 'burned' && b.cctpNonce && l && !l.stale && l.block !== undefined) {
+        // The mint may have landed before the journal says so (between two ticks): if the nonce is used at the block the
+        // recipient was read at, the USDC is in that read.
+        check(b, this.usedAt(b, l.block, ms))
+      }
+    }
+    await Promise.all(jobs)
+    let unsure = false
+    const rows = inFlightBurns(mine, accountKey, (b) => legOf(b)?.block ?? 0n, settled)
+      .sort((a, b) => a.at.localeCompare(b.at))
+      .map((b) => {
+        const l = legOf(b)
+        const weak = b.state === 'minted' && (b.mintedBlock === undefined || !l || l.stale || l.block === undefined)
+        const rowUnsure = failed.has(b.id) || weak
+        if (rowUnsure) unsure = true
+        const t = this.trail(b)
+        const stage: MoneyInFlight['stage'] = b.state === 'sending' ? 'sending' : b.state === 'minted' ? 'minted' : b.mintTx ? 'minting' : b.attestedAt ? 'attested' : 'burned'
+        return {
+          id: b.id,
+          kind: 'cctp',
+          from: this.baseRegistryOf.chainId,
+          to: b.chainId,
+          recipient: b.recipient,
+          amountUsdc: b.amount,
+          stage,
+          ...(t.burnTx ? { burnTx: t.burnTx } : {}),
+          ...(t.burnedAt ? { burnedAt: t.burnedAt } : {}),
+          ...(t.attestedAt ? { attestedAt: t.attestedAt } : {}),
+          ...(t.mintTx ? { mintTx: t.mintTx } : {}),
+          ...(t.mintedAt ? { mintedAt: t.mintedAt } : {}),
+          ...(t.eta ? { eta: t.eta } : {}),
+          feeUsdc: '0',
+          finality: 'standard',
+          ...(rowUnsure ? { unsure: true } : {}),
+        } satisfies MoneyInFlight
+      })
+    return { rows, unsure }
+  }
+
+  /** Every Safe a burn of the account went to, kept until a read shows it empty (releaseRecipient), however old its burns. */
+  recipients(accountKey: string): Address[] {
+    return [...(this.journal.pastRecipients[accountKey] ?? [])]
+  }
+
+  /**
+   * Forgets a past recipient, only when `leg` is a live read of it that holds nothing at all (no token, no position) and
+   * no burn to it is still on its way or minted above that read's block. Returns whether it was dropped.
+   */
+  releaseRecipient(accountKey: string, safe: Address, leg: { block: number; stale: boolean; empty: boolean }): boolean {
+    if (leg.stale || !leg.empty) return false
+    const list = this.journal.pastRecipients[accountKey]
+    if (!list?.some((a) => a.toLowerCase() === safe.toLowerCase())) return false
+    const open = this.burns().some(
+      (b) => b.accountKey === accountKey && b.recipient.toLowerCase() === safe.toLowerCase() && (IN_FLIGHT.has(b.state) || (b.state === 'minted' && (b.mintedBlock === undefined || BigInt(b.mintedBlock) > BigInt(leg.block)))),
+    )
+    if (open) return false
+    this.journal.pastRecipients[accountKey] = list.filter((a) => a.toLowerCase() !== safe.toLowerCase())
+    try {
+      this.save()
+    } catch (e) {
+      this.journal.pastRecipients[accountKey] = list
+      logErr('[bridge-monad] journal write failed:', e)
+      return false
+    }
+    return true
+  }
+
+  /** MONAD_LEG_TIMEOUT_MS; a field so a test can shorten it. */
+  private legTimeoutMs = MONAD_LEG_TIMEOUT_MS
+  private readonly legCache = new Map<string, { at: number; leg: MoneyChain }>()
+  private readonly legReads = new Map<string, Promise<MoneyChain>>()
+
+  /**
+   * otto/mamoru#269: one remote Safe on Monad as a chain of the money map: tokens, positions, MON, block and time, at
+   * the pool price funding shows (slot0). One read serves every poll for `maxAgeMs`, and a failed read is not retried for
+   * 5 s, so the map adds no RPC load beyond that. Monad unreadable: the last good leg of this process, else the last good
+   * total on disk, else the engine's last sleeve value, flagged stale with its time; never 0 once anything was read. Never
+   * read at all: `read.at` is null (the map is then incomplete). `key`: the journal key of the Safe (account key, or
+   * `<account key>#retired` for a retired design-C Safe).
+   */
+  async sleeveLeg(key: string, safe: Address, maxAgeMs: number, deadline?: number): Promise<MoneyChain> {
+    const jk = safe.toLowerCase()
+    const ck = jk
+    const hit = this.legCache.get(ck)
+    if (hit && this.now() - hit.at < (hit.leg.read.stale ? Math.min(maxAgeMs, 5_000) : maxAgeMs)) return hit.leg
+    const running = this.legReads.get(ck)
+    if (running) return running
+    const p = this.readLeg(key, safe, ck, jk, deadline).finally(() => this.legReads.delete(ck))
+    this.legReads.set(ck, p)
+    return p
+  }
+
+  /**
+   * The one readSafe of each Safe that may be running: a hung request is waited on again, never restarted by the next
+   * poll. The Monad client is built with a 60 s transport timeout (boot.ts SIDE_CLIENT_TIMEOUT_MS), so a request that never
+   * answers is rejected by the transport and leaves this map by itself.
+   */
+  private readonly rawReads = new Map<string, Promise<SafeRead>>()
+
+  private legVerify: Promise<boolean> | null = null
+
+  private async readLeg(key: string, safe: Address, ck: string, jk: string, deadline?: number): Promise<MoneyChain> {
+    const before = this.legCache.get(ck)
+    try {
+      // The check of the Monad RPC (until it has passed) and the read together stay inside one deadline.
+      const r = await withTimeout(
+        (async () => {
+          if (!this.verified) {
+            this.legVerify ??= this.monadVerified().finally(() => (this.legVerify = null))
+            if (!(await this.legVerify)) throw new Error('Monad RPC not checked yet')
+          }
+          if (this.rawReads.has(jk)) throw new Error('the previous read of this Safe has not answered yet')
+          // The same full read the engine's readSleeve makes; the display filters positions to those above dust.
+          const raw = readSafe(this.monad, safe, this.monadRegistryOf)
+          this.rawReads.set(jk, raw)
+          void raw.then(() => undefined, () => undefined).finally(() => this.rawReads.delete(jk))
+          return raw
+        })(),
+        this.left(deadline),
+      )
+      const last = this.journal.shown[jk]
+      // A lagging provider: a read older than the last one shown is not used (it could miss a mint already counted).
+      if (last && BigInt(last.block) > r.block) throw new Error(`provider at block ${r.block}, behind ${last.block}`)
+      const at = this.iso()
+      const leg = chainLegOf({ chainId: this.monadRegistryOf.chainId, safe, registry: this.monadRegistryOf, r, held: heldAboveDust(r, this.monadRegistryOf), at, stale: false, gasSymbol: 'MON' })
+      if (last && last.totalUsdc === leg.totalUsdc && this.now() - Date.parse(last.at) <= 5 * 60_000) {
+        // Unchanged: the block moves on in memory (a prune must see this read), the disk is written on a change or after 5 min.
+        last.block = r.block.toString()
+      } else {
+        this.journal.shown[jk] = { totalUsdc: leg.totalUsdc, block: r.block.toString(), at }
+        try {
+          this.save()
+        } catch (e) {
+          logErr('[bridge-monad] journal write failed:', e)
+        }
+      }
+      this.legCache.set(ck, { at: this.now(), leg })
+      return leg
+    } catch (e) {
+      if (!before || !before.leg.read.stale) logErr(`[bridge-monad] ${key} money map: Monad Safe unreadable, showing its last value:`, e)
+      // What is known of THIS Safe (never of the account's other Safes): this process's last leg, the last good total on
+      // disk (by address), or the engine's last sleeve value when it was read for this very Safe: the newest by block wins.
+      const known = before && before.leg.read.at !== null ? before.leg : null
+      const shown = this.journal.shown[jk]
+      // The engine's sleeve record for THIS Safe, found by address under whatever key the engine used (account key or #retired).
+      // An entry written before it carried a Safe is the account's primary remote's (plain key), never a #retired/#past one's.
+      const sl = [...Object.values(this.journal.sleeves).filter((e) => e.safe === jk), ...(!key.includes('#') && this.journal.sleeves[key] && this.journal.sleeves[key]!.safe === undefined ? [this.journal.sleeves[key]!] : [])].sort((x, y) => Number(y.block) - Number(x.block))[0]
+      const cands = [shown ? { totalUsdc: BigInt(shown.totalUsdc), block: Number(shown.block), at: shown.at } : null, sl ? { totalUsdc: BigInt(sl.value), block: Number(sl.block), at: sl.at } : null].filter((c): c is NonNullable<typeof c> => c !== null)
+      const best = cands.sort((x, y) => y.block - x.block)[0] ?? null
+      const leg: MoneyChain = known && (!best || best.block <= known.read.block) ? { ...known, read: { ...known.read, stale: true } } : unreadLeg({ chainId: this.monadRegistryOf.chainId, safe, gasSymbol: 'MON', known: best })
+      // Cached for the short failure TTL (no hammering, no log spam); `known` above ignores an unread leg, so it never
+      // shadows what the journal learns later.
+      this.legCache.set(ck, { at: this.now(), leg })
+      return leg
+    }
   }
 
   /** The account's latest burn not yet minted, for the progress line. */
@@ -466,11 +756,27 @@ export class MonadBridge {
     this.save()
   }
 
+  /**
+   * otto/mamoru#269: a minted burn is pruned only once a read of its recipient after the mint is recorded: the engine's sleeve
+   * record for that Safe, or the last good display total, at or after its mintedBlock; a burn with no mintedBlock (old
+   * entries) needs a successful live read of the recipient whose wall-clock time is after the mint was seen (mintAt, else
+   * updatedAt). Until then the journal row is what keeps its amount in the displayed total while Monad cannot be read:
+   * never age alone. Failed and dropped burns hold no value.
+   */
+  private confirmed(b: BridgeBurn): boolean {
+    if (b.state !== 'minted') return true
+    const safe = b.recipient.toLowerCase()
+    const reads = [this.journal.shown[safe], ...Object.values(this.journal.sleeves).filter((e) => e.safe === safe)]
+    if (b.mintedBlock !== undefined) return reads.some((e) => e !== undefined && BigInt(e.block) >= BigInt(b.mintedBlock!))
+    const since = Date.parse(b.mintAt ?? b.updatedAt)
+    return reads.some((e) => e !== undefined && Date.parse(e.at) >= since)
+  }
+
   private prune(): void {
     const cut = this.now() - MINTED_KEEP_MS
     let changed = false
     for (const [id, b] of Object.entries(this.journal.burns)) {
-      if ((b.state === 'minted' || b.state === 'failed' || b.state === 'dropped') && Date.parse(b.updatedAt) < cut) {
+      if ((b.state === 'minted' || b.state === 'failed' || b.state === 'dropped') && Date.parse(b.updatedAt) < cut && this.confirmed(b)) {
         delete this.journal.burns[id]
         changed = true
       }
@@ -588,6 +894,17 @@ export class MonadBridge {
       logErr(`[bridge-monad] ${b.account.slice(0, 10)}:`, 'attestation of another burn, ignored')
       return
     }
+    // otto/mamoru#269 (display): the step from 'attesting' to 'minting' is only visible if the first valid attestation time is
+    // kept. Set only once the nonce, the attesters' signature and the duplicate check passed; nothing here decides anything
+    // (updatedAt is not moved), and a failed write is logged, never allowed to stop the mint.
+    if (!b.attestedAt) {
+      b.attestedAt = this.iso()
+      try {
+        this.save()
+      } catch (e) {
+        logErr('[bridge-monad] journal write failed (attestedAt kept in memory):', e)
+      }
+    }
     // The CCTP nonce is on disk before anything else is read or sent for it (the duplicate check above reads it).
     if (b.cctpNonce?.toLowerCase() !== msg.nonce.toLowerCase()) this.update(b, { cctpNonce: msg.nonce })
     const block = await this.monad.getBlockNumber()
@@ -685,4 +1002,13 @@ export function burnOf(logs: Log[], b: Pick<BridgeBurn, 'account' | 'depositor' 
     a.minFinalityThreshold >= 2000 &&
     a.hookData === '0x'
   return ok ? { message: sent[0]!.args.message } : null
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let t: ReturnType<typeof setTimeout>
+  const timeout = new Promise<never>((_, reject) => {
+    t = setTimeout(() => reject(new Error(`no answer in ${ms} ms`)), ms)
+  })
+  p.catch(() => {})
+  return Promise.race([p, timeout]).finally(() => clearTimeout(t))
 }

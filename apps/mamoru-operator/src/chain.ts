@@ -1,5 +1,5 @@
 import type { PublicClient } from 'viem'
-import { BASE_CHAIN_ID, ReasonError, chainOf, isChainId, type Address, type ChainId } from '@mamoru/domain'
+import { BASE_CHAIN_ID, ReasonError, chainOf, isChainId, type Address, type ChainId, type FundingView } from '@mamoru/domain'
 import { address, entry, erc20Abi, erc4626Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
 import { Batch, PRICE_SHARES, balanceRead, blockNumberRead, contractRead, createDeployedChecker, multicall3Of, tokenIdReads, type Handle } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
@@ -284,4 +284,44 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
   }
   const livePrice = prices[live]!
   return { block: blockNumber, deployed, eth, usdc: tokens.USDC ?? 0n, sqrtPriceX96: livePrice.sqrtPriceX96, tick: livePrice.tick, tokens, prices, positions, positionCount: count, ...(byId ? { byId, ownedIds: ids } : {}), ...(opts.vaults ? { vaults } : {}) }
+}
+
+/**
+ * Every token of the USDC pools the Safe holds outside a position, with its value in USDC at the pool's price. A
+ * swap leaves its output there until the mint that follows; leaving it out would show the account short of it.
+ */
+export function idleTokens(r: SafeRead, registry: Registry): NonNullable<FundingView['idle']> {
+  const out: NonNullable<FundingView['idle']> = []
+  for (const [token, amount] of Object.entries(r.tokens)) {
+    if (amount === 0n) continue
+    const pool = token === 'USDC' ? undefined : usdcPools(registry).find((p) => r.prices[p] && (entry(p, registry).token0 === token || entry(p, registry).token1 === token))
+    if (token !== 'USDC' && !pool) continue
+    const valueUsdc = pool ? inUsdc(pool, token, amount, r.prices[pool]!.sqrtPriceX96, registry) : amount
+    out.push({ token, amount: amount.toString(), decimals: entry(token, registry).decimals ?? 18, valueUsdc: valueUsdc.toString() })
+  }
+  // USDC first, then by value.
+  return out.sort((a, b) => (a.token === 'USDC' ? -1 : b.token === 'USDC' ? 1 : Number(BigInt(b.valueUsdc) - BigInt(a.valueUsdc))))
+}
+
+/** Positions worth less than this (raw USDC, 0.01) are not unwound by a Stop nor counted by a withdrawal: dust or unsolicited. */
+export const POSITION_DUST_USDC = 10_000n
+
+/** One position as funding shows it: amounts, value at the pool's price (slot0) and where the price sits in its range. */
+export function positionView(p: PoolPosition, r: SafeRead, registry: Registry): NonNullable<FundingView['positions']>[number] {
+  const sqrt = r.prices[p.pool]!.sqrtPriceX96
+  return {
+    tokenId: p.tokenId.toString(),
+    pool: p.pool,
+    liquidity: p.liquidity.toString(),
+    inRange: p.inRange,
+    amountUsdc: (p.token0 === 'USDC' ? p.amount0 : p.amount1).toString(),
+    amountCbbtc: (p.token0 === 'cbBTC' ? p.amount0 : p.token1 === 'cbBTC' ? p.amount1 : 0n).toString(),
+    amounts: [
+      { token: p.token0, amount: p.amount0.toString(), decimals: entry(p.token0, registry).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token0, p.amount0, sqrt, registry).toString() },
+      { token: p.token1, amount: p.amount1.toString(), decimals: entry(p.token1, registry).decimals ?? 18, valueUsdc: inUsdc(p.pool, p.token1, p.amount1, sqrt, registry).toString() },
+    ],
+    valueUsdc: positionUsdc(p, sqrt, registry).toString(),
+    // otto/mamoru#233: where the pool's price sits in the position's range, for the gauge by "In range".
+    range: { lower: p.tickLower, upper: p.tickUpper, tick: r.prices[p.pool]!.tick },
+  }
 }

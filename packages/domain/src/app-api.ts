@@ -72,6 +72,8 @@ export type FundingView = {
    * as that chain's account once it has recomputed the address); `ready` once it runs there. Absent: none.
    */
   remote?: { chainId: number; address: Hex0x; spec: RemoteSpec; ready: boolean }
+  /** otto/mamoru#269: the money across every chain and in flight; absent from an older operator (the app then shows this chain only). */
+  money?: MoneyMap
   address: Hex0x
   deployed: boolean
   block: number
@@ -448,7 +450,75 @@ export type OpView = {
  * (base units) and how far it got: 'sending' (signed, not yet seen on Base), 'burned' (burned on Base, waiting for
  * Circle's attestation and the mint), 'minted' (arrived), 'failed' (nothing left the account).
  */
-export type BridgeProgress = { chainId: number; amountUsdc: string; state: 'sending' | 'burned' | 'minted' | 'failed' }
+export type BridgeProgress = {
+  chainId: number
+  amountUsdc: string
+  state: 'sending' | 'burned' | 'minted' | 'failed'
+  /**
+   * otto/mamoru#269, all optional (an older operator sends none): the burn's Base transaction and time, when Circle's
+   * attestation was seen complete, the mint on the destination chain and when it was seen, the Safe that receives it,
+   * and the expected arrival window (burnedAt + 13..19 min, Standard finality; `late` once past its end, still burned).
+   */
+  burnTx?: Hex0x
+  burnedAt?: string
+  attestedAt?: string
+  mintTx?: Hex0x
+  mintedAt?: string
+  recipient?: Hex0x
+  eta?: { from: string; to: string; late: boolean }
+}
+
+/**
+ * otto/mamoru#269: where the account's money is, on every chain it has a Safe on, plus what is on its way between them.
+ * One source builds it (the operator of the home chain, which holds the bridge journal), so a burn is never counted twice
+ * nor dropped: `totalUsdc` is always the sum of the chains' `totalUsdc` and the in-flight amounts, in USDC base units.
+ * Gas (ETH, MON) is shown per chain and never part of any total.
+ */
+export type MoneyWhy = { code: string; since?: string }
+export type MoneyChain = {
+  chainId: number
+  safe: Hex0x
+  explorerUrl: string
+  /**
+   * `stale`: the chain could not be read now, so this is the last good value (never 0, never left out); `at` is when
+   * it was read. `at: null`: it was never read, `totalUsdc` is then 0 only because nothing is known, and the map is not `complete`.
+   */
+  read: { block: number; at: string | null; stale: boolean }
+  /** Every token outside a position, valued in USDC at the pool price shown for the chain (slot0, as funding does). `why`: the engine's last reason for leaving USDC idle, when known. */
+  idle: { token: string; amount: string; decimals: number; valueUsdc: string; why?: MoneyWhy }[]
+  positions: (FundingView['positions'][number] & { chainId: number })[]
+  gas: { symbol: 'ETH' | 'MON'; amount: string; reserveTarget?: string }
+  /** The Safe holds more position NFTs than were read and no ids to read them by: positions may be missing, the map is not `complete`. */
+  partial?: boolean
+  totalUsdc: string
+}
+export type MoneyInFlight = {
+  id: string
+  /** 'cctp': a burn of this account's journal. 'bridge': an amount on its way with no per-transfer detail (the Ethereum to Base route). */
+  kind: 'cctp' | 'bridge'
+  from: number
+  to: number
+  recipient: Hex0x
+  amountUsdc: string
+  stage: 'sending' | 'burned' | 'attested' | 'minting' | 'minted' | 'failed'
+  burnTx?: Hex0x
+  burnedAt?: string
+  attestedAt?: string
+  mintTx?: Hex0x
+  mintedAt?: string
+  eta?: { from: string; to: string; late: boolean }
+  feeUsdc: string
+  finality: 'standard' | 'fast'
+  /** A check that this burn is not already in a chain's read failed: it is counted here, and may also be inside a chain total. The map is not `complete`. */
+  unsure?: boolean
+}
+export type MoneyMap = {
+  totalUsdc: string
+  /** false: a chain was never read, a chain read is `partial`, or an in-flight row is `unsure`; the app says so. */
+  complete: boolean
+  chains: MoneyChain[]
+  inFlight: MoneyInFlight[]
+}
 
 // Live operator (sprint amendment 2026-09-26 21:40). The Worker authenticates the device session, then
 // forwards the same route to the operator with this context in `x-mamoru-account` (base64url JSON)
