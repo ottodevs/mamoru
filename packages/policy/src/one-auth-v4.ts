@@ -254,8 +254,7 @@ export function registryPoolEntry(p: RegistryPool, registry: Registry): Registry
 
 /**
  * A V4 policy whose buckets serve the registry's active pools: a pool of two pinned stables goes to `stables`, any other
- * (a stable and an asset) to `risk`, each bucket keeping its preference (a bucket with no active pool keeps none, and
- * its share waits as savings). `registry` gains an entry for every pool it did not know. The engine's actionPolicy
+ * (a stable and an asset) to `risk`, each bucket keeping its preference (a bucket with no active pool is left out). `registry` gains an entry for every pool it did not know. The engine's actionPolicy
  * carries each pool's band, anchor and windows exactly as the registry states them, so its bounds are V4's own.
  * Returns the extended registry too: the engine resolves every pool name in it.
  */
@@ -274,7 +273,9 @@ export function withRegistryPools(policy: PolicyVersion, deployment: Pick<OneAut
   }
   const extended: Registry = { ...registry, entries }
   const local = policy.buckets.filter((b) => b.id === 'stables' || b.id === 'risk')
-  const buckets = local.map((b) => ({ ...b, pools: named.filter((n) => (b.id === 'stables' ? n.stablePair : !n.stablePair)).map((n) => n.name) }))
+  // A bucket the registry lists no pool for is left out (its share waits as savings): kept with no pool, decide would
+  // reduce the others toward its target and put the same USDC back (a reduce/increase churn seen on the fork e2e).
+  const buckets = local.map((b) => ({ ...b, pools: named.filter((n) => (b.id === 'stables' ? n.stablePair : !n.stablePair)).map((n) => n.name) })).filter((b) => b.pools.length > 0)
   const bandTicksByPool: Record<RegistryName, number> = {}
   const anchorByPool: Record<RegistryName, { tick: number; band: number }> = {}
   const twapByPool: Record<RegistryName, { long: number; short: number }> = {}
