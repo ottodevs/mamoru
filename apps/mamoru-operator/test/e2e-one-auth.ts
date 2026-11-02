@@ -232,7 +232,9 @@ try {
     }
   })
   const base = B.lab
-  log(`Base fork at ${await base.client.getBlockNumber()}${M ? `, Monad fork at ${await M.lab.client.getBlockNumber()}` : ''}`)
+  const baseFork = await base.client.getBlockNumber()
+  const monadFork = M ? await M.lab.client.getBlockNumber() : 0n
+  log(`Base fork at ${baseFork}${M ? `, Monad fork at ${monadFork}` : ''}`)
 
   // --- the V4 stack, as T7 deploys it ------------------------------------------------------------------------------------
   const deployer = privateKeyToAccount(generatePrivateKey()).address
@@ -356,9 +358,9 @@ try {
       const gState = new GuardianState(join(dir, 'guardian'))
       const wallet = await import('viem').then((v) => v.createWalletClient({ account: privateKeyToAccount(guardianKey), transport: v.http(B.url) }))
       const sent: Hex[] = []
-      const homeBlock = await base.client.getBlockNumber()
+      // From the fork blocks: everything V4 and the registry ever emitted is local to the forks (no upstream log reads).
       const notes = await runPass(
-        { homeChainId: 8453, v4: d.policy, gasPolicy: d.gasPolicy, registryAt: { 8453: d.registry, 143: d.registry }, fromBlock: { 8453: homeBlock - 2_000n, 143: (await M.lab.client.getBlockNumber()) - 2_000n }, logPage: 1_000n, maxPagesPerStream: 10, dryRun: false, realertMs: 3_600_000 },
+        { homeChainId: 8453, v4: d.policy, gasPolicy: d.gasPolicy, registryAt: { 8453: d.registry, 143: d.registry }, fromBlock: { 8453: baseFork + 1n, 143: monadFork + 1n }, logPage: 500n, maxPagesPerStream: 100, dryRun: false, realertMs: 3_600_000 },
         {
           clients: { 8453: base.client as never, 143: M.lab.client as never },
           send: async (a) => {
