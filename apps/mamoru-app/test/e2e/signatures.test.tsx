@@ -56,14 +56,19 @@ describe('before each passkey signature', () => {
     const props = { amount: '120.00', asset: 'USDC', address: `0x7a3f${'0'.repeat(32)}91c2`, chain: 'Base', scope: signatureCopy.withdraw('USDC'), busy: null, error: null, onApprove: () => {}, onCancel: () => {} }
     const { html, text } = render(<WithdrawReview {...props} />)
     expect(text).toContain('120.00 USDC')
-    expect(text).toContain('to 0x7a3f…91c2 · Base')
+    expect(text).toContain('to Base')
     expect(text).toContain('Only your passkey can do this.')
     expect(text).toContain('Cancel')
     expect(text).toContain('Withdraw with passkey')
     expect(html).toMatch(/<details[^>]*data-testid="sign-details"(?![^>]*\bopen)/)
-    // The whole signed sentence and the full address are in the page, behind the disclosure (#41).
+    // The whole signed sentence stays behind the disclosure (#41); the whole destination is in view outside it, above
+    // the button, never only its ends (address poisoning).
     expect(html).toContain('This signature sends your USDC to the address you chose. Only your passkey can do this.')
-    expect(html).toContain(props.address)
+    const shown = html.indexOf('data-testid="withdraw-address"')
+    expect(shown).toBeGreaterThan(-1)
+    expect(html.indexOf(props.address, shown)).toBeGreaterThan(shown)
+    expect(shown).toBeLessThan(html.indexOf('data-testid="sign-details"'))
+    expect(text).not.toContain('…')
     expect(html.indexOf('120.00')).toBeLessThan(html.indexOf('Withdraw with passkey'))
     expect(html.indexOf('data-testid="withdraw-to"')).toBeLessThan(html.indexOf('Only your passkey can do this.'))
     expect(text).not.toMatch(/\b\d of \d\b/)

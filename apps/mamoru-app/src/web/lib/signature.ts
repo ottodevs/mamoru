@@ -37,7 +37,6 @@ export const signatureCopy = {
     action: 'Withdraw with passkey',
     details: 'What you sign',
     to: 'to',
-    toFull: 'Sending to',
   },
   withdraw,
   stop: "This signature ends Mamoru's permission to act, closes every position and swaps what they held to USDC, which stays in your account. Only your passkey can do this.",

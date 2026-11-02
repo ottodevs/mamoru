@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react'
-import { shortHex } from '../lib/format.ts'
 import { signatureCopy } from '../lib/signature.ts'
 import { CARD_LINK } from '../routes/onboarding.tsx'
 
@@ -50,10 +49,17 @@ export function WithdrawReview({
       <p className="m-0 text-[clamp(2rem,9vw,3rem)] leading-none tabular-nums" data-testid="withdraw-amount">
         {amount} {asset}
       </p>
-      <p className="m-0 font-mono text-[0.9rem] text-stone" data-testid="withdraw-to" title={address}>
-        {copy.to} {name ? `${name} · ` : ''}
-        {shortHex(address)} · {chain}
-      </p>
+      {/* The whole destination stays in view above the button, never only its ends: a look-alike address with the
+          same first and last characters (address poisoning) must be visible before the passkey signs. */}
+      <div className="grid gap-1" data-testid="withdraw-to">
+        <p className="m-0 font-mono text-[0.9rem] text-stone">
+          {copy.to} {name ? `${name} · ` : ''}
+          {chain}
+        </p>
+        <p className="m-0 font-mono text-[0.82rem] break-all" data-testid="withdraw-address">
+          {address}
+        </p>
+      </div>
       {children}
       <p className="m-0 mt-1 grid grid-cols-[1.6rem_1fr] leading-snug">
         <span className="text-emerald" aria-hidden="true">
@@ -67,8 +73,6 @@ export function WithdrawReview({
           <p className="m-0" data-testid="sign-scope">
             {scope}
           </p>
-          <p className="m-0">{copy.toFull}</p>
-          <p className="m-0 font-mono text-[0.82rem] break-all text-stone">{address}</p>
         </div>
       </details>
       <div role="status" aria-live="polite">
