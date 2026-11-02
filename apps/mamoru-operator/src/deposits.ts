@@ -6,10 +6,10 @@ import { nameOf, type Registry } from '@mamoru/registry'
  * otto/mamoru#340: a deposit is USDC sent to the Safe from outside Mamoru. It moves nothing of the account, so no
  * owner op and no engine journal move ever marked it: the funding cache answered without it until it aged out, and
  * the savings history (GET /ops, built from the account's ops) never had a row for it. The operator now reads the
- * Safe's incoming USDC Transfer logs itself, a page at a time from a cursor that never passes the chain's safe block,
+ * Safe's incoming USDC Transfer logs itself, from a cursor that never passes head minus DEPOSIT_CONFIRM_BLOCKS,
  * keeps each deposit at or below it as a row of its own (`AccountState.deposits`, outside `ops`, so nothing that
- * settles or retries ops ever sees one) and serves it in GET /ops as an OpView of kind 'deposit'. A deposit past the
- * safe block is re-read on every look and served as arriving ('submitted') until the cursor reaches it.
+ * settles or retries ops ever sees one) and serves it in GET /ops as an OpView of kind 'deposit'. A deposit above it
+ * is re-read on every look and served as arriving ('submitted') until it is that deep.
  */
 
 const TRANSFER = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)')
@@ -23,6 +23,14 @@ export type DepositRow = { txHash: Hex; logIndex: number; block: string; amountU
  * send a Safe dust, and dust must neither fill the history, push a real row out, nor cost a write or a chain read.
  */
 export const DEPOSIT_MIN_USDC = 10_000n
+
+/**
+ * Blocks under the head a deposit's block must be to be final (about 10 minutes of Base blocks): above it a block may
+ * still reorg, or a node behind may not have served its logs yet, so the cursor never passes head minus this, and a
+ * deposit above it is read again on every look and shown as arriving. A fixed depth, not the 'safe' tag: one call
+ * fewer per look, and the same rule on every chain whatever tags its nodes answer.
+ */
+export const DEPOSIT_CONFIRM_BLOCKS = 300n
 
 /** Blocks per eth_getLogs page (the provider's 2,000-block range, as OWNER_LOG_PAGE_BLOCKS). */
 export const DEPOSIT_PAGE_BLOCKS = 2_000n
@@ -47,18 +55,20 @@ export function depositRange(cursor: bigint | undefined, head: bigint, pages: nu
 type TransferLog = { args?: { from?: Address; to?: Address; value?: bigint }; transactionHash?: Hex | null; logIndex?: number | null; blockNumber?: bigint | null; blockTimestamp?: bigint | number | null }
 
 /**
- * The deposits among USDC Transfer logs to `safe`: anything a contract of the chain's registry sent (a pool, the
- * position manager, a vault, the bridge) is Mamoru's own money coming back, and a mint (from zero, a CCTP leg) is
- * a bridge of the account's own; every other sender (a wallet, an exchange, a bridge relayer) is a deposit.
+ * The deposits among USDC Transfer logs to `safe`. Not a deposit: anything a contract of the chain's registry sent
+ * (a pool, the position manager, a vault, the bridge), a mint (from zero, a CCTP leg of the account's own), the Safe
+ * itself, and any transfer in a transaction of the account's own ops (`ownTx`, lowercase hashes): a vault redeem pays
+ * from the vault's underlying token (aBasUSDC for waBasUSDC), which no registry names. Every other sender (a wallet,
+ * an exchange, a bridge relayer bringing the owner's own money from another chain) is a deposit.
  */
-export function depositsOf(logs: readonly TransferLog[], safe: Address, registry: Registry, foundAt: string): DepositRow[] {
+export function depositsOf(logs: readonly TransferLog[], safe: Address, registry: Registry, foundAt: string, ownTx: ReadonlySet<string> = new Set()): DepositRow[] {
   const out: DepositRow[] = []
   for (const l of logs) {
     const from = l.args?.from
     const value = l.args?.value
     if (!from || typeof value !== 'bigint' || value < DEPOSIT_MIN_USDC || !l.transactionHash || l.logIndex == null || l.blockNumber == null) continue
     if (l.args?.to && l.args.to.toLowerCase() !== safe.toLowerCase()) continue
-    if (from.toLowerCase() === ZERO || nameOf(from, registry) !== undefined) continue
+    if (from.toLowerCase() === ZERO || from.toLowerCase() === safe.toLowerCase() || nameOf(from, registry) !== undefined || ownTx.has(l.transactionHash.toLowerCase())) continue
     const ts = l.blockTimestamp == null ? null : Number(l.blockTimestamp)
     out.push({ txHash: l.transactionHash, logIndex: l.logIndex, block: l.blockNumber.toString(), amountUsdc: value.toString(), from: from.toLowerCase() as Hex, at: ts ? new Date(ts * 1000).toISOString() : foundAt })
   }
@@ -104,7 +114,7 @@ export function mergeDeposits(kept: readonly DepositRow[], found: readonly Depos
   return { rows: all.filter((d) => !dropped.has(d)), added: added.filter((d) => !dropped.has(d)) }
 }
 
-/** The history row of a deposit: confirmed at or below the chain's safe block, 'submitted' (arriving) above it. */
+/** The history row of a deposit: confirmed once DEPOSIT_CONFIRM_BLOCKS deep, 'submitted' (arriving) until then. */
 export function depositOpView(d: DepositRow, arriving = false): OpView {
   return { opId: `dep-${d.txHash.toLowerCase()}-${d.logIndex}`, kind: 'deposit', state: arriving ? 'submitted' : 'confirmed', txHash: d.txHash, block: Number(d.block), updatedAt: d.at, amountUsdc: d.amountUsdc, asset: 'USDC', from: d.from }
 }

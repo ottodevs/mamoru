@@ -54,8 +54,8 @@ export function opLine(op: OpView): string {
     case 'transfer':
       if (failed) return 'Withdrawal needs another approval'
       return withdrewLine(op, done)
-    // otto/mamoru#340: USDC sent to the account from outside Mamoru. Arriving ('submitted') while its block is newer
-    // than the chain's safe block: on chain and counted in the balance, not yet final.
+    // otto/mamoru#340: USDC sent to the account from outside Mamoru. Arriving ('submitted') until its block is about
+    // 10 minutes deep: on chain and counted in the balance, not yet final.
     case 'deposit': {
       const what = op.amountUsdc ? `${usd(op.amountUsdc)} USDC` : 'USDC'
       const from = op.from ? ` from ${shortHex(op.from)}` : ''

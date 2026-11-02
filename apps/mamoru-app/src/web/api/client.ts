@@ -138,7 +138,8 @@ export const httpClient: ApiClient = {
   funding: (k, opts) => request<FundingView>(acct(k, 'funding') + (opts?.fresh ? '?fresh=1' : '')),
   otherChains: (k) => request<OtherChainsView>(acct(k, 'other-chains')),
   yieldLedger: (k) => request<YieldLedgerView>(acct(k, 'yield')),
-  ops: (k) => request<{ ops: OpView[] }>(acct(k, 'ops')),
+  // otto/mamoru#340: with the deposit rows (the operator leaves them out for apps that do not ask).
+  ops: (k) => request<{ ops: OpView[] }>(acct(k, 'ops?deposits=1')),
   activatePrepare: (k) => post<OwnerTxToSign>(acct(k, 'activate/prepare')),
   activate: (k, sig) => post<OpView>(acct(k, 'activate'), sig),
   withdrawAssets: (k) => request<{ assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }>(acct(k, 'withdraw-assets')),

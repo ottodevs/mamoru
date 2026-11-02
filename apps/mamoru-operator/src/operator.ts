@@ -52,7 +52,7 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, nativePricePool, positionUsdc, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
-import { balanceMoves, DEPOSIT_PAGE_BLOCKS, depositId, depositOpView, depositRange, depositsOf, mergeDeposits, readTransfersIn, type DepositRow } from './deposits.ts'
+import { balanceMoves, DEPOSIT_CONFIRM_BLOCKS, DEPOSIT_PAGE_BLOCKS, depositId, depositOpView, depositRange, depositsOf, mergeDeposits, readTransfersIn, type DepositRow } from './deposits.ts'
 import { elsewhereOf, exposureOf, joinReads, totalOf, type ChainExposure, type ExposureWire, type PeerExposure, type PeerRead } from './exposure.ts'
 import { closeCalls, planReduce, planVaultExit, routeOf, swapBackCalls, vaultExitCalls, type SwapBack, type VaultExit } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
@@ -114,22 +114,25 @@ const CHAIN_USAGE_TTL_MS = 10 * 60_000
 const FUNDING_STALE_MS = 60_000
 const FUNDING_FRESH_READ_MS = 2_000
 /**
- * otto/mamoru#340: how often a funding poll also looks for a deposit (one eth_getLogs of the Safe's incoming USDC
- * from where the last look ended), and how long the poll waits on that look before it reads the balance anyway.
- * While the last look reached the head within DEPOSIT_CURRENT_MS, nothing can have moved the balance unseen (a
- * deposit is found by the look, everything else of the account invalidates the cache), so a poll may then answer
- * from a read up to FUNDING_STALE_MS old: a poll every 15 s costs one readSafe a minute, as the 60 s poll did, and a
- * deposit shows within one poll. Over the RPC budget the look runs at most once a minute.
+ * otto/mamoru#340: how often a funding poll also looks for a deposit, and how long the poll waits on that look before
+ * it reads the balance anyway. A look is one eth_getLogs of the Safe's incoming USDC from where the last final block
+ * ended to the head (75 CU), and an eth_blockNumber shared by every look of the operator for DEPOSIT_HEAD_CACHE_MS (10
+ * CU): about 9k CU an hour per account with Home open, at most 120 looks an hour. While the last look reached the
+ * head within DEPOSIT_CURRENT_MS, a deposit cannot be missed (the look finds it; everything else of the account
+ * invalidates the cache), so a poll answers from a balance read up to FUNDING_STALE_MS old: one readSafe a minute, as
+ * with the old 60 s poll. Over the RPC budget the look runs at most every 2 minutes. With no app open, the review
+ * loop looks at most every DEPOSIT_IDLE_SCAN_MS (about 150 CU an hour), only so the cursor never falls a day behind.
  */
-const DEPOSIT_SCAN_MS = 4_000
-const DEPOSIT_SCAN_BRAKED_MS = 60_000
-const DEPOSIT_SCAN_WAIT_MS = 1_500
-const DEPOSIT_CURRENT_MS = 2 * DEPOSIT_SCAN_MS
-/** Pages of DEPOSIT_PAGE_BLOCKS one look reads at most; a longer gap is caught up over the next looks. */
+const DEPOSIT_SCAN_MS = 30_000
+const DEPOSIT_SCAN_BRAKED_MS = 120_000
+const DEPOSIT_IDLE_SCAN_MS = 30 * 60_000
+const DEPOSIT_SCAN_WAIT_MS = 1_000
+const DEPOSIT_CURRENT_MS = DEPOSIT_SCAN_MS + 5_000
+const DEPOSIT_HEAD_CACHE_MS = 10_000
 const DEPOSIT_PAGES_PER_PASS = 5
 /**
- * otto/mamoru#340: one account's deposit looks. `cursor`: the last block read for confirmed rows (never past the safe
- * block), `saved` what the state file holds of it; `arriving`: deposits past the safe block at the last look;
+ * otto/mamoru#340: one account's deposit looks. `cursor`: the last block read for final rows (never past head minus
+ * DEPOSIT_CONFIRM_BLOCKS), `saved` what the state file holds of it; `arriving`: deposits above it at the last look;
  * `moved`: the transfers that already moved the account (fundingMoved once per transfer, not once per look).
  */
 type DepositLook = { at: number; safe?: string; cursor?: bigint; saved?: bigint; okAt?: number; pending?: Promise<void>; arriving: DepositRow[]; moved: Set<string> }
@@ -1817,7 +1820,7 @@ export class Operator {
    * (prepare, submit, renew) reads live: only the display read funding serves is cached.
    */
   private async readSafeCached(acc: AccountState, safe: Address, fresh: boolean): Promise<SafeRead> {
-    // otto/mamoru#340: a deposit look that reached the head just now stands in for the 15 s age (see DEPOSIT_SCAN_MS).
+    // otto/mamoru#340: a deposit look that reached the head lately stands in for the 15 s age (see DEPOSIT_SCAN_MS).
     const maxAge = fresh ? FUNDING_FRESH_READ_MS : (this.cfg.rpcBudget?.over(Date.now()) ?? false) || this.depositsCurrent(acc, safe) ? FUNDING_STALE_MS : FUNDING_FRESH_MS
     return this.fundingCache.get(fundingCacheKey(acc.accountKey, safe), maxAge, () => this.readOf(acc, safe))
   }
@@ -1837,18 +1840,18 @@ export class Operator {
   }
 
   /**
-   * otto/mamoru#340: looks for USDC sent to the Safe since the last look (deposits.ts), at most every DEPOSIT_SCAN_MS
-   * per account (DEPOSIT_SCAN_BRAKED_MS over the RPC budget) and one look at a time. A deposit found is kept as a
+   * otto/mamoru#340: looks for USDC sent to the Safe since the last look (deposits.ts), at most every `every` ms per
+   * account (DEPOSIT_SCAN_MS; DEPOSIT_SCAN_BRAKED_MS over the RPC budget) and one look at a time. A deposit found is kept as a
    * history row and moves the account (fundingMoved), so the funding read after it goes to the chain. Never throws.
    * Only for an account of the state file: a read of an accountKey never seen (readOnly) leaves nothing behind.
    */
-  private watchDeposits(acc: AccountState, safe: Address): Promise<void> {
+  private watchDeposits(acc: AccountState, safe: Address, every = DEPOSIT_SCAN_MS): Promise<void> {
     if (this.store.state.accounts[acc.accountKey] !== acc) return Promise.resolve()
     let w = this.depositLooks.get(acc.accountKey)
     if (!w) this.depositLooks.set(acc.accountKey, (w = { at: 0, arriving: [], moved: new Set() }))
     if (w.pending) return w.pending
     const now = Date.now()
-    if (now - w.at < (this.rpcOverBudget(now) ? DEPOSIT_SCAN_BRAKED_MS : DEPOSIT_SCAN_MS)) return Promise.resolve()
+    if (now - w.at < (this.rpcOverBudget(now) ? Math.max(every, DEPOSIT_SCAN_BRAKED_MS) : every)) return Promise.resolve()
     w.at = now
     const look = w
     const p: Promise<void> = this.lookForDeposits(acc, safe, look)
@@ -1868,34 +1871,35 @@ export class Operator {
       w.arriving = []
       w.moved.clear()
     }
-    // Confirmed rows only up to the chain's safe block, read on the same node as the head: a block past it may still
-    // reorg, and a node behind may not have served its logs yet, so the cursor never passes it. Past it, up to the
-    // head, deposits are read again on every look and shown as arriving.
-    const [head, safeBlock] = await Promise.all([this.client.getBlockNumber(), this.client.getBlock({ blockTag: 'safe' }).then((b) => b.number!)])
+    const head = await this.client.getBlockNumber({ cacheTime: DEPOSIT_HEAD_CACHE_MS })
+    // Final rows only up to `line`; the cursor never passes it (see DEPOSIT_CONFIRM_BLOCKS). Above it, up to the head,
+    // deposits are read again on every look, in the same eth_getLogs once the cursor is caught up, shown as arriving.
+    const line = head > DEPOSIT_CONFIRM_BLOCKS ? head - DEPOSIT_CONFIRM_BLOCKS : 0n
     const usdc = address(this.policyOf(acc).savingsAsset, this.cfg.registry)
+    const ownTx = new Set(acc.ops.flatMap((o) => (o.txHash ? [o.txHash.toLowerCase()] : [])))
     const foundAt = now()
     const found: DepositRow[] = []
     const moves: string[] = []
     try {
-      const range = depositRange(w.cursor, safeBlock, DEPOSIT_PAGES_PER_PASS)
+      const range = depositRange(w.cursor, head, DEPOSIT_PAGES_PER_PASS)
+      let arriving: DepositRow[] | null = range ? null : []
+      const above: DepositRow[] = []
       if (range) {
         for (let from = range.from; from <= range.to; from += DEPOSIT_PAGE_BLOCKS) {
           const to = from + DEPOSIT_PAGE_BLOCKS - 1n < range.to ? from + DEPOSIT_PAGE_BLOCKS - 1n : range.to
           const logs = await readTransfersIn(this.client, usdc, safe, from, to)
-          found.push(...depositsOf(logs, safe, this.cfg.registry, foundAt))
+          const rows = depositsOf(logs, safe, this.cfg.registry, foundAt, ownTx)
+          found.push(...rows.filter((d) => BigInt(d.block) <= line))
           moves.push(...balanceMoves(logs, safe))
-          w.cursor = to
+          above.push(...rows.filter((d) => BigInt(d.block) > line))
+          if (to === head) arriving = above
+          w.cursor = to < line ? to : line > (w.cursor ?? 0n) ? line : w.cursor
         }
       }
-      // Arriving: only once the confirmed rows are read up to the safe block, the last page before the head at most.
-      if (w.cursor !== undefined && w.cursor >= safeBlock) {
-        const from = safeBlock + DEPOSIT_PAGE_BLOCKS > head ? safeBlock + 1n : head - DEPOSIT_PAGE_BLOCKS + 1n
-        const logs = from <= head ? await readTransfersIn(this.client, usdc, safe, from, head) : []
-        const before = new Map(w.arriving.map((d) => [depositId(d), d]))
-        const confirmed = new Set((acc.deposits ?? []).map(depositId))
+      if (arriving) {
         // A row seen on an earlier look keeps its time; one a reorg dropped is gone from this read, so from the history.
-        w.arriving = depositsOf(logs, safe, this.cfg.registry, foundAt).filter((d) => !confirmed.has(depositId(d))).map((d) => before.get(depositId(d)) ?? d)
-        moves.push(...balanceMoves(logs, safe))
+        const before = new Map(w.arriving.map((d) => [depositId(d), d]))
+        w.arriving = arriving.map((d) => before.get(depositId(d)) ?? d)
         w.okAt = Date.now()
       }
     } finally {
@@ -2007,7 +2011,7 @@ export class Operator {
   }
 
   /** GET /ops. Failed engine ops are internal attempts: left out unless `all` (debugging). */
-  ops(ctx: AccountContext, after: string | null, includeFailedEngine = false, kind?: string | null): { ops: OpView[] } {
+  ops(ctx: AccountContext, after: string | null, includeFailedEngine = false, kind?: string | null, withDeposits = false): { ops: OpView[] } {
     const { acc } = this.account(ctx, { readOnly: true })
     // otto/mamoru#293 (#295): every migrate-v4 op of the account, unwindowed, with its migrateStep and state.
     if (kind === 'migrate-v4') return { ops: acc.ops.filter((o) => o.kind === 'migrate-v4').map((o) => ({ ...o })) }
@@ -2022,9 +2026,15 @@ export class Operator {
       return b ? { ...o, bridge: b } : o
     })
     // otto/mamoru#340: and every deposit found (watchDeposits), after the ops (the history orders by block and time):
-    // the confirmed ones, then those past the safe block, as arriving.
+    // the final ones, then those less than DEPOSIT_CONFIRM_BLOCKS deep, as arriving.
+    // Only to a client that asks (`deposits=1`): an app from before them would count an arriving one as an op in flight
+    // and poll at its 4 s pace until it is final. A transfer in a transaction of one of the account's ops (a vault
+    // redeem the look saw before the op's hash was stored) is never a deposit.
     const look = this.depositLooks.get(acc.accountKey)
-    const deposits = [...(acc.deposits ?? []).map((d) => depositOpView(d)), ...(look?.safe === acc.ctx.address.toLowerCase() ? look.arriving.map((d) => depositOpView(d, true)) : [])]
+    const ownTx = new Set(acc.ops.flatMap((o) => (o.txHash ? [o.txHash.toLowerCase()] : [])))
+    const deposits = !withDeposits
+      ? []
+      : [...(acc.deposits ?? []).map((d) => depositOpView(d)), ...(look?.safe === acc.ctx.address.toLowerCase() ? look.arriving.map((d) => depositOpView(d, true)) : [])].filter((d) => !ownTx.has(d.txHash!.toLowerCase()))
     if (!after) return { ops: [...all, ...deposits] }
     // An op id cursor pages the ops as before; deposit rows are not in that order, so a deposit's id as the cursor is
     // answered like an unknown one (everything), never with a slice that would skip ops added after it.
@@ -6893,8 +6903,9 @@ export class Operator {
           logErr(`[engine ${acc.accountKey}] review error:`, e)
           safeMetrics(() => this.engineHealth.record(acc.accountKey, false, 'REVIEW_ERROR', classifyEngineError('REVIEW_ERROR', e)))
         }
-        // otto/mamoru#340: the history's own look for deposits, so it never falls a day behind while no app is open.
-        void this.watchDeposits(acc, acc.ctx.address as Address)
+        // otto/mamoru#340: the history's own look for deposits, rarely (DEPOSIT_IDLE_SCAN_MS), so its cursor never falls
+        // a day behind while no app is open; the engine finds deposits for its own use from its observation.
+        void this.watchDeposits(acc, acc.ctx.address as Address, DEPOSIT_IDLE_SCAN_MS)
         // Persist how far deposits were read, so a restart or a failed review does not rescan from activation.
         if (runner.engine.depositsAfter - BigInt(acc.depositsAfter) >= DEPOSITS_SAVE_BLOCKS) {
           acc.depositsAfter = runner.engine.depositsAfter.toString()

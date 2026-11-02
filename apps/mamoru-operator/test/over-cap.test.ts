@@ -3348,6 +3348,8 @@ describe('fresh funding: a read at most 2 s old, never held back by an earlier o
 // until the cache aged out, and the savings history never listed it at all.
 describe('a deposit shows at once in funding and in the history', () => {
   const WALLET = `0x${'ab'.repeat(20)}` as Hex
+  /** Not in base.json: what waBasUSDC pays a redeem from (Aave's aBasUSDC). */
+  const A_BAS_USDC = '0x4e65fe4dba92790696d040ac24aa414708f5c0ab' as Hex
   const at = (ms: number) => setSystemTime(new Date(1_790_000_000_000 + ms))
   afterEach(() => setSystemTime())
   const reads = (op: Operator) => {
@@ -3357,54 +3359,99 @@ describe('a deposit shows at once in funding and in the history', () => {
     client.call = (a) => (a.to.toLowerCase() === address('Multicall3', baseRegistry).toLowerCase() && n++, call(a))
     return () => n
   }
-  /** A stored account (the state file's own record), holding `usdc`, its first look for deposits done. */
+  /** Every eth_getLogs and eth_blockNumber the looks make. */
+  const looks = (op: Operator) => {
+    const client = (op as unknown as { client: { getLogs: (a: { event?: { name?: string } }) => Promise<unknown>; getBlockNumber: (a?: unknown) => Promise<bigint> } }).client
+    const n = { logs: 0, head: 0 }
+    const { getLogs, getBlockNumber } = client
+    client.getLogs = (a) => (a.event?.name === 'Transfer' && n.logs++, getLogs(a))
+    client.getBlockNumber = (a) => (n.head++, getBlockNumber(a))
+    return n
+  }
+  const ops = (w: ReturnType<typeof world>, after: string | null = null) => w.op.ops(ctx, after, false, null, true).ops
+  const deposits = (w: ReturnType<typeof world>) => ops(w).filter((o) => o.kind === 'deposit')
+  /** A stored account (the state file's own record), holding `usdc`, its first look for deposits done at head 1,000. */
   const stored = async (usdc: bigint) => {
     at(0)
     const w = world(usdc)
+    w.knobs.head = 1_000n
     w.op.account(ctx)
     expect((await w.op.funding(ctx)).usdc).toBe(usdc.toString())
     return w
   }
-  const land = (w: ReturnType<typeof world>, from: Hex, value: bigint, block: bigint) => {
+  /** `value` sent at `block`; the head moves to `head` (by default deep enough for the block to be final). */
+  const land = (w: ReturnType<typeof world>, from: Hex, value: bigint, block: bigint, head = block + 300n, tx = keccak256(stringToHex(`deposit-${block}`))) => {
     w.chain.usdc += value
-    w.knobs.transfers.push({ from, value, block, tx: keccak256(stringToHex(`deposit-${block}`)), logIndex: 3 })
-    w.knobs.head = block
+    w.knobs.transfers.push({ from, value, block, tx, logIndex: 3 })
+    w.knobs.head = head
   }
 
   test('the next plain poll reads the new balance, not the cached one, and GET /ops lists the deposit', async () => {
     const w = await stored(5_000_000n)
-    land(w, WALLET, 25_000_000n, 101n)
-    at(4_000)
+    land(w, WALLET, 25_000_000n, 1_001n)
+    at(30_000)
     expect((await w.op.funding(ctx)).usdc).toBe('30000000')
-    const rows = w.op.ops(ctx, null).ops.filter((o) => o.kind === 'deposit')
-    expect(rows).toEqual([expect.objectContaining({ kind: 'deposit', state: 'confirmed', amountUsdc: '25000000', from: WALLET, block: 101, txHash: keccak256(stringToHex('deposit-101')) })])
+    expect(deposits(w)).toEqual([expect.objectContaining({ kind: 'deposit', state: 'confirmed', amountUsdc: '25000000', from: WALLET, block: 1_001, txHash: keccak256(stringToHex('deposit-1001')) })])
     // Kept in the state file next to the ops, never among them (nothing that settles or retries ops sees one).
     expect(w.state.accounts[ctx.accountKey]!.ops.some((o) => (o.kind as string) === 'deposit')).toBe(false)
     expect(w.state.accounts[ctx.accountKey]!.deposits).toHaveLength(1)
   })
 
-  test('the same deposit read again (a restart, an overlapping look) is one row', async () => {
+  // Review of #229 (Gemini r2 #5): an app from before deposit rows counts any row not final as an op in flight.
+  test('an app that does not ask for deposit rows gets none', async () => {
     const w = await stored(5_000_000n)
-    land(w, WALLET, 25_000_000n, 101n)
-    at(4_000)
+    land(w, WALLET, 25_000_000n, 1_001n)
+    at(30_000)
     await w.op.funding(ctx)
-    // A restarted operator starts from the saved cursor, which may be behind the last look.
-    w.state.accounts[ctx.accountKey]!.depositsSeen = { safe: SAFE.toLowerCase(), block: '90' }
-    ;(w.op as unknown as { depositLooks: Map<string, unknown> }).depositLooks.clear()
-    at(8_000)
-    await w.op.funding(ctx)
-    expect(w.op.ops(ctx, null).ops.filter((o) => o.kind === 'deposit')).toHaveLength(1)
+    expect(w.op.ops(ctx, null).ops.some((o) => o.kind === 'deposit')).toBe(false)
   })
 
-  test("Mamoru's own money coming back (a pool, a vault, a CCTP mint) is not a deposit", async () => {
+  test('the same deposit read again (a restart, an overlapping look) is one row', async () => {
     const w = await stored(5_000_000n)
-    land(w, address('pool:USDC/cbBTC/500', baseRegistry).toLowerCase() as Hex, 1_000_000n, 101n)
-    land(w, address('vault:gtUSDCp', baseRegistry).toLowerCase() as Hex, 2_000_000n, 102n)
-    land(w, `0x${'0'.repeat(40)}`, 3_000_000n, 103n)
-    at(4_000)
+    land(w, WALLET, 25_000_000n, 1_001n)
+    at(30_000)
+    await w.op.funding(ctx)
+    // A restarted operator starts from the saved cursor, which may be behind the last look.
+    w.state.accounts[ctx.accountKey]!.depositsSeen = { safe: SAFE.toLowerCase(), block: '990' }
+    ;(w.op as unknown as { depositLooks: Map<string, unknown> }).depositLooks.clear()
+    at(60_000)
+    await w.op.funding(ctx)
+    expect(deposits(w)).toHaveLength(1)
+  })
+
+  test("Mamoru's own money coming back (a pool, a vault, a CCTP mint, the Safe itself) is not a deposit", async () => {
+    const w = await stored(5_000_000n)
+    land(w, address('pool:USDC/cbBTC/500', baseRegistry).toLowerCase() as Hex, 1_000_000n, 1_001n)
+    land(w, address('vault:gtUSDCp', baseRegistry).toLowerCase() as Hex, 2_000_000n, 1_002n)
+    land(w, `0x${'0'.repeat(40)}`, 3_000_000n, 1_003n)
+    land(w, SAFE.toLowerCase() as Hex, 4_000_000n, 1_004n)
+    at(30_000)
     // Review of #229 (Gemini P1 3): no row, but the balance they move is read at once all the same.
-    expect((await w.op.funding(ctx)).usdc).toBe('11000000')
-    expect(w.op.ops(ctx, null).ops.some((o) => o.kind === 'deposit')).toBe(false)
+    expect((await w.op.funding(ctx)).usdc).toBe('15000000')
+    expect(deposits(w)).toEqual([])
+  })
+
+  // Review of #229 r2 (Opus P1-1): a waBasUSDC redeem pays from aBasUSDC, which no registry names.
+  test('a waBasUSDC redeem is no deposit, whether its op was stored before the look or after it', async () => {
+    const w = await stored(5_000_000n)
+    const acc = w.state.accounts[ctx.accountKey]!
+    const redeem = (tx: Hex) => acc.ops.push({ opId: `eng-1-1-op-${tx.slice(2, 6)}-vault_redeem`, kind: 'reduce', step: 'vault_redeem', state: 'confirmed', txHash: tx, updatedAt: new Date().toISOString() } as never)
+    // Stored before the look: never recorded.
+    const first = keccak256(stringToHex('redeem-1'))
+    redeem(first)
+    land(w, A_BAS_USDC, 10_000_000n, 1_001n, 1_301n, first)
+    at(30_000)
+    expect((await w.op.funding(ctx)).usdc).toBe('15000000')
+    expect(deposits(w)).toEqual([])
+    expect(acc.deposits ?? []).toEqual([])
+    // Seen by the look before the engine stored the op's hash: hidden from the history once it is.
+    const second = keccak256(stringToHex('redeem-2'))
+    land(w, A_BAS_USDC, 10_000_000n, 1_400n, 1_700n, second)
+    at(60_000)
+    await w.op.funding(ctx)
+    expect(deposits(w)).toHaveLength(1)
+    redeem(second)
+    expect(deposits(w)).toEqual([])
   })
 
   // Security review: anyone can send a Safe dust; it must cost no row, no write and no chain read.
@@ -3413,41 +3460,57 @@ describe('a deposit shows at once in funding and in the history', () => {
     let saves = 0
     ;(w.op as unknown as { store: { save: () => void } }).store.save = () => void saves++
     const count = reads(w.op)
-    land(w, WALLET, 9_999n, 101n)
-    at(4_000)
+    land(w, WALLET, 9_999n, 1_001n, 1_010n)
+    at(30_000)
     expect((await w.op.funding(ctx)).usdc).toBe('5000000')
     expect(count()).toBe(0)
     expect(saves).toBe(0)
-    expect(w.op.ops(ctx, null).ops.some((o) => o.kind === 'deposit')).toBe(false)
+    expect(deposits(w)).toEqual([])
   })
 
-  // Security review: a deposit past the chain's safe block may still reorg, and a node behind may not have served
-  // its logs: it shows at once as arriving, the cursor stays at the safe block, and a reorg takes the row away.
-  test('past the safe block a deposit is arriving, the cursor stays behind, a reorg drops it, safety confirms it', async () => {
+  // Security review: a deposit near the head may still reorg, and a node behind may not have served its logs: it
+  // shows at once as arriving, the cursor stays DEPOSIT_CONFIRM_BLOCKS under the head, a reorg takes the row away.
+  test('near the head a deposit is arriving, the cursor stays behind, a reorg drops it, depth confirms it', async () => {
     const w = await stored(5_000_000n)
-    let safe = 100n
-    const client = (w.op as unknown as { client: { getBlock: (a?: { blockTag?: string; blockNumber?: bigint }) => Promise<{ number: bigint }> } }).client
-    const { getBlock } = client
-    client.getBlock = (a) => (a?.blockTag === 'safe' ? Promise.resolve({ number: safe }) : getBlock(a))
-    land(w, WALLET, 25_000_000n, 101n)
-    at(4_000)
+    land(w, WALLET, 25_000_000n, 1_001n, 1_002n)
+    at(30_000)
     expect((await w.op.funding(ctx)).usdc).toBe('30000000')
-    const arriving = () => w.op.ops(ctx, null).ops.filter((o) => o.kind === 'deposit')
-    expect(arriving()).toEqual([expect.objectContaining({ state: 'submitted', amountUsdc: '25000000' })])
+    expect(deposits(w)).toEqual([expect.objectContaining({ state: 'submitted', amountUsdc: '25000000' })])
     expect(w.state.accounts[ctx.accountKey]!.deposits ?? []).toEqual([])
-    expect(w.state.accounts[ctx.accountKey]!.depositsSeen?.block).toBe('100')
-    // Reorged out before it was safe: gone from the history on the next look.
+    expect(w.state.accounts[ctx.accountKey]!.depositsSeen?.block).toBe('702')
+    // Reorged out before it was final: gone from the history on the next look.
     w.knobs.transfers.length = 0
-    at(8_000)
+    at(60_000)
     await w.op.funding(ctx)
-    expect(arriving()).toEqual([])
-    // Mined again and now safe: a confirmed row, kept in the state file.
-    w.knobs.transfers.push({ from: WALLET, value: 25_000_000n, block: 101n, tx: keccak256(stringToHex('deposit-101')), logIndex: 3 })
-    safe = 101n
-    at(12_000)
+    expect(deposits(w)).toEqual([])
+    // Mined again and now deep enough: a confirmed row, kept in the state file.
+    land(w, WALLET, 25_000_000n, 1_001n, 1_301n)
+    at(90_000)
     await w.op.funding(ctx)
-    expect(arriving()).toEqual([expect.objectContaining({ state: 'confirmed', amountUsdc: '25000000' })])
+    expect(deposits(w)).toEqual([expect.objectContaining({ state: 'confirmed', amountUsdc: '25000000' })])
     expect(w.state.accounts[ctx.accountKey]!.deposits).toHaveLength(1)
+  })
+
+  // Review of #229 r2 (Opus P1-2): a look is one eth_getLogs; Home's 15 s polls look at most every 30 s, and keep the
+  // balance read to one a minute; the review loop does not look again while a look ran in the last half hour.
+  test('cost: one eth_getLogs per look, a look per 30 s, one balance read a minute, none from a review', async () => {
+    const w = await stored(5_000_000n)
+    const count = reads(w.op)
+    const n = looks(w.op)
+    for (let t = 15_000; t < 60_000; t += 15_000) {
+      at(t)
+      await w.op.funding(ctx)
+    }
+    expect(n.logs).toBe(1)
+    expect(count()).toBe(0)
+    at(60_000)
+    await w.op.funding(ctx)
+    expect(count()).toBe(1)
+    expect(n.logs).toBe(2)
+    const watch = (w.op as unknown as { watchDeposits: (a: AccountState, s: Hex, every?: number) => Promise<void> }).watchDeposits.bind(w.op)
+    at(120_000)
+    await watch(w.state.accounts[ctx.accountKey]!, SAFE, 30 * 60_000)
+    expect(n.logs).toBe(2)
   })
 
   // Review of #229 (Gemini P1 2): the cursor reaches the state file as it moves, not only when a deposit lands.
@@ -3456,38 +3519,23 @@ describe('a deposit shows at once in funding and in the history', () => {
     let saves = 0
     ;(w.op as unknown as { store: { save: () => void } }).store.save = () => void saves++
     for (let i = 1; i <= 4; i++) {
-      w.knobs.head = 100n + 100n * BigInt(i)
-      at(4_000 * i)
+      w.knobs.head = 1_000n + 100n * BigInt(i)
+      at(30_000 * i)
       await w.op.funding(ctx)
     }
     expect(saves).toBe(1)
-    expect(w.state.accounts[ctx.accountKey]!.depositsSeen?.block).toBe('500')
+    expect(w.state.accounts[ctx.accountKey]!.depositsSeen?.block).toBe('1100')
   })
 
   // Review of #229 (Gemini P0 1): a deposit's id as the ?after cursor never hides ops added after it.
   test('GET /ops?after=<deposit id> still returns ops added later', async () => {
     const w = await stored(5_000_000n)
-    land(w, WALLET, 25_000_000n, 101n)
-    at(4_000)
+    land(w, WALLET, 25_000_000n, 1_001n)
+    at(30_000)
     await w.op.funding(ctx)
-    const dep = w.op.ops(ctx, null).ops.find((o) => o.kind === 'deposit')!
+    const dep = deposits(w)[0]!
     w.state.accounts[ctx.accountKey]!.ops.push({ opId: 'own-9-transfer', kind: 'transfer', state: 'submitted', updatedAt: new Date().toISOString() } as never)
-    expect(w.op.ops(ctx, dep.opId).ops.map((o) => o.opId)).toContain('own-9-transfer')
-  })
-
-  test('with the deposit look current, polls every 15 s cost one balance read a minute, as the 60 s poll did', async () => {
-    const w = await stored(5_000_000n)
-    const count = reads(w.op)
-    for (let t = 15_000; t < 60_000; t += 15_000) {
-      at(t - 4_000)
-      await w.op.funding(ctx)
-      at(t)
-      await w.op.funding(ctx)
-    }
-    expect(count()).toBe(0)
-    at(60_000)
-    await w.op.funding(ctx)
-    expect(count()).toBe(1)
+    expect(ops(w, dep.opId).map((o) => o.opId)).toContain('own-9-transfer')
   })
 
   test('a deposit look that fails falls back to the 15 s age', async () => {
@@ -3495,10 +3543,13 @@ describe('a deposit shows at once in funding and in the history', () => {
     const client = (w.op as unknown as { client: { getLogs: (a: { event?: { name?: string } }) => Promise<unknown> } }).client
     const { getLogs } = client
     client.getLogs = (a) => (a.event?.name === 'Transfer' ? Promise.reject(new Error('rpc down')) : getLogs(a))
-    land(w, WALLET, 25_000_000n, 101n)
-    at(16_000)
+    land(w, WALLET, 25_000_000n, 1_001n)
+    // The look at 31 s fails: the one before it stops counting at 35 s, and from then on the 15 s age holds again.
+    at(31_000)
+    await w.op.funding(ctx)
+    at(36_000)
     expect((await w.op.funding(ctx)).usdc).toBe('30000000')
-    expect(w.op.ops(ctx, null).ops.some((o) => o.kind === 'deposit')).toBe(false)
+    expect(deposits(w)).toEqual([])
   })
 })
 

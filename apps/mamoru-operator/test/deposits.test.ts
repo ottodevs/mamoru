@@ -26,6 +26,12 @@ describe('depositsOf', () => {
   })
 })
 
+test("depositsOf: the Safe itself and a transfer in a transaction of the account's own op are not deposits", () => {
+  const redeem = log('0x4e65fe4dba92790696d040ac24aa414708f5c0ab', 5_000_000n, 12n)
+  expect(depositsOf([log(SAFE, 5_000_000n), redeem], SAFE, baseRegistry, AT, new Set([redeem.transactionHash.toLowerCase()]))).toEqual([])
+  expect(depositsOf([redeem], SAFE, baseRegistry, AT)).toHaveLength(1)
+})
+
 describe('depositRange', () => {
   test('a Safe with no cursor is read from a day back; a cursor is read on from', () => {
     expect(depositRange(undefined, 100_000n, 50)).toEqual({ from: 100_000n - DEPOSIT_BACKFILL_BLOCKS + 1n, to: 100_000n })

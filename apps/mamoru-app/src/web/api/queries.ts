@@ -80,9 +80,9 @@ export function fundingInterval(data: Pick<FundingView, 'progress' | 'engine'> |
 
 /**
  * #255: the funding poll when nothing is moving. otto/mamoru#340: 15 s, not 60 s: a deposit moves nothing of the
- * account, so this poll is the only way Home learns of one. It costs no more chain reads than the 60 s poll did:
- * the operator looks for a deposit on each poll (one log read) and, while that look is current, answers from a
- * read up to 60 s old, going to the chain at once when it found one.
+ * account, so this poll is the only way Home learns of one. The operator looks for a deposit at most every 30 s
+ * (one log read) and, while that look is current, answers from a balance read up to 60 s old, so the balance costs
+ * the chain no more than the 60 s poll did; a deposit it finds sends the next read to the chain.
  */
 export const FUNDING_IDLE_MS = 15_000
 
@@ -177,7 +177,7 @@ export function useBridgeOut(accountKey: string | undefined) {
 
 /**
  * Operations on the account. Polls every 4 s while any operation is not confirmed or failed; otto/mamoru#340: every
- * 30 s while only a deposit is arriving (it turns confirmed once its block is safe, minutes later, nothing to watch).
+ * 30 s while only a deposit is arriving (it turns confirmed about 10 minutes later, once its block is deep enough).
  */
 export function opsInterval(ops: readonly Pick<OpView, 'kind' | 'state'>[] | undefined): number | false {
   const open = (ops ?? []).filter((op) => !TERMINAL.has(op.state))

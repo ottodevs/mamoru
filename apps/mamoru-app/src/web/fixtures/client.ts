@@ -238,7 +238,7 @@ if (historyOn)
 
 // ?deposit (dev only, otto/mamoru#340): 6 s in, 25 USDC lands from a wallet with nothing of the account moving. Home
 // shows the new balance and the history row (arriving) within one funding poll, with no refresh; 40 s in, its block
-// is safe and the row reads as added.
+// is final and the row reads as added.
 if (param('deposit'))
   setTimeout(() => {
     liveState.funding = { ...liveState.funding, usdc: (BigInt(liveState.funding.usdc) + 25_000_000n).toString(), block: liveState.funding.block + 3 }

@@ -266,7 +266,8 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
         case 'GET withdraw-assets':
           return json(200, await op.withdrawAssets())
         case 'GET ops':
-          return json(200, op.ops(ctx, url.searchParams.get('after'), url.searchParams.get('all') === '1', url.searchParams.get('kind')))
+          // otto/mamoru#340: deposit rows only for a client that asks for them (`deposits=1`).
+          return json(200, op.ops(ctx, url.searchParams.get('after'), url.searchParams.get('all') === '1', url.searchParams.get('kind'), url.searchParams.get('deposits') === '1'))
         case 'POST activate/prepare':
           return json(200, await op.prepareActivate(ctx))
         case 'POST activate':
