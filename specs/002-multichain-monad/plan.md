@@ -28,6 +28,7 @@ simulate a second chain.
 | XI. One operation, one nonce | One non-terminal operation per account and chain. A move is one operation on the source chain; the mint is the relayer's own transaction in its own nonce space on the destination |
 | XVI. Truth on screen | In flight shown as in flight and counted once (FR-XCH-008, FR-XCH-017); an unobserved cost part is "not observed" (FR-COST-003) |
 | XIX. Moving between chains | Existing routes only; session routes pinned; every move measured; new routes through the Lab (FR-XCH, FR-COST) |
+| XX. Simplicity | Each return-to-Base case of FR-XCH-014 is one sentence; rare cases (bridge at risk, move stuck) fall back to not moving, waiting with a reason code or alerting; vault parking stays undecided until the Lab measures its cost |
 
 ## 3. Chains and registries (#60, #61, #62)
 

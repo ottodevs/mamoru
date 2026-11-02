@@ -8,7 +8,7 @@ CCTP out of scope" Ot revoked on 2026-10-27.
   venues and routes, noema `1-projects/mamoru/decisions/2026-10-18-venues-y-rutas-abiertas.md`) and 2026-10-27
   (moving funds between chains is core and its cost is always optimized,
   `1-projects/mamoru/decisions/2026-10-27-mover-fondos-entre-cadenas.md`).
-- Constitution: `.specify/memory/constitution.md` v2.0.0 (principles III and XIX).
+- Constitution: `.specify/memory/constitution.md` v2.1.0 (principles III, XIX and XX).
 - Delta over `specs/001-mamoru-v1/`, which is not reopened. Umbrella ticket: otto/mamoru#201.
 
 ## What this pack covers

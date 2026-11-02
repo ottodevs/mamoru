@@ -1,6 +1,6 @@
 # Constitución de Mamoru
 
-Versión 2.0.0. Ratificada el 2026-09-26 como 1.0.0. Enmendada el 2026-10-29 por las decisiones de Ot que recoge la sección "Enmiendas". Obliga a `specs/001-mamoru-v1/`, a `specs/002-multichain-monad/` y a todo pack posterior.
+Versión 2.1.0. Ratificada el 2026-09-26 como 1.0.0. Enmendada el 2026-10-29 y el 2026-11-01 por las decisiones de Ot que recoge la sección "Enmiendas". Obliga a `specs/001-mamoru-v1/`, a `specs/002-multichain-monad/` y a todo pack posterior.
 
 La ley es `inputs/mamoru-spec-v1.md`, cerrada el 2026-09-26, más las decisiones de Ot que la amplían y que recoge la sección "Enmiendas". Esta constitución las traduce a reglas que un spec, un plan, una tarea o un escenario pueden incumplir de forma comprobable. Si un documento del pack contradice a esta constitución, gana la constitución. Si esta constitución contradice a la ley, gana la ley y se corrige la constitución.
 
@@ -155,6 +155,17 @@ Mover fondos de la cuenta entre chains está dentro del alcance. Se hace siempre
 
 Se comprueba con los escenarios XCH y COST de `specs/002-multichain-monad/`.
 
+### XX. Sencillez
+
+Mamoru es sencillo de explicar, de operar y de revisar. Una regla que el equipo no puede contar en una frase no entra hasta que se simplifica.
+
+- Cada regla del pack se enuncia en una frase. Si necesita una cadena de excepciones, se reescribe.
+- Un caso raro se trata con la salida segura más simple: no mover, esperar con un código de razón o avisar. Solo gana una rama propia cuando hay datos, del Lab o de producción, de que ocurre y de lo que cuesta.
+- La revisión de un spec, un plan o un cambio de código marca como hallazgo P2 la complejidad sin valor medido, y propone el equivalente sencillo.
+- Sencillo no quita seguridad: los principios I, II, V, IX y XIX se cumplen igual. Lo que se recorta son ramas, no comprobaciones.
+
+Se comprueba en cada revisión de pack y de PR.
+
 ## Pruebas que tumban el plan
 
 1. La prueba adversarial de la sesión no pasa (SESS-01 a SESS-25).
@@ -188,3 +199,4 @@ Solo estas tres quedan abiertas. Todo lo demás está decidido en el pack.
 |---|---|---|---|
 | 1.0.0 | 2026-09-26 | Ratificación | `inputs/mamoru-spec-v1.md` |
 | 2.0.0 | 2026-10-29 | El principio III pasa de una chain a una lista cerrada: Base y Monad de ejecución, Ethereum de entrada, sin chain por defecto, el fork evita todo chain id soportado. Nuevo principio XIX: el movimiento entre chains está en alcance y cada movimiento se mide. I, IV, IX y XVI se ajustan a eso. Las decisiones cerradas cambian en la chain y suman el movimiento entre chains. La regla de idioma recoge que los packs desde 002 van en inglés. `specs/001-mamoru-v1/` no se reabre; `specs/002-multichain-monad/` es el delta | Decisiones de Ot: 2026-10-01 (Monad como chain de ejecución), 2026-10-18 (rutas abiertas entre chains; rescate en L1 por userOp con paymaster ERC-20, otto/mamoru#180), 2026-10-27 (mover fondos entre chains es núcleo y su coste se optimiza siempre) |
+| 2.1.0 | 2026-11-01 | Nuevo principio XX: sencillez. Una regla cabe en una frase, el caso raro va a la salida segura más simple salvo datos de que ocurre y cuesta, y la revisión marca la complejidad sin valor como P2 | Decisión de Ot: 2026-11-01 (sencillez ante todo) |
