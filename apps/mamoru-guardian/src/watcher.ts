@@ -244,76 +244,115 @@ const allowanceViewAbi = [
  * the position manager, SignMsg on the home. Then the CURRENT allowance of every (token, spender) seen and whether each
  * operator is still approved. `complete` only once the scan reached the head.
  */
+/** A call that reverted (the contract said no), as opposed to a transport or provider failure. */
+function reverted(e: unknown): boolean {
+  for (let x = e as { name?: string; cause?: unknown } | undefined, i = 0; x && i < 8; x = x.cause as typeof x, i++) {
+    if (x.name === 'ContractFunctionRevertedError' || x.name === 'CallExecutionError' && /revert/i.test(String((x as { shortMessage?: string }).shortMessage ?? ''))) return true
+  }
+  return false
+}
+
+type Hist = NonNullable<Sibling['hist']>
+
+/** One range of the home's logs folded into `h` (shared by the persisted scan and the unconfirmed tail). */
+async function foldLogs(home: ChainClient, s: Sibling, h: Hist, reg: ReturnType<typeof registryFor>, from: bigint, to: bigint): Promise<void> {
+  const npm = reg.entries.find((e) => e.name === 'NonfungiblePositionManager')?.address
+  const callOnly = address('MultiSendCallOnly_141', reg)
+  // Every token's Approval(owner = home); which ones count is decided below (forged emitters cannot force a refusal).
+  for (const l of await home.getLogs({ event: approvalEvent, args: { owner: s.account }, fromBlock: from, toBlock: to })) {
+    if (!l.address || (npm && isAddressEqual(l.address, npm)) || l.args.spender === undefined) continue
+    const k = getAddress(l.address)
+    h.spenders[k] = [...new Set([...(h.spenders[k] ?? []), getAddress(String(l.args.spender))])]
+  }
+  if (npm) {
+    for (const l of await home.getLogs({ address: npm, event: approvalForAllEvent, args: { owner: s.account }, fromBlock: from, toBlock: to })) h.operators = [...new Set([...h.operators, `${getAddress(npm)}:${getAddress(String(l.args.operator))}`])] as Address[]
+    for (const l of await home.getLogs({ address: npm, event: nftApprovalEvent, args: { owner: s.account }, fromBlock: from, toBlock: to })) if (l.args.tokenId !== undefined) h.nftIds = [...new Set([...(h.nftIds ?? []), String(l.args.tokenId)])]
+  }
+  h.signed += (await home.getLogs({ address: s.account, event: signMsgEvent, fromBlock: from, toBlock: to })).length
+  // Review r3 (P0-B): every owner tx and every module tx of the home (SafeL2 events, emitted by the home itself).
+  for (const l of await home.getLogs({ address: s.account, event: safeMultiSigEvent, fromBlock: from, toBlock: to })) if (Number(l.args.operation) === 1 && !isAddressEqual(getAddress(String(l.args.to)), callOnly)) h.delegatecalls = (h.delegatecalls ?? 0) + 1
+  for (const l of await home.getLogs({ address: s.account, event: safeModuleTxEvent, fromBlock: from, toBlock: to })) if (Number(l.args.operation) === 1) h.delegatecalls = (h.delegatecalls ?? 0) + 1
+}
+
+/**
+ * Review r2/r3 of #223 and the security review of r3: the home's history from its deploy block on. The cursor (on the
+ * sibling's state, schema v2: an older one restarts from the deploy block) stays HISTORY_CONFIRMATIONS behind the head;
+ * before any answer the unconfirmed tail up to the head is read too, without moving the cursor, so nothing in the last
+ * blocks is ever missed. Only the home registry's tokens (real value, what Mamoru moves) and the position manager count:
+ * any contract can emit an Approval naming the home, so an unknown emitter is reported in `note`, never a refusal.
+ */
 async function homeHistoryOf(cfg: WatcherConfig, d: WatcherDeps, s: Sibling, home: ChainClient, homeChainId: number): Promise<HomeHistory> {
   const reg = registryFor(homeChainId)
   const tip = await home.getBlockNumber()
   const head = tip > HISTORY_CONFIRMATIONS ? tip - HISTORY_CONFIRMATIONS : 0n
-  const h = (s.hist ??= { next: '', spenders: {}, operators: [], signed: 0, delegatecalls: 0, nftIds: [] })
-  h.delegatecalls ??= 0
-  h.nftIds ??= []
+  if (s.hist && (s.hist.v !== 2 || s.hist.delegatecalls === undefined || s.hist.nftIds === undefined || s.hist.operators.some((o) => !String(o).includes(':')))) s.hist = undefined
+  const h = (s.hist ??= { v: 2, next: '', spenders: {}, operators: [], signed: 0, delegatecalls: 0, nftIds: [] })
   const empty = (note?: string): HomeHistory => ({ complete: false, ...(note ? { note } : {}), allowances: [], approvedForAll: [], signedMessages: 0, delegatecalls: 0, positionApprovals: [] })
   if (h.next === '') {
     let at: bigint | null
     try {
       at = await deployBlockOf(home, s.account, tip)
     } catch {
-      return empty('the home chain RPC has no history: its deploy block cannot be found') // P2: alerted, not silent
+      return empty('the home chain RPC has no history: its deploy block cannot be found')
     }
     if (at === null) return empty()
     h.next = at.toString()
   }
-  const npm = reg.entries.find((e) => e.name === 'NonfungiblePositionManager')?.address
-  const callOnly = address('MultiSendCallOnly_141', reg)
   let next = BigInt(h.next)
   for (let page = 0; page < cfg.maxPagesPerStream && next <= head; page++) {
     const to = next + cfg.logPage - 1n < head ? next + cfg.logPage - 1n : head
-    // Review r3 (P1-1): Approval(owner = home) on EVERY token (one query, no address filter). The position manager's
-    // ERC-721 approvals share the topic; they are read apart below.
-    for (const l of await home.getLogs({ event: approvalEvent, args: { owner: s.account }, fromBlock: next, toBlock: to })) {
-      if (!l.address || (npm && isAddressEqual(l.address, npm)) || l.args.spender === undefined) continue
-      const k = getAddress(l.address)
-      h.spenders[k] = [...new Set([...(h.spenders[k] ?? []), getAddress(String(l.args.spender))])]
-    }
-    for (const l of await home.getLogs({ event: approvalForAllEvent, args: { owner: s.account }, fromBlock: next, toBlock: to })) {
-      if (l.address) h.operators = [...new Set([...h.operators, `${getAddress(l.address)}:${getAddress(String(l.args.operator))}`])] as Address[]
-    }
-    if (npm) for (const l of await home.getLogs({ address: npm, event: nftApprovalEvent, args: { owner: s.account }, fromBlock: next, toBlock: to })) if (l.args.tokenId !== undefined) h.nftIds = [...new Set([...h.nftIds, String(l.args.tokenId)])]
-    h.signed += (await home.getLogs({ address: s.account, event: signMsgEvent, fromBlock: next, toBlock: to })).length
-    // Review r3 (P0-B): every owner tx and every module tx of the home (SafeL2 events).
-    for (const l of await home.getLogs({ address: s.account, event: safeMultiSigEvent, fromBlock: next, toBlock: to })) if (Number(l.args.operation) === 1 && !isAddressEqual(getAddress(String(l.args.to)), callOnly)) h.delegatecalls++
-    for (const l of await home.getLogs({ address: s.account, event: safeModuleTxEvent, fromBlock: next, toBlock: to })) if (Number(l.args.operation) === 1) h.delegatecalls++
+    await foldLogs(home, s, h, reg, next, to)
     next = to + 1n
     h.next = next.toString()
     d.store.save()
   }
-  const complete = next > head
+  if (next <= head) return empty()
+  // The unconfirmed tail, read into a copy: counted now, scanned again (persisted) once it is confirmed.
+  const view: Hist = { ...h, spenders: { ...h.spenders }, operators: [...h.operators], nftIds: [...(h.nftIds ?? [])] }
+  if (next <= tip) await foldLogs(home, s, view, reg, next, tip)
+  const tokens = new Set(reg.entries.filter((e) => e.kind === 'token').map((e) => e.address.toLowerCase()))
   const allowances: { token: Address; spender: Address }[] = []
-  for (const [token, spenders] of Object.entries(h.spenders)) {
+  const ignored: string[] = []
+  for (const [token, spenders] of Object.entries(view.spenders)) {
+    if (!tokens.has(token.toLowerCase())) {
+      ignored.push(token)
+      continue
+    }
     for (const spender of spenders) {
-      // An allowance that cannot be read is counted as live (fail closed).
+      // A registry token that cannot be read is counted as live (fail closed); its contract is known, not forged.
       const v = await call<bigint>(home, token as Address, allowanceViewAbi, 'allowance', [s.account, spender]).catch(() => 1n)
       if (v > 0n) allowances.push({ token: token as Address, spender })
     }
   }
   const approvedForAll: Address[] = []
-  for (const pair of h.operators) {
+  for (const pair of view.operators) {
     const [contract, op] = String(pair).split(':') as [Address, Address]
     if (await call<boolean>(home, contract, allowanceViewAbi, 'isApprovedForAll', [s.account, op]).catch(() => true)) approvedForAll.push(op)
   }
   const positionApprovals: bigint[] = []
+  const npm = reg.entries.find((e) => e.name === 'NonfungiblePositionManager')?.address
   if (npm) {
-    for (const id of h.nftIds) {
-      const owner = await call<Address>(home, npm, allowanceViewAbi, 'ownerOf', [BigInt(id)]).catch(() => null)
-      if (!owner || !isAddressEqual(owner, s.account)) continue // burned or moved: no longer the home's
+    for (const id of view.nftIds ?? []) {
+      let owner: Address
+      try {
+        owner = await call<Address>(home, npm, allowanceViewAbi, 'ownerOf', [BigInt(id)])
+      } catch (e) {
+        if (reverted(e)) continue // burned: no longer anyone's
+        positionApprovals.push(BigInt(id)) // a transport failure proves nothing: fail closed
+        continue
+      }
+      if (!isAddressEqual(owner, s.account)) continue // moved away: no longer the home's
       const approved = await call<Address>(home, npm, allowanceViewAbi, 'getApproved', [BigInt(id)]).catch(() => s.account)
       if (BigInt(approved) !== 0n) positionApprovals.push(BigInt(id))
     }
   }
-  return { complete, allowances, approvedForAll, signedMessages: h.signed, delegatecalls: h.delegatecalls, positionApprovals }
+  return { complete: true, ...(ignored.length ? { note: `Approval logs from ${ignored.length} contract(s) outside the registry ignored` } : {}), allowances, approvedForAll, signedMessages: view.signed, delegatecalls: view.delegatecalls ?? 0, positionApprovals }
 }
 
 /** Safe proxy storage slot 0: its singleton. */
 const SINGLETON_SLOT: Hex = '0x0000000000000000000000000000000000000000000000000000000000000000'
+/** Consecutive transient re-checks of a ready sibling after which it is cleared (fail closed, security review of #223). */
+const SIBLING_TRANSIENT_CLEAR = 3
 /** A sent setReady is not sent again within this window: Ethereum's inclusion plus a lagging read RPC. */
 const SIBLING_RESEND_MS = 15 * 60_000
 
@@ -406,8 +445,12 @@ async function processSiblings(cfg: WatcherConfig, d: WatcherDeps): Promise<stri
       if (ready) {
         s.checkedAt = now
         d.store.save()
-        if (!res.ok && res.transient) {
-          // Review r3 of #223 (P2): a read failure or a scan in progress proves nothing: alerted, never cleared on it.
+        const stuck = !res.ok && res.transient ? (s.transient = (s.transient ?? 0) + 1) : (s.transient = 0)
+        if (!res.ok && res.transient && stuck < SIBLING_TRANSIENT_CLEAR) {
+          // Review r3 of #223 (P2): a read failure or a scan in progress proves nothing: alerted, retried next pass (the
+          // re-check clock does not move), and cleared only after SIBLING_TRANSIENT_CLEAR in a row (security review).
+          s.checkedAt = undefined
+          d.store.save()
           await alertOnce(d, `sib:recheck:${k}:${res.failed}`, `Ready sibling's re-check incomplete, ${where}: ${res.failed}`, cfg.realertMs)
         } else if (!res.ok) {
           // Review r2 of #223 (P1-c): the guardian clears it (revoke-only) instead of letting the bridge continue.

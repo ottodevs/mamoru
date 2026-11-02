@@ -203,7 +203,6 @@ describe('V4 sibling readiness (#310)', () => {
     // review r3 (P0-A): a spender that forwards arbitrary calls (it is in the registry, it does not pull from msg.sender)
     ['an allowance to Multicall3', (w) => { w.approvals = [{ token: address('USDC', baseRegistry), spender: address('Multicall3', baseRegistry) }] }, 'homeAllowance'],
     ['an allowance to MultiSendCallOnly', (w) => { w.approvals = [{ token: address('USDC', baseRegistry), spender: address('MultiSendCallOnly_141', baseRegistry) }] }, 'homeAllowance'],
-    ['an allowance on a token outside the registry', (w) => { w.approvals = [{ token: A(0xda1), spender: A(0xbad) }] }, 'homeAllowance'],
     // review r3 (P0-B): storage the owner could rewrite with no event
     ['an owner delegatecall to anything but MultiSendCallOnly', (w) => { w.ownerTxs = [{ to: A(0xbad), operation: 1 }] }, 'homeDelegatecall'],
     ['a module delegatecall', (w) => { w.moduleTxs = [{ operation: 1 }] }, 'homeDelegatecall'],
@@ -294,5 +293,50 @@ describe("the home's history (review r2 of #223, P0-1)", () => {
     await runPass(s.cfg, s.deps)
     expect(s.cleared).toEqual([{ account: ACCOUNT, domain: 6 }])
     expect(s.alerts.some((a) => a.includes('clearReady sent'))).toBe(true)
+  })
+})
+
+describe('security review of r3 (#223)', () => {
+  test('an Approval forged by any contract (outside the registry) never blocks readiness', async () => {
+    const w = world()
+    w.approvals = [{ token: A(0xda1), spender: A(0xbad) }]
+    const s = setup(w)
+    await runPass(s.cfg, s.deps)
+    expect(s.sent.length).toBe(1)
+  })
+
+  test('a grant in the unconfirmed tail (the last blocks) is seen before any setReady', async () => {
+    const w = world(); w.head = 15n
+    w.approvals = [{ token: address('USDC', baseRegistry), spender: A(0xbad) }]
+    const s = setup(w)
+    await runPass(s.cfg, s.deps)
+    expect(s.sent).toEqual([])
+    expect(s.alerts.some((a) => a.includes('homeAllowance'))).toBe(true)
+  })
+
+  test('an older history schema restarts from the deploy block', async () => {
+    const w = world()
+    const s = setup(w)
+    s.store.state.siblings[ACCOUNT] = { account: ACCOUNT, domain: 6, hist: { next: '999', spenders: {}, operators: [], signed: 0 } as never }
+    w.approvals = [{ token: address('USDC', baseRegistry), spender: A(0xbad) }]
+    await runPass(s.cfg, s.deps)
+    expect(s.sent).toEqual([])
+    expect(s.alerts.some((a) => a.includes('homeAllowance'))).toBe(true)
+  })
+
+  test('three transient re-checks in a row of a ready sibling clear it (fail closed)', async () => {
+    const w = world()
+    let now = 1_000
+    const s = setup(w)
+    s.deps.now = () => now
+    await runPass(s.cfg, s.deps)
+    expect(s.sent.length).toBe(1)
+    const c = s.deps.clients[BASE]! as unknown as { getCode: () => Promise<unknown> }
+    c.getCode = async () => { throw new Error('rpc down') }
+    for (let i = 0; i < 3; i++) {
+      now += 2_000
+      await runPass(s.cfg, s.deps)
+    }
+    expect(s.cleared).toEqual([{ account: ACCOUNT, domain: 6 }])
   })
 })
