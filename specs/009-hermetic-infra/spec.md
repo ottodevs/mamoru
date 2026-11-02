@@ -87,12 +87,7 @@ user from that sum.
 | INV-3 | **No external control of a user.** No Mamoru-side address is, or can become, owner, guardian, executor with unrestricted calls, revoker or account-wide pauser. Accounts still on a guardian-bearing grant are declared non-compliant until migrated. | T9 (per-account state check: owners, threshold, guard, fallback handler, modules, executors, attesters, policy version; any Mamoru address in an authority slot fails) |
 | INV-4 | **Hermetic infra.** Every Mamoru infra contract has immutable, verified code and constructor-only configuration, no privileged state change, no upgrade, and pays only fixed recipients for fixed purposes. | T3 (inventory of every Mamoru-deployed contract on every chain: V1, V2, V3/V-next, MamoruGasPolicy, MamoruPauseGate, MamoruV3Routes, MamoruV4LiquidityPolicy; entry-point analysis of each for privileged or value-moving paths), T11 if a funded contract is built |
 | INV-5 | **Finite infra exposure.** For every reachable history (donations, reentrancy, failures, top-ups), the total value an infra version can ever pay out is at most its declared ceiling. | T11 (Halmos + invariant fuzzing), only if a funded contract is built |
-| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload, except the bounded, disclosed reverted-bundle budget below. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; per userOp, `UserOperationEvent.sender` is the user's account and `actualGasCost` is charged to it or to an admitted third-party paymaster, Mamoru's bundler submits **one userOp per bundle**, so the bundle's whole cost (gas × price, intrinsic overhead and, on Base, the L1 data fee) is attributable to that one user: per bundle, the beneficiary is a declared Mamoru beneficiary for that chain and the submitter's total fee ≤ that op's `actualGasCost` + a per-chain tolerance stated in wei. Admission before submission: simulation, and `preVerificationGas` covering the estimated L1 data fee with a margin. A bundle that reverts on chain (for example a nonce raced through a public bundler) emits no event: its fee is a disclosed exception, counted and capped per account per day, after which the bundler stops submitting for that account. A per-chain global daily wei budget is a hard ceiling on every counted revert on that chain, because fresh accounts cost nothing. Reverts the bundler causes itself (for example its own private-to-public fallback racing a pending transaction) count against it too; they are excluded only from the account's own cap. Once the budget is spent, Mamoru's bundler submits nothing that can revert at Mamoru's cost on that chain until the window resets. This limits only what Mamoru's own bundler takes on, never a user:
-  - owner ops still go through any public ERC-7562 bundler, paid by the Safe, and the app routes them there automatically when Mamoru's bundler declines (passkey-only users have no EOA);
-  - owner ops can also go as a plain `execTransaction`, paid by the submitting wallet unless a SafeTx refund is used;
-  - session ops can still go through a direct `handleOps` from any EOA (the user's own, or a self-hosted agent's).
-
-  The user pays in every case. Disclosed degradation: an attacker who drains the budget each day can stop Mamoru's bundler, and with it Mamoru's hosted automation, on that chain until the reset. Funds and exits are not affected; funding provenance: no transfer from any Mamoru wallet to a user account or to a paymaster that serves users) |
+| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload, except the per-strike loss and the backstop budget defined in D2 "Bundler accounting", both bounded in wei and disclosed. | T10 (payer trace per user cost, per D2 "Bundler accounting": the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; plus a provenance ledger: no transfer from any Mamoru wallet to a user account or to a paymaster that serves users) |
 
 ## Decisions
 
@@ -141,11 +136,54 @@ only USDC cannot pay for its own first userOp. The first operation is paid in on
 Mamoru wallet pays.
 
 **Session ops and ERC-7562.** V3's validation reads the pool oracle, the position manager and `block.timestamp`
-(`MamoruActionPolicyV3.sol:302-305`), which ERC-7562 public mempools reject. Session ops are therefore submitted by a
-direct `handleOps` call. Any EOA can make that call (Mamoru's bundler, a self-hosted agent, the user), so it needs no
-public mempool. The public-bundler fallback applies to **owner** ops (exit, revoke, renew), whose validators (owner
-signature, WebAuthn through the P-256 precompile) must stay ERC-7562 compliant. T5 tests this through a
-standards-compliant bundler.
+(`MamoruActionPolicyV3.sol:302-305`), which ERC-7562 public mempools reject. Under V3, session ops can therefore only
+be submitted by a direct `handleOps` call. Any EOA can make that call (Mamoru's bundler, a self-hosted agent, the
+user), but public bundlers will not take them. V-next fixes this (POL-12): its validation is ERC-7562 compliant, so
+session ops become eligible for public bundlers too. That is what lets the bundler accounting below hand ops to public
+bundlers without stopping automation. Owner ops (exit, revoke, renew), whose validators (owner signature, WebAuthn
+through the P-256 precompile) are already compliant, stay eligible. T5 tests both through a standards-compliant
+bundler.
+
+**Bundler accounting.** Mamoru's bundler submits **one userOp per bundle** and simulates it right before private
+submission. Admission requires that simulation, and a `preVerificationGas` that covers the estimated L1 data fee with a
+margin. The bundle's beneficiary must be a declared Mamoru beneficiary for that chain; the declared set is updated
+before a rotated beneficiary is first used. Per bundle, the submitter's total fee (including the L1 data fee on Base)
+must be ≤ that op's `actualGasCost` + a per-chain tolerance in wei.
+
+- **What a strike costs Mamoru.** A bundle that reverts on chain after passing simulation emits no event, and Mamoru
+  pays its fee: that is a strike. With one op per bundle and simulation just before submission, a strike needs the op
+  to be invalidated between simulation and inclusion. Only someone who can act on the account can do that, through a
+  conflicting nonce, a session revoke or draining the prefund, and they pay for that transaction themselves. The
+  bundler sets the transaction's gas limit to the simulated gas plus a margin, never to the policy caps. Per-strike
+  bound:
+  - **Base:** the op's maximum prefund at the `MamoruGasPolicy` caps, (3M + 2M + 200k gas) × 0.1 gwei =
+    5.2 × 10¹⁴ wei, plus the one-op L1 data fee bound (T9 measures it; about 5 × 10¹³ wei). In total
+    ≤ 5.7 × 10¹⁴ wei (0.00057 ETH).
+  - **Monad:** gas is charged on the transaction's gas limit, so the bound is that limit × price, at most
+    5.2M gas × 1,000 gwei = 5.2 × 10¹⁸ wei (5.2 MON) at the caps. In practice it is the simulated gas plus the margin.
+  - **Ethereum:** 0. Mamoru's bundler submits nothing there; G7 goes through Pimlico.
+- **What it costs the attacker.** At least the invalidating transaction. A fresh Sybil account also costs its own Safe
+  deploy (a user-paid userOp), and after one strike it is routed away (below), so each Sybil yields at most one strike.
+  On Base and Ethereum, where a reverted bundle is charged for gas used and validation fails early, attacker cost is
+  roughly equal to or greater than Mamoru's loss per strike. On Monad, the gas-limit charge can make Mamoru's loss
+  larger than the attacker's. The backstop below bounds the total either way.
+- **Per-account strike.** An account with a strike is routed to public bundlers for N days (N set by T11; default 7).
+  Its user still pays, it is still served, and its automation continues through the public bundler (POL-12). Other
+  accounts are unaffected. Reverts that Mamoru's bundler causes itself, for example its own fallback racing a pending
+  transaction, are not strikes: the private submission is cancelled or replaced before any public fallback. They
+  still count toward the backstop.
+- **Float-protection backstop.** A per-chain daily wei budget covers every revert at Mamoru's cost. When it is spent,
+  Mamoru's bundler hands **all** ops on that chain to public bundlers until the window resets. Automation continues
+  and users pay. Hosted automation never stops because of the budget. The remaining dependency is public bundler
+  availability on that chain: Pimlico's public bundler accepts EntryPoint v0.7 on Base, Ethereum and Monad (verified
+  2026-11-02).
+- **Never blocks a user.** Being routed elsewhere is not being refused:
+  - owner ops go through any public ERC-7562 bundler, paid by the Safe, and the app routes them automatically
+    (passkey-only users have no EOA);
+  - owner ops can also go as a plain `execTransaction`, paid by the submitting wallet unless a SafeTx refund is used;
+  - session ops go through a public bundler (POL-12) or a direct `handleOps` from any EOA.
+
+  The user pays in every case.
 
 The relayer becomes a **dust bundler**:
 - It holds no authority (already true) and a float of about one bundle.
@@ -281,6 +319,20 @@ bounded by the owner's allowance.
   session grant (its bridge-out is an owner/paymaster userOp), and gets V-next only when a grant there is added.
   CREATE2 with a pinned compiler and `bytecode_hash = none`. Per-chain constants live in a `chainid` table in code, and
   an unknown chain refuses.
+- **POL-12: ERC-7562-compliant validation.** V-next's validation reads only what ERC-7562 allows: no
+  `block.timestamp` or `block.number`, no external oracle or position-manager reads, and storage access only to
+  storage associated with the account.
+  - **Static checks stay in validation:** targets, selectors, decoded recipients, tokens, amounts against per-call
+    caps, and the batch shape.
+  - **Dynamic checks move to execution:** the TWAP band, position identity and the per-period and total budget run
+    inside the batch. The policy requires a call to an immutable, ownerless `MamoruExecGuard` before the action (the
+    same pattern as `AllowanceCheck`). The guard reads the oracle, enforces and records the account's budget in
+    storage keyed by the calling account, and reverts the batch on any breach. A breach then costs the account the
+    gas of a reverted execution; the user pays and nothing moves.
+  - **Time windows** that must be known at validation use `validAfter`/`validUntil` in `validationData`, as
+    TimeFramePolicy does.
+  - **Tests (T5):** a standards-compliant bundler admits session ops, and every dynamic bound in POL-02/03/07 still
+    holds with its check run in execution.
 - **POL-11: Gas ceiling per generation.** `MamoruGasPolicy` per-op caps (`maxFeePerGas` × (verificationGasLimit +
   callGasLimit + preVerificationGas + paymaster gas limits), every one of them capped; `permitERC4337Paymaster` stays
   false so paymaster fields are 0) times
@@ -441,6 +493,7 @@ bounded by the owner's allowance.
 | Bug in an infra contract with no admin | n/a (no funded infra) | None funded in v1; conditional `GasTreasury` bounded by lifetime ceiling | Its ceiling |
 | Wrong constructor parameters | n/a | Fork test of exact init calldata; bytecode and code-hash check per chain; unknown chain pays nothing | A wrong value stays until the next version |
 | Shared V4 executor bug | Undeployed design reaches every account | Not deployed (POL-10) | None |
+| Reverted bundles at Mamoru's cost | No bound | One op per bundle, simulation before submission, per-strike bound in wei, strike routing, backstop hands all ops to public bundlers | Backstop budget per chain per day; dependency on public bundler availability |
 | Users linked by one beneficiary / shared keys | One relayer address on every bundle | Per-account session keys, rotating beneficiary | On-chain analysis of funding sources |
 | Takeover of `mamoru.lol` or a signer host | Phishing page can obtain a full-Safe passkey signature | Registrar lock, DNSSEC, CAA; published signer hash (after the fact only) (D4-R5) | Balances of users who sign on the compromised page while it is up |
 | Sequencer censorship, issuer freeze | Same | Documented (WLK-06) | Outside Mamoru's contracts |
@@ -483,8 +536,8 @@ bounded by the owner's allowance.
     inventory for REG-02, and the pinned code hashes.
 
 **P1, one redeploy**
-- **T4: V-next.** Implement POL-01..11 from V3, with no pause code, limits on the vault and bridge families, and the
-  gas ceiling. Deploy with CREATE2 to the same address on every chain with a session grant (Base and Monad today), and
+- **T4: V-next.** Implement POL-01..12 from V3, with no pause code, limits on the vault and bridge families, the gas
+  ceiling, and ERC-7562-compliant validation with `MamoruExecGuard`. Deploy with CREATE2 to the same address on every chain with a session grant (Base and Monad today), and
   pin it in the registry.
 - **T5: Fork tests for the session surface.**
   - Self-calls (each selector in POL-05) are refused.
@@ -509,17 +562,12 @@ bounded by the owner's allowance.
   - Delete G7.
   - Add the INV-6 payer trace in CI and on `/ops`:
     - per-userOp attribution from `UserOperationEvent`;
-    - one userOp per bundle, the beneficiary checked against the declared Mamoru beneficiaries, and the submitter's
-      total fee (including the L1 data fee on Base) against that op's `actualGasCost`, within the per-chain tolerance
-      in wei;
-    - the admission rule (simulation, `preVerificationGas` margin over the estimated L1 fee);
-    - reverted bundles counted per account with the daily cap and against the per-chain global daily budget (a hard
-      stop for Mamoru's bundler once spent, self-caused reverts included); the
-      private submission is cancelled or replaced before any public fallback, and the declared beneficiary set is
-      updated before a rotated beneficiary is first used;
+    - every rule in D2 "Bundler accounting": one userOp per bundle, the admission rule, the declared beneficiary,
+      fee ≤ `actualGasCost` + tolerance, strikes routed to public bundlers for N days, the per-strike bounds in wei
+      per chain, and the backstop that hands all ops to public bundlers;
     - a provenance ledger of every outgoing transfer from Mamoru wallets.
 - **T11: Bundler.** Relayer keys per chain in KMS, private submission with a public-bundler fallback, rotating
-  beneficiary. Build `GasTreasury` (TRS-01..07, with Halmos and fuzzing for INV-5) only if D3's condition holds.
+  beneficiary, strike routing (N days) and the backstop hand-off. Build `GasTreasury` (TRS-01..07, with Halmos and fuzzing for INV-5) only if D3's condition holds.
 
 **P3, keys and exit**
 - **T12: Session keys.** Session keys in KMS/TEE, per account, with KEY-05 (isolation, published aggregate exposure,
