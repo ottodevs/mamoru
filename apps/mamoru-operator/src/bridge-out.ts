@@ -1556,7 +1556,8 @@ export class BridgeOut {
             }
           }
           if (receipt?.status === 'success') await this.settleSibling(c, receipt)
-          else if (receipt?.status === 'reverted' || this.now() - Date.parse(c.sentAt ?? c.at) > UNCONFIRMED_GIVEUP_MS) await this.resendSibling(accountKey, c)
+          // Dropped or reverted alike, a resend waits UNCONFIRMED_GIVEUP_MS from the last send: never a burst.
+          else if (this.now() - Date.parse(c.sentAt ?? c.at) > UNCONFIRMED_GIVEUP_MS) await this.resendSibling(accountKey, c)
           else if (c.state === 'sending') c.state = 'unconfirmed'
         }
       }
@@ -1564,20 +1565,32 @@ export class BridgeOut {
     if (c.state !== before) this.writeSibling(accountKey, c)
   }
 
-  /** The same signed enable again, after a dropped or reverted send; bounded, then alerted (the row stays unconfirmed). */
+  /**
+   * The same signed enable again, after a dropped or reverted send; bounded, then alerted (the row stays unconfirmed).
+   * Security review of #227: only when nothing else is being sent; the Safe simulates it first and its gas stays under
+   * SIBLING_ENABLE_GAS (else alerted, never sent); the resend counter and the clock move only once a hash exists, so a
+   * refusal before the send (gas price, budget, simulation) consumes nothing and is tried again on a later tick.
+   */
   private async resendSibling(accountKey: string, c: StoredSibling): Promise<void> {
     c.state = 'unconfirmed'
     if (!c.execData || (c.resends ?? 0) >= SIBLING_RESENDS) {
       logErr(`[alert] bridge-out sibling ${accountKey.slice(0, 8)}: the enable of ${c.safe} did not land after ${c.resends ?? 0} resends; the account stays blocked until ops looks`, undefined)
       return
     }
-    c.resends = (c.resends ?? 0) + 1
-    c.sentAt = new Date(this.now()).toISOString()
-    this.writeSibling(accountKey, c)
+    if (this.inFlight || this.bundling.size > 0) return
+    const data = c.execData
     await this.exclusive(async () => {
-      const est = await this.l1.estimateGas({ account: this.relayer.address, to: c.safe, data: c.execData! })
-      const r = await this.charged({ to: c.safe, data: c.execData!, gas: (est * 13n) / 10n }, (h) => {
+      await this.simulate(c.safe, data)
+      const est = await this.l1.estimateGas({ account: this.relayer.address, to: c.safe, data })
+      const gas = (est * 13n) / 10n
+      if (gas > SIBLING_ENABLE_GAS) {
+        logErr(`[alert] bridge-out sibling ${accountKey.slice(0, 8)}: the resend of ${c.safe}'s enable would take ${est} gas: not sent`, undefined)
+        return
+      }
+      const r = await this.charged({ to: c.safe, data, gas }, (h) => {
         c.l1Tx = h
+        c.resends = (c.resends ?? 0) + 1
+        c.sentAt = new Date(this.now()).toISOString()
         this.writeSibling(accountKey, c)
       })
       await this.settleSibling(c, r.receipt)

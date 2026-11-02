@@ -28,6 +28,7 @@ function make(stored: Partial<StoredSibling>, chain: Chain, now: () => number) {
     getGasPrice: async () => 1_000_000n,
     getBalance: async () => 10n ** 18n,
     estimateGas: async () => 1_000_000n,
+    call: async () => ({ data: `0x${'1'.padStart(64, '0')}` }),
     readContract: async ({ functionName }: { functionName: string }) => {
       if (functionName === 'isPermissionEnabled') return chain.enabled
       if (functionName === 'nonce') return chain.nonceFinal
@@ -110,5 +111,35 @@ describe('sibling enable reconciliation', () => {
     const m = make({ l1Tx: TX, state: 'failed' }, { ...base, enabled: true }, () => T0 + 60_000)
     await m.bo.tick()
     expect(m.journal().state).toBe('done')
+  })
+})
+
+describe('sibling resend guards (security review of #227)', () => {
+  test('a resend refused before the send (simulation) consumes no resend and is tried again later', async () => {
+    let now = T0 + UNCONFIRMED_GIVEUP_MS + 1
+    const m = make({ l1Tx: TX }, { ...base, sendLands: true }, () => now)
+    ;(m.bo as unknown as { l1: { call: () => Promise<unknown> } }).l1.call = async () => { throw new Error('refused') }
+    await m.bo.tick()
+    expect(m.sent).toEqual([])
+    expect(m.journal().resends ?? 0).toBe(0)
+    ;(m.bo as unknown as { l1: { call: () => Promise<unknown> } }).l1.call = async () => ({ data: `0x${'1'.padStart(64, '0')}` })
+    now += 60_000
+    await m.bo.tick()
+    expect(m.sent.length).toBe(1)
+    expect(m.journal().state).toBe('done')
+  })
+
+  test('a resend above the gas ceiling is never sent', async () => {
+    const m = make({ l1Tx: TX }, base, () => T0 + UNCONFIRMED_GIVEUP_MS + 1)
+    ;(m.bo as unknown as { l1: { estimateGas: () => Promise<bigint> } }).l1.estimateGas = async () => 5_000_000n
+    await m.bo.tick()
+    expect(m.sent).toEqual([])
+  })
+
+  test('a reverted send is not resent before the interval', async () => {
+    const m = make({ l1Tx: TX }, { ...base, receipt: 'reverted' }, () => T0 + 60_000)
+    await m.bo.tick()
+    expect(m.sent).toEqual([])
+    expect(m.journal().state).toBe('unconfirmed')
   })
 })
