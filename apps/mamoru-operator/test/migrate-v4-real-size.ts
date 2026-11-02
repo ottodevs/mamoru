@@ -211,6 +211,9 @@ try {
   const { nonces } = await readSessionState(base.client, baseRegistry, safe, inv.revoke, r.block)
   const safeNonce = await base.client.readContract({ address: safe, abi: safeAbi, functionName: 'nonce' })
   const sessionKey = privateKeyToAccount(generatePrivateKey()).address // the account's session key is the operator's secret; any address gives the same size
+  // A real-size probe measures nothing on an account with nothing to move: old sessions enabled, old ids to revoke, positions to admit.
+  check(now.enabled.length > 0 && inv.remove.length > 0 && inv.revoke.length > 0 && admit.length > 0, 'the Safe carries real state to migrate (enabled ids, ids to revoke, positions to admit)', `enabled ${now.enabled.length}, remove ${inv.remove.length}, revoke ${inv.revoke.length}, admit ${admit.length}`)
+  // Field for field what planMigration (src/operator.ts) gives buildMigrateV4 for step 0, home and homeDomain included.
   const input: MigrateV4Input = { chainId: 8453, safe, safeNonce: safeNonce.toString(), step: 0, capUsdc: v4CapUsdOf(CAP_USDC).toString(), sessionKey, generation: '1', admit: admit.map(String), oldPermissionIds: inv.revoke, removeIds: inv.remove, noncesBefore: nonces.map(String), home: '0x0000000000000000000000000000000000000000', homeDomain: 0 }
   const tx = buildMigrateV4(input, baseRegistry)
   const m: Migration = { label: 'Base home', ...tx, before: now.enabled, input }
