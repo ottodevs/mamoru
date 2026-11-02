@@ -86,7 +86,7 @@ that sum.
 | INV-3 | **No external control of a user.** No Mamoru-side address is, or can become, owner, guardian, executor with unrestricted calls, revoker or account-wide pauser. Accounts still on a guardian-bearing grant are declared non-compliant until migrated. | T9 (per-account state check: owners, threshold, guard, fallback handler, modules, executors, attesters, policy version; any Mamoru address in an authority slot fails) |
 | INV-4 | **Hermetic infra.** Every Mamoru infra contract has immutable, verified code and constructor-only configuration, no privileged state change, no upgrade, and pays only fixed recipients for fixed purposes. | T3 (inventory of every Mamoru-deployed contract on every chain: V1, V2, V3/V-next, MamoruGasPolicy, MamoruPauseGate, MamoruV3Routes, MamoruV4LiquidityPolicy; entry-point analysis of each for privileged or value-moving paths), T11 if a funded contract is built |
 | INV-5 | **Finite infra exposure.** For every reachable history (donations, reentrancy, failures, top-ups), the total value an infra version can ever pay out is at most its declared ceiling. | T11 (Halmos + invariant fuzzing), only if a funded contract is built |
-| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; each bundle's beneficiary net flow ≥ 0 within a stated tolerance) |
+| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; per bundle, the submitting EOA's fee plus the beneficiary's receipts net ≥ 0 within a stated tolerance, summed across rotating beneficiaries) |
 
 ## Decisions
 
@@ -175,7 +175,9 @@ bounded by the owner's allowance.
 - **Owner actions without the operator.** Today every withdraw, Stop and renewal is prepared, checked and sent by the
   operator (`operator.ts:4500-4640`). The app builds and signs SafeTxs and owner userOps client-side from open-source
   code. The user sends them in either of two ways:
-  - from the backup owner EOA as `execTransaction`, paying gas from that wallet (the user's own balance);
+  - from the backup owner EOA as `execTransaction`, paying gas from that wallet (the user's own balance). The walkaway
+    docs state the native amount the user's wallet needs per chain: an exit always needs upfront gas from some wallet
+    of the user or a willing submitter, and no design removes that;
   - by any submitter, with a SafeTx refund (`gasPrice`, `refundReceiver = 0` so `tx.origin` is repaid by the Safe).
 
   The operator may offer to relay. Its refusal never blocks.
@@ -183,6 +185,30 @@ bounded by the owner's allowance.
   accounts are therefore exposed until they enroll. T2 runs first. Once a date is published, the app refuses new
   deposits and new grants for accounts without a backup owner (their exit stays open). Mamoru keeps the domain serving
   the passkey signer until every live account has enrolled or exited, and `/ops` lists the accounts still exposed.
+
+## Decisions for Ot (open)
+
+Three residuals in the review are trade-offs, not spec errors. The spec states each one and does not decide it.
+
+1. **Renewal cadence (POL-04).** A bounded expiry means a periodic owner tap, and the strategy stops if the user is away
+   longer. Removing the tap means an expiry long enough to be indefinite, with `total` as the only bound. Recommendation:
+   30 days.
+2. **Hosted-agent aggregate exposure.** Per-account limits do not cap the sum across accounts served by one signing
+   service. Options:
+   - **(a) Accept and publish it** (KEY-05).
+   - **(b) Shared global budget.** An immutable contract with a global rate limit that every V-next session debits.
+     That caps the sum across all accounts, but makes it one shared piece: one account's usage can throttle the others,
+     and it is an availability coupling between users.
+   - **(c) No hosted signer.** The user-chosen agent (WLK-04) only.
+
+   Recommendation: (a) now, with WLK-04 shipped. Evaluate (b) only if the published sum grows past what Mamoru is
+   willing to state.
+3. **Owner credential strength.** Any owner credential (the passkey or the backup wallet) is a full-control credential
+   by definition: it is the user's custody. A 1-of-2 makes either one sufficient. A 2-of-3 with a delayed single-owner
+   recovery is stronger, but adds a signature to every owner action.
+
+   Recommendation: 1-of-2. C6's "no EOA whose leak matters" applies to Mamoru-side keys; the user's own credentials
+   are the user's.
 
 ## Requirements
 
@@ -209,8 +235,9 @@ bounded by the owner's allowance.
 - **POL-06: ERC-1271 off.** `erc1271Policies` and `allowedERC7739Content` stay empty. A test proves a session-key
   `isValidSignature` returns failure.
 - **POL-07: Reviewed tokens and venues only.**
-  - **Approvals:** exact amount, only to pinned spenders, and only in the same batch as the call that consumes them, so
-    no allowance outlives its batch.
+  - **Approvals:** exact amount, only to pinned spenders, and only in a batch shaped `approve(spender, x)`, then the
+    consuming call, then `approve(spender, 0)`. The policy refuses a batch whose trailing reset is missing, so no
+    allowance outlives its batch even when the spender pulls less than `x`.
   - **Recipients:** pinned to the account.
   - **Nested calls:** routers, multicalls and bridges have their nested recipient, token and amount decoded and
     bounded, as V3 already does for CCTP (`depositForBurn`: recipient = account, pinned domain and token, fee 0).
@@ -225,7 +252,9 @@ bounded by the owner's allowance.
   session grant (its bridge-out is an owner/paymaster userOp), and gets V-next only when a grant there is added.
   CREATE2 with a pinned compiler and `bytecode_hash = none`. Per-chain constants live in a `chainid` table in code, and
   an unknown chain refuses.
-- **POL-11: Gas ceiling per generation.** `MamoruGasPolicy` per-op caps (`maxFeePerGas` × the sum of gas limits) times
+- **POL-11: Gas ceiling per generation.** `MamoruGasPolicy` per-op caps (`maxFeePerGas` × (verificationGasLimit +
+  callGasLimit + preVerificationGas + paymaster gas limits), every one of them capped; `permitERC4337Paymaster` stays
+  false so paymaster fields are 0) times
   the UsageLimitPolicy op count is the most a generation can spend on gas, including ops that revert. Today's counts
   (`manageAny 32,000`, `policies-v6.ts:11`) make that figure meaningless. The count is sized so the figure fits a
   stated gas ceiling, which is added to the maximum loss shown to the owner. A leaked key can burn at most that ceiling
@@ -243,7 +272,8 @@ bounded by the owner's allowance.
 - **GRD-02: Remove the copy.** Every UI and grant text that promises a guardian pause is removed
   (`operator.ts:2151,2155,2306`, `home.tsx:118,123,1042`).
 - **GRD-03: Per-account migration with a cutoff.** Each account moves to V-next with an owner-signed renewal; the
-  generation jump already exists. The app asks every V2 account to renew now rather than at expiry. Destroying the key
+  generation jump already exists. The renewal batch also calls `removeSession` for the V2 session, so the removal is
+  provable on chain. The app asks every V2 account to renew now rather than at expiry. Destroying the key
   cannot be proven, so it does not count as removing the power. What removes the power in practice is the cutoff: from
   a published date the operator stops signing V2 grants. After that a guardian pause can only stop automation that no
   longer runs, while the owner path was never gated. A ledger lists every account and the policy it runs.
@@ -391,7 +421,8 @@ bounded by the owner's allowance.
   - Turn G1, G2 and G4 into account-paid userOps, with the first-operation options (a) and (b).
   - Turn G5 and G6 into destination-Safe userOp mints.
   - Delete G7.
-  - Add the INV-6 payer trace in CI and on `/ops`.
+  - Add the INV-6 payer trace in CI and on `/ops`: submitter fee against beneficiary receipts per bundle, not the
+    beneficiary alone.
 - **T11: Bundler.** Relayer keys per chain in KMS, private submission with a public-bundler fallback, rotating
   beneficiary. Build `GasTreasury` (TRS-01..07, with Halmos and fuzzing for INV-5) only if D3's condition holds.
 
