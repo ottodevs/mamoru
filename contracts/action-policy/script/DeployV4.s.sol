@@ -7,6 +7,7 @@ import {MamoruGasPolicyV2} from "../src/MamoruGasPolicyV2.sol";
 import {MamoruMigrationCheck} from "../src/MamoruMigrationCheck.sol";
 import {MamoruV4Table, IMamoruV4Table} from "../src/MamoruV4Table.sol";
 import {MamoruV4Chains} from "../src/MamoruV4Chains.sol";
+import {MamoruV4Classes} from "../src/MamoruV4Classes.sol";
 import {IModuleRegistry} from "./Deploy.s.sol";
 
 /**
@@ -44,9 +45,9 @@ contract DeployMamoruV4 is Script {
 
     /// The addresses `predict()` gives for this source and compiler (identical on Base, Monad and Ethereum). A source
     /// or compiler change moves them: `run()` then refuses, and re-pinning is a deliberate commit.
-    address public constant EXPECTED_TABLE = 0x89df2e7d14aE0225422cD125D458a31D26F89eC6;
-    address public constant EXPECTED_GAS_POLICY = 0xbC532f4b0A1bb29c9565F590a351c924baD4f606;
-    address public constant EXPECTED_POLICY = 0x74EB63d0dC4f7645BF06EA6011FED14e3BEeFe53;
+    address public constant EXPECTED_TABLE = 0x73D526C33Df9102bf6Ce468644DafD4650886be0;
+    address public constant EXPECTED_GAS_POLICY = 0xC9492e5424ea15b61c9451e0ab748E2266aE048d;
+    address public constant EXPECTED_POLICY = 0x5524493A374408d0149CC92545ddF470bB063697;
     address public constant EXPECTED_CHECK = 0xc04046b4649471875372FA9e800143491cD4fB31;
 
     /// Selectors no V4 contract may carry (spec 010 I7, spec 009 POL-01): guardian, pause, review, readiness setter.
@@ -147,6 +148,40 @@ contract DeployMamoruV4 is Script {
         require(ok, "DeployV4: deterministic deployer");
     }
 
+    /// Spec 010 "Hard bounds": every class and vault of this chain's table is inside V4's hard bounds (V3's), its
+    /// tokens are pinned with a stable side, its reference pool is a pool of the pinned factory for that pair, and each
+    /// listed vault's asset() is its pinned stable. A row outside them stays until a new version: refused here first.
+    function checkTable(IMamoruV4Table t, MamoruActionPolicyV4 p) public view {
+        MamoruV4Chains.Chain memory ch = t.chain(block.chainid);
+        address[2][] memory pairs = t.pairsOf(block.chainid);
+        for (uint256 i; i < pairs.length; i++) {
+            MamoruV4Classes.Class memory c = t.classOf(block.chainid, pairs[i][0], pairs[i][1]);
+            require(c.ref != address(0), "table: a listed pair without a class");
+            require(MamoruV4Chains.isPinned(ch, pairs[i][0]) && MamoruV4Chains.isPinned(ch, pairs[i][1]), "table: pinned tokens");
+            require(MamoruV4Chains.isStable(ch, pairs[i][0]) || MamoruV4Chains.isStable(ch, pairs[i][1]), "table: a stable side");
+            require(c.twapWindow >= p.MIN_TWAP_WINDOW() && c.twapWindow <= p.MAX_TWAP_WINDOW(), "table: long window");
+            require(c.twapShortWindow >= p.MIN_SHORT_WINDOW(), "table: short window");
+            require(uint256(c.twapShortWindow) * p.MIN_WINDOW_RATIO() <= c.twapWindow, "table: LeftClaw M-1");
+            require(c.bandTicks >= p.MIN_BAND() && c.bandTicks <= p.MAX_BAND() && c.anchorBand <= p.MAX_BAND(), "table: band");
+            require(c.ratioBps != 0 && c.ratioBps <= p.MAX_RATIO_BPS() && c.feeMask != 0, "table: ratio, fee set");
+            (address a, address b) = pairs[i][0] < pairs[i][1] ? (pairs[i][0], pairs[i][1]) : (pairs[i][1], pairs[i][0]);
+            (bool ok, bytes memory r) = c.ref.staticcall(abi.encodeWithSignature("fee()"));
+            require(ok, "table: reference pool");
+            (bool ok2, bytes memory got) = ch.factory.staticcall(
+                abi.encodeWithSignature("getPool(address,address,uint24)", a, b, abi.decode(r, (uint24)))
+            );
+            require(ok2 && abi.decode(got, (address)) == c.ref, "table: reference pool not the factory's");
+        }
+        address[] memory vaults = t.vaultsOf(block.chainid);
+        for (uint256 i; i < vaults.length; i++) {
+            MamoruV4Classes.Vault memory v = t.vaultOf(block.chainid, vaults[i]);
+            require(v.asset != address(0) && v.ratioBps != 0 && v.ratioBps <= p.MAX_VAULT_RATIO_BPS(), "table: vault ratio");
+            require(MamoruV4Chains.isStable(ch, v.asset), "table: vault asset");
+            (bool ok, bytes memory r) = vaults[i].staticcall(abi.encodeWithSignature("asset()"));
+            require(ok && abi.decode(r, (address)) == v.asset, "table: vault asset() on chain");
+        }
+    }
+
     /// Every address has code, the wiring is the one predicted, and no contract carries a forbidden selector (after
     /// `run`, or alone to audit a chain).
     function check(Stack memory s) public view {
@@ -164,6 +199,7 @@ contract DeployMamoruV4 is Script {
                 require(!hasSelector(all[i].code, f[k]), "DeployV4: a guardian, pause or admin selector in the bytecode");
             }
         }
+        checkTable(IMamoruV4Table(s.table), p);
         IModuleRegistry mr = IModuleRegistry(MODULE_REGISTRY);
         require(mr.findModule(s.policy).sender == PINNED_DEPLOYER, "ModuleRecord policy");
         require(mr.findModule(s.gasPolicy).sender == PINNED_DEPLOYER, "ModuleRecord gas policy");

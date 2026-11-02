@@ -123,6 +123,31 @@ library MamoruV4Classes {
         }
     }
 
+    /// Every pair with a class on `chainId` (token order as in `classOf`'s rows), for the deploy script's bounds check,
+    /// the engine's candidate pools and /ops. Kept next to `classOf`: a row added there is added here.
+    function pairsOf(uint256 chainId) internal pure returns (address[2][] memory p) {
+        if (chainId == BASE) {
+            p = new address[2][](3);
+            p[0] = [0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913, 0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2];
+            p[1] = [0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913, 0x4200000000000000000000000000000000000006];
+            p[2] = [0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913, 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf];
+        } else if (chainId == MONAD) {
+            p = new address[2][](1);
+            p[0] = [0x754704Bc059F8C67012fEd69BC8A327a5aafb603, 0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A];
+        } else if (chainId == ETHEREUM) {
+            p = new address[2][](1);
+            p[0] = [0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48, 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2];
+        }
+    }
+
+    /// Every vault listed on `chainId`, for the same uses.
+    function vaultsOf(uint256 chainId) internal pure returns (address[] memory v) {
+        if (chainId == BASE) {
+            v = new address[](1);
+            v[0] = 0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61;
+        }
+    }
+
     /// A vault listed on `chainId` by exact address (spec 010 A1 "Vaults"); asset 0 when it is not.
     function vaultOf(uint256 chainId, address vault) internal pure returns (Vault memory v) {
         if (chainId == BASE && vault == 0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61) {
