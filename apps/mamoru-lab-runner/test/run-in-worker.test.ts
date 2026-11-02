@@ -51,11 +51,13 @@ describe('runInWorker budget (otto/mamoru#204, AL-04): a wall-clock budget, sepa
     const heartbeat = async (): Promise<boolean> => true
     const outcome = await runInWorker<{ ms: number; extendToMs?: number }, { done: true }>(
       BUDGET_WORKER,
-      { ms: 80, extendToMs: 500 }, // initial budget (40ms) would kill it mid-run; the extension (500ms) lets it finish
-      { heartbeat, intervalMs: 20, budgetMs: 40 },
+      // The initial budget (500 ms) would kill the 1 s run mid-way; the extension (3 s) lets it finish. The initial budget
+      // stays well above a Worker's start under a busy full run, which 40 ms was not (otto/mamoru#313).
+      { ms: 1_000, extendToMs: 3_000 },
+      { heartbeat, intervalMs: 20, budgetMs: 500 },
     )
     expect(outcome).toEqual({ result: { done: true } })
-  }, 2_000)
+  }, 5_000)
 
   test('a runs-produced control message reaches onRunsProduced and is never mistaken for the final result', async () => {
     const heartbeat = async (): Promise<boolean> => true
@@ -75,7 +77,9 @@ describe('runInWorker budget (otto/mamoru#204, AL-04): a wall-clock budget, sepa
     const outcome = await runInWorker<{ ms: number; emitRuns?: unknown[] }, { done: true }>(
       BUDGET_WORKER,
       { ms: 5_000, emitRuns: [{ resultHash: 'survives-timeout' }] },
-      { heartbeat, intervalMs: 500, budgetMs: 60, onRunsProduced: (runs) => seen.push(...runs) },
+      // The budget counts from before the Worker starts: 60 ms lost the race to a Worker starting under a busy full run
+      // (otto/mamoru#313). 1.5 s still ends long before the job's 5 s, so the timeout is what ends it.
+      { heartbeat, intervalMs: 500, budgetMs: 1_500, onRunsProduced: (runs) => seen.push(...runs) },
     )
     expect(outcome).toEqual({ timedOut: true })
     expect(seen).toEqual([{ resultHash: 'survives-timeout' }])
