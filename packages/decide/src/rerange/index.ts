@@ -139,29 +139,43 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal(outside ? 'out' : near ? 'edge' : 'widen') }
 }
 
+/** A live session named `grant`: enabled, not expired, uses left (as allocate's). */
+function liveSession(obs: Observation, grant: string): boolean {
+  return obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
+}
+
+/** otto/mamoru#220: merges per pool in 7 days. Two settle any pool (the further one, then an old one a fresh mint outdid). */
+export const MERGES_PER_WEEK = 2
+
 /**
- * otto/mamoru#220: one position per pool. Where the account holds more than one live position in a pool, the one
- * furthest from the range a new entry would get now is closed (ties: the newer tokenId), one per review and after the
- * re-range cooldown. Its money goes back in through the entry: into the position that stays when it is close enough
- * (#171), else into a fresh one, which is then the closest and stays. Not counted toward the weekly cap. Only where
- * the policy can add to a held position (spec 007 `increase`): without it every top-up is a new NFT, and a merge would
- * close one review after review.
+ * otto/mamoru#220: one position per pool. Where the account holds more than one live position in a pool, all of them
+ * in range, the one furthest from the range a new entry would get now is closed (ties: the newer tokenId), one per
+ * review, after the re-range cooldown and at most MERGES_PER_WEEK times a week per pool (not counted toward the
+ * re-range cap). Its money goes back in through the entry: into the position that stays when it is close enough
+ * (#171), else into a fresh one, which is then the closest and stays. A position out of range is the re-range rule's,
+ * with its wait. Only where the policy can add to a held position (spec 007 `increase`): without it every top-up is a
+ * new NFT, and a merge would close one review after review. Pools in `skip` (depegged, frozen by a fall, under a staged
+ * exit) are left as they are.
  */
 export function mergeOf(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>, skip?: ReadonlySet<string>): RerangeProposal | null {
   if (!hasManageAny(policy)) return null
   const last = obs.lastRerangeAt ?? null
   if (last !== null && obs.block.timestamp - last < BigInt(policy.range.cooldownSeconds)) return null
+  const since = obs.block.timestamp - WEEK
   for (const pool of obs.pools) {
     if (!policyPools.has(pool.name) || skip?.has(pool.name) || !hasIncrease(policy, pool.name)) continue
     // A bucket at preference 0 is being left: `reduce` empties it.
     if (policy.buckets.find((b) => b.pools.includes(pool.name as never))?.preference === 0) continue
+    const grant = anyKey(policy, 'manage-any', pool.name)
+    if (!liveSession(obs, grant)) continue
     const live = obs.positions.filter((p) => p.pool === pool.name && p.liquidity > 0n && isManaged(p, policy, policyPools))
-    if (live.length < 2) continue
+    if (live.length < 2 || live.some((p) => pool.tick < p.tickLower || pool.tick >= p.tickUpper)) continue
+    if ((obs.recentReranges ?? []).filter((r) => r.pool === pool.name && r.at > since && r.merge).length >= MERGES_PER_WEEK) continue
     const fresh = rangeFor(obs, policy, pool)
     const distance = (p: PositionObs) => Math.abs(p.tickLower - fresh.tickLower) + Math.abs(p.tickUpper - fresh.tickUpper)
     let far = live[0]!
     for (const p of live.slice(1)) if (distance(p) > distance(far) || (distance(p) === distance(far) && p.tokenId > far.tokenId)) far = p
-    return { kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: far.tokenId, liquidity: far.liquidity, why: 'merge', tickLower: far.tickLower, tickUpper: far.tickUpper }
+    return { kind: 'rerange', grant, pool: pool.name, tokenId: far.tokenId, liquidity: far.liquidity, why: 'merge', tickLower: far.tickLower, tickUpper: far.tickUpper }
   }
   return null
 }

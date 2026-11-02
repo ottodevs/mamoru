@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV2, conservadorLiveV4, conservadorLiveV5, grantKey, type PolicyVersion } from '@mamoru/policy'
 import { address, entry, baseRegistry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { decide, mergeOf, rangeFor, type Observation, type PoolObs, type PositionObs, type SessionObs } from './index.ts'
+import { decide, mergeOf, MERGES_PER_WEEK, rangeFor, type Observation, type PoolObs, type PositionObs, type SessionObs } from './index.ts'
 
 // otto/mamoru#220: one position per pool. c23e94e1 held two NFTs per pool from before #171 (WETH 6291301+6291328 on
 // the same range, cbBTC 6291323+6351872 on two ranges).
@@ -86,6 +86,28 @@ describe('one position per pool (otto/mamoru#220)', () => {
 
   test('a policy that cannot add to a held position (v2, v4) keeps both: every top-up there is a new NFT', () => {
     for (const p of [conservadorLiveV2, conservadorLiveV4]) expect(mergeOf(obs([held(3n, 60), held(4n)], { sessions: sessions(p) }), p, new Set([RISK]))).toBeNull()
+  })
+
+  test('review r1: no live manage-any session, no merge (it would only starve reduce)', () => {
+    const pools = new Set([RISK])
+    const dead = sessions(LIVE).map((s) => (s.grant === `manage-any:${RISK}` ? { ...s, active: false } : s))
+    expect(mergeOf(obs([held(3n, 60), held(4n)], { sessions: dead }), LIVE, pools)).toBeNull()
+    const expired = sessions(LIVE).map((s) => (s.grant === `manage-any:${RISK}` ? { ...s, validUntil: 1 } : s))
+    expect(mergeOf(obs([held(3n, 60), held(4n)], { sessions: expired }), LIVE, pools)).toBeNull()
+  })
+
+  test('review r1: a position out of range is the re-range rule\'s, with its wait; no merge closes it early', () => {
+    const out = held(3n, 4_000)
+    expect(mergeOf(obs([out, held(4n)]), LIVE, new Set([RISK]))).toBeNull()
+  })
+
+  test('review r1: at most MERGES_PER_WEEK merges a pool in 7 days', () => {
+    const pools = new Set([RISK])
+    const two = Array.from({ length: MERGES_PER_WEEK }, (_, i) => ({ pool: RISK, at: 10_000n + BigInt(i), merge: true as const }))
+    expect(mergeOf(obs([held(3n, 60), held(4n)], { recentReranges: two }), LIVE, pools)).toBeNull()
+    expect(mergeOf(obs([held(3n, 60), held(4n)], { recentReranges: two.slice(1) }), LIVE, pools)).toMatchObject({ tokenId: 3n })
+    // Re-ranges do not use up merges, and merges older than a week do not count.
+    expect(mergeOf(obs([held(3n, 60), held(4n)], { recentReranges: [{ pool: RISK, at: 10_000n }, { pool: RISK, at: 10_001n }] }), LIVE, pools)).toMatchObject({ tokenId: 3n })
   })
 
   test('the re-range cooldown holds a merge', () => {
