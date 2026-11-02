@@ -24,11 +24,15 @@ remappings = [
 # MamoruActionPolicyV3 (#116 T1) is V2 plus the ERC-4626 and CCTP families: at 1,000 runs it is 26,144 bytes, at 200
 # runs (viaIR) 24,491, 85 under EIP-170 (1 run saves only 6 more). Verify it with solc 0.8.28, cancun, 200 runs, viaIR.
 # Any further runtime addition to V3 needs a split (e.g. the vault and bridge checks in their own contract).
+# MamoruActionPolicyV4 (#292, spec 010) and the contracts it creates (MamoruV4Helper, MamoruGasPolicyV2,
+# MamoruRemoteInit): viaIR (stack depth), 200 runs. Verify them the same way: solc 0.8.28, cancun, 200 runs, viaIR.
 additional_compiler_profiles = [
   { name = "v2", optimizer_runs = 1000, via_ir = true },
   { name = "v3", optimizer_runs = 200, via_ir = true },
+  { name = "v4", optimizer_runs = 200, via_ir = true },
 ]
 compilation_restrictions = [
   { paths = "src/MamoruActionPolicyV2.sol", optimizer_runs = 1000, via_ir = true },
   { paths = "src/MamoruActionPolicyV3.sol", optimizer_runs = 200, via_ir = true },
+  { paths = "src/MamoruActionPolicyV4.sol", optimizer_runs = 200, via_ir = true },
 ]
