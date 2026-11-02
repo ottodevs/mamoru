@@ -86,11 +86,10 @@ policy on Base can reason about what lives at an address on Monad. Constants:
      initializer, so a rotated or removed key is not carried over (r2 P0).
    - **A salt** of `keccak(account, domain, ownersHash)`.
    - **V4's own canonical initializer.** It is a plain Safe setup (owners, threshold, the shared-signer
-     `configure`) plus the 7579 adapter and the SmartSession, installed **with no ERC-7484 registry and no
-     attesters**. Deployment therefore depends on no external state that can change after a mint: anyone can
+     `configure`) plus the 7579 adapter and the SmartSession, installed with the account's **own self-attestation** as the only trusted attester (the production enable flow,
+     T1). No third party can revoke it, so deployment depends on nothing that can change after a mint: anyone can
      deploy the address at any time through the permissionless factory, and the result is always the user's Safe
-     (r2 P0). T1 verifies that the launchpad accepts an empty registry. If it does not, the session is enabled by
-     a second relayed call after deployment, and the Safe owns the funds either way.
+     (r2 P0). T4 tests deploy-after-mint on a fork.
 
    V4 stores `ownersHash` with the remote and refuses every burn while the account's current owners hash differs.
    `registerRemote` may then compute a new remote. The old remote's own V4 sends its funds back only to the home
@@ -219,7 +218,7 @@ bounds that do not end the authorization.
 
 | # | Finding | r3 |
 |---|---|---|
-| P0-1 | Funds can be minted to a remote Safe that cannot be deployed: the ERC-7484 attestation is checked at setup | The canonical initializer has no ERC-7484 registry and no attesters, so deployment depends on nothing external; T1 verifies this (I4). |
+| P0-1 | Funds can be minted to a remote Safe that cannot be deployed: the ERC-7484 attestation is checked at setup | The canonical initializer trusts only the remote Safe's own self-attestation (as in production, T1), so no third party can make it undeployable; T4 tests deploy-after-mint (I4). |
 | P0-2 | Rebuilding the address from the original keys can restore a revoked owner | The owners and the passkey are read from the account's *current* state; burns stop when they change; the old remote returns funds home (I4). |
 | P1-3 | A registry-chosen router or NPM can take approved assets | A per-chain tuple pinned in V4: factory, NPM, router, stables, assets. |
 | P1-4 | An admin-chosen "stable" makes the loss bound meaningless | Tokens are pinned in V4; the registry chooses pools only among them. |
