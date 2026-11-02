@@ -1,6 +1,7 @@
 import type { AccountContext, Address } from '@mamoru/domain'
 import { getAddress } from 'viem'
 import { operatorSignature } from './server.ts'
+import type { ReleaseView } from './release.ts'
 
 /** What the remote operator answers a provision with: the Safe runs (`active`), or it is not provisioned yet and why. */
 export type RemoteProvision = { state: 'active'; address: Address } | { state: 'pending'; code: string }
@@ -12,6 +13,7 @@ export type RemoteProvision = { state: 'active'; address: Address } | { state: '
  * the Worker, and rebuilds every address from the keys in the context.
  * - `key`: the session key the remote operator signs that Safe's userOps with (generated there once, never sent here).
  * - `provision`: deploy that Safe if it has no code, check it on chain, and run it. Idempotent.
+ * - `release` / `releaseStatus` (#278): send savings of that Safe home, one request one burn.
  */
 export class RemotePeer {
   constructor(
@@ -66,5 +68,27 @@ export class RemotePeer {
       throw Object.assign(new Error(`remote operator of chain ${this.chainId}: ${status}`), { status, code: typeof b?.code === 'string' ? b.code : `HTTP_${status}`, error: typeof b?.error === 'string' ? b.error : '' })
     }
     return res
+  }
+
+  /**
+   * otto/mamoru#278: ask the peer to send `amount` (raw savings units) of the remote Safe of `remote` home, under the
+   * request id `id` (the same id again is the same request), or read where that request is. HTTP errors are thrown with
+   * their code (RELEASE_OPEN, NOT_A_REMOTE, ...).
+   */
+  async release(remote: AccountContext, id: string, amount: bigint): Promise<ReleaseView> {
+    return this.releaseCall(remote, 'release', { id, amount: amount.toString() })
+  }
+
+  async releaseStatus(remote: AccountContext): Promise<ReleaseView> {
+    return this.releaseCall(remote, 'release/status', {})
+  }
+
+  private async releaseCall(remote: AccountContext, route: string, payload: unknown): Promise<ReleaseView> {
+    const { status, body } = await this.post(remote, route, payload)
+    if (status !== 200) {
+      const b = body as { code?: unknown } | null
+      throw Object.assign(new Error(`remote operator of chain ${this.chainId}: ${route} ${status}`), { status, code: typeof b?.code === 'string' ? b.code : `HTTP_${status}` })
+    }
+    return body as ReleaseView
   }
 }

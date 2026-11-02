@@ -247,3 +247,36 @@ describe('provision (Monad side)', () => {
     expect(m.started).toEqual([m.rctx.accountKey])
   })
 })
+
+describe('release (Monad side, otto/mamoru#278)', () => {
+  const HOME = ctx.address
+  const rctx = (address: string): AccountContext => ({ accountKey: 'r-v4', chainId: 143, address: address as Address, owners: ctx.owners, saltNonce: ctx.saltNonce, passkey: ctx.passkey, remote: { chainId: 143, policyId: 'one-auth-v4-remote', sessionKey: `0x${'11'.repeat(20)}`, validAfter: 0, validUntil: 0, capUsdc: '1000', home: HOME, homeDomain: 6 } })
+  const SAFE = `0x${'c4'.repeat(20)}`
+  const running = (m: ReturnType<typeof monadWorld>, over: Partial<AccountState> = {}) => {
+    m.state.accounts['r-v4'] = { accountKey: 'r-v4', ctx: rctx(SAFE), policyId: 'one-auth-v4-remote', active: true, ops: [], grants: [], managedTokenIds: [], ...over } as unknown as AccountState
+  }
+
+  test('a running V4 remote takes a request, saves it, and reports it', async () => {
+    const m = monadWorld()
+    running(m)
+    const saves = m.saves()
+    expect(await m.op.requestRelease(rctx(SAFE), { id: 'r1', amount: '2500000' })).toMatchObject({ id: 'r1', state: 'open', chainId: 8453 })
+    expect(m.saves()).toBeGreaterThan(saves)
+    expect(m.op.releaseStatus(rctx(SAFE))).toMatchObject({ id: 'r1', state: 'open' })
+    expect(await code(m.op.requestRelease(rctx(SAFE), { id: 'r2', amount: '1' }))).toEqual({ status: 409, code: 'RELEASE_OPEN' })
+    expect(await code(m.op.requestRelease(rctx(SAFE), { id: 'r3', amount: 'x' }))).toEqual({ status: 400, code: 'BAD_REQUEST' })
+  })
+
+  test('refused: no such account, not running, not a V4 remote, another address, a bad body', async () => {
+    const m = monadWorld()
+    expect(await code(m.op.requestRelease(rctx(SAFE), { id: 'r1', amount: '1' }))).toEqual({ status: 404, code: 'NOT_A_REMOTE' })
+    running(m, { active: false })
+    expect(await code(m.op.requestRelease(rctx(SAFE), { id: 'r1', amount: '1' }))).toEqual({ status: 404, code: 'NOT_A_REMOTE' })
+    running(m, { policyId: liveWmonUsdcMonadV6.policyId })
+    expect(await code(m.op.requestRelease(rctx(SAFE), { id: 'r1', amount: '1' }))).toEqual({ status: 404, code: 'NOT_A_REMOTE' })
+    running(m)
+    expect(await code(m.op.requestRelease(rctx(`0x${'d5'.repeat(20)}`), { id: 'r1', amount: '1' }))).toEqual({ status: 404, code: 'NOT_A_REMOTE' })
+    expect(await code(m.op.requestRelease(rctx(SAFE), { id: 'r1', amount: '0' }))).toEqual({ status: 400, code: 'BAD_REQUEST' })
+    expect(m.op.releaseStatus(rctx(SAFE))).toEqual({ state: 'none' })
+  })
+})

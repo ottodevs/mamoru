@@ -290,6 +290,11 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
           return json(200, await op.submitMigrateV4(ctx, parse()))
         case 'POST migrate-v4/status':
           return json(200, op.migrateV4Status(ctx))
+        // otto/mamoru#278: a V4 remote Safe's return home, asked by its home account's operator.
+        case 'POST release':
+          return json(200, await op.requestRelease(ctx, parse()))
+        case 'POST release/status':
+          return json(200, op.releaseStatus(ctx))
         // otto/mamoru#293: an account created on V4 (setup mode): its session key before it exists, then its start.
         case 'POST one-auth-key':
           return json(200, await op.oneAuthKey(ctx))

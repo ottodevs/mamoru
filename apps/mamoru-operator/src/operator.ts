@@ -34,6 +34,7 @@ import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
 import { buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
+import { beforeSign as releaseBeforeSign, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
 import { baseStepLines, monadStepLines, readRegistryPools, readV4Paused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
 import { draftUserOp, executeCallData, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
@@ -6095,6 +6096,52 @@ export class Operator {
     return this.lock(ctx.accountKey).run(() => this.provisionNow(ctx))
   }
 
+  /**
+   * otto/mamoru#278, remote side (`POST release`, from the home account's operator): send `amount` of savings home. The
+   * engine frees it and bridges it in one burn (decide's releaseOf); `POST release/status` follows it to `burned`.
+   * Refused: no running V4 remote Safe of this context here, a bad body, another request still open.
+   */
+  requestRelease(ctx: AccountContext, body: unknown): Promise<ReleaseView> {
+    return this.lock(ctx.accountKey).run(async () => {
+      const acc = this.releaseAccount(ctx)
+      try {
+        const v = requestRelease(acc, body, now())
+        this.store.save()
+        return v
+      } catch (e) {
+        if (e instanceof ReleaseRefused) throw new HttpError(e.status, e.code, e.message)
+        throw e
+      }
+    })
+  }
+
+  /** otto/mamoru#278: where the release of this remote Safe is (`none` when there was never one). */
+  releaseStatus(ctx: AccountContext): ReleaseView {
+    const acc = this.releaseAccount(ctx)
+    const before = JSON.stringify(acc.release ?? null)
+    const v = releaseView(acc, now())
+    if (JSON.stringify(acc.release ?? null) !== before) this.store.save()
+    return v
+  }
+
+  private releaseAccount(ctx: AccountContext): AccountState {
+    const acc = this.store.state.accounts[ctx.accountKey]
+    if (!acc || acc.policyId !== ONE_AUTH_V4_REMOTE || !acc.active || acc.ctx.address.toLowerCase() !== ctx.address.toLowerCase() || !releaseHomeOf(acc)) throw new HttpError(404, 'NOT_A_REMOTE', 'no running V4 remote Safe of this account here')
+    return acc
+  }
+
+  /** The engine's beforeBridgeSign on a V4 remote Safe: the burn is on disk before it is signed, or it is not signed. */
+  private releaseSigning(acc: AccountState, b: BridgeSigning): void {
+    const before = acc.release ? { ...acc.release, ...(acc.release.burn ? { burn: { ...acc.release.burn } } : {}) } : undefined
+    releaseBeforeSign(acc, b, now())
+    try {
+      this.store.save()
+    } catch (e) {
+      acc.release = before
+      throw e
+    }
+  }
+
   private async provisionNow(ctx: AccountContext): Promise<{ state: 'active'; address: Address }> {
     const spec = ctx.remote
     if (!spec || spec.chainId !== this.cfg.chainId) throw new HttpError(400, 'BAD_REQUEST', 'not a remote Safe of this chain')
@@ -6219,6 +6266,8 @@ export class Operator {
         // otto/mamoru#293: the registry the V4 policy's pools resolve in (the chain's, plus MamoruRegistry's pools), and the
         // remote V4 mints to once the guardian marked it ready (the bridge's only recipient).
         ...(v4 ? { registry: v4.registry, v4BridgeRecipient: () => (acc.oneAuth?.remote?.ready ? (acc.oneAuth.remote.address as Address) : undefined) } : {}),
+        // otto/mamoru#278: a V4 remote Safe bridges only home (V4 pins it on chain), and only for its home's open release.
+        ...(v4 && acc.policyId === ONE_AUTH_V4_REMOTE ? { v4BridgeRecipient: () => releaseHomeOf(acc)?.home, release: () => releaseObs(acc, now()) } : {}),
         // The only owner intent the operator has today: a stop on its way pauses the engine (US6).
         // otto/mamoru#293 (review of #202 r2, Opus 2): also while a migration is prepared or not settled, so the positions it
         // admits and the balances it moves are the ones it was built on.
@@ -6266,6 +6315,8 @@ export class Operator {
         mintAllowed: () => mintAllowed(acc.admittedTokenIds),
         // otto/mamoru#215: a bridge-out is on disk in the bridge journal before it is signed; without one it is never signed.
         ...(this.cfg.bridgeMonad ? { beforeBridgeSign: (b: BridgeSigning) => this.cfg.bridgeMonad!.recordSending(acc.accountKey, b), bridgeUnsigned: (h: Hex) => this.cfg.bridgeMonad!.discardUnsigned(h), bridgeFailed: (_opId: string, code: string) => this.cfg.bridgeMonad!.bridgeFailed(acc.accountKey, code) } : {}),
+        // otto/mamoru#278: a V4 remote Safe's return home is on disk as its release's burn before it is signed.
+        ...(acc.policyId === ONE_AUTH_V4_REMOTE ? { beforeBridgeSign: (b: BridgeSigning) => this.releaseSigning(acc, b), bridgeUnsigned: (h: Hex) => void (releaseUnsigned(acc, h, now()) && this.store.save()) } : {}),
       },
     )
     // The journal of a restarted engine is empty: the block of the last operation stored for the account stands in

@@ -8,6 +8,7 @@ import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { SponsorEntry } from './sponsorship.ts'
 import type { OpFacts } from './yield-receipts.ts'
 import type { OneAuthState } from './one-auth.ts'
+import type { ReleaseState } from './release.ts'
 
 /** An op as GET /ops serves it, plus what the operator keeps: repeat count of an identical failure, and for a confirmed engine op the session and calls it used (ledger replay on restart). */
 export type StoredOp = OpView & {
@@ -182,6 +183,8 @@ export type AccountState = {
   remote?: RemoteSafeRecord
   /** otto/mamoru#293: the account's move to MamoruActionPolicyV4 (inventory, the remote V4 registered). Absent: never offered. */
   oneAuth?: OneAuthState
+  /** otto/mamoru#278: on a V4 remote Safe, the return home its home account asked for (release.ts). */
+  release?: ReleaseState
 }
 
 export type RemoteSafeRecord = { chainId: number; address: Hex; spec: RemoteSpec; permissionIds: Hex[]; ready?: boolean; lastCode?: string; checkedAt?: string }
