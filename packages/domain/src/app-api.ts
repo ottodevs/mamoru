@@ -349,6 +349,28 @@ export type OwnerTxToSign = {
   // otto/mamoru#295 (migrate-v4): the Safe transaction itself, so the Worker can recompute `safeTxHash` from it, check the Safe
   // and the destination, and read the calldata before the owner is asked to sign. Bigints as decimal strings.
   safeTx?: { to: Hex0x; value: string; data: Hex0x; operation: 0 | 1; safeTxGas: string; baseGas: string; gasPrice: string; gasToken: Hex0x; refundReceiver: Hex0x; nonce: string }
+  // otto/mamoru#293 (migrate-v4): the exact input `buildMigrateV4` built `safeTx` from.
+  input?: MigrateV4Input
+}
+// otto/mamoru#293 x #295: every input of a migrate-v4 Safe tx, explicit and JSON-safe (integers as decimal strings). The
+// operator builds what it prepares with `buildMigrateV4` (packages/account/one-auth) and returns this as `input`; the
+// Worker rebuilds the tx from it with the same function and compares hashes.
+export type MigrateV4Input = {
+  chainId: number
+  safe: Hex0x
+  safeNonce: string
+  step: 0 | 1
+  capUsdc: string
+  sessionKey: Hex0x
+  generation: string
+  admit: string[]
+  oldPermissionIds: Hex0x[]
+  removeIds: Hex0x[]
+  noncesBefore: string[]
+  home: Hex0x
+  homeDomain: number
+  moveTo?: Hex0x
+  transfers?: { token: Hex0x; amount: string }[]
 }
 // WebAuthn assertion for SafeWebAuthnSharedSigner (base64url fields as returned by the browser).
 export type OwnerSignature = {

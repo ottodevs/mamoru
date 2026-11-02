@@ -11,7 +11,7 @@ import { address, baseRegistry, monadRegistry, type Registry } from '@mamoru/reg
 import { grantKey, ONE_AUTH_V4_REMOTE, type OneAuthV4Deployment } from '@mamoru/policy'
 import { ownerSafeTx } from '@mamoru/account/live'
 import { safeTxTypedData } from '@mamoru/account/safe'
-import { migrationTx, v4Session, V4_REMOTE_SESSION_SALT } from '@mamoru/account/one-auth'
+import { buildMigrateV4, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { v4RemoteFromSpec } from '@mamoru/account/remote'
 import { checkMigrateTx } from '../../mamoru-app/src/api/migrate-check.ts'
 import type { AccountRow } from '../../mamoru-app/src/api/accounts/store.ts'
@@ -28,16 +28,18 @@ const v6 = resolveV6Policy('base', { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTIO
 
 const row = (chainId: number, addr: string): AccountRow => ({ account_key: chainId === 8453 ? 'k' : 'k@143', user_id: 'u', chain_id: chainId, address: addr as never, owners_json: JSON.stringify(ctx.owners), passkey_credential_id: ctx.passkey.credentialId, passkey_x: ctx.passkey.x, passkey_y: ctx.passkey.y, salt_nonce: ctx.saltNonce, preset: 'conservador', policy_version: 'x', recovery_ack_at: null, created_at: '', env: 'prod', is_test: 1 })
 
-/** Monad with the V4 stack pinned (what the monad.json pin does). */
-function pinnedMonad(): Registry {
+/** A registry with the V4 stack pinned (what the base.json / monad.json pin does). */
+function pinned(r: Registry): Registry {
   const names = ['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'] as const
   const at = [D.registry, D.policy, D.gasPolicy, D.migrationCheck]
-  return { ...monadRegistry, undeployed: [], entries: [...monadRegistry.entries, ...names.map((name, i) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: at[i]!, codeHash: null }) as never)] }
+  return { ...r, undeployed: [], entries: [...r.entries, ...names.map((name, i) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: at[i]!, codeHash: null }) as never)] }
 }
+const pinnedMonad = () => pinned(monadRegistry)
+const base6 = pinned(reg6)
 
 describe("the operator's migrate-v4 prepare passes the Worker's check (#295 migrate-check.ts)", () => {
   test('step 0 (Base): the real prepare of a v6 account', async () => {
-    const w = world(0n, { registry: reg6, v6Policy: v6, oneAuth: D, opsFlags: () => ({}), opsScopedFlags: () => ({ one_auth_v4: ['k'] }) })
+    const w = world(0n, { registry: base6, v6Policy: v6, oneAuth: D, opsFlags: () => ({}), opsScopedFlags: () => ({ one_auth_v4: ['k'] }) })
     const grants = v6.session.grants.filter((g) => !g.perPosition).map((g, i) => ({ name: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(64, '0')}` as Hex, grant: { policyId: v6.policyId, userOp: { validUntil: 2_000_000_000, validAfter: 0, usageLimit: 1 } } }))
     const acc = { accountKey: 'k', ctx, active: true, trusted: true, policyId: v6.policyId, sessionKey: KEY, signedCapUsdc: '1500000000', grants, ops: [], revoked: [], managedTokenIds: [], admittedTokenIds: [], depositsAfter: '1', historyFromBlock: '1', epoch: 1, seq: 0 } as unknown as AccountState
     w.state.accounts.k = acc
@@ -51,6 +53,8 @@ describe("the operator's migrate-v4 prepare passes the Worker's check (#295 migr
     expect(tx.chainId).toBe(8453)
     expect(tx.moveTo).toBeUndefined()
     expect(tx.safeTx?.operation).toBe(1)
+    // the Worker's other path: rebuild from `input` with the same builder, the same hash
+    expect(buildMigrateV4(tx.input!, base6).safeTxHash).toBe(tx.safeTxHash)
     expect(() => checkMigrateTx({ tx, step: 0, rows: [row(8453, ctx.address)] })).not.toThrow()
     // and the check would refuse it on the wrong step, or with a field changed
     expect(() => checkMigrateTx({ tx, step: 1, rows: [row(8453, ctx.address)] })).toThrow()
@@ -64,19 +68,11 @@ describe("the operator's migrate-v4 prepare passes the Worker's check (#295 migr
     const spec: RemoteSpec = { chainId: 143, policyId: ONE_AUTH_V4_REMOTE, sessionKey, validAfter: 0, validUntil: 0, capUsdc: capUsd.toString(), home: ctx.address, homeDomain: 6 }
     const target = v4RemoteFromSpec(ctx, spec, monad)
     const old = '0x0000000000000000000000000000000000000ce1' as const
-    const session = v4Session({ sessionKey, deployment: D, init: { capUsd, generation: 1n, home: ctx.address, homeDomain: 6, admit: [] }, salt: V4_REMOTE_SESSION_SALT, registry: monad })
-    const moves = (['USDC', 'WMON'] as const).map((t) => ({ to: address(t, monad), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [target.address, 5n] }) }))
     const ids = [`0x${'01'.padStart(64, '0')}`] as Hex[]
-    const m = migrationTx({ account: old, remove: ids, revoke: ids, noncesBefore: [0n], session, deployment: D, attestData: '0x01', extra: moves, registry: monad })
-    const safeTx = ownerSafeTx(m.calls, 0n, monad)
-    const safeTxHash = hashTypedData(safeTxTypedData(old, 143, safeTx))
-    const moveTo = movedTo(m.calls)!
-    expect(moveTo.toLowerCase()).toBe(target.address.toLowerCase())
-    const tx: OwnerTxToSign = {
-      safe: old, chainId: 143, safeTxHash, summary: [], expiresAt: '', prepareId: 'p', step: 1, moveTo,
-      remote: { chainId: 143, address: moveTo, spec },
-      safeTx: { to: safeTx.to, value: '0', data: safeTx.data, operation: safeTx.operation, safeTxGas: '0', baseGas: '0', gasPrice: '0', gasToken: '0x0000000000000000000000000000000000000000', refundReceiver: '0x0000000000000000000000000000000000000000', nonce: '0' },
-    }
+    const input: MigrateV4Input = { chainId: 143, safe: old, safeNonce: '0', step: 1, capUsdc: capUsd.toString(), sessionKey, generation: '1', admit: [], oldPermissionIds: ids, removeIds: ids, noncesBefore: ['0'], home: ctx.address, homeDomain: 6, moveTo: target.address, transfers: (['USDC', 'WMON'] as const).map((t) => ({ token: address(t, monad), amount: '5' })) }
+    const built = buildMigrateV4(input, monad)
+    expect(movedTo(built.calls)!.toLowerCase()).toBe(target.address.toLowerCase())
+    const tx: OwnerTxToSign = { safe: old, chainId: 143, safeTxHash: built.safeTxHash, summary: [], expiresAt: '', prepareId: 'p', step: 1, moveTo: target.address, remote: { chainId: 143, address: target.address, spec }, safeTx: built.safeTx, input }
     const rows = [row(8453, ctx.address), row(143, old)]
     expect(() => checkMigrateTx({ tx, step: 1, rows, registryOf: () => monad })).not.toThrow()
     // a destination other than the owner's own V4 Safe there is refused

@@ -10,12 +10,12 @@
 //    enumeration and the operator's records; any disagreement fails closed.
 // Owner signatures stay Safe transaction hashes only (SECURITY.md: Mamoru never asks the passkey to sign a SmartSession
 // ENABLE payload; packages/account/sessions/no-enable-mode.test.ts).
-import { concat, encodeAbiParameters, encodeFunctionData, encodePacked, getAddress, getContractAddress, isAddressEqual, keccak256, pad, parseAbi, parseAbiItem, size, toHex, zeroAddress, type Hex, type PublicClient } from 'viem'
-import type { Address } from '@mamoru/domain'
+import { concat, encodeAbiParameters, encodeFunctionData, encodePacked, getAddress, getContractAddress, hashTypedData, isAddressEqual, keccak256, pad, parseAbi, parseAbiItem, size, toHex, zeroAddress, type Hex, type PublicClient } from 'viem'
+import type { Address, MigrateV4Input } from '@mamoru/domain'
 import { address, moduleRegistryAbi, multiSendCallOnlyAbi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi, smartSessionAbi, type Registry } from '@mamoru/registry'
-import { encodeGasCapsV2, encodeInitV4, GAS_CAPS_V2_BY_CHAIN, V4_CHAIN_BY_DOMAIN, type GasCapsV2, type InitV4, type OneAuthV4Deployment } from '@mamoru/policy'
+import { encodeGasCapsV2, encodeInitV4, GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment, V4_CHAIN_BY_DOMAIN, type GasCapsV2, type InitV4, type OneAuthV4Deployment } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress, SAFE_PROXY_141_CREATION_CODE } from '../recovery/index.ts'
-import { multiSendCallOnly, OPERATION_DELEGATECALL, type MultiSendCall, type SafeSetup, type WebAuthnSigner } from '../safe/index.ts'
+import { multiSendCallOnly, OPERATION_DELEGATECALL, safeTxTypedData, type MultiSendCall, type SafeSetup, type WebAuthnSigner } from '../safe/index.ts'
 import { ATTESTATION_SCHEMA_UID, ownableValidatorInitData, permissionIdOf, type SmartSessionStruct } from '../sessions/index.ts'
 
 /** SmartSession FALLBACK_TARGET_FLAG / FALLBACK_TARGET_SELECTOR_FLAG (MamoruV4Helper.FALLBACK_TARGET/_SELECTOR). */
@@ -101,6 +101,7 @@ export const mamoruRegistryAbi = parseAbi([
 
 const SESSIONS_PARAM = smartSessionAbi.find((f) => f.type === 'function' && f.name === 'enableSessions')!.inputs
 const remoteInitAbi = parseAbi(['function init(bytes sessions)'])
+const erc20TransferAbi = parseAbi(['function transfer(address to, uint256 amount) returns (bool)'])
 
 // ---- the session ------------------------------------------------------------------------------------------------
 
@@ -357,4 +358,56 @@ export async function readSessionState(client: PublicClient, registry: Registry,
   const enabled = (await client.readContract({ address: smart, abi: smartSessionV4Abi, functionName: 'getPermissionIDs', args: [account], blockNumber })) as Hex[]
   const nonces = await Promise.all(ids.map((id) => client.readContract({ address: smart, abi: smartSessionV4Abi, functionName: 'getNonce', args: [id, account], blockNumber }) as Promise<bigint>))
   return { enabled: enabled.map((x) => x.toLowerCase() as Hex), nonces }
+}
+
+// ---- the one builder the operator prepares with and the Worker rebuilds with (#293 x #295) -----------------------
+
+/**
+ * Everything a migrate-v4 Safe transaction depends on, explicit and JSON-safe (integers as decimal strings). The operator
+ * returns it with its prepare; the Worker rebuilds the transaction from it (`buildMigrateV4`) and compares hashes.
+ * - `removeIds`: the old ids still enabled (removeSession each); `oldPermissionIds`: every old id known (revokeEnableSignature
+ *   each, and assertMigrated's `old`), with `noncesBefore[i]` = SmartSession.getNonce(oldPermissionIds[i], safe) read when built.
+ * - step 0 (home): `home` the zero address, `homeDomain` 0. Step 1 (a design-C Safe on Monad): `home` the Base account,
+ *   `homeDomain` 6, and the funds it moves: `transfers` (ERC-20 `transfer` of `amount` of `token`) to `moveTo`.
+ */
+export type { MigrateV4Input } from '@mamoru/domain'
+
+/** The Safe tx on the wire (OwnerTxToSign.safeTx): refund fields zero, gas token the zero address. */
+export type WireSafeTx = { to: Address; value: string; data: Hex; operation: 0 | 1; safeTxGas: string; baseGas: string; gasPrice: string; gasToken: Address; refundReceiver: Address; nonce: string }
+
+const ZERO: Address = '0x0000000000000000000000000000000000000000'
+const dec = (s: string, what: string): bigint => {
+  if (!/^[0-9]+$/.test(s)) throw new Error(`buildMigrateV4: ${what} is not a decimal integer`)
+  return BigInt(s)
+}
+
+/**
+ * The migrate-v4 Safe transaction of `input`, deterministic: the same input gives the same bytes and hash on any machine.
+ * Every contract comes from `registry` (by default the chain's pinned registry json): MamoruActionPolicyV4,
+ * MamoruGasPolicyV2, MamoruMigrationCheck, MultiSendCallOnly_141, SmartSession, ModuleRegistry, RhinestoneAttester,
+ * OwnableValidator. The self-attestation's data is derived from (safe, safeNonce), so it is unique per Safe nonce.
+ * Throws on any inconsistent input (it never builds something the operator would not prepare).
+ */
+export function buildMigrateV4(input: MigrateV4Input, registry: Registry): { safeTx: WireSafeTx; safeTxHash: Hex; calls: MultiSendCall[]; permissionId: Hex } {
+  if (registry.chainId !== input.chainId) throw new Error(`buildMigrateV4: registry of chain ${registry.chainId}, input on ${input.chainId}`)
+  const deployment = oneAuthV4Deployment(registry)
+  if (!deployment) throw new Error(`buildMigrateV4: the V4 stack is not pinned on chain ${input.chainId}`)
+  const remote = BigInt(input.home) !== 0n
+  if (input.step === 0 && (remote || input.homeDomain !== 0 || input.moveTo || input.transfers?.length)) throw new Error('buildMigrateV4: step 0 is the home account: no home, no funds moved')
+  if (input.step === 1 && (!remote || !V4_CHAIN_BY_DOMAIN[input.homeDomain] || V4_CHAIN_BY_DOMAIN[input.homeDomain] === input.chainId)) throw new Error('buildMigrateV4: step 1 names its home on another chain')
+  if (!!input.transfers?.length !== !!input.moveTo) throw new Error('buildMigrateV4: transfers and moveTo go together')
+  if (input.oldPermissionIds.length !== input.noncesBefore.length) throw new Error('buildMigrateV4: one nonce per old id')
+  const safe = getAddress(input.safe)
+  const init = { capUsd: dec(input.capUsdc, 'capUsdc'), generation: dec(input.generation, 'generation'), home: getAddress(input.home), homeDomain: input.homeDomain, admit: input.admit.map((a) => dec(a, 'admit')) }
+  const session = v4Session({ sessionKey: getAddress(input.sessionKey), deployment, init, salt: remote ? V4_REMOTE_SESSION_SALT : v4HomeSessionSalt(init.generation), registry })
+  const extra = (input.transfers ?? []).map((t) => {
+    if (!registry.entries.some((e) => e.kind === 'token' && isAddressEqual(e.address, t.token))) throw new Error(`buildMigrateV4: ${t.token} is not a token of the ${registry.chain} registry`)
+    return { to: getAddress(t.token), value: 0n, data: encodeFunctionData({ abi: erc20TransferAbi, functionName: 'transfer', args: [getAddress(input.moveTo!), dec(t.amount, 'amount')] }) }
+  })
+  const nonce = dec(input.safeNonce, 'safeNonce')
+  const attestData = keccak256(encodeAbiParameters([{ type: 'string' }, { type: 'address' }, { type: 'uint256' }], ['mamoru.v4.attest', safe, nonce]))
+  const tx = migrationTx({ account: safe, remove: input.removeIds, revoke: input.oldPermissionIds, noncesBefore: input.noncesBefore.map((n) => dec(n, 'noncesBefore')), session, deployment, attestData, extra, registry })
+  const safeTx: WireSafeTx = { to: tx.to, value: '0', data: tx.data, operation: tx.operation, safeTxGas: '0', baseGas: '0', gasPrice: '0', gasToken: ZERO, refundReceiver: ZERO, nonce: nonce.toString() }
+  const safeTxHash = hashTypedData(safeTxTypedData(safe, input.chainId, { to: tx.to, value: 0n, data: tx.data, operation: tx.operation, nonce }))
+  return { safeTx, safeTxHash, calls: tx.calls, permissionId: tx.permissionId }
 }

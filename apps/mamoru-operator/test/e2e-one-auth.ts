@@ -159,6 +159,64 @@ function der(r: bigint, s: bigint): Uint8Array {
   return Buffer.concat([Buffer.from([0x30, body.length]), body])
 }
 
+// ---- the ENABLE-payload replay (contracts/action-policy/test/V4UserOpFork.t.sol `_ownerSignedEnable`, in TypeScript) --------
+
+type Replay = { op: Parameters<typeof handleOpsData>[0][number] }
+const CHAIN_SESSION_TYPEHASH: Hex = '0x1ea7e4bc398fa0ccd68d92b5d8931a3fd93eebe1cf0391b4ba28935801af7c80'
+const MULTICHAIN_SESSION_TYPEHASH: Hex = '0x0c9d02fb89a1da34d66ea2088dc9ee6a58efee71cef6f1bb849ed74fc6003d98'
+const MULTICHAIN_DOMAIN_SEPARATOR: Hex = '0x057501e891776d1482927e5f094ae44049a4d893ba2d7b334dd7db8d38d3a0e1'
+const SAFE_MSG_TYPEHASH: Hex = '0x60b3cbf8b4a223d68d641b3b6ddf9a298e7f33710cf3d3a9d1146b5a6150fbca'
+const SESSION_TUPLE = (smartSessionAbi.find((f) => f.type === 'function' && f.name === 'enableSessions')!.inputs[0] as unknown as { components: readonly { name: string; type: string }[] }).components
+const digestAbi = parseAbi(['struct PolicyData { address policy; bytes initData; }', 'struct ERC7739Context { bytes32 appDomainSeparator; string[] contentName; }', 'struct ERC7739Data { ERC7739Context[] allowedERC7739Content; PolicyData[] erc1271Policies; }', 'struct ActionData { bytes4 actionTargetSelector; address actionTarget; PolicyData[] actionPolicies; }', 'struct Session { address sessionValidator; bytes sessionValidatorInitData; bytes32 salt; PolicyData[] userOpPolicies; ERC7739Data erc7739Policies; ActionData[] actions; bool permitERC4337Paymaster; }', 'function getSessionDigest(bytes32 permissionId, address account, Session data, uint8 mode) view returns (bytes32)', 'function domainSeparator() view returns (bytes32)'])
+
+/** SmartSession's FastLZ of literal runs only (V4UserOpFork.t.sol `_flzLiterals`): runs of at most 32 bytes. */
+function flzLiterals(data: Hex): Hex {
+  const b = Buffer.from(data.slice(2), 'hex')
+  const out: Buffer[] = []
+  for (let i = 0; i < b.length; i += 32) {
+    const n = Math.min(32, b.length - i)
+    out.push(Buffer.from([n - 1]), b.subarray(i, i + n))
+  }
+  return `0x${Buffer.concat(out).toString('hex')}`
+}
+
+/**
+ * An owner-signed SmartSession ENABLE payload for the old session `session` of `safe`, signed now over its current ENABLE
+ * nonce by the backup EOA owner (Safe ERC-1271 via Safe7579 with validator 0), and a userOp of the old session key that
+ * carries it: what a v2-v6 renewal could have produced and a holder kept unused (contracts test `_ownerSignedEnable`).
+ */
+async function enablePayload(lab: Lab, safe: Address, session: SmartSessionStruct, owner: ReturnType<typeof privateKeyToAccount>, sessionKey: ReturnType<typeof privateKeyToAccount>): Promise<Replay> {
+  const pid = permissionIdOf(session)
+  const smart = address('SmartSession', baseRegistry)
+  const digest = await lab.client.readContract({ address: smart, abi: digestAbi, functionName: 'getSessionDigest', args: [pid, safe, session as never, 1] })
+  const chainsHash = keccak256(keccak256(encodeAbiParameters([{ type: 'bytes32' }, { type: 'uint64' }, { type: 'bytes32' }], [CHAIN_SESSION_TYPEHASH, 8453n, digest])))
+  const hash = keccak256(concat(['0x1901', MULTICHAIN_DOMAIN_SEPARATOR, keccak256(encodeAbiParameters([{ type: 'bytes32' }, { type: 'bytes32' }], [MULTICHAIN_SESSION_TYPEHASH, chainsHash]))]))
+  const dom = await lab.client.readContract({ address: safe, abi: digestAbi, functionName: 'domainSeparator' })
+  const msgHash = keccak256(concat(['0x1901', dom, keccak256(encodeAbiParameters([{ type: 'bytes32' }, { type: 'bytes32' }], [SAFE_MSG_TYPEHASH, keccak256(encodeAbiParameters([{ type: 'bytes32' }], [hash]))]))]))
+  const ownerSig = await owner.sign({ hash: msgHash })
+  const a = session.actions[0]!
+  const callData = executeCallData([{ target: a.actionTarget, value: 0n, callData: concat([a.actionTargetSelector, pad('0x00', { size: 64 })]) }])
+  const nonce = await lab.entryPointNonce(safe, sessionNonceKey(9))
+  let op = draftUserOp(safe, nonce, callData, { verificationGasLimit: 3_000_000n, callGasLimit: 2_000_000n, preVerificationGas: 100_000n, maxFeePerGas: 100_000_000n, maxPriorityFeePerGas: 1_000_000n })
+  const keySig = await sessionKeySignature(sessionKey, userOpHash(op, 8453))
+  const enable = encodeAbiParameters(
+    [{ type: 'tuple', components: [{ name: 'chainDigestIndex', type: 'uint8' }, { name: 'hashesAndChainIds', type: 'tuple[]', components: [{ name: 'chainId', type: 'uint64' }, { name: 'sessionDigest', type: 'bytes32' }] }, { name: 'sessionToEnable', type: 'tuple', components: SESSION_TUPLE }, { name: 'permissionEnableSig', type: 'bytes' }] }, { type: 'bytes' }],
+    [{ chainDigestIndex: 0, hashesAndChainIds: [{ chainId: 8453n, sessionDigest: digest }], sessionToEnable: session as never, permissionEnableSig: concat(['0x0000000000000000000000000000000000000000', ownerSig]) }, keySig],
+  )
+  op = { ...op, signature: concat(['0x01', flzLiterals(enable)]) }
+  return { op }
+}
+
+/** Whether the EntryPoint would include the payload's userOp (an eth_call of handleOps). */
+async function sendEnable(lab: Lab, r: Replay, from: Address): Promise<boolean> {
+  try {
+    await lab.client.call({ account: from, to: address('EntryPointV07', baseRegistry), data: handleOpsData([r.op], from) })
+    return true
+  } catch {
+    return false
+  }
+}
+
 const stops: (() => void | Promise<void>)[] = []
 let exitCode = 1
 try {
@@ -418,60 +476,3 @@ try {
 }
 process.exit(exitCode)
 
-// ---- the ENABLE-payload replay (contracts/action-policy/test/V4UserOpFork.t.sol `_ownerSignedEnable`, in TypeScript) --------
-
-type Replay = { op: Parameters<typeof handleOpsData>[0][number] }
-const CHAIN_SESSION_TYPEHASH: Hex = '0x1ea7e4bc398fa0ccd68d92b5d8931a3fd93eebe1cf0391b4ba28935801af7c80'
-const MULTICHAIN_SESSION_TYPEHASH: Hex = '0x0c9d02fb89a1da34d66ea2088dc9ee6a58efee71cef6f1bb849ed74fc6003d98'
-const MULTICHAIN_DOMAIN_SEPARATOR: Hex = '0x057501e891776d1482927e5f094ae44049a4d893ba2d7b334dd7db8d38d3a0e1'
-const SAFE_MSG_TYPEHASH: Hex = '0x60b3cbf8b4a223d68d641b3b6ddf9a298e7f33710cf3d3a9d1146b5a6150fbca'
-const SESSION_TUPLE = (smartSessionAbi.find((f) => f.type === 'function' && f.name === 'enableSessions')!.inputs[0] as unknown as { components: readonly { name: string; type: string }[] }).components
-const digestAbi = parseAbi(['struct PolicyData { address policy; bytes initData; }', 'struct ERC7739Context { bytes32 appDomainSeparator; string[] contentName; }', 'struct ERC7739Data { ERC7739Context[] allowedERC7739Content; PolicyData[] erc1271Policies; }', 'struct ActionData { bytes4 actionTargetSelector; address actionTarget; PolicyData[] actionPolicies; }', 'struct Session { address sessionValidator; bytes sessionValidatorInitData; bytes32 salt; PolicyData[] userOpPolicies; ERC7739Data erc7739Policies; ActionData[] actions; bool permitERC4337Paymaster; }', 'function getSessionDigest(bytes32 permissionId, address account, Session data, uint8 mode) view returns (bytes32)', 'function domainSeparator() view returns (bytes32)'])
-
-/** SmartSession's FastLZ of literal runs only (V4UserOpFork.t.sol `_flzLiterals`): runs of at most 32 bytes. */
-function flzLiterals(data: Hex): Hex {
-  const b = Buffer.from(data.slice(2), 'hex')
-  const out: Buffer[] = []
-  for (let i = 0; i < b.length; i += 32) {
-    const n = Math.min(32, b.length - i)
-    out.push(Buffer.from([n - 1]), b.subarray(i, i + n))
-  }
-  return `0x${Buffer.concat(out).toString('hex')}`
-}
-
-/**
- * An owner-signed SmartSession ENABLE payload for the old session `session` of `safe`, signed now over its current ENABLE
- * nonce by the backup EOA owner (Safe ERC-1271 via Safe7579 with validator 0), and a userOp of the old session key that
- * carries it: what a v2-v6 renewal could have produced and a holder kept unused (contracts test `_ownerSignedEnable`).
- */
-async function enablePayload(lab: Lab, safe: Address, session: SmartSessionStruct, owner: ReturnType<typeof privateKeyToAccount>, sessionKey: ReturnType<typeof privateKeyToAccount>): Promise<Replay> {
-  const pid = permissionIdOf(session)
-  const smart = address('SmartSession', baseRegistry)
-  const digest = await lab.client.readContract({ address: smart, abi: digestAbi, functionName: 'getSessionDigest', args: [pid, safe, session as never, 1] })
-  const chainsHash = keccak256(keccak256(encodeAbiParameters([{ type: 'bytes32' }, { type: 'uint64' }, { type: 'bytes32' }], [CHAIN_SESSION_TYPEHASH, 8453n, digest])))
-  const hash = keccak256(concat(['0x1901', MULTICHAIN_DOMAIN_SEPARATOR, keccak256(encodeAbiParameters([{ type: 'bytes32' }, { type: 'bytes32' }], [MULTICHAIN_SESSION_TYPEHASH, chainsHash]))]))
-  const dom = await lab.client.readContract({ address: safe, abi: digestAbi, functionName: 'domainSeparator' })
-  const msgHash = keccak256(concat(['0x1901', dom, keccak256(encodeAbiParameters([{ type: 'bytes32' }, { type: 'bytes32' }], [SAFE_MSG_TYPEHASH, keccak256(encodeAbiParameters([{ type: 'bytes32' }], [hash]))]))]))
-  const ownerSig = await owner.sign({ hash: msgHash })
-  const a = session.actions[0]!
-  const callData = executeCallData([{ target: a.actionTarget, value: 0n, callData: concat([a.actionTargetSelector, pad('0x00', { size: 64 })]) }])
-  const nonce = await lab.entryPointNonce(safe, sessionNonceKey(9))
-  let op = draftUserOp(safe, nonce, callData, { verificationGasLimit: 3_000_000n, callGasLimit: 2_000_000n, preVerificationGas: 100_000n, maxFeePerGas: 100_000_000n, maxPriorityFeePerGas: 1_000_000n })
-  const keySig = await sessionKeySignature(sessionKey, userOpHash(op, 8453))
-  const enable = encodeAbiParameters(
-    [{ type: 'tuple', components: [{ name: 'chainDigestIndex', type: 'uint8' }, { name: 'hashesAndChainIds', type: 'tuple[]', components: [{ name: 'chainId', type: 'uint64' }, { name: 'sessionDigest', type: 'bytes32' }] }, { name: 'sessionToEnable', type: 'tuple', components: SESSION_TUPLE }, { name: 'permissionEnableSig', type: 'bytes' }] }, { type: 'bytes' }],
-    [{ chainDigestIndex: 0, hashesAndChainIds: [{ chainId: 8453n, sessionDigest: digest }], sessionToEnable: session as never, permissionEnableSig: concat(['0x0000000000000000000000000000000000000000', ownerSig]) }, keySig],
-  )
-  op = { ...op, signature: concat(['0x01', flzLiterals(enable)]) }
-  return { op }
-}
-
-/** Whether the EntryPoint would include the payload's userOp (an eth_call of handleOps). */
-async function sendEnable(lab: Lab, r: Replay, from: Address): Promise<boolean> {
-  try {
-    await lab.client.call({ account: from, to: address('EntryPointV07', baseRegistry), data: handleOpsData([r.op], from) })
-    return true
-  } catch {
-    return false
-  }
-}

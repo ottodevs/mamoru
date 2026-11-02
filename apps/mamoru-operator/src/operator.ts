@@ -32,7 +32,7 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteFromSpec } from '@mamoru/account/remote'
-import { inventoryOf, mamoruActionPolicyV4Abi, migrationTx, readSessionState, sessionCreatedIds, v4HomeSession, v4Session, V4_REMOTE_SESSION_SALT } from '@mamoru/account/one-auth'
+import { buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
 import { baseStepLines, monadStepLines, readRegistryPools, readV4Paused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
@@ -698,6 +698,8 @@ type Prepared = {
   home?: Address
   /** migrate-v4: the C (USD units) the V4 Init carries (v4CapUsdOf the signed cap). */
   v4CapUsd?: string
+  /** migrate-v4: what buildMigrateV4 built from (returned as `input`) and the hash it gave; hold checks its own tx gives it too. */
+  built?: { input: MigrateV4Input; safeTxHash: Hex }
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** otto/mamoru#223: out-of-range positions the last decision does not re-range, with the re-range code. */ rangeHolds?: { tokenId: string; code: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -1883,6 +1885,10 @@ export class Operator {
     const fee = await this.feePlan(acc, live, kind, extra.revokeOnly === true, deployed)
     const tx: SafeTx = fee.refund ? { ...ownerSafeTx(calls, nonce, this.cfg.registry), refund: fee.refund } : ownerSafeTx(calls, nonce, this.cfg.registry)
     const safeTxHash = safeTxHashOf(live, tx)
+    // otto/mamoru#293: a migration is exactly what buildMigrateV4 gives for its input (the Worker rebuilds it the same way).
+    if (kind === 'migrate-v4' && (!extra.built || extra.built.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.built.input.safeNonce !== nonce.toString() || fee.refund)) {
+      throw new HttpError(409, 'ONE_AUTH_STALE', 'your Safe changed while the update was prepared: prepare it again')
+    }
     const prepareId = toHex(randomBytes(16)).slice(2)
     const expires = Date.now() + PREPARE_TTL_MS
     for (const [id, p] of this.prepared) if (p.expires < Date.now()) this.prepared.delete(id)
@@ -1896,7 +1902,7 @@ export class Operator {
     // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
     const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? migrateFields(tx, extra.step ?? 0, movedTo(calls)) : {}) }
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}) }
   }
 
   /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */
@@ -5549,13 +5555,14 @@ export class Operator {
     const r = await readSafe(this.client, live.safe, this.cfg.registry)
     const admit = this.sizingPositions(acc, r).map((p) => p.tokenId).slice(0, V4_MAX_ADMIT)
     const cap = v4CapUsdOf(this.signedCapOf(acc))
-    const session = v4HomeSession({ sessionKey: privateKeyToAccount(acc.sessionKey).address, deployment: d, capUsd: cap, generation: 1n, admit, registry: this.cfg.registry })
     const { nonces } = await readSessionState(this.client, this.cfg.registry, live.safe, inv.revoke, r.block)
-    const attestData = keccak256(toHex(`mamoru.v4.attest:${acc.accountKey}:${randomBytes(8).toString('hex')}`))
-    const tx = migrationTx({ account: live.safe, remove: inv.remove, revoke: inv.revoke, noncesBefore: nonces, session, deployment: d, attestData, registry: this.cfg.registry })
-    const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey: privateKeyToAccount(acc.sessionKey).address, permissionId: tx.permissionId, salt: session.salt, deployment: d, registry: this.cfg.registry }), permissionId: tx.permissionId, ...(admit.length ? { admit: admit.map(String) } : {}) }
+    const { nonce: safeNonce } = await readSafeNonce(this.client, live.safe)
+    // The one builder the Worker rebuilds with (packages/account/one-auth buildMigrateV4): explicit inputs only.
+    const input: MigrateV4Input = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: safeNonce.toString(), step: 0, capUsdc: cap.toString(), sessionKey: privateKeyToAccount(acc.sessionKey).address, generation: '1', admit: admit.map(String), oldPermissionIds: inv.revoke, removeIds: inv.remove, noncesBefore: nonces.map(String), home: '0x0000000000000000000000000000000000000000', homeDomain: 0 }
+    const tx = buildMigrateV4(input, this.cfg.registry)
+    const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey: privateKeyToAccount(acc.sessionKey).address, permissionId: tx.permissionId, salt: v4HomeSessionSalt(1n), deployment: d, registry: this.cfg.registry }), permissionId: tx.permissionId, ...(admit.length ? { admit: admit.map(String) } : {}) }
     const summary = baseStepLines({ remove: inv.remove.length, revoke: inv.revoke.length, capUsd: cap, admitted: admit.length, ...(this.v4PolicyOf(acc).remoteBuckets?.length ? { remoteChain: 'Monad' } : {}) })
-    return this.hold(acc, live, 'migrate-v4', tx.calls, summary, { step: 0, grants: [stored], revokes: inv.revoke, removes: inv.remove, capUsdc: this.signedCapOf(acc).toString(), v4CapUsd: cap.toString() })
+    return this.hold(acc, live, 'migrate-v4', tx.calls, summary, { step: 0, grants: [stored], revokes: inv.revoke, removes: inv.remove, capUsdc: this.signedCapOf(acc).toString(), v4CapUsd: cap.toString(), built: { input, safeTxHash: tx.safeTxHash } })
   }
 
   /** Base side of step 1: refused before step 0 is confirmed; the Monad operator builds it on the design-C Safe. */
@@ -5620,14 +5627,14 @@ export class Operator {
     }
     const r = await readSafe(this.client, live.safe, this.cfg.registry)
     const admit = this.sizingPositions(acc, r).map((p) => p.tokenId).slice(0, V4_MAX_ADMIT)
-    const session = v4Session({ sessionKey, deployment: d, init: { capUsd: homeCfg.capUsd, generation: 1n, home, homeDomain: V4_DOMAIN_BY_CHAIN[BASE_CHAIN_ID]!, admit }, salt: V4_REMOTE_SESSION_SALT, registry: this.cfg.registry })
     const { nonces } = await readSessionState(this.client, this.cfg.registry, live.safe, inv.revoke, r.block)
-    const moves = (['USDC', 'WMON'] as const).filter((t) => isDeployed(t, this.cfg.registry) && (r.tokens[t] ?? 0n) > 0n).map((t) => ({ to: address(t, this.cfg.registry), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [target.address, r.tokens[t]!] }) }))
-    const attestData = keccak256(toHex(`mamoru.v4.attest:${acc.accountKey}:${randomBytes(8).toString('hex')}`))
-    const tx = migrationTx({ account: live.safe, remove: inv.remove, revoke: inv.revoke, noncesBefore: nonces, session, deployment: d, attestData, extra: moves, registry: this.cfg.registry })
-    const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey, permissionId: tx.permissionId, salt: session.salt, deployment: d, registry: this.cfg.registry, policyId: ONE_AUTH_V4_REMOTE }), permissionId: tx.permissionId, ...(admit.length ? { admit: admit.map(String) } : {}) }
+    const { nonce: safeNonce } = await readSafeNonce(this.client, live.safe)
+    const transfers = (['USDC', 'WMON'] as const).filter((t) => isDeployed(t, this.cfg.registry) && (r.tokens[t] ?? 0n) > 0n).map((t) => ({ token: address(t, this.cfg.registry), amount: r.tokens[t]!.toString() }))
+    const input: MigrateV4Input = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: safeNonce.toString(), step: 1, capUsdc: homeCfg.capUsd.toString(), sessionKey, generation: '1', admit: admit.map(String), oldPermissionIds: inv.revoke, removeIds: inv.remove, noncesBefore: nonces.map(String), home, homeDomain: V4_DOMAIN_BY_CHAIN[BASE_CHAIN_ID]!, ...(transfers.length ? { moveTo: target.address, transfers } : {}) }
+    const tx = buildMigrateV4(input, this.cfg.registry)
+    const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey, permissionId: tx.permissionId, salt: V4_REMOTE_SESSION_SALT, deployment: d, registry: this.cfg.registry, policyId: ONE_AUTH_V4_REMOTE }), permissionId: tx.permissionId, ...(admit.length ? { admit: admit.map(String) } : {}) }
     const summary = monadStepLines({ remove: inv.remove.length, revoke: inv.revoke.length, moveTo: target.address, tokens: (['USDC', 'WMON'] as const).filter((t) => (r.tokens[t] ?? 0n) > 0n).map((t) => `${fmtUnits(r.tokens[t]!, entry(t, this.cfg.registry).decimals ?? 18)} ${t}`), positions: admit.length })
-    return this.hold(acc, live, 'migrate-v4', tx.calls, summary, { step: 1, grants: [stored], revokes: inv.revoke, removes: inv.remove, capUsdc: homeCfg.capUsd.toString(), home })
+    return this.hold(acc, live, 'migrate-v4', tx.calls, summary, { step: 1, grants: [stored], revokes: inv.revoke, removes: inv.remove, capUsdc: homeCfg.capUsd.toString(), home, built: { input, safeTxHash: tx.safeTxHash } })
   }
 
   /** Monad side (`POST migrate-v4/status`, from the Base operator): whether step 1 is confirmed on this Safe. */
