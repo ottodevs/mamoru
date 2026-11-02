@@ -167,7 +167,7 @@ function reopen(r: ReleaseState): void {
 export type SettleChain = Pick<PublicClient, 'getBlock' | 'readContract' | 'getLogs' | 'getTransactionReceipt'>
 
 /** What the chain says of a sending request; `stay`: not settled yet (or not provable: it stays sending). */
-export type SettleOutcome = { kind: 'stay' } | { kind: 'burned'; userOpHash: Hex; amount: string; txHash: Hex; block: number } | { kind: 'reopen'; why: string }
+export type SettleOutcome = { kind: 'stay' } | { kind: 'burned'; userOpHash: Hex; amount: string; txHash: Hex; block: number } | { kind: 'reopen'; why: string; /** The other op that used the nonce, when it was not one of the tries read. */ userOpHash?: Hex }
 
 /** How far back from its first prepare block a try's nonce is looked for, at most (doubling steps). */
 const MAX_BACK_STEPS = 20
@@ -207,7 +207,8 @@ export async function settleOutcome(acc: AccountState, chain: SettleChain, regis
   const ev = logs.find((l) => l.args.nonce === nonce && !!l.args.sender && isAddressEqual(l.args.sender, sender))
   if (!ev?.args.userOpHash) throw new Error(`release ${r.id}: nonce ${s.nonce} used in block ${hi} without its UserOperationEvent there; kept sending`)
   const t = s.tries.find((x) => x.userOpHash === ev.args.userOpHash!.toLowerCase())
-  if (!t) return { kind: 'reopen', why: `nonce ${s.nonce} taken by another op in block ${hi}` }
+  const hash = ev.args.userOpHash.toLowerCase() as Hex
+  if (!t) return { kind: 'reopen', why: `nonce ${s.nonce} taken by another op in block ${hi}`, userOpHash: hash }
   if (!ev.args.success) return { kind: 'reopen', why: `its burn reverted in block ${hi}` }
   const receipt = await chain.getTransactionReceipt({ hash: ev.transactionHash! })
   const burn = burnOf(userOpLogs(receipt.logs, ev.logIndex!, registry), { account: sender, depositor: t.depositor, recipient: h.home, amount: t.amount, destinationDomain: h.homeDomain }, registry)
@@ -216,12 +217,14 @@ export async function settleOutcome(acc: AccountState, chain: SettleChain, regis
 }
 
 /**
- * Applies what `settleOutcome` read, synchronously, only to the same request still sending at the same nonce (anything
- * written while it read wins). Returns whether the state changed.
+ * Applies what `settleOutcome` read, synchronously, only to the same sending it read (the same object: a request
+ * reopened and sent again meanwhile, even at the same nonce, is another sending; anything written while it read wins).
+ * A reopen naming an op that is now one of the tries is never applied. Returns whether the state changed.
  */
-export function applySettle(acc: AccountState, read: ReleaseState, nonce: string, o: SettleOutcome, now: string): boolean {
+export function applySettle(acc: AccountState, read: NonNullable<ReleaseState['sending']>, o: SettleOutcome, now: string): boolean {
   const r = acc.release
-  if (o.kind === 'stay' || r !== read || r.state !== 'sending' || r.sending?.nonce !== nonce) return false
+  if (o.kind === 'stay' || !r || r.state !== 'sending' || r.sending !== read) return false
+  if (o.kind === 'reopen' && o.userOpHash && read.tries.some((t) => t.userOpHash === o.userOpHash)) return false
   if (o.kind === 'reopen') reopen(r)
   else {
     Object.assign(r, { state: 'burned', burn: { userOpHash: o.userOpHash, amount: o.amount, txHash: o.txHash, block: o.block } })

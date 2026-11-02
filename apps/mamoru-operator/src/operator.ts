@@ -6136,7 +6136,7 @@ export class Operator {
   private async settleReleaseOf(acc: AccountState): Promise<void> {
     const r = acc.release
     if (r?.state !== 'sending' || !r.sending) return
-    const nonce = r.sending.nonce
+    const read = r.sending
     let o: Awaited<ReturnType<typeof settleOutcome>>
     try {
       o = await settleOutcome(acc, this.client, this.cfg.registry)
@@ -6145,7 +6145,7 @@ export class Operator {
       return
     }
     const before = structuredClone(r)
-    if (!applySettle(acc, r, nonce, o, now())) return
+    if (!applySettle(acc, read, o, now())) return
     try {
       this.store.save()
       if (o.kind === 'reopen') console.log(`[release] ${acc.accountKey}: ${r.id} open again (${o.why})`)

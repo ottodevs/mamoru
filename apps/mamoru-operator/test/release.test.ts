@@ -200,9 +200,8 @@ const sending = (tries: Hex[] = [UOP]) => {
 
 /** settleOutcome then applySettle, as the operator does. */
 async function settled(acc: AccountState, c: SettleChain): Promise<boolean> {
-  const r = acc.release!
-  const nonce = r.sending!.nonce
-  return applySettle(acc, r, nonce, await settleOutcome(acc, c, REG), T)
+  const read = acc.release!.sending!
+  return applySettle(acc, read, await settleOutcome(acc, c, REG), T)
 }
 
 describe('release: settled by the chain (review r2: the op that used the nonce, found positively)', () => {
@@ -256,13 +255,28 @@ describe('release: settled by the chain (review r2: the op that used the nonce, 
 
   test('an outcome read for a request that changed meanwhile is not applied (anything written while it read wins)', async () => {
     const acc = sending()
-    const r = acc.release!
+    const read = acc.release!.sending!
     const o = await settleOutcome(acc, chain({ usedFrom: 1_010n, landed: { hash: `0x${'77'.repeat(32)}` } }), REG)
     // Meanwhile: settled elsewhere and a new request opened.
-    Object.assign(r, { state: 'burned' })
+    Object.assign(acc.release!, { state: 'burned' })
     requestRelease(acc, { id: 'r2', amount: '1' }, T)
-    expect(applySettle(acc, r, N.toString(), o, T)).toBe(false)
+    expect(applySettle(acc, read, o, T)).toBe(false)
     expect(acc.release).toMatchObject({ id: 'r2', state: 'open' })
+  })
+
+  test('review r3: read before a reopen and a new try at the same nonce, its stale reopen is not applied to the new sending', async () => {
+    const acc = sending([UOP])
+    const read = acc.release!.sending!
+    // The settle reads while A is still the only try; meanwhile A is unsigned and B is sent at the same nonce and lands.
+    const stale = await settleOutcome(acc, chain({ usedFrom: 1_010n, landed: { hash: UOP2 } }), REG)
+    expect(stale).toMatchObject({ kind: 'reopen', userOpHash: UOP2 })
+    unsigned(acc, UOP, T)
+    beforeSign(acc, signing({ userOpHash: UOP2 }), T)
+    expect(applySettle(acc, read, stale, T)).toBe(false)
+    expect(acc.release!.state).toBe('sending')
+    // Read again against the new sending: B is its try, burned.
+    expect(await settled(acc, chain({ usedFrom: 1_010n, landed: { hash: UOP2 } }))).toBe(true)
+    expect(acc.release).toMatchObject({ state: 'burned', burn: { userOpHash: UOP2 } })
   })
 
   test('nonce used at the head (landed or taken, not settled at safe yet): the review holds', async () => {
