@@ -87,7 +87,7 @@ user from that sum.
 | INV-3 | **No external control of a user.** No Mamoru-side address is, or can become, owner, guardian, executor with unrestricted calls, revoker or account-wide pauser. Accounts still on a guardian-bearing grant are declared non-compliant until migrated. | T9 (per-account state check: owners, threshold, guard, fallback handler, modules, executors, attesters, policy version; any Mamoru address in an authority slot fails) |
 | INV-4 | **Hermetic infra.** Every Mamoru infra contract has immutable, verified code and constructor-only configuration, no privileged state change, no upgrade, and pays only fixed recipients for fixed purposes. | T3 (inventory of every Mamoru-deployed contract on every chain: V1, V2, V3/V-next, MamoruGasPolicy, MamoruPauseGate, MamoruV3Routes, MamoruV4LiquidityPolicy; entry-point analysis of each for privileged or value-moving paths), T11 if a funded contract is built |
 | INV-5 | **Finite infra exposure.** For every reachable history (donations, reentrancy, failures, top-ups), the total value an infra version can ever pay out is at most its declared ceiling. | T11 (Halmos + invariant fuzzing), only if a funded contract is built |
-| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; per userOp, `UserOperationEvent.sender` is the user's account and `actualGasCost` is charged to it or to an admitted third-party paymaster, Mamoru's bundler submits **one userOp per bundle**, so the bundle's whole cost (gas × price, intrinsic overhead and, on Base, the L1 data fee) is attributable to that one user: per bundle, the submitter's total fee ≤ that op's `actualGasCost` + a per-chain tolerance stated in wei; funding provenance: no transfer from any Mamoru wallet to a user account or to a paymaster that serves users) |
+| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; per userOp, `UserOperationEvent.sender` is the user's account and `actualGasCost` is charged to it or to an admitted third-party paymaster, Mamoru's bundler submits **one userOp per bundle**, so the bundle's whole cost (gas × price, intrinsic overhead and, on Base, the L1 data fee) is attributable to that one user: per bundle, the beneficiary is a declared Mamoru beneficiary for that chain and the submitter's total fee ≤ that op's `actualGasCost` + a per-chain tolerance stated in wei. Admission before submission: simulation, and `preVerificationGas` covering the estimated L1 data fee with a margin. A bundle that reverts on chain (for example a nonce raced through a public bundler) emits no event: its fee is a disclosed exception, counted and capped per account per day, after which the bundler stops submitting for that account; funding provenance: no transfer from any Mamoru wallet to a user account or to a paymaster that serves users) |
 
 ## Decisions
 
@@ -306,8 +306,14 @@ bounded by the owner's allowance.
     - **Trade loss:** up to V2's remaining `total` for the generation. The per-period bucket refills, but `total` does
       not.
     - **Gas debits:** a copied key can act as its own bundler and beneficiary, and the Safe pays every op's
-      `actualGasCost`, reverting ops included. This part is bounded by the grant's gas caps (`MamoruGasPolicy` ×
-      `UsageLimitPolicy`) where the grant has them. Where it does not, the bound is the Safe's native balance.
+      `actualGasCost`, reverting ops included. Because the key also picks the fee and keeps the difference, the bound
+      holds only where the grant caps both of these:
+      - the per-op maximum prefund: the sum of gas limits × `maxFeePerGas`, both capped by `MamoruGasPolicy`;
+      - the op count (`UsageLimitPolicy`).
+
+      The bound is then count × maximum prefund. Otherwise the bound is everything the key can reach until V2's
+      `validUntil`: the Safe's native balance at any time, including later top-ups, plus its EntryPoint deposit, plus
+      any admitted paymaster allowance.
 
     T9 states both parts per account, citing V2's bounds and the grant's gas policies by file:line;
   - the guardian, if a copy of its key exists, can still pause that account's sessions. It cannot touch the owner
@@ -450,8 +456,11 @@ bounded by the owner's allowance.
     was registered with RP ID `mamoru.lol` and not a subdomain; then test an existing production credential from
     every host. **If any credential is scoped to a subdomain**, that account can sign only under that host, so for it
     D4-R2's several hosts do not exist. The account is flagged on `/ops` and the app asks the owner to add a new
-    `mamoru.lol`-scoped passkey as owner, signed with the old one while its host still serves, then to remove the old
-    passkey. Until that is done, the account's walkaway is disclosed as single-host.
+    `mamoru.lol`-scoped passkey as owner, signed with the old one, then to remove the old passkey. Exception to the pin:
+    on each such legacy host, a signer that requests the credential's original `rpId` stays served until every flagged
+    account on that host has migrated or exited. Until then, the account's walkaway is disclosed as single-host. T2
+    also confirms from the Safe WebAuthn verifier's source whether it checks the `rpIdHash` in `authenticatorData`. If
+    it pins a value, the new passkey's signer configuration must match it.
   - D4-R5: DNSSEC, CAA and the published release hash.
   - The optional backup owner in settings (FR-ONB-004 signed challenge), with the D4-R4 disclosure and the `/ops`
     count.
@@ -488,8 +497,11 @@ bounded by the owner's allowance.
   - Delete G7.
   - Add the INV-6 payer trace in CI and on `/ops`:
     - per-userOp attribution from `UserOperationEvent`;
-    - one userOp per bundle, and the submitter's total fee (including the L1 data fee on Base) against that op's
-      `actualGasCost`, within the per-chain tolerance in wei;
+    - one userOp per bundle, the beneficiary checked against the declared Mamoru beneficiaries, and the submitter's
+      total fee (including the L1 data fee on Base) against that op's `actualGasCost`, within the per-chain tolerance
+      in wei;
+    - the admission rule (simulation, `preVerificationGas` margin over the estimated L1 fee);
+    - reverted bundles counted per account with the daily cap;
     - a provenance ledger of every outgoing transfer from Mamoru wallets.
 - **T11: Bundler.** Relayer keys per chain in KMS, private submission with a public-bundler fallback, rotating
   beneficiary. Build `GasTreasury` (TRS-01..07, with Halmos and fuzzing for INV-5) only if D3's condition holds.
