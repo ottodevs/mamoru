@@ -156,7 +156,7 @@ contract V4RemoteForkTest is V4Fixture {
         vm.recordLogs();
         vm.prank(makeAddr("anyone"));
         g = gasleft();
-        v4.announceReady(at, DOMAIN_BASE, remoteSk);
+        v4.announceReady(at, DOMAIN_BASE, remoteSk, _remotePid());
         console2.log("announceReady (read back + sendMessage, exec gas)", g - gasleft());
         bytes memory message = _sentMessage(vm.getRecordedLogs());
         // Base: the account's own session relays the message (a userOp, the user pays); V4 accepts it and the session
@@ -298,14 +298,17 @@ contract V4RemoteForkTest is V4Fixture {
         vm.selectFork(monadFork);
         (bool ok,) = SAFE_FACTORY.call(createCall);
         assertTrue(ok);
+        bytes32 rp = _remotePid();
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadAnnounce.selector, 4));
-        v4.announceReady(at, DOMAIN_BASE, makeAddr("another session key")); // recomputes to another address
+        v4.announceReady(at, DOMAIN_BASE, makeAddr("another session key"), rp); // recomputes to another address
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadAnnounce.selector, 3));
-        v4.announceReady(at, 0, remoteSk); // not its home domain
+        v4.announceReady(at, 0, remoteSk, rp); // not its home domain
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.NoConfig.selector, attacker));
-        v4.announceReady(attacker, DOMAIN_BASE, remoteSk); // no V4 session
+        v4.announceReady(attacker, DOMAIN_BASE, remoteSk, rp); // no V4 session
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadAnnounce.selector, 5));
+        v4.announceReady(at, DOMAIN_BASE, remoteSk, keccak256("not its session")); // a permission not enabled there
         vm.recordLogs();
-        v4.announceReady(at, DOMAIN_BASE, remoteSk);
+        v4.announceReady(at, DOMAIN_BASE, remoteSk, rp);
         bytes memory m = _sentMessage(vm.getRecordedLogs());
         // the message names V4 as sender and recipient, Base as destination, finality 2000, an open caller
         assertEq(uint32(bytes4(_slice(m, 8, 4))), DOMAIN_BASE, "destination domain");
@@ -313,6 +316,21 @@ contract V4RemoteForkTest is V4Fixture {
         assertEq(bytes32(_slice(m, 76, 32)), bytes32(uint256(uint160(address(v4)))), "recipient: the same V4");
         assertEq(bytes32(_slice(m, 108, 32)), bytes32(0), "open destinationCaller");
         assertEq(uint32(bytes4(_slice(m, 140, 4))), 2000, "finality 2000");
+    }
+
+    /// Review r1 of #228: a remote whose V4 session the owner removed (Stop) cannot be announced ready.
+    function test_A1_stoppedSafeCannotBeAnnounced() public {
+        vm.prank(home);
+        v4.registerRemote(DOMAIN_MONAD, remoteSk);
+        (address at, bytes memory createCall) = lens.remoteDeployment(home, DOMAIN_MONAD);
+        vm.selectFork(monadFork);
+        (bool ok,) = SAFE_FACTORY.call(createCall);
+        assertTrue(ok);
+        bytes32 rp = _remotePid();
+        vm.prank(at);
+        ISmartSessionT(SMART_SESSION).removeSession(rp); // the owner's Stop on Monad
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadAnnounce.selector, 5));
+        v4.announceReady(at, DOMAIN_BASE, remoteSk, rp);
     }
 
     function _slice(bytes memory b, uint256 o, uint256 n) internal pure returns (bytes memory out) {

@@ -610,7 +610,7 @@ abstract contract V4Fixture is Test {
     /// policy have module records and a Safe can self-attest them for the production enable flow (T7's path on the
     /// home chain). Single-chain tests only; the cross-chain tests use the deterministic deployer (`_deployStack`).
     function _deployStackViaModuleRegistry() internal {
-        bytes32 resolverUID = IModRegT(MODULE_REGISTRY).findModule(TIME_FRAME).resolverUID;
+        bytes32 resolverUID = IModRegT(MODULE_REGISTRY).findModule(SMART_SESSION).resolverUID; // on every chain
         table = MamoruV4Table(_create2(type(MamoruV4Table).creationCode, "mamoru.v4.table"));
         vm.startPrank(makeAddr("deployer"));
         gasPol = MamoruGasPolicyV2(
@@ -629,6 +629,6 @@ abstract contract V4Fixture is Test {
         );
         vm.stopPrank();
         helper = v4.HELPER();
-        lens = new MamoruV4Lens(v4);
+        lens = MamoruV4Lens(_create2(abi.encodePacked(type(MamoruV4Lens).creationCode, abi.encode(v4)), "mamoru.v4.lens"));
     }
 }

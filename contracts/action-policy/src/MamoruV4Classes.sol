@@ -123,7 +123,7 @@ library MamoruV4Classes {
         }
     }
 
-    /// Every pair with a class on `chainId` (token order as in `classOf`'s rows), for the deploy script's bounds check,
+    /// Every pair with a class on `chainId` (any token order: `classOf` sorts), for the deploy script's bounds check,
     /// the engine's candidate pools and /ops. Kept next to `classOf`: a row added there is added here.
     function pairsOf(uint256 chainId) internal pure returns (address[2][] memory p) {
         if (chainId == BASE) {
