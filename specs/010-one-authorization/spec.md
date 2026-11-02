@@ -139,8 +139,11 @@ policy on Base can reason about what lives at an address on Monad. Constants:
      the counter. A slow leak below the 24 h breaker therefore stops after at most 10C per chain, and in normal
      operation this costs the user nothing (ops reviews it; it never asks the owner).
 6. **Gas.** `MamoruGasPolicyV2` (userOp policy) keeps the per-op cap and adds a per-account **gas bucket per
-   window** and a **cumulative gas threshold** (r4 P1). Gas paid since the guardian's last `review(account)` is
-   counted, and at `GAS_REVIEW` (pinned per chain: 0.01 ETH on Base, 5 MON on Monad, about a month of normal
+   window** and a **cumulative gas threshold** (r4 P1). SmartSession calls userOp policies only at validation, with no settlement callback (r5 P1). So the policy
+   charges each userOp **conservatively at validation**: `(callGasLimit + verificationGasLimit +
+   preVerificationGas + paymasterVerificationGasLimit + paymasterPostOpGasLimit) × maxFeePerGas`, the most it can
+   cost. It **rejects an operation that would cross** the bucket or the threshold. Charged gas since the
+   guardian's last `review(account)` is counted, and at `GAS_REVIEW` (pinned per chain: 0.01 ETH on Base, 5 MON on Monad, about a month of normal
    operation) the session is paused until the guardian reviews it. A slow drain of the Safe's gas reserve
    therefore stops too. No action-free userOp: V4 refuses an empty batch and a call it cannot classify, through the
    fallback action.
@@ -274,6 +277,12 @@ bounds that do not end the authorization.
 |---|---|---|
 | P0 | Remote readiness checked only by the operator, so a session-signed burn skips it | `readyOf` is written only by the guardian after reading the remote back; V4 refuses a burn without it; a rotation clears it (I4). |
 | P1 | No cumulative stop on gas | A cumulative gas threshold pauses the session until the guardian reviews (I6). |
+
+## Review r5 (GPT-6 Sol, PR #196, NO-GO) → r6
+
+| # | Finding | r6 |
+|---|---|---|
+| P1 | A userOp policy cannot count gas actually paid (no settlement callback) | Each op is charged at validation from its capped gas fields; an op that would cross the bucket or the threshold is rejected (I6). The guardian `readyOf` change was confirmed closed. |
 
 ## Open questions
 
