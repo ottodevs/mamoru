@@ -1,7 +1,8 @@
 // otto/mamoru#293, spec 010 I4 + I7: the guardian watcher. A separate process with its own key and no operator code path.
 // Env names: see README.md. Fails closed: no V4 address, no home RPC, a wrong chain id, a key that is not V4's GUARDIAN or
 // a missing start block all stop the process before it does anything.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createPublicClient, createWalletClient, getAddress, http, type Address, type Hex } from 'viem'
 import { mamoruActionPolicyV4Abi } from '@mamoru/account/one-auth'
@@ -39,24 +40,44 @@ export function shortWhy(e: unknown): string {
   return (e as { shortMessage?: string }).shortMessage ?? (e as Error).message ?? String(e)
 }
 
+/** The stamp file of a startup failure: one per reason (a hash of it), in the state dir. */
+function stampOf(env: Env, why: string): string | null {
+  const dir = env.MAMORU_GUARDIAN_STATE_DIR
+  return dir ? join(dir, `startup-alerted-${createHash('sha256').update(why).digest('hex').slice(0, 16)}`) : null
+}
+
 /**
- * Pages a startup failure, at most once per hour across restarts (a stamp file in the state dir when there is one): systemd
- * restarts the unit with backoff and never gives up, so the page is the signal, not the unit's state.
+ * Pages a startup failure, at most once per hour per reason across restarts (systemd restarts the unit with backoff and
+ * never gives up, so the page is the signal). The stamp is written only once the alert was delivered: a failed delivery
+ * leaves no stamp and the next restart pages again. A stamp from the future (clock moved back) counts as expired.
  */
 export async function pageStartupFailure(alerter: Alerter, env: Env, why: string, now = Date.now()): Promise<boolean> {
-  const dir = env.MAMORU_GUARDIAN_STATE_DIR
-  const stamp = dir ? join(dir, 'startup-alerted') : null
+  const stamp = stampOf(env, why)
   try {
-    if (stamp && existsSync(stamp) && now - Number(readFileSync(stamp, 'utf8')) < 3_600_000) return false
+    if (stamp && existsSync(stamp)) {
+      const age = now - Number(readFileSync(stamp, 'utf8'))
+      if (age >= 0 && age < 3_600_000) return false
+    }
   } catch {}
-  await alerter.alert(`guardian failed to start (restarting with backoff): ${why}`).catch(() => {})
+  try {
+    await alerter.alert(`guardian failed to start (restarting with backoff): ${why}`)
+  } catch {
+    return false
+  }
   try {
     if (stamp) {
-      mkdirSync(dir!, { recursive: true, mode: 0o700 })
+      mkdirSync(env.MAMORU_GUARDIAN_STATE_DIR!, { recursive: true, mode: 0o700 })
       writeFileSync(stamp, String(now), { mode: 0o600 })
     }
   } catch {}
   return true
+}
+
+/** After a successful start: every startup stamp is cleared, so the next failure pages at once. */
+export function clearStartupStamps(env: Env): void {
+  const dir = env.MAMORU_GUARDIAN_STATE_DIR
+  if (!dir || !existsSync(dir)) return
+  for (const f of readdirSync(dir)) if (f.startsWith('startup-alerted-')) rmSync(join(dir, f), { force: true })
 }
 
 /** Starts the guardian loop; throws on any startup failure (the caller pages it). `once`: one pass and return. */
@@ -133,6 +154,7 @@ export async function run(env: Env, alerter: Alerter, makeClient: MakeClient = (
   }
   const deps = { clients, send, alerter, store, allowlist: readAllowlist(env.MAMORU_GUARDIAN_ALLOWLIST_FILE), now: () => Date.now() }
   const interval = Number(env.MAMORU_GUARDIAN_INTERVAL_SECONDS ?? 30) * 1000
+  clearStartupStamps(env)
   console.log(`guardian up: home chain ${homeChainId}, chains [${Object.keys(clients).join(',')}], ${dryRun ? 'DRY-RUN' : 'live'}`)
 
   for (;;) {

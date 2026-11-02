@@ -5,7 +5,8 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Alerter } from '../src/alerts.ts'
-import { alerterFrom, pageStartupFailure, run, shortWhy, type MakeClient } from '../src/main.ts'
+import { readdirSync } from 'node:fs'
+import { alerterFrom, clearStartupStamps, pageStartupFailure, run, shortWhy, type MakeClient } from '../src/main.ts'
 
 const env = () => ({ MAMORU_GUARDIAN_HOME_RPC_URL: 'http://127.0.0.1:9/', MAMORU_GUARDIAN_V4_ADDRESS: '0x00000000000000000000000000000000000000a2', MAMORU_GUARDIAN_GAS_POLICY_ADDRESS: '0x00000000000000000000000000000000000000a3', MAMORU_GUARDIAN_STATE_DIR: mkdtempSync(join(tmpdir(), 'guardian-start-')), MAMORU_GUARDIAN_FROM_BLOCK_8453: '1', MAMORU_GUARDIAN_DRY_RUN: '1' })
 const capture = () => {
@@ -41,5 +42,19 @@ describe('guardian startup failures are paged', () => {
   test('the alerter needs configuration only: an unreadable webhook file still leaves the console sink', async () => {
     const a = alerterFrom({ MAMORU_GUARDIAN_WEBHOOK_FILE: '/nonexistent/webhook' })
     await a.alert('test line') // no throw
+  })
+  test('a failed delivery leaves no stamp (the next restart pages); stamps per reason; future stamps expired; cleared on start', async () => {
+    const e = env()
+    const failing: Alerter = { alert: async () => { throw new Error('webhook down') } }
+    expect(await pageStartupFailure(failing, e, 'rpc down', 1_000)).toBe(false)
+    expect(readdirSync(e.MAMORU_GUARDIAN_STATE_DIR).filter((f) => f.startsWith('startup-alerted-'))).toEqual([])
+    const { a, alerts } = capture()
+    expect(await pageStartupFailure(a, e, 'rpc down', 2_000)).toBe(true) // retried: delivered
+    expect(await pageStartupFailure(a, e, 'wrong chain', 2_000)).toBe(true) // another reason pages too
+    expect(await pageStartupFailure(a, e, 'rpc down', 2_500)).toBe(false) // same reason within the hour
+    expect(await pageStartupFailure(a, e, 'rpc down', 1_000)).toBe(true) // a stamp from the future: expired
+    expect(alerts.length).toBe(3)
+    clearStartupStamps(e)
+    expect(readdirSync(e.MAMORU_GUARDIAN_STATE_DIR).filter((f) => f.startsWith('startup-alerted-'))).toEqual([])
   })
 })
