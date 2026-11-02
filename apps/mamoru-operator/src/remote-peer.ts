@@ -79,8 +79,12 @@ export class RemotePeer {
     return this.releaseCall(remote, 'release', { id, amount: amount.toString() })
   }
 
-  async releaseStatus(remote: AccountContext): Promise<ReleaseView> {
-    return this.releaseCall(remote, 'release/status', {})
+  async releaseStatus(remote: AccountContext, id?: string): Promise<ReleaseView> {
+    return this.releaseCall(remote, 'release/status', id ? { id } : {})
+  }
+
+  async releaseCancel(remote: AccountContext, id: string): Promise<ReleaseView> {
+    return this.releaseCall(remote, 'release/cancel', { id })
   }
 
   private async releaseCall(remote: AccountContext, route: string, payload: unknown): Promise<ReleaseView> {

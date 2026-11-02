@@ -685,6 +685,8 @@ export async function bootOperator(o: BootOptions) {
   if (Object.keys(remotePeers).length) setInterval(() => void operator.tickRemotes(), 60_000).unref?.()
   // otto/mamoru#293: V4 homes register, provision and follow the readiness of their remote every minute.
   if (oneAuth && chainId === BASE_CHAIN_ID) setInterval(() => void operator.tickOneAuth(), 60_000).unref?.()
+  // otto/mamoru#278: a V4 remote Safe's burn home is settled against the chain every minute.
+  if (oneAuth && chainId !== BASE_CHAIN_ID) setInterval(() => void operator.tickReleases(), 60_000).unref?.()
   // otto/mamoru#136 phase 1 + otto/mamoru#129: one read of every served Safe and its pools, with the yield-ledger
   // hold-value baseline always folded in, served on GET /snapshot. Always built when the chain supports it;
   // started and stopped by the `yield_ledger` ops flag (D1, set from /ops), not MAMORU_SNAPSHOT / MAMORU_YIELD_LEDGER

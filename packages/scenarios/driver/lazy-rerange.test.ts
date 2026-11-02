@@ -127,12 +127,14 @@ describe('engine: out-of-range clock across restarts and gaps (otto/mamoru#268)'
 
 describe('engine: release (otto/mamoru#278)', () => {
   test('an open release from the operator is in the observation; none, or 0, leaves it out', async () => {
-    const withRelease = await engine(V2, undefined, { release: () => ({ amount: 5n, chainId: 8453 }) }).review()
+    const withRelease = await engine(V2, undefined, { release: async () => ({ amount: 5n, chainId: 8453 }) }).review()
     expect(withRelease.kind).toBe('decided')
     if (withRelease.kind === 'decided') expect(withRelease.observation.release).toEqual({ amount: 5n, chainId: 8453 })
-    for (const release of [() => undefined, () => ({ amount: 0n, chainId: 8453 as const })]) {
+    for (const release of [async () => undefined, async () => ({ amount: 0n, chainId: 8453 as const })]) {
       const r = await engine(V2, undefined, { release }).review()
       if (r.kind === 'decided') expect(r.observation.release).toBeUndefined()
     }
+    const failed = await engine(V2, undefined, { release: async () => Promise.reject(new Error('rpc down')) }).review()
+    expect(failed).toMatchObject({ kind: 'observation-failed', code: 'OBS_RPC_UNAVAILABLE' })
   })
 })

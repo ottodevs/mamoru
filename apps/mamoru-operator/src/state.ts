@@ -185,6 +185,8 @@ export type AccountState = {
   oneAuth?: OneAuthState
   /** otto/mamoru#278: on a V4 remote Safe, the return home its home account asked for (release.ts). */
   release?: ReleaseState
+  /** otto/mamoru#278: the last finished requests (burned, cancelled), newest first, for status by id. */
+  releasesDone?: ReleaseState[]
 }
 
 export type RemoteSafeRecord = { chainId: number; address: Hex; spec: RemoteSpec; permissionIds: Hex[]; ready?: boolean; lastCode?: string; checkedAt?: string }

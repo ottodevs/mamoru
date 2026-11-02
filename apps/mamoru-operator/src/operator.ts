@@ -34,7 +34,7 @@ import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
 import { buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
-import { beforeSign as releaseBeforeSign, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
+import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, nonceUsedAtHead, settle as settleRelease, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
 import { baseStepLines, monadStepLines, readRegistryPools, readV4Paused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
 import { draftUserOp, executeCallData, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
@@ -6102,43 +6102,104 @@ export class Operator {
    * Refused: no running V4 remote Safe of this context here, a bad body, another request still open.
    */
   requestRelease(ctx: AccountContext, body: unknown): Promise<ReleaseView> {
+    return this.lock(ctx.accountKey).run(async () => this.releaseWrite(this.releaseAccount(ctx, true), (acc) => requestRelease(acc, body, now())))
+  }
+
+  /** otto/mamoru#278: the home withdraws a request nothing was signed for yet. */
+  cancelRelease(ctx: AccountContext, body: unknown): Promise<ReleaseView> {
+    return this.lock(ctx.accountKey).run(async () => this.releaseWrite(this.releaseAccount(ctx, false), (acc) => cancelRelease(acc, body, now())))
+  }
+
+  /** otto/mamoru#278: where a request is (`{ id }`, or the latest), settled against the chain first. Served while stopped too. */
+  releaseStatus(ctx: AccountContext, body: unknown): Promise<ReleaseView> {
     return this.lock(ctx.accountKey).run(async () => {
-      const acc = this.releaseAccount(ctx)
-      try {
-        const v = requestRelease(acc, body, now())
-        this.store.save()
-        return v
-      } catch (e) {
-        if (e instanceof ReleaseRefused) throw new HttpError(e.status, e.code, e.message)
-        throw e
-      }
+      const acc = this.releaseAccount(ctx, false)
+      await this.settleReleaseOf(acc)
+      const id = (body as { id?: unknown } | null)?.id
+      return releaseView(acc, typeof id === 'string' ? id : undefined)
     })
   }
 
-  /** otto/mamoru#278: where the release of this remote Safe is (`none` when there was never one). */
-  releaseStatus(ctx: AccountContext): ReleaseView {
-    const acc = this.releaseAccount(ctx)
-    const before = JSON.stringify(acc.release ?? null)
-    const v = releaseView(acc, now())
-    if (JSON.stringify(acc.release ?? null) !== before) this.store.save()
-    return v
+  /** otto/mamoru#278: every minute, each V4 remote Safe's sending request is settled against the chain. */
+  async tickReleases(): Promise<void> {
+    for (const acc of Object.values(this.store.state.accounts)) {
+      if (acc.policyId !== ONE_AUTH_V4_REMOTE || acc.release?.state !== 'sending') continue
+      await this.lock(acc.accountKey).run(() => this.settleReleaseOf(acc))
+    }
   }
 
-  private releaseAccount(ctx: AccountContext): AccountState {
+  private async settleReleaseOf(acc: AccountState): Promise<void> {
+    if (acc.release?.state !== 'sending') return
+    const before = structuredClone(acc.release)
+    try {
+      if (await settleRelease(acc, this.client, this.cfg.registry, now())) this.store.save()
+    } catch (e) {
+      acc.release = before
+      console.error(`[release] ${acc.accountKey}: ${(e as Error).message?.split('\n')[0]}`)
+    }
+  }
+
+  /**
+   * The engine's `release` on a V4 remote Safe, before each review: the request settled against the chain, and none
+   * while a sending burn's nonce is used at the head but not settled at `safe` yet (the burn may be out already).
+   */
+  private async releaseForReview(acc: AccountState): Promise<Observation['release'] | undefined> {
+    // No account lock: a review never waits behind an owner operation; settling is idempotent (both read the chain).
+    await this.settleReleaseOf(acc)
+    if (await nonceUsedAtHead(acc, this.client, this.cfg.registry)) return undefined
+    return releaseObs(acc)
+  }
+
+  /** A change to the release state, on disk before it is answered; a save that throws leaves the state as it was. */
+  private releaseWrite(acc: AccountState, f: (acc: AccountState) => ReleaseView): ReleaseView {
+    const before = { release: structuredClone(acc.release), releasesDone: structuredClone(acc.releasesDone) }
+    try {
+      const v = f(acc)
+      this.store.save()
+      return v
+    } catch (e) {
+      acc.release = before.release
+      acc.releasesDone = before.releasesDone
+      if (e instanceof ReleaseRefused) throw new HttpError(e.status, e.code, e.message)
+      throw e
+    }
+  }
+
+  /**
+   * The V4 remote Safe of this context: stored here under that key, the same address and the same home (the signed
+   * context names the home it asks for). `running`: only while it runs (a new request); status and cancel also after.
+   */
+  private releaseAccount(ctx: AccountContext, running: boolean): AccountState {
     const acc = this.store.state.accounts[ctx.accountKey]
-    if (!acc || acc.policyId !== ONE_AUTH_V4_REMOTE || !acc.active || acc.ctx.address.toLowerCase() !== ctx.address.toLowerCase() || !releaseHomeOf(acc)) throw new HttpError(404, 'NOT_A_REMOTE', 'no running V4 remote Safe of this account here')
+    const home = acc ? releaseHomeOf(acc) : null
+    const asked = ctx.remote
+    const same = !!acc && !!home && acc.ctx.address.toLowerCase() === ctx.address.toLowerCase() && !!asked?.home && asked.home.toLowerCase() === home.home.toLowerCase() && asked.homeDomain === home.homeDomain
+    if (!acc || acc.policyId !== ONE_AUTH_V4_REMOTE || !same || (running && !acc.active)) throw new HttpError(404, 'NOT_A_REMOTE', 'no running V4 remote Safe of this account here')
     return acc
   }
 
   /** The engine's beforeBridgeSign on a V4 remote Safe: the burn is on disk before it is signed, or it is not signed. */
   private releaseSigning(acc: AccountState, b: BridgeSigning): void {
-    const before = acc.release ? { ...acc.release, ...(acc.release.burn ? { burn: { ...acc.release.burn } } : {}) } : undefined
+    const before = structuredClone(acc.release)
     releaseBeforeSign(acc, b, now())
     try {
       this.store.save()
     } catch (e) {
       acc.release = before
       throw e
+    }
+  }
+
+  /** The engine's bridgeUnsigned on a V4 remote Safe: that try was never signed (on disk, or left as it was). */
+  private releaseUnsigned(acc: AccountState, hash: Hex): void {
+    const before = structuredClone(acc.release)
+    if (!releaseUnsigned(acc, hash, now())) return
+    try {
+      this.store.save()
+    } catch (e) {
+      // Kept as a try: settle reopens it once its nonce is used without it.
+      acc.release = before
+      console.error(`[release] ${acc.accountKey}: could not save an unsigned try: ${(e as Error).message?.split('\n')[0]}`)
     }
   }
 
@@ -6267,7 +6328,7 @@ export class Operator {
         // remote V4 mints to once the guardian marked it ready (the bridge's only recipient).
         ...(v4 ? { registry: v4.registry, v4BridgeRecipient: () => (acc.oneAuth?.remote?.ready ? (acc.oneAuth.remote.address as Address) : undefined) } : {}),
         // otto/mamoru#278: a V4 remote Safe bridges only home (V4 pins it on chain), and only for its home's open release.
-        ...(v4 && acc.policyId === ONE_AUTH_V4_REMOTE ? { v4BridgeRecipient: () => releaseHomeOf(acc)?.home, release: () => releaseObs(acc, now()) } : {}),
+        ...(v4 && acc.policyId === ONE_AUTH_V4_REMOTE ? { v4BridgeRecipient: () => (releaseObs(acc) ? releaseHomeOf(acc)?.home : undefined), release: () => this.releaseForReview(acc) } : {}),
         // The only owner intent the operator has today: a stop on its way pauses the engine (US6).
         // otto/mamoru#293 (review of #202 r2, Opus 2): also while a migration is prepared or not settled, so the positions it
         // admits and the balances it moves are the ones it was built on.
@@ -6314,9 +6375,13 @@ export class Operator {
         // Sol review round 2 #4: never more admitted positions than one bounded read sees (chain.ts MAX_INVENTORY).
         mintAllowed: () => mintAllowed(acc.admittedTokenIds),
         // otto/mamoru#215: a bridge-out is on disk in the bridge journal before it is signed; without one it is never signed.
-        ...(this.cfg.bridgeMonad ? { beforeBridgeSign: (b: BridgeSigning) => this.cfg.bridgeMonad!.recordSending(acc.accountKey, b), bridgeUnsigned: (h: Hex) => this.cfg.bridgeMonad!.discardUnsigned(h), bridgeFailed: (_opId: string, code: string) => this.cfg.bridgeMonad!.bridgeFailed(acc.accountKey, code) } : {}),
-        // otto/mamoru#278: a V4 remote Safe's return home is on disk as its release's burn before it is signed.
-        ...(acc.policyId === ONE_AUTH_V4_REMOTE ? { beforeBridgeSign: (b: BridgeSigning) => this.releaseSigning(acc, b), bridgeUnsigned: (h: Hex) => void (releaseUnsigned(acc, h, now()) && this.store.save()) } : {}),
+        // otto/mamoru#278: a V4 remote Safe's return home is on disk as its release's burn before it is signed; the bridge
+        // journal (#215, Base to Monad) is never its journal.
+        ...(acc.policyId === ONE_AUTH_V4_REMOTE
+          ? { beforeBridgeSign: (b: BridgeSigning) => this.releaseSigning(acc, b), bridgeUnsigned: (h: Hex) => this.releaseUnsigned(acc, h) }
+          : this.cfg.bridgeMonad
+            ? { beforeBridgeSign: (b: BridgeSigning) => this.cfg.bridgeMonad!.recordSending(acc.accountKey, b), bridgeUnsigned: (h: Hex) => this.cfg.bridgeMonad!.discardUnsigned(h), bridgeFailed: (_opId: string, code: string) => this.cfg.bridgeMonad!.bridgeFailed(acc.accountKey, code) }
+            : {}),
       },
     )
     // The journal of a restarted engine is empty: the block of the last operation stored for the account stands in

@@ -287,7 +287,7 @@ export type EngineConfig = {
    * otto/mamoru#278: on a V4 remote Safe, savings its home asked to have sent back (`Observation.release`), read at every
    * review. Absent or undefined: no release.
    */
-  release?: () => Observation['release'] | undefined
+  release?: () => Promise<Observation['release'] | undefined>
   /**
    * otto/mamoru#218: this account's confirmed re-ranges from before this engine started (block timestamp and pool),
    * for the weekly cap and the cooldown across a restart. The newest also seeds `lastRerangeAt`. Absent: none.
@@ -713,9 +713,16 @@ export class Engine {
         return { kind: 'observation-failed', code: 'OBS_RPC_UNAVAILABLE', detail: `remote value: ${(e as Error).message?.split('\n')[0] ?? String(e)}` }
       }
     }
-    // otto/mamoru#278: an open release on a V4 remote Safe.
-    const release = this.cfg.release?.()
-    if (release && release.amount > 0n) obs = { ...obs, release }
+    // otto/mamoru#278: an open release on a V4 remote Safe. A hook that cannot answer holds the review: deciding without
+    // it could place what the home asked back.
+    if (this.cfg.release) {
+      try {
+        const release = await this.cfg.release()
+        if (release && release.amount > 0n) obs = { ...obs, release }
+      } catch (e) {
+        return { kind: 'observation-failed', code: 'OBS_RPC_UNAVAILABLE', detail: `release: ${(e as Error).message?.split('\n')[0] ?? String(e)}` }
+      }
+    }
     // Never decide on a view older than the engine's own last operation: a provider serving a head behind it shows
     // the account as it was before that operation, and the same step would be proposed again. The reviews used to be
     // minutes apart, which hid this; they can now follow each other in seconds.

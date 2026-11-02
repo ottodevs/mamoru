@@ -262,7 +262,8 @@ describe('release (Monad side, otto/mamoru#278)', () => {
     const saves = m.saves()
     expect(await m.op.requestRelease(rctx(SAFE), { id: 'r1', amount: '2500000' })).toMatchObject({ id: 'r1', state: 'open', chainId: 8453 })
     expect(m.saves()).toBeGreaterThan(saves)
-    expect(m.op.releaseStatus(rctx(SAFE))).toMatchObject({ id: 'r1', state: 'open' })
+    expect(await m.op.releaseStatus(rctx(SAFE), {})).toMatchObject({ id: 'r1', state: 'open' })
+    expect(await m.op.releaseStatus(rctx(SAFE), { id: 'r1' })).toMatchObject({ id: 'r1', state: 'open' })
     expect(await code(m.op.requestRelease(rctx(SAFE), { id: 'r2', amount: '1' }))).toEqual({ status: 409, code: 'RELEASE_OPEN' })
     expect(await code(m.op.requestRelease(rctx(SAFE), { id: 'r3', amount: 'x' }))).toEqual({ status: 400, code: 'BAD_REQUEST' })
   })
@@ -277,6 +278,34 @@ describe('release (Monad side, otto/mamoru#278)', () => {
     running(m)
     expect(await code(m.op.requestRelease(rctx(`0x${'d5'.repeat(20)}`), { id: 'r1', amount: '1' }))).toEqual({ status: 404, code: 'NOT_A_REMOTE' })
     expect(await code(m.op.requestRelease(rctx(SAFE), { id: 'r1', amount: '0' }))).toEqual({ status: 400, code: 'BAD_REQUEST' })
-    expect(m.op.releaseStatus(rctx(SAFE))).toEqual({ state: 'none' })
+    expect(await m.op.releaseStatus(rctx(SAFE), {})).toEqual({ state: 'none' })
+  })
+
+  test('review r1: a context naming another home is refused; status and cancel are served while stopped, a new request is not', async () => {
+    const m = monadWorld()
+    running(m)
+    const other = rctx(SAFE)
+    other.remote = { ...other.remote!, home: `0x${'99'.repeat(20)}` }
+    expect(await code(m.op.requestRelease(other, { id: 'r1', amount: '1' }))).toEqual({ status: 404, code: 'NOT_A_REMOTE' })
+    expect(await code(m.op.releaseStatus({ ...rctx(SAFE), remote: { ...rctx(SAFE).remote!, homeDomain: 15 } }, {}))).toEqual({ status: 404, code: 'NOT_A_REMOTE' })
+    await m.op.requestRelease(rctx(SAFE), { id: 'r1', amount: '1' })
+    m.state.accounts['r-v4']!.active = false
+    expect(await m.op.releaseStatus(rctx(SAFE), { id: 'r1' })).toMatchObject({ state: 'open' })
+    expect(await m.op.cancelRelease(rctx(SAFE), { id: 'r1' })).toMatchObject({ state: 'cancelled' })
+    expect(await code(m.op.requestRelease(rctx(SAFE), { id: 'r2', amount: '1' }))).toEqual({ status: 404, code: 'NOT_A_REMOTE' })
+  })
+
+  test('review r1: a save that throws leaves the request as it was and answers the error', async () => {
+    const m = monadWorld()
+    running(m)
+    const store = (m.op as unknown as { store: { save: () => void } }).store
+    const save = store.save
+    store.save = () => {
+      throw new Error('disk full')
+    }
+    expect(await code(m.op.requestRelease(rctx(SAFE), { id: 'r1', amount: '1' }))).toBeInstanceOf(Error)
+    expect(m.state.accounts['r-v4']!.release).toBeUndefined()
+    store.save = save
+    expect(await m.op.requestRelease(rctx(SAFE), { id: 'r2', amount: '1' })).toMatchObject({ id: 'r2', state: 'open' })
   })
 })

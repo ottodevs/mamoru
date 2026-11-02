@@ -294,7 +294,9 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
         case 'POST release':
           return json(200, await op.requestRelease(ctx, parse()))
         case 'POST release/status':
-          return json(200, op.releaseStatus(ctx))
+          return json(200, await op.releaseStatus(ctx, parse()))
+        case 'POST release/cancel':
+          return json(200, await op.cancelRelease(ctx, parse()))
         // otto/mamoru#293: an account created on V4 (setup mode): its session key before it exists, then its start.
         case 'POST one-auth-key':
           return json(200, await op.oneAuthKey(ctx))
