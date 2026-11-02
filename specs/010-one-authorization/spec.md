@@ -100,10 +100,17 @@ policy on Base can reason about what lives at an address on Monad. Constants:
      T1). No third party can revoke it, so deployment depends on nothing that can change after a mint: anyone can
      deploy the address at any time through the permissionless factory, and the result is always the user's Safe
      (r2 P0).
-   - **Before the first burn to a domain** (r3 P0-2), the operator deploys the remote Safe (relayed and
-     permissionless) and reads back on the remote chain its owners, the threshold, the modules and the session.
-     It burns only if all of them match. Base cannot verify Monad on chain, so this check is off chain and fails
-     closed.
+   - **Readiness is an on-chain prerequisite of `bridge`** (r3 P0-2, r4 P0):
+     - V4 refuses a burn unless `readyOf[account][domain] == remoteOf(account, domain)`.
+     - Only the **guardian** writes `readyOf`, never the operator or the session. The guardian is a separate key,
+       run by a separate watchdog process, with no operator code path.
+     - The guardian writes it after the remote Safe is deployed (relayed, permissionless) and it has read back,
+       on the remote chain, the code at the address, the owners and threshold, the shared-signer (x, y), the 7579
+       modules, and the session bound to V4.
+     - Any change of `remoteOf`, for example after a key rotation, clears `readyOf`. So does a change of the
+       account's `ownersHash`.
+     - A compromised operator or session key therefore cannot burn to an address the guardian has not seen
+       deployed and correct. A compromised guardian alone moves no funds.
    - The setup itself is **T1b**, run before any V4 code: the exact canonical initializer, with the
      self-attestation *inside* setup, deployed on a fork after funds were sent to its address.
 
@@ -132,7 +139,10 @@ policy on Base can reason about what lives at an address on Monad. Constants:
      the counter. A slow leak below the 24 h breaker therefore stops after at most 10C per chain, and in normal
      operation this costs the user nothing (ops reviews it; it never asks the owner).
 6. **Gas.** `MamoruGasPolicyV2` (userOp policy) keeps the per-op cap and adds a per-account **gas bucket per
-   window**. No action-free userOp: V4 refuses an empty batch and a call it cannot classify, through the
+   window** and a **cumulative gas threshold** (r4 P1). Gas paid since the guardian's last `review(account)` is
+   counted, and at `GAS_REVIEW` (pinned per chain: 0.01 ETH on Base, 5 MON on Monad, about a month of normal
+   operation) the session is paused until the guardian reviews it. A slow drain of the Safe's gas reserve
+   therefore stops too. No action-free userOp: V4 refuses an empty batch and a call it cannot classify, through the
    fallback action.
 7. **Guardian.** It can pause, unpause, and **cancel any queued registry entry**. It can never add, enable or move
    a token.
@@ -257,6 +267,13 @@ bounds that do not end the authorization.
 | P0-2 | A burn can target a remote Safe that cannot be deployed | The remote is deployed and read back before the first burn (fail closed); T1b fork-tests the exact self-attested initializer, deploying after a mint, before V4 code (I4). |
 | P1-3 | V4 cannot enforce approve/spend pairing on a per-call fallback | Approvals go only to V4. V4 performs each operation atomically and resets the allowance; direct router/NPM/messenger/vault calls are refused (I1). |
 | P1-4 | A thin pool's TWAP is not a value bound | A depth check at every priced use (20× the call), and the stated bound is now the full permitted spend (threat model). |
+
+## Review r4 (GPT-6 Sol, PR #196, NO-GO) → r5
+
+| # | Finding | r5 |
+|---|---|---|
+| P0 | Remote readiness checked only by the operator, so a session-signed burn skips it | `readyOf` is written only by the guardian after reading the remote back; V4 refuses a burn without it; a rotation clears it (I4). |
+| P1 | No cumulative stop on gas | A cumulative gas threshold pauses the session until the guardian reviews (I6). |
 
 ## Open questions
 
