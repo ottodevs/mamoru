@@ -87,7 +87,7 @@ user from that sum.
 | INV-3 | **No external control of a user.** No Mamoru-side address is, or can become, owner, guardian, executor with unrestricted calls, revoker or account-wide pauser. Accounts still on a guardian-bearing grant are declared non-compliant until migrated. | T9 (per-account state check: owners, threshold, guard, fallback handler, modules, executors, attesters, policy version; any Mamoru address in an authority slot fails) |
 | INV-4 | **Hermetic infra.** Every Mamoru infra contract has immutable, verified code and constructor-only configuration, no privileged state change, no upgrade, and pays only fixed recipients for fixed purposes. | T3 (inventory of every Mamoru-deployed contract on every chain: V1, V2, V3/V-next, MamoruGasPolicy, MamoruPauseGate, MamoruV3Routes, MamoruV4LiquidityPolicy; entry-point analysis of each for privileged or value-moving paths), T11 if a funded contract is built |
 | INV-5 | **Finite infra exposure.** For every reachable history (donations, reentrancy, failures, top-ups), the total value an infra version can ever pay out is at most its declared ceiling. | T11 (Halmos + invariant fuzzing), only if a funded contract is built |
-| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; per bundle, the submitting EOA's fee plus the beneficiary's receipts net ≥ 0 within a stated tolerance, summed across rotating beneficiaries) |
+| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; per userOp, `UserOperationEvent.sender` is the user's account and `actualGasCost` is charged to it or to an admitted third-party paymaster; per bundle, the submitter's fee ≤ Σ `actualGasCost` paid to the beneficiaries + a stated tolerance; funding provenance: no transfer from any Mamoru wallet to a user account or to a paymaster that serves users) |
 
 ## Decisions
 
@@ -182,6 +182,11 @@ bounded by the owner's allowance.
     backend) is published with a reproducible build. Anyone can serve it under the same RP ID from several hosts:
     Cloudflare, an IPFS gateway via DNSLink, a plain static host behind a `mamoru.lol` subdomain. Mamoru's Worker
     going down does not remove the owner's signing path.
+    - **RP ID pinned.** Today `rpId = location.hostname`, so a page at `exit.mamoru.lol` would ask for that
+      subdomain's RP ID and an existing `mamoru.lol` passkey would not sign. The signer and the app therefore pass
+      `rpId: "mamoru.lol"` explicitly, which WebAuthn allows from any subdomain. Beta keeps its own hostname-scoped
+      credentials (AGENTS.md: do not change the beta RP ID). T2 tests an existing production credential from every
+      host.
   - **D4-R3: Related Origins.** WebAuthn Related Origin Requests (`/.well-known/webauthn` on `mamoru.lol` listing
     other origins) are documented as an option for signing from another domain. They need `mamoru.lol` to serve that
     file, so they spread hosting but do not remove the domain dependency.
@@ -189,6 +194,18 @@ bounded by the owner's allowance.
     backup owner, the passkey can no longer produce signatures. The funds stay in the user's Safe: no one else can move
     them, but the user cannot either. The app says this where the optional backup owner is offered, and `/ops` counts
     the live accounts without one.
+  - **D4-R5: Malicious signing page.** An attacker who takes over `mamoru.lol`, a subdomain or a signer host can serve
+    a page that asks a returning user to tap for an attacker-built SafeTx. That one tap authorizes a transfer of the
+    whole Safe. The Safe WebAuthn verifier checks the signature, not the page origin, and this risk exists today. The
+    exposure is the balance of every user who signs on the compromised page while it is up. Mitigations:
+    - registrar lock, DNSSEC and CAA records (D4-R1);
+    - the static signer's release hash published in the repo, so a user or a third party can compare what a host
+      serves;
+    - the decoded transaction shown before the tap;
+    - the optional backup owner on a wallet that decodes the transaction independently (hardware clear signing).
+
+    Disclosed with D4-R4. A WebAuthn signer that pins the origin on chain would remove this risk. It is a new module,
+    out of scope here.
 - **Owner actions without the operator.** Today every withdraw, Stop and renewal is prepared, checked and sent by the
   operator (`operator.ts:4500-4640`). The app and the static signer build and sign SafeTxs and owner userOps
   client-side from open-source code. The user sends them in one of three ways:
@@ -230,9 +247,16 @@ bounded by the owner's allowance.
 - **POL-06: ERC-1271 off.** `erc1271Policies` and `allowedERC7739Content` stay empty. A test proves a session-key
   `isValidSignature` returns failure.
 - **POL-07: Reviewed tokens and venues only.**
-  - **Approvals:** exact amount, only to pinned spenders, and only in a batch shaped `approve(spender, x)`, then the
-    consuming call, then `approve(spender, 0)`. The policy refuses a batch whose trailing reset is missing, so no
-    allowance outlives its batch even when the spender pulls less than `x`.
+  - **Approvals:** exact amount, only to pinned spenders, and only in a batch shaped as follows:
+    1. `approve(spender, x)`;
+    2. the consuming call;
+    3. `approve(spender, 0)`;
+    4. a call to an immutable, stateless, fund-less `AllowanceCheck.assertZero(token, account, spender)` that reverts
+       the batch if the allowance is not 0.
+
+    Safe's MultiSend checks call success, not a returned `false`, which is why the reset alone is not enough. The
+    policy refuses a batch without steps 3 and 4. Admitted tokens must also revert or return `true` on `approve`. T5
+    tests this per admitted token and per executor path.
   - **Recipients:** pinned to the account.
   - **Nested calls:** routers, multicalls and bridges have their nested recipient, token and amount decoded and
     bounded, as V3 already does for CCTP (`depositForBurn`: recipient = account, pinned domain and token, fee 0).
@@ -268,10 +292,16 @@ bounded by the owner's allowance.
   (`operator.ts:2151,2155,2306`, `home.tsx:118,123,1042`).
 - **GRD-03: Per-account migration with a cutoff.** Each account moves to V-next with an owner-signed renewal; the
   generation jump already exists. The renewal batch also calls `removeSession` for the V2 session, so the removal is
-  provable on chain. The app asks every V2 account to renew now rather than at expiry. Destroying the key
-  cannot be proven, so it does not count as removing the power. What removes the power in practice is the cutoff: from
-  a published date the operator stops signing V2 grants. After that a guardian pause can only stop automation that no
-  longer runs, while the owner path was never gated. A ledger lists every account and the policy it runs.
+  provable on chain. The app asks every V2 account to renew now rather than at expiry. From a published cutoff date
+  the operator stops signing V2 grants and deletes its V2 session keys. Neither deletion can be proven on chain.
+  **Accounts that ignore renewal:** until V2's own `validUntil`, two things remain possible:
+  - a copied V2 session key can still act, within V2's on-chain caps and pinned recipients (recipient = account, so
+    no funds leave the Safe);
+  - the guardian, if a copy of its key exists, can still pause that account's sessions. It cannot touch the owner
+    path or move funds.
+
+  The owner can end both at any time with `removeSession` from the walkaway path. Those accounts stay flagged under
+  GRD-04 until V2 expiry or removal. A ledger lists every account and the policy it runs.
 - **GRD-04: Non-compliant until migrated.** While an account runs V2 or uses `MamoruPauseGate`, that account is declared
   non-compliant with C4 on `/ops` and in the walkaway docs. No claim of "no one can pause you" is made while any live
   account runs V2.
@@ -321,13 +351,20 @@ bounded by the owner's allowance.
 - **WLK-02: Static frontend.** An open-source static frontend on IPFS with an ENS name builds and signs the exit with
   the user's passkey, served under the `mamoru.lol` RP ID (D4-R2), or with the optional backup owner. It needs no
   Mamoru backend.
-- **WLK-03: Tested with Mamoru off.** In CI, on a fork of each chain: Mamoru's operator, relayer, bundler, Worker and
-  domain are unreachable, and the user revokes every session and withdraws every asset through a public RPC and a
-  public bundler or a plain `execTransaction`.
+- **WLK-03: Tested with Mamoru off.** In CI, on a fork of each chain, Mamoru's operator, relayer, bundler and Worker
+  are unreachable. Two cases:
+  - **(i) Passkey, domain available.** The passkey owner signs on the static signer served from a non-Mamoru host
+    under `mamoru.lol` (D4-R2).
+  - **(ii) Backup owner, domain unavailable.** An account with the optional backup owner signs from that wallet.
+
+  In both cases the user revokes every session and allowance and withdraws every asset through a public RPC and a
+  public bundler, or a plain `execTransaction`. A passkey-only account with the domain gone is the disclosed D4-R4
+  residual; it is not tested as passing.
 - **WLK-04: Agent of the user's choice.** The owner can always grant a V-next session to a key they choose. That is
   an owner power no Mamoru component can veto, and the static frontend exposes it. An optional self-hosted agent mode
-  (open-source agent run with the user's own session key) comes later, so that Mamoru refusing service stops only
-  Mamoru's offer, never the strategy.
+  (open-source agent run with the user's own session key) comes later. Until it ships, the guarantee is the owner's
+  power to grant a key, not continuity of the strategy: if Mamoru stops running the agent, the strategy stops while
+  funds stay withdrawable. Once the agent ships, Mamoru refusing service stops only Mamoru's offer.
 - **WLK-05: Verifiable builds.** Verified source on every chain, reproducible CREATE2 bytecode, code hashes pinned in
   `packages/registry/*.json` (including the `MamoruGasPolicy` Base address, today env-only, `boot.ts:108,126`).
 - **WLK-06: What Mamoru cannot guarantee.** The docs state it:
@@ -376,6 +413,7 @@ bounded by the owner's allowance.
 | Wrong constructor parameters | n/a | Fork test of exact init calldata; bytecode and code-hash check per chain; unknown chain pays nothing | A wrong value stays until the next version |
 | Shared V4 executor bug | Undeployed design reaches every account | Not deployed (POL-10) | None |
 | Users linked by one beneficiary / shared keys | One relayer address on every bundle | Per-account session keys, rotating beneficiary | On-chain analysis of funding sources |
+| Takeover of `mamoru.lol` or a signer host | Phishing page can obtain a full-Safe passkey signature | Registrar lock, DNSSEC, CAA, published signer hash, decoded tx display, optional hardware backup owner (D4-R5) | Balances of users who sign on the compromised page while it is up |
 | Sequencer censorship, issuer freeze | Same | Documented (WLK-06) | Outside Mamoru's contracts |
 
 ## Out of scope
@@ -393,7 +431,9 @@ bounded by the owner's allowance.
 - **T1: Retire the guardian.** Do GRD-01/02: destroy the key, publish the retirement, remove the copy.
 - **T2: Owner path.**
   - D4-R1: prepay the domain, registrar lock, multi-provider DNS.
-  - D4-R2: the static signer, reproducible and served from at least two hosts under `mamoru.lol`.
+  - D4-R2: the static signer, reproducible and served from at least two hosts under `mamoru.lol`. `rpId` is pinned to
+    `mamoru.lol` in the signer and the app, and an existing production credential is tested from every host.
+  - D4-R5: DNSSEC, CAA, the published release hash, and the decoded-transaction display.
   - The optional backup owner in settings (FR-ONB-004 signed challenge), with the D4-R4 disclosure and the `/ops`
     count.
 - **T3: Inventory checks.**
@@ -427,8 +467,10 @@ bounded by the owner's allowance.
   - Turn G1, G2 and G4 into account-paid userOps, with the first-operation options (a) and (b).
   - Turn G5 and G6 into destination-Safe userOp mints.
   - Delete G7.
-  - Add the INV-6 payer trace in CI and on `/ops`: submitter fee against beneficiary receipts per bundle, not the
-    beneficiary alone.
+  - Add the INV-6 payer trace in CI and on `/ops`:
+    - per-userOp attribution from `UserOperationEvent`;
+    - per-bundle submitter fee against receipts;
+    - a provenance ledger of every outgoing transfer from Mamoru wallets.
 - **T11: Bundler.** Relayer keys per chain in KMS, private submission with a public-bundler fallback, rotating
   beneficiary. Build `GasTreasury` (TRS-01..07, with Halmos and fuzzing for INV-5) only if D3's condition holds.
 
