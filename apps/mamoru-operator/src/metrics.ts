@@ -159,6 +159,9 @@ const RING_HOURS = 48
  * defense in depth rather than a response to an untrusted input, matching the method allowlist. */
 const MAX_PROVIDERS = 16
 const OTHER_PROVIDER = 'other'
+/** Keyed providers billed per call (Alchemy CU, QuickNode credits) keep their own label past the cap, so the budget
+ * brake and the ops alert, which read the bill by label, never lose them in "other" (otto/mamoru#305). */
+const isBilled = (provider: string) => /alchemy|quiknode\.pro/i.test(provider)
 
 /** How a logical eth_getLogs range ended on the provider that read it: accepted with a witness, or why it was rejected. */
 export type LogRangeOutcome = 'accepted' | 'no_witness' | 'hash_mismatch' | 'provider_error'
@@ -197,7 +200,7 @@ class Buckets {
   private providers = new Map<string, Map<string, RpcCounters>>()
 
   private providerKey(provider: string): string {
-    if (this.providers.has(provider) || this.providers.size < MAX_PROVIDERS) return provider
+    if (this.providers.has(provider) || this.providers.size < MAX_PROVIDERS || isBilled(provider)) return provider
     return OTHER_PROVIDER
   }
 

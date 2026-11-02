@@ -97,6 +97,17 @@ describe('rpcBudget', () => {
   })
 })
 
+describe('billed providers past the label cap (#305 r1)', () => {
+  test('QuickNode recorded after 16 other labels still spends credits and brakes', () => {
+    const m = metrics()
+    for (let i = 0; i < 20; i++) m.recordRequest(`public${i}.org`, 'eth_call', false, T)
+    for (let i = 0; i < 3; i++) m.recordRequest('quiknode.pro', 'eth_call', false, T)
+    expect(m.creditsThisHour(T)).toBe(3 * QUICKNODE_CREDITS_PER_CALL)
+    expect(rpcBudget(m, 0, 60).over(T)).toBe(true)
+    expect(Object.keys(m.snapshot(T).cumulative)).toContain('quiknode.pro')
+  })
+})
+
 describe('keyedCreditsBudgetFromEnv', () => {
   test('unset, empty, negative and not a number are the default; 0 turns it off', () => {
     expect(keyedCreditsBudgetFromEnv({})).toBe(DEFAULT_KEYED_CREDITS_PER_HOUR)
