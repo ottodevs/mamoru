@@ -243,7 +243,17 @@ describe('return home (otto/mamoru#278, Base side)', () => {
     const e = await s.r.request('acc-1', HOME, REMOTE, stopped, AMOUNT, FLOOR)
     expect(s.j().returns[e.id]!.state).toBe('requested')
     expect(s.r.busy('acc-1')).toBe(true)
-    // Status unreadable: kept too.
+    // The latest release there finished (burned): nothing open, the new return is cancelled.
+    const done = setup()
+    const finished: ReturnPeer = { ...stopped, releaseStatus: async () => ({ id: 'older', amount: '1', chainId: 8453, state: 'burned', burn: { amount: '1', txHash: `0x${'33'.repeat(32)}`, block: 1 } }) }
+    const d = await done.r.request('acc-1', HOME, REMOTE, finished, AMOUNT, FLOOR)
+    expect(done.j().returns[d.id]!.state).toBe('cancelled')
+    // The peer does not know the Safe at all (404 to the status too): cancelled.
+    const unknown = setup()
+    const nobody: ReturnPeer = { ...stopped, releaseStatus: async () => Promise.reject(Object.assign(new Error('no'), { status: 404, code: 'NOT_A_REMOTE' })) }
+    const n = await unknown.r.request('acc-1', HOME, REMOTE, nobody, AMOUNT, FLOOR)
+    expect(unknown.j().returns[n.id]!.state).toBe('cancelled')
+    // Status unreadable: kept.
     const t = setup()
     const blind: ReturnPeer = { ...stopped, releaseStatus: async () => Promise.reject(new Error('timeout')) }
     const b = await t.r.request('acc-1', HOME, REMOTE, blind, AMOUNT, FLOOR)

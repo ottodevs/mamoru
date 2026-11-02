@@ -145,13 +145,16 @@ export class ReturnHome {
    * Asks the remote Safe to send `amount` home: the entry is on disk before the peer is asked, so a lost answer is
    * asked again with the same id (the same request there). One open return per account: refused while one is.
    */
-  /** The peer's latest release is none or cancelled (nothing open or sending there); unknown counts as not. */
+  /**
+   * Nothing open or sending on the peer: its latest release is in any other state, or the peer does not know this
+   * Safe at all (404 NOT_A_REMOTE to the status too). Unreadable otherwise, or open or sending: not nothing.
+   */
   private async nothingOpen(remote: AccountContext, peer: ReturnPeer): Promise<boolean> {
     try {
       const v = await peer.releaseStatus(remote)
-      return v.state === 'none' || v.state === 'cancelled'
-    } catch {
-      return false
+      return v.state !== 'open' && v.state !== 'sending' && (v.state as string | undefined) !== undefined
+    } catch (err) {
+      return (err as { status?: unknown }).status === 404 && (err as { code?: unknown }).code === 'NOT_A_REMOTE'
     }
   }
 
