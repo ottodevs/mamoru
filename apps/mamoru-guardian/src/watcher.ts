@@ -7,7 +7,7 @@ import { mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi } from '@
 import { V4_CHAIN_BY_DOMAIN, type OneAuthV4Deployment } from '@mamoru/policy'
 import { address, registryFor, safe7579Abi, safeAbi, safeWebAuthnSharedSignerAbi } from '@mamoru/registry'
 import type { Alerter } from './alerts.ts'
-import { checkRemote, checkSibling, FALLBACK_ACTION_ID, type CheckReads, type HomeHistory, type Side, type SiblingReads, type V4Config } from './checks.ts'
+import { checkRemote, checkSibling, FALLBACK_ACTION_ID, type CheckReads, type CheckResult, type HomeHistory, type Side, type SiblingReads, type V4Config } from './checks.ts'
 import type { Sibling, StateStore } from './state.ts'
 
 /** The slice of a viem PublicClient the guardian uses (a real client is cast to it in main.ts). */
@@ -16,7 +16,7 @@ export type ChainClient = {
   getCode(a: { address: Address; blockNumber?: bigint }): Promise<Hex | undefined>
   getStorageAt(a: { address: Address; slot: Hex }): Promise<Hex | undefined>
   readContract(a: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[] }): Promise<unknown>
-  getLogs(a: { address?: Address; event: unknown; args?: Record<string, unknown>; fromBlock: bigint; toBlock: bigint }): Promise<{ args: Record<string, unknown>; address?: Address }[]>
+  getLogs(a: { address?: Address | Address[]; event: unknown; args?: Record<string, unknown>; fromBlock: bigint; toBlock: bigint }): Promise<{ args: Record<string, unknown>; address?: Address; blockNumber?: bigint | null }[]>
 }
 
 export type SetReady = (a: { account: Address; domain: number; remote: Address }) => Promise<Hex>
@@ -229,6 +229,9 @@ const signMsgEvent = parseAbiItem('event SignMsg(bytes32 indexed msgHash)')
 const nftApprovalEvent = parseAbiItem('event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)')
 const safeMultiSigEvent = parseAbiItem('event SafeMultiSigTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures, bytes additionalInfo)')
 const safeModuleTxEvent = parseAbiItem('event SafeModuleTransaction(address module, address to, uint256 value, bytes data, uint8 operation)')
+const addedOwnerEvent = parseAbiItem('event AddedOwner(address owner)')
+const removedOwnerEvent = parseAbiItem('event RemovedOwner(address owner)')
+const changedThresholdEvent = parseAbiItem('event ChangedThreshold(uint256 threshold)')
 /** Logs are read this many blocks short of the head (review r3 of #223, P2: a reorg never skips a log behind the cursor). */
 const HISTORY_CONFIRMATIONS = 10n
 const allowanceViewAbi = [
@@ -255,11 +258,13 @@ function reverted(e: unknown): boolean {
 type Hist = NonNullable<Sibling['hist']>
 
 /** One range of the home's logs folded into `h` (shared by the persisted scan and the unconfirmed tail). */
-async function foldLogs(home: ChainClient, s: Sibling, h: Hist, reg: ReturnType<typeof registryFor>, from: bigint, to: bigint): Promise<void> {
+async function foldLogs(home: ChainClient, s: Sibling, h: Hist, reg: ReturnType<typeof registryFor>, from: bigint, to: bigint, v4: Address): Promise<void> {
   const npm = reg.entries.find((e) => e.name === 'NonfungiblePositionManager')?.address
   const callOnly = address('MultiSendCallOnly_141', reg)
-  // Every token's Approval(owner = home); which ones count is decided below (forged emitters cannot force a refusal).
-  for (const l of await home.getLogs({ event: approvalEvent, args: { owner: s.account }, fromBlock: from, toBlock: to })) {
+  // Review r4 of #223 (P1-2) + security review: Approval(owner = home) only from the registry's tokens and vault shares
+  // (real value, what Mamoru moves): a forged emitter can neither flood this query nor be stored.
+  const emitters = reg.entries.filter((e) => e.kind === 'token' || e.kind === 'vault').map((e) => e.address)
+  for (const l of await home.getLogs({ address: emitters, event: approvalEvent, args: { owner: s.account }, fromBlock: from, toBlock: to })) {
     if (!l.address || (npm && isAddressEqual(l.address, npm)) || l.args.spender === undefined) continue
     const k = getAddress(l.address)
     h.spenders[k] = [...new Set([...(h.spenders[k] ?? []), getAddress(String(l.args.spender))])]
@@ -272,6 +277,10 @@ async function foldLogs(home: ChainClient, s: Sibling, h: Hist, reg: ReturnType<
   // Review r3 (P0-B): every owner tx and every module tx of the home (SafeL2 events, emitted by the home itself).
   for (const l of await home.getLogs({ address: s.account, event: safeMultiSigEvent, fromBlock: from, toBlock: to })) if (Number(l.args.operation) === 1 && !isAddressEqual(getAddress(String(l.args.to)), callOnly)) h.delegatecalls = (h.delegatecalls ?? 0) + 1
   for (const l of await home.getLogs({ address: s.account, event: safeModuleTxEvent, fromBlock: from, toBlock: to })) if (Number(l.args.operation) === 1) h.delegatecalls = (h.delegatecalls ?? 0) + 1
+  // Review r4 (P1): the last owner change, and V4's last enable for this account (PolicySet: the account is not indexed).
+  const max = (a: string | undefined, b: bigint | null | undefined) => (b == null ? a : a === undefined || b > BigInt(a) ? b.toString() : a)
+  for (const ev of [addedOwnerEvent, removedOwnerEvent, changedThresholdEvent]) for (const l of await home.getLogs({ address: s.account, event: ev, fromBlock: from, toBlock: to })) h.lastOwnerChange = max(h.lastOwnerChange, l.blockNumber)
+  for (const l of await home.getLogs({ address: v4, event: policySetEvent, fromBlock: from, toBlock: to })) if (l.args.account !== undefined && isAddressEqual(getAddress(String(l.args.account)), s.account)) h.lastPolicySet = max(h.lastPolicySet, l.blockNumber)
 }
 
 /**
@@ -285,8 +294,8 @@ async function homeHistoryOf(cfg: WatcherConfig, d: WatcherDeps, s: Sibling, hom
   const reg = registryFor(homeChainId)
   const tip = await home.getBlockNumber()
   const head = tip > HISTORY_CONFIRMATIONS ? tip - HISTORY_CONFIRMATIONS : 0n
-  if (s.hist && (s.hist.v !== 2 || s.hist.delegatecalls === undefined || s.hist.nftIds === undefined || s.hist.operators.some((o) => !String(o).includes(':')))) s.hist = undefined
-  const h = (s.hist ??= { v: 2, next: '', spenders: {}, operators: [], signed: 0, delegatecalls: 0, nftIds: [] })
+  if (s.hist && (s.hist.v !== 3 || s.hist.delegatecalls === undefined || s.hist.nftIds === undefined || s.hist.operators.some((o) => !String(o).includes(':')))) s.hist = undefined
+  const h = (s.hist ??= { v: 3, next: '', spenders: {}, operators: [], signed: 0, delegatecalls: 0, nftIds: [] })
   const empty = (note?: string): HomeHistory => ({ complete: false, ...(note ? { note } : {}), allowances: [], approvedForAll: [], signedMessages: 0, delegatecalls: 0, positionApprovals: [] })
   if (h.next === '') {
     let at: bigint | null
@@ -301,7 +310,7 @@ async function homeHistoryOf(cfg: WatcherConfig, d: WatcherDeps, s: Sibling, hom
   let next = BigInt(h.next)
   for (let page = 0; page < cfg.maxPagesPerStream && next <= head; page++) {
     const to = next + cfg.logPage - 1n < head ? next + cfg.logPage - 1n : head
-    await foldLogs(home, s, h, reg, next, to)
+    await foldLogs(home, s, h, reg, next, to, cfg.v4)
     next = to + 1n
     h.next = next.toString()
     d.store.save()
@@ -309,8 +318,8 @@ async function homeHistoryOf(cfg: WatcherConfig, d: WatcherDeps, s: Sibling, hom
   if (next <= head) return empty()
   // The unconfirmed tail, read into a copy: counted now, scanned again (persisted) once it is confirmed.
   const view: Hist = { ...h, spenders: { ...h.spenders }, operators: [...h.operators], nftIds: [...(h.nftIds ?? [])] }
-  if (next <= tip) await foldLogs(home, s, view, reg, next, tip)
-  const tokens = new Set(reg.entries.filter((e) => e.kind === 'token').map((e) => e.address.toLowerCase()))
+  if (next <= tip) await foldLogs(home, s, view, reg, next, tip, cfg.v4)
+  const tokens = new Set(reg.entries.filter((e) => e.kind === 'token' || e.kind === 'vault').map((e) => e.address.toLowerCase()))
   const allowances: { token: Address; spender: Address }[] = []
   const ignored: string[] = []
   for (const [token, spenders] of Object.entries(view.spenders)) {
@@ -346,13 +355,13 @@ async function homeHistoryOf(cfg: WatcherConfig, d: WatcherDeps, s: Sibling, hom
       if (BigInt(approved) !== 0n) positionApprovals.push(BigInt(id))
     }
   }
-  return { complete: true, ...(ignored.length ? { note: `Approval logs from ${ignored.length} contract(s) outside the registry ignored` } : {}), allowances, approvedForAll, signedMessages: view.signed, delegatecalls: view.delegatecalls ?? 0, positionApprovals }
+  return { complete: true, ...(ignored.length ? { note: `Approval logs from ${ignored.length} contract(s) outside the registry ignored` } : {}), allowances, approvedForAll, signedMessages: view.signed, delegatecalls: view.delegatecalls ?? 0, positionApprovals, ...(view.lastOwnerChange !== undefined ? { lastOwnerChange: BigInt(view.lastOwnerChange) } : {}), ...(view.lastPolicySet !== undefined ? { lastPolicySet: BigInt(view.lastPolicySet) } : {}) }
 }
 
 /** Safe proxy storage slot 0: its singleton. */
 const SINGLETON_SLOT: Hex = '0x0000000000000000000000000000000000000000000000000000000000000000'
-/** Consecutive transient re-checks of a ready sibling after which it is cleared (fail closed, security review of #223). */
-const SIBLING_TRANSIENT_CLEAR = 3
+/** An unbroken run of failed reads of a ready sibling this long clears it (fail closed; security review of #223). */
+const SIBLING_TRANSIENT_CLEAR_MS = 30 * 60_000
 /** A sent setReady is not sent again within this window: Ethereum's inclusion plus a lagging read RPC. */
 const SIBLING_RESEND_MS = 15 * 60_000
 
@@ -437,28 +446,42 @@ async function processSiblings(cfg: WatcherConfig, d: WatcherDeps): Promise<stri
       if (!ready && s.sentAt !== undefined && now - s.sentAt < SIBLING_RESEND_MS) continue
       const homeChainId = V4_CHAIN_BY_DOMAIN[s.domain]
       const homeClient = homeChainId === undefined ? undefined : d.clients[homeChainId]
-      if (homeChainId === undefined || !homeClient) {
-        await alertOnce(d, `sib:${k}:rpc`, `Sibling not marked ready, ${where}: no RPC configured for its home chain`, cfg.realertMs)
+      // Review r4 of #223 (GPT-6 P1): no home RPC is a failed read, for a ready sibling too (it is then cleared in time).
+      const res: CheckResult = homeChainId === undefined || !homeClient
+        ? { ok: false, failed: 'homeRpc: no RPC configured for its home chain: read failed', transient: true }
+        : await checkSibling({ account: s.account, homeDomain: s.domain, homeRegistry: registryFor(homeChainId), deployment: { policy: cfg.v4, gasPolicy: cfg.gasPolicy } }, siblingReadsFor(cfg, sibChain, homeClient, homeChainId, helper, () => homeHistoryOf(cfg, d, s, homeClient, homeChainId)))
+      if (ready) {
+        if (res.ok) {
+          s.checkedAt = now
+          s.transientSince = undefined
+          d.store.save()
+          continue
+        }
+        if (res.transient) {
+          // Security review of #223: only failed READS start the clock (a history scan in progress is no failure), and
+          // it is time, not passes: SIBLING_TRANSIENT_CLEAR_MS of unbroken failed reads clears the sibling.
+          if (!res.failed.startsWith('homeHistory:')) s.transientSince ??= now
+          const expired = s.transientSince !== undefined && now - s.transientSince >= SIBLING_TRANSIENT_CLEAR_MS
+          if (!expired) {
+            s.checkedAt = undefined // re-read next pass
+            d.store.save()
+            await alertOnce(d, `sib:recheck:${k}:${res.failed}`, `Ready sibling's re-check incomplete, ${where}: ${res.failed}`, cfg.realertMs)
+            continue
+          }
+        }
+        // A definite failure, or reads failing for too long: the guardian clears it (revoke-only, review r2 P1-c). The
+        // re-check clock moves only once the clear is sent; a failed clear is tried again next pass (GPT-6 r4 P1).
+        if (!cfg.dryRun && d.clear) {
+          const tx = await d.clear({ account: s.account, domain: s.domain }).catch(() => null)
+          s.checkedAt = tx ? now : undefined
+          if (tx) s.transientSince = undefined
+          d.store.save()
+          await alertOnce(d, `sib:changed:${k}:${res.failed}:${tx ?? 'retry'}`, `Ready sibling's home changed or unreadable, ${where}: ${res.failed}. ${tx ? `clearReady sent tx=${tx}` : 'clearReady FAILED to send: retried next pass'}`, cfg.realertMs)
+        } else await alertOnce(d, `sib:changed:${k}:${res.failed}`, `Ready sibling's home changed, ${where}: ${res.failed}. Clear it with V4.clearReady`, cfg.realertMs)
         continue
       }
-      const res = await checkSibling({ account: s.account, homeDomain: s.domain, homeRegistry: registryFor(homeChainId), deployment: { policy: cfg.v4, gasPolicy: cfg.gasPolicy } }, siblingReadsFor(cfg, sibChain, homeClient, homeChainId, helper, () => homeHistoryOf(cfg, d, s, homeClient, homeChainId)))
-      if (ready) {
-        s.checkedAt = now
-        d.store.save()
-        const stuck = !res.ok && res.transient ? (s.transient = (s.transient ?? 0) + 1) : (s.transient = 0)
-        if (!res.ok && res.transient && stuck < SIBLING_TRANSIENT_CLEAR) {
-          // Review r3 of #223 (P2): a read failure or a scan in progress proves nothing: alerted, retried next pass (the
-          // re-check clock does not move), and cleared only after SIBLING_TRANSIENT_CLEAR in a row (security review).
-          s.checkedAt = undefined
-          d.store.save()
-          await alertOnce(d, `sib:recheck:${k}:${res.failed}`, `Ready sibling's re-check incomplete, ${where}: ${res.failed}`, cfg.realertMs)
-        } else if (!res.ok) {
-          // Review r2 of #223 (P1-c): the guardian clears it (revoke-only) instead of letting the bridge continue.
-          if (!cfg.dryRun && d.clear) {
-            const tx = await d.clear({ account: s.account, domain: s.domain }).catch(() => null)
-            await alertOnce(d, `sib:changed:${k}:${res.failed}`, `Ready sibling's home changed, ${where}: ${res.failed}. ${tx ? `clearReady sent tx=${tx}` : 'clearReady FAILED to send: clear it by hand'}`, cfg.realertMs)
-          } else await alertOnce(d, `sib:changed:${k}:${res.failed}`, `Ready sibling's home changed, ${where}: ${res.failed}. Clear it with V4.clearReady`, cfg.realertMs)
-        }
+      if (homeChainId === undefined || !homeClient) {
+        await alertOnce(d, `sib:${k}:rpc`, `Sibling not marked ready, ${where}: no RPC configured for its home chain`, cfg.realertMs)
         continue
       }
       if (!res.ok) {

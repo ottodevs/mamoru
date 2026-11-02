@@ -209,6 +209,9 @@ export type HomeHistory = {
   delegatecalls: number
   /** Review r3 (P1-2): positions of the home with a single-token approval still set (ERC-721 getApproved). */
   positionApprovals: readonly bigint[]
+  /** Review r4 of #223 (P1): blocks of the home's last owner change (AddedOwner/RemovedOwner/ChangedThreshold) and of V4's last PolicySet for it. */
+  lastOwnerChange?: bigint
+  lastPolicySet?: bigint
 }
 
 const ZERO: Address = '0x0000000000000000000000000000000000000000'
@@ -300,12 +303,16 @@ export async function checkSibling(
     ...i.homeRegistry.entries.filter((e) => e.kind === 'vault' || e.name === 'SwapRouter02' || e.name === 'NonfungiblePositionManager' || e.name === 'TokenMessengerV2').map((e) => e.address.toLowerCase()),
     i.deployment.policy.toLowerCase(),
   ])
-  const allowed = pulls
-  const foreign = hist.v.allowances.find((x) => !allowed.has(x.spender.toLowerCase()))
+
+  const foreign = hist.v.allowances.find((x) => !pulls.has(x.spender.toLowerCase()))
   if (foreign) return fail(`homeAllowance: ${foreign.token} may be spent by ${foreign.spender}`)
   if (hist.v.approvedForAll.length) return fail(`homeApprovedForAll: ${hist.v.approvedForAll[0]} may move the home's positions`)
   if (hist.v.signedMessages) return fail('homeSignedMessages: the home stored a signed message')
   if (hist.v.positionApprovals.length) return fail(`homePositionApproval: position ${hist.v.positionApprovals[0]} has an approved operator`)
+  // Review r4 of #223 (Opus P1-1, GPT-6 P1): a V4 session enabled by whoever was an owner, with their own key, keeps
+  // working after an owner swap until a new generation. The V4 Init in force must be newer than the last owner change.
+  if (hist.v.lastPolicySet === undefined) return fail('homeConfig: no V4 enable seen in the home\'s history')
+  if (hist.v.lastOwnerChange !== undefined && hist.v.lastPolicySet <= hist.v.lastOwnerChange) return fail('homeSessionStale: the V4 authorization predates the last owner change: the current owners must sign it again')
   // P1-a, bounded: the home's C is never above the sibling's (the C Mamoru signs for both).
   if (home.v.capUsd > sib.v.capUsd) return fail("homeConfig: the home's C is above the sibling's")
   return { ok: true }

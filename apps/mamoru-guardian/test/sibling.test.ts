@@ -33,6 +33,8 @@ function world() {
     signMsgs: 0,
     head: 10n,
     ownerTxs: [] as { to: Address; operation: number }[],
+    homePolicySetAt: 5n as bigint | undefined,
+    ownerChangeAt: undefined as bigint | undefined,
     moduleTxs: [] as { operation: number }[],
     nftApprovals: [] as { tokenId: bigint; approved: Address; owned: boolean }[],
     sibCode: PROXY as Hex | undefined,
@@ -63,11 +65,16 @@ function client(w: W, side: 'sibling' | 'home'): ChainClient {
     getStorageAt: async ({ slot }) => pad(slot.startsWith('0x4a204f62') ? w.home.guard : slot.startsWith('0x6c9a6c4a') ? w.home.handler : w.home.singleton, { size: 32 }),
     getLogs: async ({ event, address: at }) => {
       const name = (event as { name: string }).name
-      if (name === 'PolicySet') return side === 'sibling' ? w.logs : []
+      if (name === 'PolicySet') return side === 'sibling' ? w.logs : w.homePolicySetAt === undefined ? [] : [{ args: { account: ACCOUNT }, blockNumber: w.homePolicySetAt }]
       if (side !== 'home') return []
       const npm = address('NonfungiblePositionManager', baseRegistry)
-      if (name === 'Approval' && at && at.toLowerCase() === npm.toLowerCase()) return w.nftApprovals.map((x) => ({ address: npm, args: { owner: ACCOUNT, approved: x.approved, tokenId: x.tokenId } }))
-      if (name === 'Approval') return w.approvals.map((x) => ({ address: x.token, args: { owner: ACCOUNT, spender: x.spender } }))
+      const one = typeof at === 'string' ? at : undefined
+      if (name === 'Approval' && one && one.toLowerCase() === npm.toLowerCase()) return w.nftApprovals.map((x) => ({ address: npm, args: { owner: ACCOUNT, approved: x.approved, tokenId: x.tokenId } }))
+      if (name === 'Approval') {
+        const allowed = Array.isArray(at) ? at.map((x) => x.toLowerCase()) : undefined
+        return w.approvals.filter((x) => !allowed || allowed.includes(x.token.toLowerCase())).map((x) => ({ address: x.token, args: { owner: ACCOUNT, spender: x.spender } }))
+      }
+      if (name === 'AddedOwner' && w.ownerChangeAt !== undefined) return [{ args: {}, blockNumber: w.ownerChangeAt }]
       if (name === 'ApprovalForAll') return w.approvalForAll.map((o) => ({ address: npm, args: { owner: ACCOUNT, operator: o } }))
       if (name === 'SignMsg') return Array.from({ length: w.signMsgs }, () => ({ args: {} }))
       if (name === 'SafeMultiSigTransaction') return w.ownerTxs.map((t) => ({ args: { to: t.to, operation: t.operation } }))
@@ -324,7 +331,7 @@ describe('security review of r3 (#223)', () => {
     expect(s.alerts.some((a) => a.includes('homeAllowance'))).toBe(true)
   })
 
-  test('three transient re-checks in a row of a ready sibling clear it (fail closed)', async () => {
+  test('an unbroken half hour of failed reads of a ready sibling clears it (fail closed), not a few passes', async () => {
     const w = world()
     let now = 1_000
     const s = setup(w)
@@ -337,6 +344,60 @@ describe('security review of r3 (#223)', () => {
       now += 2_000
       await runPass(s.cfg, s.deps)
     }
+    expect(s.cleared).toEqual([])
+    now += 31 * 60_000
+    await runPass(s.cfg, s.deps)
+    expect(s.cleared).toEqual([{ account: ACCOUNT, domain: 6 }])
+  })
+})
+
+describe('review r4 of #223', () => {
+  test("a V4 authorization older than the home's last owner change is refused (an old owner's own session key)", async () => {
+    const w = world(); w.homePolicySetAt = 3n; w.ownerChangeAt = 4n
+    const s = setup(w)
+    await runPass(s.cfg, s.deps)
+    expect(s.sent).toEqual([])
+    expect(s.alerts.some((a) => a.includes('homeSessionStale'))).toBe(true)
+  })
+
+  test('re-signed after the owner change: accepted', async () => {
+    const w = world(); w.ownerChangeAt = 4n; w.homePolicySetAt = 6n
+    const s = setup(w)
+    await runPass(s.cfg, s.deps)
+    expect(s.sent.length).toBe(1)
+  })
+
+  test('no V4 enable in the home history: refused', async () => {
+    const w = world(); w.homePolicySetAt = undefined
+    const s = setup(w)
+    await runPass(s.cfg, s.deps)
+    expect(s.sent).toEqual([])
+  })
+
+  test('an allowance on a registry vault share to a foreign spender is refused', async () => {
+    const w = world()
+    w.approvals = [{ token: address('vault:gtUSDCp', baseRegistry), spender: A(0xbad) }]
+    const s = setup(w)
+    await runPass(s.cfg, s.deps)
+    expect(s.sent).toEqual([])
+    expect(s.alerts.some((a) => a.includes('homeAllowance'))).toBe(true)
+  })
+
+  test('a failed clearReady is tried again on the next pass', async () => {
+    const w = world()
+    let now = 1_000
+    const s = setup(w)
+    s.deps.now = () => now
+    await runPass(s.cfg, s.deps)
+    let fails = 1
+    s.deps.clear = async (a) => { if (fails-- > 0) throw new Error('wallet down'); s.cleared.push(a); return '0x02' }
+    w.signMsgs = 1
+    s.store.state.siblings[ACCOUNT]!.hist = undefined
+    now += 2_000
+    await runPass(s.cfg, s.deps)
+    expect(s.cleared).toEqual([])
+    now += 2_000
+    await runPass(s.cfg, s.deps)
     expect(s.cleared).toEqual([{ account: ACCOUNT, domain: 6 }])
   })
 })
