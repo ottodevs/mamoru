@@ -99,6 +99,9 @@ for _ in $(seq 1 90); do
 done
 [ "$conclusion" = "success" ] || { echo "CI on $new_head did not finish in 15 minutes ($conclusion)" >&2; exit 1; }
 
+# Pull requests stacked on this branch, read now: once GitHub deletes the branch it retargets them to main.
+children="$(gh pr list -R "$repo" --base "$head" --state open --json number,headRefName -q '.[] | "\(.number)\t\(.headRefName)"')"
+
 # Not forced: if main moved since the fetch above (another machine merged), this push is not a fast-forward and git
 # refuses it, so nothing lands on a main the overlap check did not see.
 git -C "$tmp" push -q origin "$new_head:refs/heads/main"
@@ -109,4 +112,30 @@ for _ in $(seq 1 12); do
   sleep 5
 done
 echo "PR #$pr: $(gh pr view "$pr" -R "$repo" --json state -q .state)"
-[ "$keep_branch" = "--keep-branch" ] || git -C "$root" push -q origin --delete "$head" || true
+
+# The rebase re-signed every commit, so a stacked pull request still carries the old ones and conflicts with main.
+# Its author drops them with one rebase; say exactly which, on the pull request and here.
+if [ -n "$children" ] && [ "$new_head" != "$old_head" ]; then
+  while IFS=$'\t' read -r child child_head; do
+    fix="git fetch origin && git rebase --onto origin/main $old_head $child_head && git push --force-with-lease origin $child_head"
+    gh pr comment "$child" -R "$repo" --body "Its base #$pr was merged as \`${new_head:0:7}\` with re-signed commits, so this branch still carries the old ones (up to \`${old_head:0:7}\`). In your worktree: \`$fix\`. The rebase only drops #$pr's commits; if the range-diff of your own commits is identical, the review stands." >/dev/null
+    echo "stacked PR #$child ($child_head): $fix"
+  done <<<"$children"
+fi
+
+# The repository deletes merged branches itself (delete_branch_on_merge), usually within seconds. Delete it here only
+# if it is still there, so a missing branch is not reported as an error and a real failure is.
+branch_exists() { [ -n "$(git -C "$root" ls-remote --heads origin "refs/heads/$head")" ]; }
+if [ "$keep_branch" = "--keep-branch" ]; then
+  echo "kept $head (GitHub may still delete it: delete_branch_on_merge is on)"
+else
+  for _ in $(seq 1 6); do branch_exists || break; sleep 5; done
+  if ! branch_exists; then
+    echo "branch $head deleted"
+  elif git -C "$root" push -q origin --delete "$head" 2>/dev/null || ! branch_exists; then
+    echo "branch $head deleted"
+  else
+    echo "could not delete branch $head: delete it by hand" >&2
+    exit 1
+  fi
+fi
