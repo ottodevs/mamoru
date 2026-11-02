@@ -1752,7 +1752,8 @@ export class Operator {
       idle: idleTokens(r, this.cfg.registry),
       engine: this.engineView(acc),
       positions: [
-        ...this.sizingPositions(acc, r).map((p) => ({
+        // A position the engine emptied (liquidity and owed fees 0, NFT not burned) is no longer working capital: no row.
+        ...this.sizingPositions(acc, r).filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n).map((p) => ({
         tokenId: p.tokenId.toString(),
         pool: p.pool,
         liquidity: p.liquidity.toString(),

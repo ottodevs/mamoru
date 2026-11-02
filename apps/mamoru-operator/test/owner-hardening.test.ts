@@ -135,6 +135,15 @@ describe('#4 position NFTs sent to the Safe never block Stop', () => {
     expect(plan.out.reduce.map((r) => r.tokenId)).toEqual(['7'])
   })
 
+  test('funding shows no row for an admitted position the engine emptied (liquidity and owed fees 0)', async () => {
+    const w = world(0n)
+    w.chain.deployed = true
+    const acc = w.op.account(ctx).acc
+    acc.admittedTokenIds = ['7', '8']
+    w.chain.positions = [{ tokenId: 7n, liquidity: 100_000_000n }, { tokenId: 8n, liquidity: 0n }]
+    expect((await w.op.funding(ctx)).positions.map((p) => p.tokenId)).toEqual(['7'])
+  })
+
   test('an account from before the record counts every non-dust position, largest first, at most 16', async () => {
     const w = world(0n)
     w.chain.deployed = true
