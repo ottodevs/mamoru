@@ -3,8 +3,12 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { encodeFunctionData, getAddress, pad, parseAbi, parseAbiItem, parseEventLogs, TransactionNotFoundError, TransactionReceiptNotFoundError, toHex, zeroAddress, type Hex, type Log, type PublicClient, type TransactionReceipt } from 'viem'
 import type { UserOperation } from 'viem/account-abstraction'
-import type { AccountContext, Address, BridgeOutRoute, BridgeOutToSign, BridgeOutView, EthConvert, EthConvertToSign, OwnerSignature } from '@mamoru/domain'
-import { address, baseRegistry, entryPointV07Abi, erc20Abi } from '@mamoru/registry'
+import type { AccountContext, Address, BridgeOutRoute, BridgeOutToSign, BridgeOutView, EthConvert, EthConvertToSign, MigrateV4Input, OwnerSignature } from '@mamoru/domain'
+import { address, baseRegistry, entryPointV07Abi, erc20Abi, ethereumRegistry } from '@mamoru/registry'
+import { buildMigrateV4, smartSessionV4Abi } from '@mamoru/account/one-auth'
+import { oneAuthV4Deployment } from '@mamoru/policy'
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
+import { chmodSync } from 'node:fs'
 import { browserOwnerSignature, deployCall, encodeWebAuthnSignature, liveAccountFromContext, ownerSafeTx, readSafeNonce, safeContractSignature, safeTxHashOf, verifyOwnerSignature, type LiveAccount } from '@mamoru/account/live'
 import { execTransactionData, type SafeTx } from '@mamoru/account/safe'
 import { userOpHash } from '@mamoru/account/sessions'
@@ -71,6 +75,19 @@ export const CONVERTS_PER_ACCOUNT_DAY = 3
 /** Gas limit of the owner transaction (the swap used ~130k on Ethereum), with margin. */
 export const CONVERT_GAS = 300_000n
 
+// otto/mamoru#309 (b), spec 010 "Ethereum and siblings": the account's own Safe on Ethereum gets ONE V4 session whose
+// Init names the account itself as home (home domain 6, Base). The owner signs one Safe transaction on Ethereum, built by
+// the same builder the Worker rebuilds with (buildMigrateV4, step 1, chain 1, no old sessions): trust the Rhinestone
+// attester and the Safe, self-attest V4 and MamoruGasPolicyV2, enableSessions, assertMigrated. No ENABLE signature. The
+// relayer deploys the Safe first when it has no code (the account's own initializer) and pays the gas, charged to the
+// day's budget like a conversion. From then on Mamoru wraps, swaps and bridges home under V4 with no signature (#309 c).
+/** Ceiling of the sibling's owner transaction (fork: trust + attest + enable ~1.5M on Ethereum); the limit sent is the estimate plus 30 %. */
+export const SIBLING_ENABLE_GAS = 2_500_000n
+/** Below these the sibling is not offered: nothing for it to do. */
+export const SIBLING_MIN_WEI = MIN_CONVERT_WEI
+/** CCTP domain of Base: a sibling's only home. */
+export const SIBLING_HOME_DOMAIN = 6
+
 /** Safe 1.4.1: keccak256('ExecutionSuccess(bytes32,uint256)') and keccak256('ExecutionFailure(bytes32,uint256)'). */
 const EXECUTION_SUCCESS_TOPIC = '0x442e715f626346e8c54381002da614f62bee8d27386535b2521ec8540898556e'
 const EXECUTION_FAILURE_TOPIC = '0x23428b18acfb3ea64b08dc0c1d296ea9c09702c09083ca5272e64d115b687d23'
@@ -107,6 +124,18 @@ export function convertMinOut(amountIn: bigint, quoted: bigint, oracle: { answer
   const gap = quoted > fair ? quoted - fair : fair - quoted
   if (fair === 0n || gap * 10_000n > fair * MAX_ORACLE_GAP_BPS) throw new HttpError(503, 'CONVERT_PRICE_UNAVAILABLE', 'the ETH price could not be checked right now, try later')
   return (quoted * (10_000n - CONVERT_SLIPPAGE_BPS)) / 10_000n
+}
+
+/** Every line the owner signs to set up the sibling (#309, #41: the plain words of what the Safe tx does). */
+export function siblingStepLines(p: { capUsd: bigint; eth: bigint; usdc: bigint }): string[] {
+  const usd = (raw: bigint) => `${(raw / 1_000_000n).toLocaleString('en-US')}`
+  const held = [p.eth > 0n ? `${eth(p.eth)} ETH` : '', p.usdc > 0n ? `${usdc(p.usdc)} USDC` : ''].filter(Boolean).join(' and ')
+  return [
+    `Lets Mamoru move what your Safe on Ethereum holds (${held || 'nothing yet'}) to your own Safe on Base, the same address, with no further signature`,
+    'Mamoru may only turn ETH into USDC there (Uniswap, under the same price limits as on Base) and send the USDC to your Safe on Base. It can send it nowhere else',
+    `At most ${usd(p.capUsd)} USDC of value a day, and nothing leaves until Mamoru's guardian has checked your Safe on Base`,
+    'Mamoru pays the Ethereum gas to set this up; the moves after it are paid from the ETH in this Safe',
+  ]
 }
 
 /** USDC the receipt shows arriving at `safe` (Transfer events of native USDC). */
@@ -247,7 +276,30 @@ type Reservation = { wei: string; tx?: Hex; nonce?: number; at: string; goneAt?:
 /** #211: a conversion as kept on disk. */
 type StoredConvert = EthConvert & { id: string; safe: Address; safeNonce: string; safeTxHash: Hex; fromBlock: string; execStarted?: boolean }
 type PreparedConvert = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; amountIn: bigint; minOut: bigint; deployed: boolean; expires: number }
-type Journal = { converts?: Record<string, StoredConvert>; convertDays?: Record<string, { day: string; n: number }>; reservations?: Record<string, Reservation>; cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
+/** The sibling's enable, as the journal keeps it. 'unconfirmed': sent, not proven either way; tick() resolves it. */
+export type StoredSibling = {
+  id: string
+  safe: Address
+  safeNonce: string
+  safeTxHash: Hex
+  permissionId: Hex
+  sessionKey: Address
+  capUsdc: string
+  fromBlock: string
+  state: 'sending' | 'unconfirmed' | 'done' | 'failed'
+  deployTx?: Hex
+  l1Tx?: Hex
+  execStarted?: boolean
+  at: string
+}
+
+type PreparedSibling = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; permissionId: Hex; sessionKey: Address; capUsdc: bigint; deployed: boolean; expires: number }
+
+/** What the owner signs for the sibling: the Safe tx, the plain lines, and the builder's input (the Worker rebuilds it). */
+export type SiblingToSign = { safe: Address; chainId: number; safeTxHash: Hex; summary: string[]; expiresAt: string; prepareId: string; built: { input: MigrateV4Input; safeTxHash: Hex } }
+export type SiblingView = { state: 'none' | StoredSibling['state']; safe?: Address; l1Tx?: Hex; sessionKey?: Address }
+
+type Journal = { siblings?: Record<string, StoredSibling>; converts?: Record<string, StoredConvert>; convertDays?: Record<string, { day: string; n: number }>; reservations?: Record<string, Reservation>; cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
 
 const NON_TERMINAL = new Set<BridgeOutRoute['state']>(['sending', 'deposited', 'unconfirmed', 'expired'])
 
@@ -443,7 +495,7 @@ export class BridgeOut {
     const dropped = Object.keys(j.converts ?? {}).length - Object.keys(converts).length
     // None should ever be dropped (every conversion is written with both): say so if one is.
     if (dropped > 0) logErr('[bridge-out] conversions without safeTxHash/fromBlock dropped from the journal:', dropped)
-    return { routes: j.routes ?? {}, converts, convertDays: j.convertDays ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {}, reservations }
+    return { siblings: j.siblings ?? {}, routes: j.routes ?? {}, converts, convertDays: j.convertDays ?? {}, spent: j.spent ?? empty.spent, moves: j.moves ?? {}, mintDays: j.mintDays ?? {}, cctpNonces: j.cctpNonces ?? {}, cctpBurns: j.cctpBurns ?? {}, reservations }
   }
 
   private save(): void {
@@ -1293,6 +1345,182 @@ export class BridgeOut {
     }
   }
 
+  // ---------------------------------------------------------------- #309 (b): the V4 sibling on Ethereum
+
+  /** The account's C on Base (USD units), set by boot from the operator (the same C a Base V4 home signs). Null: unknown. */
+  siblingCapUsd: (ctx: AccountContext) => bigint | null = () => null
+  private readonly preparedSibling = new Map<string, PreparedSibling>()
+
+  private get keyFile(): string {
+    return join(this.stateDir, 'ethereum-sibling-keys.json')
+  }
+
+  /** The sibling's session key of `accountKey`, created once and kept in its own 0600 file (never in the journal). */
+  private siblingKey(accountKey: string): Hex {
+    const keys = existsSync(this.keyFile) ? (JSON.parse(readFileSync(this.keyFile, 'utf8')) as Record<string, Hex>) : {}
+    if (keys[accountKey]) return keys[accountKey]!
+    keys[accountKey] = generatePrivateKey()
+    const tmp = `${this.keyFile}.tmp`
+    writeFileSync(tmp, JSON.stringify(keys, null, 1), { mode: 0o600 })
+    chmodSync(tmp, 0o600)
+    renameSync(tmp, this.keyFile)
+    return keys[accountKey]!
+  }
+
+  /** The private key of the account's sibling session, for the engine leg (#309 c). Undefined before its prepare. */
+  siblingSessionKey(accountKey: string): Hex | undefined {
+    if (!existsSync(this.keyFile)) return undefined
+    return (JSON.parse(readFileSync(this.keyFile, 'utf8')) as Record<string, Hex>)[accountKey]
+  }
+
+  siblingView(accountKey: string): SiblingView {
+    const c = this.journal.siblings?.[accountKey]
+    return c ? { state: c.state, safe: c.safe, sessionKey: c.sessionKey, ...(c.l1Tx ? { l1Tx: c.l1Tx } : {}) } : { state: 'none' }
+  }
+
+  private siblingBlocking(accountKey: string): boolean {
+    const c = this.journal.siblings?.[accountKey]
+    return !!c && c.state !== 'failed'
+  }
+
+  /**
+   * The sibling's owner transaction for the passkey. Offered when V4 is pinned on Ethereum, the account holds something
+   * there for it to do, and its Safe there has no SmartSession permission yet (a Safe Mamoru set up never had one on
+   * Ethereum: any other is refused, fail closed).
+   */
+  async prepareSibling(ctx: AccountContext): Promise<SiblingToSign> {
+    this.on(ctx.accountKey)
+    const deployment = oneAuthV4Deployment(ethereumRegistry)
+    if (!deployment) throw new HttpError(503, 'SIBLING_UNAVAILABLE', 'Mamoru on Ethereum is not available yet')
+    const live = this.live(ctx)
+    if (this.siblingBlocking(ctx.accountKey)) throw new HttpError(409, 'SIBLING_IN_PROGRESS', 'your Safe on Ethereum is already set up or being set up')
+    const cap = this.siblingCapUsd(ctx)
+    if (!cap || cap <= 0n) throw new HttpError(503, 'SIBLING_UNAVAILABLE', 'your account limit could not be read just now, try again in a minute')
+    const [eth, usdc, state] = await Promise.all([this.l1.getBalance({ address: live.safe }), this.usdcAt(live.safe), readSafeNonce(this.l1, live.safe)])
+    if (eth < SIBLING_MIN_WEI && usdc < MIN_USDC) throw new HttpError(409, 'SIBLING_NOTHING', 'there is nothing on Ethereum for Mamoru to move')
+    if (state.deployed) {
+      const ids = (await this.l1.readContract({ address: address('SmartSession', ethereumRegistry), abi: smartSessionV4Abi, functionName: 'getPermissionIDs', args: [live.safe] })) as Hex[]
+      if (ids.length) throw new HttpError(409, 'SIBLING_INVENTORY_MISMATCH', 'your Safe on Ethereum has permissions Mamoru did not give: nothing was prepared, and the team was alerted')
+    }
+    const priv = this.siblingKey(ctx.accountKey)
+    const sessionKey = privateKeyToAccount(priv).address
+    const input: MigrateV4Input = { chainId: ETHEREUM_CHAIN_ID, safe: live.safe, safeNonce: state.nonce.toString(), step: 1, capUsdc: cap.toString(), sessionKey, generation: '1', admit: [], oldPermissionIds: [], removeIds: [], noncesBefore: [], home: live.safe, homeDomain: SIBLING_HOME_DOMAIN }
+    const built = buildMigrateV4(input, ethereumRegistry)
+    const tx: SafeTx = { to: built.safeTx.to, value: 0n, data: built.safeTx.data, operation: built.safeTx.operation, nonce: state.nonce }
+    // The builder hashes with the chain's domain; the account's own view of the same tx must agree.
+    if (safeTxHashOf(live, tx) !== built.safeTxHash) throw new Error('sibling: safeTxHash mismatch between the builder and the account')
+    const prepareId = toHex(randomBytes(16)).slice(2)
+    const expires = this.now() + PREPARE_TTL_MS
+    const p: PreparedSibling = { prepareId, accountKey: ctx.accountKey, live, tx, safeTxHash: built.safeTxHash, permissionId: built.permissionId, sessionKey, capUsdc: cap, deployed: state.deployed, expires }
+    if (!admitPrepare(this.preparedSibling, p, MAX_PREPARED, this.now())) throw new HttpError(503, 'BRIDGE_BUSY', 'too many approvals are waiting, try again in a minute')
+    return {
+      safe: live.safe,
+      chainId: ETHEREUM_CHAIN_ID,
+      safeTxHash: built.safeTxHash,
+      summary: siblingStepLines({ capUsd: cap, eth, usdc }),
+      expiresAt: new Date(expires).toISOString(),
+      prepareId,
+      built: { input, safeTxHash: built.safeTxHash },
+    }
+  }
+
+  async submitSibling(ctx: AccountContext, body: OwnerSignature): Promise<SiblingView> {
+    if (this.inFlight || this.bundling.size > 0) throw new HttpError(503, 'BRIDGE_BUSY', 'another move from Ethereum is being sent, try again in a minute')
+    const p = body && typeof body.prepareId === 'string' ? this.preparedSibling.get(body.prepareId) : undefined
+    if (!p || p.accountKey !== ctx.accountKey) throw new HttpError(404, 'PREPARE_NOT_FOUND', 'that approval is not known, tap again')
+    this.preparedSibling.delete(p.prepareId)
+    if (p.expires < this.now()) throw new HttpError(410, 'PREPARE_EXPIRED', 'that approval expired, tap again')
+    let signature: Hex
+    try {
+      signature = browserOwnerSignature(body, p.safeTxHash)
+    } catch {
+      throw new HttpError(400, 'BAD_SIGNATURE', 'the passkey signature could not be read')
+    }
+    if (!(await verifyOwnerSignature(signature, p.safeTxHash, p.live.webauthn))) throw new HttpError(400, 'BAD_SIGNATURE', 'the passkey signature does not match this account')
+    this.on(ctx.accountKey)
+    return this.exclusive(() => this.sendSibling(ctx, p, signature))
+  }
+
+  private async sendSibling(ctx: AccountContext, p: PreparedSibling, signature: Hex): Promise<SiblingView> {
+    if (this.siblingBlocking(ctx.accountKey)) throw new HttpError(409, 'SIBLING_IN_PROGRESS', 'your Safe on Ethereum is already set up or being set up')
+    const [state, head] = await Promise.all([readSafeNonce(this.l1, p.live.safe), this.l1.getBlockNumber({ cacheTime: 0 })])
+    if (state.deployed !== p.deployed || state.nonce !== p.tx.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'your Safe on Ethereum changed, tap again')
+    const exec = execTransactionData(p.tx, signature)
+    if (p.deployed) await this.simulate(p.live.safe, exec)
+    const c: StoredSibling = { id: p.prepareId, safe: p.live.safe, safeNonce: p.tx.nonce.toString(), safeTxHash: p.safeTxHash, permissionId: p.permissionId, sessionKey: p.sessionKey, capUsdc: p.capUsdc.toString(), fromBlock: head.toString(), state: 'sending', at: '' }
+    this.writeSibling(ctx.accountKey, c)
+    try {
+      if (!p.deployed) {
+        const d = deployCall(p.live)
+        const r = await this.charged({ to: d.to, data: d.data, gas: DEPLOY_GAS }, (h) => {
+          c.deployTx = h
+          this.writeSibling(ctx.accountKey, c)
+        })
+        if (r.receipt.status !== 'success') throw new Error('deploy reverted')
+        await this.simulate(p.live.safe, exec)
+      }
+      const est = await this.l1.estimateGas({ account: this.relayer.address, to: p.live.safe, data: exec })
+      const gas = (est * 13n) / 10n
+      if (gas > SIBLING_ENABLE_GAS) throw new Error(`sibling enable would take ${est} gas`)
+      // Started only once a hash exists: a refusal before the send (gas price, budget) leaves nothing to reconcile.
+      const r = await this.charged({ to: p.live.safe, data: exec, gas }, (h) => {
+        c.l1Tx = h
+        c.execStarted = true
+        this.writeSibling(ctx.accountKey, c)
+      })
+      await this.settleSibling(c, r.receipt)
+    } catch (e) {
+      logErr(`[bridge-out] sibling ${ctx.accountKey.slice(0, 8)}:`, e)
+      c.state = c.execStarted ? 'unconfirmed' : 'failed'
+    }
+    this.writeSibling(ctx.accountKey, c)
+    if (c.state === 'failed') throw new HttpError(502, 'SIBLING_FAILED', 'setting up your Safe on Ethereum did not go through; nothing moved')
+    return this.siblingView(ctx.accountKey)
+  }
+
+  /** Done only when the Safe executed it (ExecutionSuccess for its hash) AND SmartSession lists the V4 session now. */
+  private async settleSibling(c: StoredSibling, receipt: TransactionReceipt): Promise<void> {
+    if (receipt.status !== 'success') {
+      c.state = 'failed'
+      return
+    }
+    const ok = receipt.logs.some((l) => getAddress(l.address) === getAddress(c.safe) && l.topics[0] === EXECUTION_SUCCESS_TOPIC && (l.topics[1] ?? `0x${l.data.slice(2, 66)}`).toLowerCase() === c.safeTxHash.toLowerCase())
+    const failed = receipt.logs.some((l) => getAddress(l.address) === getAddress(c.safe) && l.topics[0] === EXECUTION_FAILURE_TOPIC)
+    if (failed) {
+      c.state = 'failed'
+      return
+    }
+    const enabled = ok && (await this.siblingEnabled(c))
+    c.state = enabled ? 'done' : 'unconfirmed'
+  }
+
+  private async siblingEnabled(c: StoredSibling): Promise<boolean> {
+    return (await this.l1.readContract({ address: address('SmartSession', ethereumRegistry), abi: smartSessionV4Abi, functionName: 'isPermissionEnabled', args: [c.permissionId, c.safe] })) as boolean
+  }
+
+  /** An unconfirmed enable from the chain: the session enabled is done; the signed nonce spent without it, failed. */
+  private async reconcileSibling(accountKey: string): Promise<void> {
+    const c = this.journal.siblings?.[accountKey]
+    if (!c || (c.state !== 'unconfirmed' && c.state !== 'sending')) return
+    if (await this.siblingEnabled(c)) c.state = 'done'
+    else {
+      const exec = await this.findExecution(c.safe, c.safeTxHash, BigInt(c.fromBlock))
+      if (exec && !exec.success) c.state = 'failed'
+      else if (!exec) {
+        const { nonce } = await readSafeNonce(this.l1, c.safe)
+        if (nonce > BigInt(c.safeNonce)) c.state = 'failed' // the signed nonce went to something else
+        else if (!c.l1Tx && this.now() - Date.parse(c.at) > UNCONFIRMED_GIVEUP_MS) c.state = 'failed' // never broadcast
+      }
+    }
+    this.writeSibling(accountKey, c)
+  }
+
+  private writeSibling(accountKey: string, c: StoredSibling): void {
+    c.at = new Date(this.now()).toISOString()
+    this.journal.siblings = { ...(this.journal.siblings ?? {}), [accountKey]: c }
+    this.save()
+  }
+
   /**
    * The Safe's ExecutionSuccess / ExecutionFailure for `safeTxHash` from `from` on, in provider-sized chunks over
    * LOG_WINDOW_BLOCKS (the signed swap's deadline is CONVERT_DEADLINE_SEC, ~75 blocks: it cannot run later). The hash
@@ -1377,6 +1605,7 @@ export class BridgeOut {
    */
   async tick(): Promise<void> {
     await this.settleReservations().catch((e) => logErr('[bridge-out] tick reservations:', e instanceof Error ? e.message : e))
+    for (const accountKey of Object.keys(this.journal.siblings ?? {})) await this.reconcileSibling(accountKey).catch((e) => logErr('[bridge-out] tick sibling:', e instanceof Error ? e.message : e))
     for (const [accountKey, r] of Object.entries(this.journal.routes)) {
       // Every unfinished CCTP move, so a burn left 'sending' or 'unconfirmed' by a crash is reconciled and minted too.
       // otto/mamoru#212: and every unfinished Across move, so a fill nobody polls for stops counting as in flight (the

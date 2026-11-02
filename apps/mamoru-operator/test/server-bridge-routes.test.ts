@@ -17,6 +17,9 @@ const bridge = {
   submit: async () => (calls.push('submit'), { route: null, enabled: true }),
   prepareConvert: async () => (calls.push('prepareConvert'), { prepareId: 'c' }),
   submitConvert: async () => (calls.push('submitConvert'), { route: null, enabled: true }),
+  prepareSibling: async () => (calls.push('prepareSibling'), { prepareId: 's' }),
+  submitSibling: async () => (calls.push('submitSibling'), { state: 'done' }),
+  siblingView: () => (calls.push('siblingView'), { state: 'none' }),
 } as unknown as BridgeOut
 
 async function call(base: string, method: string, path: string, body = '') {
@@ -38,10 +41,14 @@ describe('bridge-out and eth-convert routes (#133, #211)', () => {
           await call(base, 'POST', '/api/accounts/acc-1/bridge-out', '{"prepareId":"p"}'),
           await call(base, 'POST', '/api/accounts/acc-1/eth-convert/prepare'),
           await call(base, 'POST', '/api/accounts/acc-1/eth-convert', '{"prepareId":"c"}'),
+          // otto/mamoru#309 (b)
+          await call(base, 'POST', '/api/accounts/acc-1/ethereum-sibling/prepare'),
+          await call(base, 'POST', '/api/accounts/acc-1/ethereum-sibling', '{"prepareId":"s"}'),
+          await call(base, 'GET', '/api/accounts/acc-1/ethereum-sibling'),
         ]
         if (withBridge) {
-          expect(res.map((r) => r.status)).toEqual([200, 200, 200, 200, 200])
-          expect(calls).toEqual(['status', 'prepare', 'submit', 'prepareConvert', 'submitConvert'])
+          expect(res.map((r) => r.status)).toEqual([200, 200, 200, 200, 200, 200, 200, 200])
+          expect(calls).toEqual(['status', 'prepare', 'submit', 'prepareConvert', 'submitConvert', 'prepareSibling', 'submitSibling', 'siblingView'])
         } else {
           for (const r of res) expect(((await r.json()) as { code?: string }).code).toBe('BRIDGE_OFF')
         }

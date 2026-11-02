@@ -1273,6 +1273,14 @@ export class Operator {
   }
 
   /** The per-account cap at Start (otto/mamoru#127, #26): see capOf. */
+  /** otto/mamoru#309: the C of the account's V4 sibling on Ethereum: the C its V4 home holds, else the one it would sign. */
+  siblingCapUsd(ctx: AccountContext): bigint | null {
+    const acc = this.store.state.accounts[ctx.accountKey]
+    if (!acc) return null
+    if (this.onV4(acc) && acc.oneAuth?.capUsd) return BigInt(acc.oneAuth.capUsd)
+    return v4CapUsdOf(this.capFor(acc))
+  }
+
   capFor(acc: AccountState): bigint {
     return this.capOf(acc).cap
   }
