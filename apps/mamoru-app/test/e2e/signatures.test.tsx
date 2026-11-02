@@ -1,18 +1,43 @@
 import { describe, expect, test } from 'bun:test'
 import { signatureCopy } from '../../src/web/lib/signature.ts'
 import { ActivateScope, Review } from '../../src/web/routes/home.tsx'
-import { CreateSignature } from '../../src/web/routes/onboarding.tsx'
-import { render } from './render.ts'
+import { CreateAccount } from '../../src/web/routes/onboarding.tsx'
+import { count, render } from './render.ts'
 
 // otto/mamoru#19: every passkey prompt is preceded by one plain line on what that signature does.
 describe('before each passkey signature', () => {
-  test('signature 1 of 2 says it creates the account and only the owner can take money out', () => {
-    const { text, html } = render(<CreateSignature creating={false} error={null} onApprove={() => {}} />)
-    expect(text).toContain('Signature 1 of 2')
+  // otto/mamoru#294: one screen, one button; the signed lines stay behind "What you sign".
+  test('the create screen is one card with one button and no counters', () => {
+    const { text, html } = render(<CreateAccount phase="idle" error={null} summary={null} onStart={() => {}} onSignIn={() => {}} />)
+    expect(text).toContain('Create your account')
+    expect(text).toContain('This signature creates your Mamoru account.')
+    for (const line of ['Let Mamoru manage your savings.', 'Every move shows in your history.', 'Only you can take money out.']) expect(text).toContain(line)
+    expect(text).toContain('Face ID, fingerprint or screen lock. No password, no seed phrase.')
+    expect(text).toContain('I already have an account')
+    expect(text).not.toMatch(/\d of \d|Signature \d/)
+    expect(count(html, '<button')).toBe(2)
+    expect(html.indexOf('This signature creates')).toBeLessThan(html.indexOf('Create with passkey'))
+    // The signed meaning is reachable: both signatures, worded as before.
+    expect(html).toContain('data-testid="sign-details"')
+    expect(text).toContain('What you sign')
     expect(text).toContain('This signature creates your Mamoru account on Base. Only you can take money out of it.')
-    expect(text).toContain('Next: let Mamoru put it to work')
-    // The line comes before the button that opens the prompt.
-    expect(html.indexOf('This signature creates')).toBeLessThan(html.indexOf('Approve with passkey'))
+    expect(text).toContain('This signature lets Mamoru open, adjust and close positions with your USDC.')
+    expect(text).toContain('It can never send your money to anyone but you.')
+  })
+
+  test('progress and errors are said next to the button, and the retry resumes at the authorization', () => {
+    const creating = render(<CreateAccount phase="creating" error={null} summary={null} onStart={() => {}} onSignIn={() => {}} />)
+    expect(creating.text).toContain('Creating your account…')
+    expect(creating.text).not.toContain('I already have an account')
+    expect(creating.html).toMatch(/<button[^>]*disabled/)
+    const authorizing = render(<CreateAccount phase="authorizing" error={null} summary={['Deploy your Safe on Base']} onStart={() => {}} onSignIn={() => {}} />)
+    expect(authorizing.text).toContain('Authorizing Mamoru…')
+    // With the signed lines prepared, they sit in the disclosure, word for word.
+    expect(authorizing.text).toContain('Deploy your Safe on Base')
+    const retry = render(<CreateAccount phase="retry" error="Passkey closed. Nothing was signed." summary={null} onStart={() => {}} onSignIn={() => {}} />)
+    expect(retry.text).toContain('Passkey closed. Nothing was signed.')
+    expect(retry.text).toContain('Authorize Mamoru')
+    expect(retry.text).not.toContain('Create with passkey')
   })
 
   test('the review of an owner action says its scope before the confirm button', () => {
@@ -43,7 +68,7 @@ describe('before each passkey signature', () => {
   })
 
   test('the copy stays plain: no exclamation marks', () => {
-    const lines = [signatureCopy.create, signatureCopy.activate].flatMap((c) => Object.values(c))
+    const lines = [signatureCopy.create, signatureCopy.activate].flatMap((c) => Object.values(c).flat())
     for (const l of [...lines, signatureCopy.withdraw('USDC'), signatureCopy.stop, signatureCopy.move]) expect(String(l)).not.toContain('!')
   })
 })

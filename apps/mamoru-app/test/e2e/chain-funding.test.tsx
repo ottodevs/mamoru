@@ -89,10 +89,10 @@ describe('Home on a balance read from chain', () => {
     const oor: FundingView = { ...fromChain, positions: [{ ...fromChain.positions[0]!, inRange: false }] }
     const { text } = await home(oor)
     expect(text).toContain('Out of range.')
-    for (const claim of ['Paused', 'puts it back to work', 'Placing', 'waiting to be placed', 'being placed', 'Mamoru looks again', 'Nothing to do right now', 'next review']) expect(text).not.toContain(claim)
+    for (const claim of ['Paused', 'Temporarily', 'put it back to work', 'Placing', 'waiting to be placed', 'being placed', 'Mamoru looks again', 'Nothing to do right now', 'next review']) expect(text).not.toContain(claim)
     // and with the operator answering, the old wording stays
     const live = await home({ ...oor, source: undefined, chainRead: undefined, active: true })
-    expect(live.text).toContain('Paused: out of range. Mamoru puts it back to work automatically.')
+    expect(live.text).toContain('Temporarily out of range. Mamoru will put it back to work soon.')
   })
 
   test('the cap is shown only when it is known', () => {

@@ -49,7 +49,7 @@ describe('positions of every pool', () => {
     expect(text).toContain('2.00 USDC · 1.00 USDT')
     expect(text).toContain('0.00025 WETH · 1.00 USDC')
     expect(text).toContain('3.00 USDC')
-    expect(text).toContain('Paused: out of range. Mamoru puts it back to work automatically.')
+    expect(text).toContain('Temporarily out of range. Mamoru will put it back to work soon.')
     expect(render(<Working f={{ ...multi, progress: null }} s={split(multi, null)} onStop={null} />).text).not.toContain('Swapping')
   })
   // otto/mamoru#223: the position and the status line say what the engine decided, by its re-range code.
@@ -57,7 +57,7 @@ describe('positions of every pool', () => {
     const held = (code: string): FundingView => ({ ...multi, progress: null, engine: { placing: false, nextReviewAt: '2026-10-27T10:00:00.000Z', rangeHolds: [{ tokenId: '2', code }] } })
     const below = render(<Working f={held('DECIDE_RANGE_BELOW_COST')} s={split(multi, null)} onStop={null} />).text
     expect(below).toContain('Too small to re-centre at a profit')
-    expect(below).not.toContain('puts it back to work automatically')
+    expect(below).not.toContain('put it back to work')
     expect(render(<Working f={held('DECIDE_RANGE_COOLDOWN')} s={split(multi, null)} onStop={null} />).text).toContain('waits a little before re-centring')
     expect(engineLine({ ...held('DECIDE_RANGE_BELOW_COST'), active: true })).toContain('too small to re-centre at a profit')
     expect(engineLine({ ...held('DECIDE_RANGE_BELOW_COST'), active: true, engine: { placing: false, nextReviewAt: '2026-10-27T10:00:00.000Z' } })).toContain('Nothing to do right now')

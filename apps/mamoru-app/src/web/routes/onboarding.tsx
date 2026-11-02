@@ -1,26 +1,13 @@
-import type { OwnerResponse } from '@mamoru/domain'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { useApi } from '../api/client.ts'
-import { queryKeys, useConfig, useRegistrationChallenge } from '../api/queries.ts'
-import { downloadJson, kitFilename } from '../lib/download.ts'
-import { capNote } from '../lib/money.ts'
+import { queryKeys, useRegistrationChallenge } from '../api/queries.ts'
 import { errorText, useOwnerAction } from '../lib/owner-flow.ts'
 import { createOwnerPasskey } from '../lib/passkey.ts'
 import { rememberCredential } from '../lib/passkey-sign.ts'
 import { activateLine, signatureCopy } from '../lib/signature.ts'
 import { challengeUsable, signInCopy } from '../lib/signin.ts'
-
-export const onboardingCopy = {
-  brand: 'Mamoru',
-  title: 'Savings, automated.',
-  points: [
-    { title: 'Add USDC on Base.', body: '' },
-    { title: 'All your USDC has a job.', body: 'Mamoru opens positions for you. Profits become USDC.' },
-    { title: 'You keep control. No lockups.', body: 'Withdraw anytime. Only you can take it out.' },
-  ],
-}
 
 // A text link on the card: the card is darker than the page, so stone on wash would not read.
 export const CARD_LINK = 'text-[0.88rem] text-[color-mix(in_srgb,var(--color-ink)_68%,transparent)] underline decoration-[color-mix(in_srgb,var(--color-ink)_35%,transparent)] underline-offset-4 hover:text-ink'
@@ -38,101 +25,85 @@ export function CardFrame({ label, testId, children }: { label: string; testId: 
   )
 }
 
-/** otto/mamoru#19: which of the two onboarding signatures this is, in words and as a two-part bar. */
-function SignStep({ n }: { n: 1 | 2 }) {
+export type CreatePhase = 'idle' | 'creating' | 'authorizing' | 'retry'
+
+/** The key in its circle, as drawn in the v4 design. */
+function KeyMark() {
   return (
-    <>
-      <p className="ob-step uppercase">{n === 1 ? signatureCopy.create.step : signatureCopy.activate.step}</p>
-      <div className="mb-5 flex gap-2" aria-hidden="true">
-        <span className="h-[3px] flex-1 bg-ink" />
-        <span className={`h-[3px] flex-1 ${n === 2 ? 'bg-ink' : 'bg-[color-mix(in_srgb,var(--color-ink)_18%,transparent)]'}`} />
-      </div>
-    </>
+    <span className="mb-5 grid size-[3.4rem] place-items-center rounded-full bg-[color-mix(in_srgb,var(--color-emerald)_16%,transparent)] text-emerald" aria-hidden="true">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="7.5" cy="12" r="3.5" />
+        <path d="M11 12h10M17 12v3M20 12v2" />
+      </svg>
+    </span>
   )
 }
 
-/** Signature 1 of 2: what creating the passkey does, said before the prompt opens. */
-export function CreateSignature({ creating, error, onApprove }: { creating: boolean; error: string | null; onApprove: () => void }) {
+/**
+ * otto/mamoru#294 (Brais, v4): the only account-creation screen. One button runs both ceremonies, the passkey and then
+ * the authorization, with the progress said in place. The signed lines stay behind "What you sign" (#41).
+ */
+export function CreateAccount({ phase, error, summary, onStart, onSignIn }: { phase: CreatePhase; error: string | null; summary: string[] | null; onStart: () => void; onSignIn: () => void }) {
+  const copy = signatureCopy.create
+  const busy = phase === 'creating' || phase === 'authorizing'
+  const label = phase === 'creating' ? copy.creating : phase === 'authorizing' ? copy.authorizing : phase === 'retry' ? copy.retry : copy.action
   return (
     <div className="enter">
-      <SignStep n={1} />
-      <h1 className="ob-title">{signatureCopy.create.title}</h1>
-      <p className="ob-body">{signatureCopy.create.body}</p>
-      {error ? <p className="err mt-3">{error}</p> : null}
-      <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
-        <span className="text-[0.95rem] text-[color-mix(in_srgb,var(--color-ink)_60%,transparent)]">{signatureCopy.create.next}</span>
-        <button type="button" className="ob-btn solid ml-auto" onClick={onApprove} disabled={creating}>
-          {creating ? 'Waiting for passkey' : 'Approve with passkey'}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-/** After the passkey is made: the one approval that lets Mamoru put the money to work. */
-function Approve({ owner }: { owner: OwnerResponse }) {
-  const api = useApi()
-  const navigate = useNavigate()
-  const act = useOwnerAction(owner.accountKey, 'activate')
-  const [kitSaved, setKitSaved] = useState(false)
-  const kit = useMutation({
-    mutationFn: async (o: OwnerResponse) => {
-      downloadJson(kitFilename(o.address), await api.recoveryKit(o.accountKey))
-      await api.ackRecovery(o.accountKey).catch(() => undefined)
-    },
-    onSuccess: () => setKitSaved(true),
-  })
-  const { prepare, prepared, busy } = act
-
-  // Prepare the activation as soon as the account exists, so the approve tap goes straight to the passkey.
-  useEffect(() => {
-    if (owner && !prepared && busy === null && !act.error && !act.result) void prepare()
-  }, [owner, prepared, busy, act.error, act.result, prepare])
-
-  const approve = async () => {
-    const op = prepared ? await act.approve() : null
-    if (!prepared) await prepare()
-    if (op) void navigate({ to: '/add' })
-  }
-
-  const summary = prepared?.tx.summary ?? null
-
-  return (
-    <div className="enter">
-      <SignStep n={2} />
-      <h1 className="ob-title">{signatureCopy.activate.title}</h1>
-      <p className="ob-body">{summary ? activateLine(summary) : `${signatureCopy.activate.body} ${signatureCopy.activate.setup}`}</p>
-      <p className="ob-body font-semibold">{signatureCopy.activate.never}</p>
-      <div className="mt-3 flex flex-wrap items-start gap-x-5 gap-y-2">
-        {summary ? (
-          <details className="min-w-0 basis-full" data-testid="sign-details">
-            <summary className={`${CARD_LINK} cursor-pointer`}>{signatureCopy.activate.details}</summary>
-            <ul className="mt-2 mb-0 grid gap-1 pl-5 text-[0.88rem] leading-[1.45] [overflow-wrap:anywhere]">
+      <p className="ob-step uppercase">{copy.eyebrow}</p>
+      <KeyMark />
+      <h1 className="ob-title">{copy.title}</h1>
+      <p className="ob-body">{copy.body}</p>
+      <ul className="mt-4 mb-0 grid list-none gap-[0.55rem] p-0">
+        {copy.points.map((t) => (
+          <li key={t} className="grid grid-cols-[1.6rem_1fr] leading-snug">
+            <span className="text-emerald" aria-hidden="true">
+              ✓
+            </span>
+            <span>{t}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-4 mb-0 text-[0.95rem] leading-snug text-[color-mix(in_srgb,var(--color-ink)_60%,transparent)]">{copy.note}</p>
+      <details className="mt-3" data-testid="sign-details">
+        <summary className={`${CARD_LINK} cursor-pointer`}>{copy.details}</summary>
+        <div className="mt-2 grid gap-2 text-[0.88rem] leading-[1.45] [overflow-wrap:anywhere]">
+          <p className="m-0">{copy.signs}</p>
+          <p className="m-0">
+            {summary ? activateLine(summary) : `${signatureCopy.activate.body} ${signatureCopy.activate.setup}`} <strong>{signatureCopy.activate.never}</strong>
+          </p>
+          {summary ? (
+            <ul className="m-0 grid list-disc gap-1 pl-5">
               {summary.map((l) => (
                 <li key={l}>{l}</li>
               ))}
             </ul>
-          </details>
-        ) : null}
-        <button type="button" className={CARD_LINK} onClick={() => kit.mutate(owner)} disabled={kit.isPending}>
-          {kitSaved ? 'Recovery kit saved' : 'Save recovery kit'}
-        </button>
+          ) : null}
+        </div>
+      </details>
+      <div role="status" aria-live="polite">
+        {phase === 'retry' || phase === 'authorizing' ? <p className="mt-3 mb-0 text-[0.95rem] text-emerald">✓ {copy.created}</p> : null}
+        {error ? <p className="err mt-3">{error}</p> : null}
       </div>
-      {act.error ? <p className="err mt-3">{act.error}</p> : null}
-      <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
-        <span className="text-[0.95rem] text-[color-mix(in_srgb,var(--color-ink)_60%,transparent)]">{signatureCopy.activate.next}</span>
-        <button type="button" className="ob-btn solid ml-auto" onClick={approve} disabled={busy !== null}>
-          {busy === 'signing' ? 'Waiting for passkey' : busy === 'preparing' ? 'Preparing' : 'Approve with passkey'}
+      <div className="mt-[1.6rem] flex items-center justify-between gap-4">
+        {phase === 'idle' ? (
+          <button type="button" className={`${CARD_LINK} min-w-0 flex-1 text-left`} onClick={onSignIn}>
+            {signInCopy.link}
+          </button>
+        ) : null}
+        <button type="button" className="ob-btn solid ml-auto shrink-0" onClick={onStart} disabled={busy} data-phase={phase}>
+          {label}
         </button>
       </div>
     </div>
   )
 }
 
-/** The first screen: what Mamoru does in three points, then the passkey that creates the account. */
+/** The first screen: the passkey that creates the account, then the approval that lets Mamoru work, from one button. */
 export function Onboarding({ onSignIn }: { onSignIn: () => void }) {
   const api = useApi()
   const qc = useQueryClient()
+  const navigate = useNavigate()
+  const [go, setGo] = useState(false)
   const owner = useMutation({
     mutationFn: async () => {
       // Fetched ahead while the screen is up; a stale one is replaced first. One challenge is one attempt.
@@ -148,46 +119,43 @@ export function Onboarding({ onSignIn }: { onSignIn: () => void }) {
       }
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.session }),
+    onError: () => setGo(false),
   })
   const ready = useRegistrationChallenge(!owner.data)
-  // The cap is said before any money moves, when the API runs live.
-  const capUsdc = useConfig().data?.capUsdc
-  const points = onboardingCopy.points.map((p, i) => (i === 0 && capUsdc ? { ...p, body: capNote(capUsdc) } : p))
-  const creating = owner.isPending
-  // otto/mamoru#19: «Create account» first says what the passkey is about to sign; the prompt opens from that card.
-  const [signing, setSigning] = useState(false)
+  const created = owner.data
+  const act = useOwnerAction(created?.accountKey, 'activate')
+  const { prepare, approve, prepared, busy, error, result } = act
+  // Once the account exists, the authorization follows on its own: prepare it, then the passkey signs it. A failed or
+  // closed step stops here with its error; the retry button resumes from this step and never makes another passkey.
+  const inflight = useRef(false)
+  useEffect(() => {
+    if (!created || !go || busy !== null || result || inflight.current) return
+    if (error) {
+      setGo(false)
+      return
+    }
+    inflight.current = true
+    const step = prepared ? approve().then((op) => (op ? navigate({ to: '/add' }) : undefined)) : prepare()
+    void Promise.resolve(step).finally(() => {
+      inflight.current = false
+    })
+  }, [created, go, busy, result, error, prepared, prepare, approve, navigate])
+
+  const phase: CreatePhase = !created ? (owner.isPending ? 'creating' : 'idle') : go || busy !== null ? 'authorizing' : 'retry'
+  const start = () => {
+    if (!created) {
+      setGo(true)
+      owner.mutate()
+      return
+    }
+    act.reset()
+    setGo(true)
+  }
+  const shownError = created ? error : owner.error ? errorText(owner.error) : null
 
   return (
-    <CardFrame label="Welcome to Mamoru" testId={owner.data ? 'onboarding-approve' : signing ? 'onboarding-create' : 'onboarding'}>
-      {owner.data ? (
-        <Approve owner={owner.data} />
-      ) : signing ? (
-        <CreateSignature creating={creating} error={owner.error ? errorText(owner.error) : null} onApprove={() => owner.mutate()} />
-      ) : (
-        <div className="enter">
-          <p className="ob-step uppercase">{onboardingCopy.brand}</p>
-          <h1 className="ob-title">{onboardingCopy.title}</h1>
-          <ol className="mt-[1.4rem] mb-0 grid list-none gap-[1.1rem] p-0">
-            {points.map((p, i) => (
-              <li key={p.title} className="grid grid-cols-[2.2rem_1fr]">
-                <span className="font-mono text-[0.8rem] leading-[1.9] text-emerald">{String(i + 1).padStart(2, '0')}</span>
-                <span>
-                  <b className="block text-[1.12rem] leading-snug font-semibold">{p.title}</b>
-                  {p.body ? <span className="mt-[0.2rem] block leading-normal text-[color-mix(in_srgb,var(--color-ink)_72%,transparent)]">{p.body}</span> : null}
-                </span>
-              </li>
-            ))}
-          </ol>
-          <div className="mt-[1.6rem] flex flex-wrap items-center justify-between gap-3">
-            <button type="button" className={CARD_LINK} onClick={onSignIn}>
-              {signInCopy.link}
-            </button>
-            <button type="button" className="ob-btn solid ml-auto" onClick={() => setSigning(true)}>
-              Create account
-            </button>
-          </div>
-        </div>
-      )}
+    <CardFrame label="Create your Mamoru account" testId="onboarding">
+      <CreateAccount phase={phase} error={shownError} summary={prepared?.tx.summary ?? null} onStart={start} onSignIn={onSignIn} />
     </CardFrame>
   )
 }

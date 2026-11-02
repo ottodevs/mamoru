@@ -81,7 +81,8 @@ export const homeCopy = {
   colShare: 'Share',
   target: (pct: number) => (pct === 0 ? 'target 0%, closing' : `target ${pct}%`),
   inRange: 'In range',
-  paused: 'Paused: out of range. Mamoru puts it back to work automatically.',
+  // otto/mamoru#297: next to the range gauge; the dust, cost and cooldown holds below keep their own, truer lines.
+  paused: 'Temporarily out of range. Mamoru will put it back to work soon.',
   // otto/mamoru#238: no promise about what the engine will do while it cannot be reached.
   pausedChain: 'Out of range.',
   // otto/mamoru#223: what the engine decided about an out-of-range position, by its re-range code.

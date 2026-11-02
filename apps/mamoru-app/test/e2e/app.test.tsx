@@ -69,12 +69,14 @@ async function renderRoute(
 }
 
 describe('routes', () => {
-  test('no account: the first onboarding card, no marketing page', async () => {
+  test('no account: the one create screen, no marketing page', async () => {
     const { text } = await renderRoute('/', null)
-    expect(text).toContain('Savings, automated.')
-    expect(text).toContain('All your USDC has a job.')
-    expect(text).toContain('Create account')
+    // otto/mamoru#294: the welcome is gone; the one screen creates the account.
+    expect(text).toContain('Create your account')
+    expect(text).toContain('Create with passkey')
     expect(text).toContain('I already have an account')
+    expect(text).not.toContain('Savings, automated.')
+    expect(text).not.toMatch(/Signature \d of \d/)
     // otto/mamoru#192: the mix chart is gone (its «Off for now» was false), and there are no steps to skip.
     expect(text).not.toContain('Off for now')
     expect(text).not.toContain('Skip')
@@ -154,9 +156,8 @@ describe('deposit cap', () => {
   const refused: OpView = { opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: '26920000', capUsdc: '25000000', updatedAt: '2026-10-01T10:00:00Z' }
   const live: AppConfig = { ...fixtureConfig, fundsGate: 'live', dryRun: false, capUsdc: '25000000' }
 
-  test('the cap is said before funding: on the first card when the API runs live, and next to the deposit address', async () => {
-    expect((await renderRoute('/', null, undefined, { config: live })).text).toContain('Add USDC on Base. Up to 25 USDC per account for now.')
-    expect((await renderRoute('/', null)).text).not.toContain('per account for now')
+  test('the cap is said before funding: next to the deposit address (the one create screen no longer carries it, #294)', async () => {
+    expect((await renderRoute('/', null, undefined, { config: live })).text).not.toContain('per account for now')
     expect((await renderRoute('/add', fixtureSession, { ...fixtureFunding, usdc: '0' })).text).toContain('Send USDC on Base. Up to 25 USDC per account for now.')
   })
   // otto/mamoru#135 review (post-merge Codex gpt-6-sol, HIGH): Start used to be hidden whenever this (up to

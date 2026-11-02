@@ -5,21 +5,28 @@ import { signedFacts } from '../components/approval-dialog.tsx'
  * cannot do. Copy agreed with Brais on 20-oct (noema 1-projects/mamoru/brand/ux-beta-feedback-2026-10-20, screens 6a-6c).
  */
 export const signatureCopy = {
+  // otto/mamoru#294 (Brais, v4): one screen and one button create the passkey and sign the authorization. No counters: a
+  // withdrawal can come a year later, so nothing here says "1 of 2".
   create: {
-    step: 'Signature 1 of 2',
+    eyebrow: 'Create',
     title: 'Create your account',
-    body: 'This signature creates your Mamoru account on Base. Only you can take money out of it.',
-    next: 'Next: let Mamoru put it to work',
+    body: 'This signature creates your Mamoru account.',
+    points: ['Let Mamoru manage your savings.', 'Every move shows in your history.', 'Only you can take money out.'],
+    note: 'Face ID, fingerprint or screen lock. No password, no seed phrase.',
+    action: 'Create with passkey',
+    creating: 'Creating your account…',
+    authorizing: 'Authorizing Mamoru…',
+    retry: 'Authorize Mamoru',
+    created: 'Your account is created. One more approval lets Mamoru put your USDC to work.',
+    details: 'What you sign',
+    // The first signature, as it was worded before v4: it stays in the disclosure so its meaning does not change (#41).
+    signs: 'This signature creates your Mamoru account on Base. Only you can take money out of it.',
   },
   activate: {
-    step: 'Signature 2 of 2',
-    title: 'Let Mamoru put it to work',
     body: 'This signature lets Mamoru open, adjust and close positions with your USDC.',
     setup: 'Where needed it also creates your Safe on Base and sets up its gas reserve.',
     days: (n: number) => `Valid for ${n} days.`,
     never: 'It can never send your money to anyone but you.',
-    details: 'See details',
-    next: 'Then add USDC and it starts.',
   },
   withdraw,
   stop: "This signature ends Mamoru's permission to act, closes every position and swaps what they held to USDC, which stays in your account. Only your passkey can do this.",
