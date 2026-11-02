@@ -5,7 +5,7 @@ Date 2026-11-02. Branch `feat/292-one-auth-contracts`. Nothing deployed, no live
 gas schedule on both forks: Monad's repricing is not measured). Foundry 1.7.1, solc 0.8.28, cancun.
 
 Run: `cd contracts/action-policy && nix shell nixpkgs#foundry --command ./install.sh` once, then
-`nix shell nixpkgs#foundry --command forge test -j 4` (all 410 tests, exit 0). The gas figures below come from
+`nix shell nixpkgs#foundry --command forge test -j 4` (all 413 tests, exit 0). The gas figures below come from
 `forge test --isolate --match-path "test/{V4UserOpFork,V4RemoteFork,OneAuthRemoteInitFork}.t.sol" -vv` (each top-level
 call its own transaction, cold state, intrinsic gas included where it says "tx").
 
