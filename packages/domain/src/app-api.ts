@@ -156,14 +156,13 @@ export type FundingView = {
 // read from D1 (account_snapshot_latest, account_daily, yield_ledger_position_daily — migrations/d1/0010_yield_ledger.sql).
 // A null field is not_observed, never a fabricated zero: every field stays null until the Worker's cron
 // (the `yield_ledger` ops flag on) has pulled at least one operator snapshot for this account. `collectedUsd`
-// and `gasPaidWei` specifically stay null until a harvest/close_position receipt is known for this account (none has fired on
-// any account yet, otto/mamoru#129 research 15 Oct); `earnedSoFarUsd` folds a null collected in as 0, which is
-// accurate for every account's real history today but will need a receipt tracker once a harvest actually lands.
+// and `gasPaidWei` specifically stay null until a harvest/close_position receipt is known for this account;
+// `earnedSoFarUsd` is 0 for a measured account with nothing collected yet.
 export type YieldLedgerView = {
   asOf: string | null // ISO, the latest pulled snapshot this is built from
   accruedUsd: string | null // uncollected fees right now, USDC base units (yield only, never owed principal)
   collectedUsd: string | null // lifetime fees collected (harvest, close), USDC base units; null until any receipt exists
-  earnedSoFarUsd: string | null // accruedUsd + collectedUsd, USDC base units: the figure "earned so far" shows
+  earnedSoFarUsd: string | null // collectedUsd only (otto/mamoru#341: harvested, never accrued), USDC base units: the figure "earned so far" shows
   gasPaidWei: string | null // lifetime gas Mamoru paid for this account's ops, wei; shown separately, never subtracted from earnedSoFarUsd
   valueVsHoldUsd: string | null // today's (position value + accrued) minus the hold baseline, summed over positions, USDC base units; can be negative
   feeAccruedUsd: string | null // #108 readiness: 10% of collectedUsd, stored, never charged by anything that reads this
@@ -172,7 +171,7 @@ export type YieldLedgerView = {
   // live /funding read fails (the operator unreachable, incident #205). Null until any snapshot exists.
   lastBalance?: { totalUsd: string; readAt: string } | null
   // otto/mamoru#234: what the account had earned at the close of each UTC day, oldest first, at most the last 30
-  // days (account_daily: that day's accrued fees plus everything collected up to it). For the line by "earned so
+  // days (account_daily: everything collected up to that day, otto/mamoru#341). For the line by "earned so
   // far". Null until the cron has written a day for this account.
   earnedDaily?: { day: string; earnedUsd: string }[] | null
 }
