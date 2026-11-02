@@ -142,7 +142,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     const sibling = path.endsWith('/ethereum-sibling/prepare')
     const migrate = path.endsWith('/migrate-v4/prepare')
     if (!sibling && !migrate && !path.endsWith('/activate/prepare')) return null
-    let body: { safe?: string; chainId?: number; safeTxHash?: string; input?: MigrateV4Input; built?: { input?: MigrateV4Input; safeTxHash?: string }; remote?: { address?: string } }
+    let body: { safe?: string; chainId?: number; safeTxHash?: string; input?: MigrateV4Input; built?: { input?: MigrateV4Input; safeTxHash?: string }; remote?: { chainId?: number; address?: string } }
     try {
       body = JSON.parse(text)
     } catch {
@@ -178,7 +178,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
       // Review r1 of #239: funds the tx moves go only to the account's own new Safe, the `remote` offer checkRemote has
       // just re-derived from its keys; the sibling moves nothing.
       if (input.moveTo || input.transfers?.length) {
-        if (sibling || row.chain_id !== BASE || !body.remote?.address || body.remote.address.toLowerCase() !== (input.moveTo ?? '').toLowerCase()) return 'moveTo'
+        if (sibling || row.chain_id !== BASE || input.step !== 1 || BigInt(input.home) === 0n || body.remote?.chainId !== input.chainId || !body.remote.address || body.remote.address.toLowerCase() !== (input.moveTo ?? '').toLowerCase()) return 'moveTo'
       }
       let hash: string
       try {
