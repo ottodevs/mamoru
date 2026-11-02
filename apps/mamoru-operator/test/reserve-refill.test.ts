@@ -172,4 +172,19 @@ describe('Operator refillReserve (#262)', () => {
     await quiet(() => priv(w.op).refillReserve(acc, observation(1n)))
     expect(refills(w)).toEqual([])
   })
+
+  test('security review: a Stop that lands while the refill waits for the relayer sends nothing', async () => {
+    const { w, acc } = setup(1n)
+    const relayer = (w.op as unknown as { relayer: { send: (tx: unknown, a?: unknown, onSending?: (fee: bigint, s: unknown) => void) => Promise<unknown> } }).relayer
+    const send = relayer.send.bind(relayer)
+    relayer.send = async (tx, a, onSending) => {
+      acc.ops = [...acc.ops, { opId: 'own-2-exit', kind: 'exit', state: 'submitted', updatedAt: new Date().toISOString() } as never]
+      // The real relayer calls onSending before the broadcast; a throw there stops it.
+      onSending?.(0n, {})
+      return send(tx, a, onSending)
+    }
+    await quiet(() => priv(w.op).refillReserve(acc, observation(1n)))
+    expect(refills(w)).toEqual([])
+    expect(acc.sponsored ?? []).toEqual([])
+  })
 })

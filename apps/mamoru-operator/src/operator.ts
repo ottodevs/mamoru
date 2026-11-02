@@ -4205,8 +4205,11 @@ export class Operator {
         return
       }
       if (!obs.positions.some((p) => p.liquidity > 0n) && (obs.balances[policy.savingsAsset] ?? 0n) < MIN_DEPLOY_USDC) return held('no money left to manage')
-      const since = Date.now() - SPONSOR_WINDOW_MS
-      if (acc.ops.some((o) => o.opId.startsWith('own-') && (o.kind === 'transfer' || o.kind === 'exit') && (Date.parse(o.updatedAt) || 0) > since)) return held('the owner moved money out or stopped in the last 24 h')
+      // Checked here, again before the reservation and once more inside the relayer's lock right before the broadcast,
+      // so a Stop or a withdrawal that lands meanwhile sends nothing.
+      const movedOut = () => acc.ops.some((o) => o.opId.startsWith('own-') && (o.kind === 'transfer' || o.kind === 'exit') && (Date.parse(o.updatedAt) || 0) > Date.now() - SPONSOR_WINDOW_MS)
+      const due = () => acc.active && !movedOut()
+      if (movedOut()) return held('the owner moved money out or stopped in the last 24 h')
       // The balance is read again at send time: the observation may be minutes old, and an op may have spent since.
       const native = await this.client.getBalance({ address: obs.account.address })
       const value = reserveRefillWei(native, threshold, await this.topUpMarginWei())
@@ -4215,7 +4218,7 @@ export class Operator {
       // Synchronous from here to the record, as chargeActivation: two refills never both take the last slot, and a
       // Stop that landed during the reads above is seen.
       const at = Date.now()
-      if (!acc.active) return
+      if (!due()) return
       const { own, all } = this.sponsoredOf(acc, at)
       if (own.filter((e) => e.kind === 'refill').length >= RESERVE_REFILLS_PER_DAY) return held(`${RESERVE_REFILLS_PER_DAY} refills in 24 h`)
       const no = refillRefusal(this.sponsorPolicy(), all, estimate, at)
@@ -4226,6 +4229,8 @@ export class Operator {
       let signed = false
       try {
         const { hash, receipt } = await this.relayer.send({ to: obs.account.address, value, gas: 50_000n }, undefined, () => {
+          // Thrown before the broadcast: nothing leaves, the relayer's nonce is not used and the reservation goes.
+          if (!due()) throw new Error('the account stopped or its owner moved money out before the send')
           signed = true
         })
         this.settleSponsor(acc, entry, receipt, receipt.status === 'success' ? value : 0n)
