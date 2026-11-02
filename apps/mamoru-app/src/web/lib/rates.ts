@@ -1,4 +1,4 @@
-import type { ApyView, FundingView } from '@mamoru/domain'
+import type { ApyView, FundingView, WorkedView } from '@mamoru/domain'
 import { POLICIES, type BucketId } from '@mamoru/policy'
 import { cbbtcToUsdc, DUST_USDC, MIN_ENTRY_USDC, type Split } from './money.ts'
 import { isMultichainTarget, poolTargets } from './policies.ts'
@@ -168,6 +168,46 @@ export function monthlyRate(rows: PositionRate[], apy: ApyView | undefined): Acc
   if (rows.some((r) => r.valueUsdc === null)) return { pct: null, gap: 'no-value', covered: 0, of: rows.length, plan: false }
   const { pct, covered } = weighted(rows, (r) => r.monthlyPct)
   return { pct, gap: pct === null ? 'no-data' : null, covered, of: rows.length, plan: false }
+}
+
+export const DAY_S = 86_400
+export const MONTH_S = 30 * DAY_S
+
+/**
+ * Brais, 2 Nov: an account rate counts only the money that works, so idle money is left out. It is each pool's rate
+ * (`pick`: the pool's 24 h fee APR, or its 30-day mean), weighted by the capital that worked in that pool during
+ * the window and by how long it worked. Capital that worked earlier at another rate still counts. Those weights
+ * come from the yield ledger (`worked`, Base LP positions). Vaults are not in the ledger, so a vault's value now
+ * counts for the whole window. With nothing in the ledger for the window, the positions open now stand in the same
+ * way. If a pool that worked has no rate, the figure is n/a.
+ */
+export function workedRate(f: FundingView, worked: WorkedView['day'] | null | undefined, apy: ApyView | undefined, pick: 'currentPct' | 'monthlyPct', windowS: number, price: bigint | null = null): AccountRate {
+  if (!apy) return { pct: null, gap: 'loading', covered: 0, of: 0 }
+  const weights = new Map<string, number>()
+  const add = (pool: string, w: number) => weights.set(pool, (weights.get(pool) ?? 0) + w)
+  const fromLedger = !!worked?.length
+  for (const w of worked ?? []) add(w.pool, w.usdSeconds)
+  for (const p of f.positions) {
+    if (fromLedger && !p.vault) continue
+    const name = p.vault?.name ?? poolName(p.pool)
+    const { value } = valueOf(p, price)
+    if (value === null || !name) return { pct: null, gap: 'no-value', covered: 0, of: 0 }
+    if (value > 0n) add(name, Number(value) * windowS)
+  }
+  const of = weights.size
+  if (of === 0) return { pct: null, gap: 'no-positions', covered: 0, of: 0 }
+  let sum = 0
+  let w = 0
+  let covered = 0
+  for (const [pool, wi] of weights) {
+    const rate = apy.byPool?.find((b) => b.pool === pool)?.[pick] ?? null
+    if (rate === null) continue
+    sum += rate * wi
+    w += wi
+    covered++
+  }
+  if (covered < of || w <= 0) return { pct: null, gap: 'no-data', covered, of }
+  return { pct: Math.round((sum / w) * 100) / 100, gap: null, covered, of }
 }
 
 /** The data source named in an ApyView source line ("Plan pools, 30-day mean · DefiLlama" -> "DefiLlama"). */

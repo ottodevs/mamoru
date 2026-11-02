@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ApyView, FundingView } from '@mamoru/domain'
 import { fixtureFunding } from '../../src/web/fixtures/client.ts'
 import { split } from '../../src/web/lib/money.ts'
-import { bucketOf, currentRate, idleReason, monthlyRate, positionRates, sourceName, valueOf } from '../../src/web/lib/rates.ts'
+import { bucketOf, currentRate, DAY_S, idleReason, monthlyRate, MONTH_S, positionRates, sourceName, valueOf, workedRate } from '../../src/web/lib/rates.ts'
 import { agoText, Balance, Idle, Indicators, Working } from '../../src/web/routes/home.tsx'
 import { render } from './render.ts'
 
@@ -52,6 +52,51 @@ describe('rates per position', () => {
     const rows = positionRates({ ...placed, positions: [pos('1', 'pool:WETH/USDC/500', '1000000')] }, apy)
     expect(rows[0]!.currentPct).toBeNull()
     expect(rows[0]!.monthlyPct).toBeNull()
+  })
+})
+
+// Brais, 2 Nov: the APY counts only the capital that works or worked in the window; idle money is not in it.
+describe('rates over the working capital', () => {
+  // Beta account b54dda3a on 2 Nov: 146.68 idle, 4.79 in WETH/USDC at about 12%.
+  const brais: FundingView = {
+    ...fixtureFunding,
+    usdc: '146680000',
+    idle: [{ token: 'USDC', amount: '146680000', decimals: 6, valueUsdc: '146680000' }],
+    positions: [pos('1', 'pool:WETH/USDC/3000', '4790000')],
+  }
+  const at12 = { ...apy, byPool: [{ pool: 'pool:WETH/USDC/3000', weight: 1000, currentPct: 12, monthlyPct: 53.1 }, { pool: 'pool:USDC/USDT/100', weight: 5000, currentPct: 3, monthlyPct: 4.5 }] }
+  test('90% idle and 10% at 12%: the 24 h figure is 12%, not 0.4%', () => {
+    expect(workedRate(brais, null, at12, 'currentPct', DAY_S).pct).toBe(12)
+    expect(currentRate(positionRates(brais, at12), at12, split(brais, null)).pct).toBeCloseTo(0.38, 1)
+  })
+  test('capital that worked earlier in the window at another rate still counts, by amount and time', () => {
+    // 6.90 in USDC/USDT for 12 h, then 4.79 in WETH/USDC for 6 h.
+    const day = [
+      { pool: 'pool:USDC/USDT/100', usdSeconds: 6_900_000 * 43_200 },
+      { pool: 'pool:WETH/USDC/3000', usdSeconds: 4_790_000 * 21_600 },
+    ]
+    const r = workedRate(brais, day, at12, 'currentPct', DAY_S)
+    const expected = (3 * 6_900_000 * 43_200 + 12 * 4_790_000 * 21_600) / (6_900_000 * 43_200 + 4_790_000 * 21_600)
+    expect(r.pct).toBe(Math.round(expected * 100) / 100)
+  })
+  test('the 30-day figure is the pools\' 30-day means over the capital that worked in the month', () => {
+    expect(workedRate(brais, [{ pool: 'pool:WETH/USDC/3000', usdSeconds: 1 }], at12, 'monthlyPct', MONTH_S).pct).toBe(53.1)
+  })
+  test('a vault is not in the ledger: its value now counts for the window beside the ledger\'s pools', () => {
+    const vault = { ...pos('9', 'vault:steakUSDC', '10000000'), vault: { name: 'vault:steakUSDC' } } as FundingView['positions'][number]
+    const withVault = { ...brais, positions: [...brais.positions, vault] }
+    const rates = { ...at12, byPool: [...at12.byPool, { pool: 'vault:steakUSDC', weight: 0, currentPct: 5, monthlyPct: 5 }] }
+    const r = workedRate(withVault, [{ pool: 'pool:WETH/USDC/3000', usdSeconds: 10_000_000 * DAY_S }], rates, 'currentPct', DAY_S)
+    expect(r.pct).toBe(8.5)
+  })
+  test('a pool that worked with no rate: n/a, never dropped', () => {
+    const r = workedRate(brais, [{ pool: 'pool:USDC/cbBTC/500', usdSeconds: 1 }], at12, 'currentPct', DAY_S)
+    expect(r.pct).toBeNull()
+    expect(r.gap).toBe('no-data')
+  })
+  test('on Home: 12% under "APY · 24h avg" with most of the money idle', () => {
+    const { html } = render(<Indicators f={brais} apy={at12} price={null} />)
+    expect(html).toMatch(/data-testid="rate-current"[^>]*>[^<]*(<[^>]+>)*12/)
   })
 })
 
