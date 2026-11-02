@@ -159,8 +159,9 @@ Se comprueba con los escenarios XCH y COST de `specs/002-multichain-monad/`.
 
 Mamoru es sencillo de explicar, de operar y de revisar. Una regla que el equipo no puede contar en una frase no entra hasta que se simplifica.
 
-- Cada regla del pack se enuncia en una frase. Si necesita una cadena de excepciones, se reescribe.
+- Cada regla del pack se puede enunciar en una frase: qué pasa y cuándo. El texto que la acompaña concreta esa frase sin añadirle excepciones; si necesita una cadena de excepciones, se reescribe.
 - Un caso raro se trata con la salida segura más simple: no mover, esperar con un código de razón o avisar. Solo gana una rama propia cuando hay datos, del Lab o de producción, de que ocurre y de lo que cuesta.
+- Las salidas por riesgo y los caminos de recuperación que el pack ya exige (spec 004, la vuelta a Base por riesgo de chain, el walkaway) son esa salida segura: se cumplen siempre, sin depender de la frecuencia ni del coste medido.
 - La revisión de un spec, un plan o un cambio de código marca como hallazgo P2 la complejidad sin valor medido, y propone el equivalente sencillo.
 - Sencillo no quita seguridad: los principios I, II, V, IX y XIX se cumplen igual. Lo que se recorta son ramas, no comprobaciones.
 
@@ -199,4 +200,4 @@ Solo estas tres quedan abiertas. Todo lo demás está decidido en el pack.
 |---|---|---|---|
 | 1.0.0 | 2026-09-26 | Ratificación | `inputs/mamoru-spec-v1.md` |
 | 2.0.0 | 2026-10-29 | El principio III pasa de una chain a una lista cerrada: Base y Monad de ejecución, Ethereum de entrada, sin chain por defecto, el fork evita todo chain id soportado. Nuevo principio XIX: el movimiento entre chains está en alcance y cada movimiento se mide. I, IV, IX y XVI se ajustan a eso. Las decisiones cerradas cambian en la chain y suman el movimiento entre chains. La regla de idioma recoge que los packs desde 002 van en inglés. `specs/001-mamoru-v1/` no se reabre; `specs/002-multichain-monad/` es el delta | Decisiones de Ot: 2026-10-01 (Monad como chain de ejecución), 2026-10-18 (rutas abiertas entre chains; rescate en L1 por userOp con paymaster ERC-20, otto/mamoru#180), 2026-10-27 (mover fondos entre chains es núcleo y su coste se optimiza siempre) |
-| 2.1.0 | 2026-11-01 | Nuevo principio XX: sencillez. Una regla cabe en una frase, el caso raro va a la salida segura más simple salvo datos de que ocurre y cuesta, y la revisión marca la complejidad sin valor como P2 | Decisión de Ot: 2026-11-01 (sencillez ante todo) |
+| 2.1.0 | 2026-11-01 | Nuevo principio XX: sencillez. Una regla cabe en una frase, el caso raro va a la salida segura más simple salvo datos de que ocurre y cuesta, las salidas por riesgo y recuperación que el pack exige se mantienen, y la revisión marca la complejidad sin valor como P2 | Decisión de Ot: 2026-11-01 (sencillez ante todo) |
