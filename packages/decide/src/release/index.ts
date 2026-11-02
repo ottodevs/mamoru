@@ -10,7 +10,7 @@ export const RELEASE_MARGIN_BPS = 100n
 /**
  * otto/mamoru#278 (spec 002 FR-XCH-014 a/c): a remote Safe its home account asked to send `obs.release.amount` of
  * savings back. One rule: free that much and bridge it home; nothing else is placed meanwhile. In order: the savings are
- * there (bridge them), idle volatile (sell it), a position (reduce what is missing, 1 % more for the sale and the fee),
+ * there (bridge them), idle volatile (sell what is missing, 1 % more for the fee), a position (reduce what is missing, 1 % more),
  * nothing left to free (bridge what there is). Null when there is no release.
  */
 export function releaseOf(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>): { code: ReasonCode; proposal: BridgeOutProposal | EnterSwapProposal | ReduceProposal | null } | null {
@@ -23,18 +23,23 @@ export function releaseOf(obs: Observation, policy: PolicyVersion, policyPools: 
   const home = (amount: bigint): BridgeOutProposal => ({ kind: 'bridge_out', grant: 'bridge-out', bucket: bucket?.id ?? 'growth', chainId: r.chainId, pool: bucket?.pools[0] ?? savings, amount })
   if (free >= r.amount) return { code: 'DECIDE_RELEASE', proposal: home(r.amount) }
   const floor = opCostInSavings(obs, savings) * BigInt(policy.harvest.costFactorBps)
+  // What is missing, with the margin: a sale or a reduce frees this much, never the whole holding when less will do.
+  const missing = ((r.amount - free) * (10_000n + RELEASE_MARGIN_BPS)) / 10_000n
+  // Missing less than one op is worth: what is there goes now instead of a sale or a reduce that costs more than it frees.
+  if (free > 0n && missing * 10_000n <= floor) return { code: 'DECIDE_RELEASE', proposal: home(free) }
   for (const pool of obs.pools) {
     if (!policyPools.has(pool.name)) continue
     const volatile = volatileOf(pool, savings)
     const held = obs.balances[volatile] ?? 0n
-    if (held === 0n || inSavings(pool, volatile, held, savings) * 10_000n <= floor) continue
-    return { code: 'DECIDE_RELEASE', proposal: { kind: 'enter_swap', grant: convertKey(policy, pool.name), pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: held } }
+    const value = held === 0n ? 0n : inSavings(pool, volatile, held, savings)
+    if (value * 10_000n <= floor) continue
+    const amountIn = missing >= value ? held : (held * missing) / value + 1n
+    return { code: 'DECIDE_RELEASE', proposal: { kind: 'enter_swap', grant: convertKey(policy, pool.name), pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: amountIn > held ? held : amountIn } }
   }
   for (const p of obs.positions) {
     const pool = p.pool ? obs.pools.find((x) => x.name === p.pool) : undefined
     if (!pool || p.liquidity === 0n || !isManaged(p, policy, policyPools)) continue
     const pv = positionValue(p, pool, savings)
-    const missing = ((r.amount - free) * (10_000n + RELEASE_MARGIN_BPS)) / 10_000n
     const liquidity = pv === 0n || missing >= pv ? p.liquidity : (p.liquidity * missing) / pv + 1n
     return { code: 'DECIDE_RELEASE', proposal: { kind: 'reduce', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: liquidity > p.liquidity ? p.liquidity : liquidity } }
   }

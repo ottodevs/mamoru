@@ -292,8 +292,21 @@ describe('release: the remote Safe sends savings home', () => {
 
   test('idle WMON and too little USDC: sells the WMON first', () => {
     const d = decide(live({ balances: { USDC: 1_000_000n, WMON: 10n ** 22n }, release: { amount: 4_000_000n, chainId: 8453 } }), liveWmonUsdcMonadV6)
-    expect(d.proposal).toMatchObject({ kind: 'enter_swap', grant: anyGrant, pool: MONAD_POOL, tokenIn: 'WMON', tokenOut: 'USDC', amountIn: 10n ** 22n })
+    expect(d.proposal).toMatchObject({ kind: 'enter_swap', grant: anyGrant, pool: MONAD_POOL, tokenIn: 'WMON', tokenOut: 'USDC' })
     expect(d.reason).toBe('DECIDE_RELEASE')
+  })
+
+  test('review r1: a small shortfall sells only what is missing plus 1 %, not the whole WMON balance', () => {
+    const lots = 10n ** 30n
+    const d = decide(live({ balances: { USDC: 3_000_000n, WMON: lots }, release: { amount: 4_000_000n, chainId: 8453 } }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toMatchObject({ kind: 'enter_swap', tokenIn: 'WMON' })
+    const sold = (d.proposal as { amountIn: bigint }).amountIn
+    expect(sold > 0n && sold < lots / 1_000n).toBe(true)
+  })
+
+  test('missing less than one op is worth: sends what is there instead of a dust sale', () => {
+    const d = decide(live({ balances: { USDC: 3_999_999n, WMON: 10n ** 30n }, release: { amount: 4_000_000n, chainId: 8453 } }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toMatchObject({ kind: 'bridge_out', chainId: 8453, amount: 3_999_999n })
   })
 
   test('the value sits in the position: reduces what is missing plus 1 %, never more than the position', () => {
