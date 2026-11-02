@@ -10,6 +10,9 @@
  * Safe's gas reserve, exec) is reserved against activationWeiPerDay across all accounts before anything is sent
  * (activationRefusal), so a stream of fresh Safes cannot drain the relayer either. Their per-Safe count is the
  * `activate` entries (ACTIVATIONS_PER_DAY); the spend is the `activation` entries.
+ *
+ * otto/mamoru#262: a running account's gas reserve refilled by the relayer (`refill`) is the same subsidy as an
+ * activation's top-up: it shares activationWeiPerDay, and RESERVE_REFILLS_PER_DAY bounds it per account.
  */
 
 /**
@@ -19,9 +22,16 @@
 export type SponsoredKind = 'transfer' | 'stop' | 'renew' | 'revoke'
 /**
  * `activate`: recorded when an activation lands, for its per-Safe count. `activation`: the relayer's spend on one
- * activation (deploy, top-up, exec), reserved before it is sent, under activationWeiPerDay only.
+ * activation (deploy, top-up, exec), reserved before it is sent, under activationWeiPerDay only. `refill` (#262): one
+ * gas-reserve refill of a running account (value and gas), reserved before it is sent, under activationWeiPerDay too.
  */
-export type SponsorEntryKind = SponsoredKind | 'activate' | 'activation'
+export type SponsorEntryKind = SponsoredKind | 'activate' | 'activation' | 'refill'
+
+/** otto/mamoru#262: relayer refills of one account's gas reserve in any 24 h. */
+export const RESERVE_REFILLS_PER_DAY = 2
+
+/** Entries outside the owner-transaction limits: activations and reserve refills have their own. */
+const SUBSIDY_KINDS: ReadonlySet<SponsorEntryKind> = new Set(['activate', 'activation', 'refill'])
 
 /** Emergency revocations per account in any 24 h, outside every other limit. */
 export const EMERGENCY_REVOKES_PER_DAY = 2
@@ -95,20 +105,20 @@ export function sponsorRefusal(policy: SponsorPolicy, own: readonly SponsorEntry
     return revokes.length >= EMERGENCY_REVOKES_PER_DAY ? { code: 'SPONSOR_ACCOUNT_LIMIT', until: freesAt(revokes) } : null
   }
   const stop = kind === 'stop'
-  const mine = own.filter((e) => e.kind !== 'revoke' && e.kind !== 'activate' && e.kind !== 'activation' && (e.kind === 'stop') === stop)
+  const mine = own.filter((e) => e.kind !== 'revoke' && !SUBSIDY_KINDS.has(e.kind) && (e.kind === 'stop') === stop)
   if (mine.length >= (stop ? policy.stopsPerAccount : policy.perAccount)) return { code: 'SPONSOR_ACCOUNT_LIMIT', until: freesAt(mine) }
-  const spent = all.filter((e) => e.kind !== 'activate' && e.kind !== 'activation').reduce((n, e) => n + BigInt(e.wei), 0n)
+  const spent = all.filter((e) => !SUBSIDY_KINDS.has(e.kind)).reduce((n, e) => n + BigInt(e.wei), 0n)
   const ceiling = stop ? policy.weiPerDay : (policy.weiPerDay * BigInt(10_000 - policy.reserveBps)) / 10_000n
   if (spent + estimateWei > ceiling) return { code: 'SPONSOR_DAILY_BUDGET', until: freesAt(all) }
   return null
 }
 
 /**
- * Whether the relayer may spend about `estimateWei` more on one activation, given every account's `activation`
- * entries of the last 24 h (`all`). Null: it may. A refusal says until when.
+ * Whether the relayer may spend about `estimateWei` more on one activation or reserve refill, given every account's
+ * `activation` and `refill` entries of the last 24 h (`all`). Null: it may. A refusal says until when.
  */
 export function activationRefusal(policy: SponsorPolicy, all: readonly SponsorEntry[], estimateWei: bigint, now: number): SponsorRefusal | null {
-  const mine = all.filter((e) => e.kind === 'activation')
+  const mine = all.filter((e) => e.kind === 'activation' || e.kind === 'refill')
   const spent = mine.reduce((n, e) => n + BigInt(e.wei), 0n)
   const ceiling = policy.activationWeiPerDay ?? DEFAULT_SPONSOR.activationWeiPerDay!
   if (spent + estimateWei <= ceiling) return null

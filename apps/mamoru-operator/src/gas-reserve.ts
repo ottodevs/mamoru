@@ -13,9 +13,9 @@ type Env = Record<string, string | undefined>
  * `packages/decide/src/gates/index.ts`), at which point the engine stops reviewing it entirely: no more
  * rebalances, no more fee collection, with nothing in the journal louder than one decision line saying so.
  *
- * This module only detects that drift and says so (alert, not top-up). An automatic refill spends relayer ETH on
- * real funds and must go through sponsorship.ts's limits (per-account counts and the daily relayer budget, as the
- * activation top-up does) so a drained account cannot be cycled into repeated payouts — a follow-up, not this ticket.
+ * This module detects that drift and says so. otto/mamoru#262: the operator then refills it (reserveRefillWei,
+ * operator.ts refillReserve) within sponsorship.ts's limits (RESERVE_REFILLS_PER_DAY per account, the daily
+ * activation budget across all), so a drained account cannot be cycled into repeated payouts.
  */
 
 /**
@@ -83,4 +83,13 @@ export function gasReserveAlertOverrideFromEnv(env: Env = process.env): bigint |
 /** The alert threshold to apply to one account on one review: the env override if set, else the per-policy default at this review's fee. */
 export function gasReserveAlertWei(gasReserveWei: bigint, override: bigint | null, maxFeePerGas: bigint, gasUnits: bigint = ONE_ACTION_GAS_UNITS): bigint {
   return override ?? defaultGasReserveAlertWei(gasReserveWei, maxFeePerGas, gasUnits)
+}
+
+/**
+ * otto/mamoru#262: what the relayer sends a running account whose Safe holds `nativeWei`: up to its alert threshold
+ * plus `marginWei` (the activation's top-up margin), so a refilled Safe is not low again after one action. 0n when it
+ * is not below the threshold.
+ */
+export function reserveRefillWei(nativeWei: bigint, thresholdWei: bigint, marginWei: bigint): bigint {
+  return nativeWei < thresholdWei ? thresholdWei + marginWei - nativeWei : 0n
 }
