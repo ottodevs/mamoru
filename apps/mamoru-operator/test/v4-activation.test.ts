@@ -85,5 +85,13 @@ describe('V4 activation of a never-activated account (#309 a)', () => {
     const t = await w.op.prepareActivate(ctx)
     expect((t as unknown as { input?: unknown }).input).toBeDefined()
   })
+
+  test('security review of #235: funds on Ethereum that cannot be read stop the cap check (never read as zero)', async () => {
+    const w = world(0n, scoped)
+    inactive(w)
+    w.op.siblingHoldingsUsdc = async () => { throw new Error('rpc down') }
+    const err = await w.op.prepareActivate(ctx).then(() => null, (e) => e as { code?: string })
+    expect(err?.code).toBe('CAP_CHECK_UNAVAILABLE')
+  })
 })
 

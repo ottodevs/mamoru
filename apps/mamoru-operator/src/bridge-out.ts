@@ -1395,14 +1395,15 @@ export class BridgeOut {
 
   /**
    * #309 (a): the account's USDC at its own address on Ethereum plus its ETH valued at Chainlink's ETH/USD (fresh answers
-   * only), in USDC units; null when the sibling is off for the account or the price cannot be read.
+   * only), in USDC units. 0 when the sibling does not apply (off for the account, V4 not on Ethereum); THROWS when it
+   * applies and cannot be read (security review of #235: a cap check never reads an unreadable balance as zero).
    */
-  async siblingHoldingsUsdc(ctx: AccountContext): Promise<bigint | null> {
-    if (!this.enabledFor(ctx.accountKey) || !oneAuthV4Deployment(ethereumRegistry)) return null
+  async siblingHoldingsUsdc(ctx: AccountContext): Promise<bigint> {
+    if (!this.enabledFor(ctx.accountKey) || !oneAuthV4Deployment(ethereumRegistry)) return 0n
     const safe = this.live(ctx).safe
     const [usdcHeld, wei, round] = await Promise.all([this.usdcAt(safe), this.l1.getBalance({ address: safe }), this.l1.readContract({ address: CHAINLINK_ETH_USD, abi: aggregatorAbi, functionName: 'latestRoundData' })])
     const answer = round[1]
-    if (answer <= 0n || BigInt(Math.floor(this.now() / 1000)) - round[3] > BigInt(ORACLE_MAX_AGE_SEC)) return null
+    if (answer <= 0n || BigInt(Math.floor(this.now() / 1000)) - round[3] > BigInt(ORACLE_MAX_AGE_SEC)) throw new Error('ETH/USD price stale or unusable')
     return usdcHeld + (wei * answer) / 10n ** 20n
   }
 

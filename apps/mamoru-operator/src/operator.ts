@@ -1273,8 +1273,17 @@ export class Operator {
   }
 
   /** The per-account cap at Start (otto/mamoru#127, #26): see capOf. */
-  /** otto/mamoru#309 (a): what the account holds at its own address on Ethereum, in USDC units (BridgeOut, set by boot). */
-  siblingHoldingsUsdc: (ctx: AccountContext) => Promise<bigint | null> = async () => null
+  /** otto/mamoru#309 (a): what the account holds at its own address on Ethereum, in USDC units (BridgeOut, set by boot): 0 when it does not apply, throws when it cannot be read. */
+  siblingHoldingsUsdc: (ctx: AccountContext) => Promise<bigint> = async () => 0n
+
+  /** For a CAP check: the account's funds on Ethereum, or CAP_CHECK_UNAVAILABLE when they apply and cannot be read (fail closed). */
+  private async siblingForCap(acc: AccountState): Promise<bigint | null> {
+    try {
+      return await this.siblingHoldingsUsdc(acc.ctx)
+    } catch {
+      return null
+    }
+  }
 
   /** otto/mamoru#309: the C of the account's V4 sibling on Ethereum: the C its V4 home holds, else the one it would sign. */
   siblingCapUsd(ctx: AccountContext): bigint | null {
@@ -3354,7 +3363,9 @@ export class Operator {
     // the V4 activation. What it holds at its own address on Ethereum (its sibling, still to come home) counts toward the
     // cap and toward the deploy minimum (review r1 of #235).
     const v4 = !!this.cfg.oneAuth && this.inScope(acc, 'one_auth_v4')
-    const elsewhere = v4 ? ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) : 0n
+    const sib = v4 ? await this.siblingForCap(acc) : 0n
+    if (sib === null) throw capCheckUnavailable()
+    const elsewhere = sib
     if (start.total + elsewhere > cap) throw depositOverCap(start.total + elsewhere, cap, start.across)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC && elsewhere < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
     if (v4) return this.planV4Activation(acc, live, r, cap, gen)
@@ -4306,7 +4317,8 @@ export class Operator {
       // otto/mamoru#212: the total across chains, and USDC on its way here from Ethereum.
       const start = await this.startTotal(acc, await this.localTotal(acc, live.safe))
       // #309 (a), review r1 of #235: a V4 activation counts the account's funds at its own address on Ethereum too.
-      const there = p.grants?.[0]?.grant.oneAuthV4 ? ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) : 0n
+      const there = p.grants?.[0]?.grant.oneAuthV4 ? await this.siblingForCap(acc) : 0n
+      if (there === null) throw capCheckUnavailable()
       if (start.total + there > this.activationCap(acc, p.capUsdc)) throw depositOverCap(start.total + there, this.activationCap(acc, p.capUsdc), start.across)
       // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
       // A batch that buys its own gas reserve needs no top-up from it (otto/mamoru#15).
@@ -4578,7 +4590,8 @@ export class Operator {
         // otto/mamoru#212: the total across chains; a peer that cannot be read keeps it from running now.
         const start = await this.localTotal(acc, live.safe).then((local) => this.startTotal(acc, local)).catch(() => null)
         if (!start) return { code: 'CAP_CHECK_UNAVAILABLE' }
-        const there = p.grants?.[0]?.grant.oneAuthV4 ? ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) : 0n
+        const there = p.grants?.[0]?.grant.oneAuthV4 ? await this.siblingForCap(acc) : 0n
+        if (there === null) return { code: 'CAP_CHECK_UNAVAILABLE' }
         if (start.total + there > this.activationCap(acc, p.capUsdc)) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: (start.total + there).toString(), capUsdc: this.activationCap(acc, p.capUsdc).toString() } }
       }
       // otto/mamoru#309 (a): a V4 activation whose funds sit at the account's own address on Ethereum (its sibling, #307)
