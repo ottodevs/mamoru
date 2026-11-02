@@ -481,6 +481,16 @@ function exec(c: V3Call): Execution {
  * terminal state through the plan §10 machine. Same packages as production;
  * only the configuration differs (FR-LAB-006).
  */
+/**
+ * otto/mamoru#210: how far (bps) a vault op's simulated result may fall short of the vault's own preview at the prepare
+ * block. The simulation runs a block or more later, after interest moved the share price (a deposit gets fewer shares, a
+ * rounding vault pays a wei less); 1 bp is weeks of a stable vault's interest and bounds what the check lets through.
+ */
+export const VAULT_PREVIEW_TOLERANCE_BPS = 1n
+
+/** The least a vault op's simulation must return against the vault's `preview` (VAULT_PREVIEW_TOLERANCE_BPS below it). */
+export const vaultMinimumOf = (preview: bigint): bigint => preview - (preview * VAULT_PREVIEW_TOLERANCE_BPS) / 10_000n
+
 export class Engine {
   readonly journal = new MemoryJournal()
   readonly ledger = new SessionLedger()
@@ -1638,7 +1648,9 @@ export class Engine {
       const token = address(this.cfg.policy.savingsAsset, this.registry)
       return {
         expiresAt: null,
-        quote: { amountIn: p.assets, amountOut: shares, amountOutMinimum: shares },
+        // Live 2 Nov (b54dda3a, gtUSDCp): the simulation runs at a later block than this preview, where the vault's interest
+        // has raised the share price, so it mints a few parts per billion fewer shares; every deposit was discarded.
+        quote: { amountIn: p.assets, amountOut: shares, amountOutMinimum: vaultMinimumOf(shares) },
         calls: [
           { target: token, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [e.address, p.assets] }) },
           { target: e.address, value: 0n, callData: encodeFunctionData({ abi: erc4626Abi, functionName: 'deposit', args: [p.assets, acct] }) },
@@ -1655,14 +1667,14 @@ export class Engine {
     const assets = await read<bigint>('previewRedeem', shares)
     return {
       expiresAt: null,
-      quote: { amountIn: shares, amountOut: assets, amountOutMinimum: assets },
+      quote: { amountIn: shares, amountOut: assets, amountOutMinimum: vaultMinimumOf(assets) },
       calls: [{ target: e.address, value: 0n, callData: encodeFunctionData({ abi: erc4626Abi, functionName: 'redeem', args: [shares, acct, acct] }) }],
     }
   }
 
   /**
-   * otto/mamoru#210: a deposit moves the savings token by exactly -assets and gives at least the previewed shares; a
-   * redeem takes exactly -shares and pays at least the previewed assets. No position and no other token moves.
+   * otto/mamoru#210: a deposit moves the savings token by exactly -assets and gives at least the previewed shares less
+   * VAULT_PREVIEW_TOLERANCE_BPS; a redeem takes exactly -shares and pays at least the previewed assets less the same. No position and no other token moves.
    */
   private vaultMismatch(p: Extract<Proposal, { kind: 'vault_deposit' | 'vault_redeem' }>, prepared: Prepared, sim: Simulation): string | null {
     const savings = this.cfg.policy.savingsAsset
