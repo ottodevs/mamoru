@@ -94,11 +94,12 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         v4.initializeWithMultiplexer(a, ID, abi.encode(InitV4(1e15 + 1, 1, address(0), 0, new uint256[](0))));
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadInit.selector, 3));
         v4.initializeWithMultiplexer(a, ID, abi.encode(InitV4(C, 1, address(0), 0, new uint256[](65))));
-        // a home account names no home domain; a remote's home is another chain of the table, never itself
+        // a home account names no home domain; a remote's home is another chain of the table (a sibling's, #307, its
+        // own address there: V4EthereumSiblingFork)
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadInit.selector, 4));
         v4.initializeWithMultiplexer(a, ID, abi.encode(InitV4(C, 1, address(0), 15, new uint256[](0))));
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadInit.selector, 4));
-        v4.initializeWithMultiplexer(a, ID, abi.encode(InitV4(C, 1, a, 15, new uint256[](0))));
+        v4.initializeWithMultiplexer(a, ID, abi.encode(InitV4(C, 1, a, 6, new uint256[](0)))); // a sibling of itself here
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadInit.selector, 4));
         v4.initializeWithMultiplexer(a, ID, abi.encode(InitV4(C, 1, acct, 6, new uint256[](0)))); // Base's own domain
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadInit.selector, 4));

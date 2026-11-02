@@ -72,7 +72,7 @@ contract V4RemoteInitParityTest is Test {
         // MamoruV4Helper.sessions is public: the remote's one session, abi.encode(Session[1]).
         (bool ok, bytes memory out) = address(v4.HELPER()).staticcall(
             abi.encodeWithSignature(
-                "sessions(address,address,uint128,uint32,(uint256,uint32,address,address,address,address[2],address[2],address[2],uint256,(uint64,uint32,uint32,uint32,uint64,uint32,uint128,uint32)))",
+                "sessions(address,address,uint128,uint32,(uint256,uint32,address,address,address,address[2],address[2],address,address[2],uint256,(uint64,uint32,uint32,uint32,uint64,uint32,uint128,uint32)))",
                 home,
                 vm.parseJsonAddress(j, ".sessionKey"),
                 uint128(vm.parseJsonUint(j, ".capUsd")),
@@ -128,6 +128,7 @@ contract V4RemoteInitParityTest is Test {
         address router;
         address[2] stables;
         address[2] assets;
+        address wrapped;
         address[2] vaultFactories;
         uint256 gasReview;
         GasCapsT remoteCaps;
@@ -141,6 +142,7 @@ contract V4RemoteInitParityTest is Test {
         c.router = 0xfE31F71C1b106EAc32F1A19239c9a9A72ddfb900;
         c.stables = [0x754704Bc059F8C67012fEd69BC8A327a5aafb603, address(0)];
         c.assets = [0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A, address(0)];
+        c.wrapped = 0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A;
         c.gasReview = 5 ether;
         c.remoteCaps = GasCapsT(1_000_000_000, 3_000_000, 2_000_000, 200_000, 1_000_000_000_000, 0, 1 ether, 1 days);
     }

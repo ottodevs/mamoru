@@ -223,6 +223,29 @@ policy on Base can reason about what lives at an address on Monad. Constants:
   - This applies to V4 accounts only.
 - **Changed:** the engine's pools resolve against `registry.activePools()`.
 
+## Ethereum and siblings (#307, before T7)
+
+Ot, 2 Nov (#281): an owner whose funds sit on Ethereum signs once and Mamoru does the rest. Guillermo (#117) holds
+0.05537835 ETH at his account's own address on Ethereum (the same SafeProxyFactory CREATE2 address as on Base), and
+that Safe is not deployed. V4's bytecode is pinned, so this goes in before T7; afterwards it would be a new V4 and a
+new owner signature.
+
+- **Ethereum in the table:** chain 1, CCTP domain 0. Uniswap v3 (factory, NPM, SwapRouter02), USDC, WETH. USDT is
+  left out: its CCTP burn limit is 0 there. No vault factory. The whole pinned Safe stack has the same code hashes on
+  Ethereum (read on chain, 2 Nov). `GAS_REVIEW` is 0.03 ETH. Domain 0 is never a "none" sentinel (`chainOf`).
+- **Sibling:** an Init with `home == account` on another domain of the table. It bridges only to its own address on
+  the home domain, and only after the guardian has read that address back there (`setReady`, bound to the sibling's
+  owners hash). It has no remotes.
+- **Wrap:** native value only to the chain's pinned wrapped native, `deposit()` and `withdraw(uint256)`, both to the
+  account. This is not charged, because the value stays the account's.
+- **The one signature on a Safe set up before V4:** SmartSession's `enableSessions` and ENABLE mode check the ERC-7484
+  registry, which such a Safe cannot pass. UNSAFE_ENABLE in the first userOp skips the attestation; V4 pins the stack
+  instead.
+- **Limit:** Safe7579's owner path verifies the signature over a SafeMessage under the Safe's own domain separator,
+  which contains the chain id. One passkey assertion therefore authorizes one chain. An account set up before V4
+  approves once in the app, with one passkey prompt per chain where it holds funds (Guillermo: Base and Ethereum, 2).
+  One prompt for every chain would need a chain-agnostic validator in the account's setup: new accounts only, #116.
+
 ## Threat model (r2)
 
 Worst case per chain, with V4's hard bounds and `capUsd = C`:

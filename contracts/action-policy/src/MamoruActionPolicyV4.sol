@@ -78,8 +78,9 @@ struct SwapParams {
 struct InitV4 {
     uint128 capUsd; // C: the account's value bucket on this chain, USD units (6 decimals, the pinned stables' unit)
     uint64 generation; // approval number; a higher one retires every lower binding of the account (V3)
-    address home; // address(0) on the home chain; on a remote Safe, the home account (bridge-back target, I4)
-    uint32 homeDomain; // CCTP domain of `home`; 0 when home == address(0)
+    address home; // address(0) on the home chain; on a remote Safe, the home account (bridge-back target, I4); on a
+    // sibling (#307: the account's own address on another chain of the table), the account itself
+    uint32 homeDomain; // CCTP domain of `home` when home != address(0) (0 is Ethereum's); 0 when home == address(0)
     uint256[] admit; // positions admitted at enable (migration), V3 T6 M-4; REVOKE_FLAG entries revoke
 }
 
@@ -711,6 +712,8 @@ contract MamoruActionPolicyV4 {
     bytes4 internal constant DECREASE = 0x0c49ccbe; // decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))
     bytes4 internal constant COLLECT = 0xfc6f7865; // collect((uint256,address,uint128,uint128))
     bytes4 internal constant BURN = 0x42966c68; // burn(uint256)
+    bytes4 internal constant WRAP = 0xd0e30db0; // deposit() on the chain's wrapped native (#307)
+    bytes4 internal constant UNWRAP = 0x2e1a7d4d; // withdraw(uint256) on the chain's wrapped native (#307)
 
     address public constant SMART_SESSION = 0x00000000002B0eCfbD0496EE71e01257dA0E37DE;
     /// CCTP V2 TokenMessengerV2, the same proxy (same code hash) on every chain Circle supports; checked on Base and
@@ -892,8 +895,13 @@ contract MamoruActionPolicyV4 {
         if (i.generation > MAX_GENERATION) revert BadInit(2);
         if (i.admit.length > MAX_ADMIT) revert BadInit(3);
         // A remote Safe's home is a Mamoru account on another chain of V4's table (I4: bridge-back only there).
-        if (i.home == address(0) ? i.homeDomain != 0 : (i.home == account || i.homeDomain == ch.domain
-                    || MamoruV4Chains.byDomain(i.homeDomain).chainId == 0)) revert BadInit(4);
+        // #307: `home == account` is a SIBLING, the account's own address on this chain when the owner holds funds
+        // here at the address of their home account (the same SafeProxyFactory CREATE2 address on both chains means
+        // the same initializer, so the same initial owners). Before #307 it was refused because a canonical remote
+        // (MamoruV4Helper.remote) never has its home's address, so `home == account` could only be a mistake. A
+        // sibling bridges home only once the guardian has read the home address back on its chain (`setReady`).
+        if (i.home == address(0) ? i.homeDomain != 0 : (i.homeDomain == ch.domain
+                    || MamoruV4Chains.chainOf(i.homeDomain) == 0)) revert BadInit(4);
         _stepGeneration(account, i.generation);
         bytes32 h = keccak256(abi.encode(i.capUsd, i.generation, i.home, i.homeDomain));
         Config storage c = _config[account];
@@ -943,15 +951,24 @@ contract MamoruActionPolicyV4 {
         if (b == 0) revert PolicyNotInitialized(id, msg.sender, account);
         if (b - 1 != generationOf[account]) return VALIDATION_FAILED; // retired by a renewal
         if (isPaused(account)) return VALIDATION_FAILED; // guardian, breaker or review (I5, I7)
-        if (value != 0 || data.length < 4) return VALIDATION_FAILED; // no native value, no empty call (I6)
+        if (data.length < 4) return VALIDATION_FAILED; // no empty call (I6)
         bytes4 sel = bytes4(data[:4]);
+        MamoruV4Chains.Chain memory ch = _chain();
+        // #307: the account wraps its own native coin into the pinned wrapped native, or unwraps it back to itself
+        // (WETH9 credits and pays msg.sender, the account). Value never leaves the account, so it is not charged. This
+        // is the only call that may carry native value.
+        if (target == ch.wrapped) {
+            if (sel == WRAP) return data.length == 4 && value != 0 ? VALIDATION_SUCCESS : VALIDATION_FAILED;
+            if (sel == UNWRAP) return data.length == 36 && value == 0 ? VALIDATION_SUCCESS : VALIDATION_FAILED;
+        }
+        if (value != 0) return VALIDATION_FAILED; // no native value anywhere else (I6)
         if (target == address(this)) {
             // Each of these acts on msg.sender (the account) only and runs every check itself, at execution.
             return sel == this.swap.selector || sel == this.mint.selector || sel == this.increase.selector
                 || sel == this.deposit.selector || sel == this.redeem.selector || sel == this.bridge.selector
                 || sel == this.registerRemote.selector ? VALIDATION_SUCCESS : VALIDATION_FAILED;
         }
-        address npm = _chain().npm;
+        address npm = ch.npm;
         if (target == npm) return _checkExit(account, npm, sel, data);
         // I1 (r3 P1): an approval only to V4, whose allowance only V4's own functions spend, for the account that
         // calls them. Never on the position manager (its `approve(to, tokenId)` shares the selector).
@@ -1154,9 +1171,11 @@ contract MamoruActionPolicyV4 {
         address recipient;
         if (c.home != address(0)) {
             if (domain != c.homeDomain) revert BadBridge(2); // a remote's V4 sends funds only home
+            // #307: a sibling sends to its own address on the home chain only after the guardian read it back there.
+            if (c.home == account && !isReady(account, domain)) revert RemoteNotReady(domain);
             recipient = c.home;
         } else {
-            if (domain == ch.domain || MamoruV4Chains.byDomain(domain).chainId == 0) revert BadBridge(3);
+            if (domain == ch.domain || MamoruV4Chains.chainOf(domain) == 0) revert BadBridge(3);
             if (!REGISTRY.routeOn(domain)) revert NotListed(address(uint160(domain)));
             // r4 P0: readiness is the guardian's, for this remote and these owners; r3 P0-1: any owner change since
             // (a rotation in progress) stops every burn until the remote is re-registered and read back again.
@@ -1198,13 +1217,23 @@ contract MamoruActionPolicyV4 {
     /// Marks `remote` ready for `account` on `domain`, after the guardian read it back on its chain (code at the
     /// address, owners, threshold, passkey, Safe7579, SmartSession and the session bound to V4). Only the registered
     /// remote, and only while the account's owners are still those it was computed from. Moves nothing.
+    /// #307: for a sibling, `remote` is the account itself on its home domain, and the guardian has read back there
+    /// that this address is the user's Mamoru home account (deployed with the owners hashed here, or counterfactual
+    /// from the account's recorded initializer). Bound to the sibling's current owners hash, like a remote.
     function setReady(address account, uint32 domain, address remote) external {
         if (msg.sender != GUARDIAN) revert OnlyGuardian();
-        Remote memory r = _remote[domain][account];
-        if (r.remote == address(0) || r.remote != remote) revert RemoteNotReady(domain);
-        if (HELPER.ownersHashOf(account) != r.ownersHash) revert RemoteNotReady(domain);
-        _ready[domain][account] = Ready(remote, r.ownersHash);
-        emit RemoteReady(account, domain, remote, r.ownersHash);
+        bytes32 oh;
+        if (_isSibling(account)) {
+            if (domain != _config[account].homeDomain || remote != account) revert RemoteNotReady(domain);
+            oh = HELPER.ownersHashOf(account);
+        } else {
+            Remote memory r = _remote[domain][account];
+            if (r.remote == address(0) || r.remote != remote) revert RemoteNotReady(domain);
+            if (HELPER.ownersHashOf(account) != r.ownersHash) revert RemoteNotReady(domain);
+            oh = r.ownersHash;
+        }
+        _ready[domain][account] = Ready(remote, oh);
+        emit RemoteReady(account, domain, remote, oh);
     }
 
     function clearReady(address account, uint32 domain) external {
@@ -1333,8 +1362,13 @@ contract MamoruActionPolicyV4 {
     /// Whether `bridge` would burn to the account's remote on `domain` now: registered, marked ready by the guardian
     /// for the same owners hash, and the account's owners unchanged since (any owner change clears it, I4).
     function isReady(address account, uint32 domain) public view returns (bool) {
-        Remote memory r = _remote[domain][account];
         Ready memory y = _ready[domain][account];
+        if (_isSibling(account)) {
+            // #307: the sibling's own address on its home domain, for the owners the guardian saw.
+            return domain == _config[account].homeDomain && y.remote == account && y.ownersHash != bytes32(0)
+                && HELPER.ownersHashOf(account) == y.ownersHash;
+        }
+        Remote memory r = _remote[domain][account];
         return r.remote != address(0) && y.remote == r.remote && y.ownersHash == r.ownersHash
             && HELPER.ownersHashOf(account) == r.ownersHash;
     }
@@ -1344,6 +1378,12 @@ contract MamoruActionPolicyV4 {
     function _chain() internal view returns (MamoruV4Chains.Chain memory ch) {
         ch = MamoruV4Chains.byChainId(block.chainid);
         if (ch.chainId == 0) revert UnsupportedChain(block.chainid);
+    }
+
+    /// #307: the account's Init names itself as home (its own address on another chain of the table).
+    function _isSibling(address account) internal view returns (bool) {
+        address h = _config[account].home;
+        return h != address(0) && h == account;
     }
 
     function _live(address account) internal view returns (Config memory c) {

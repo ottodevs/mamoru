@@ -126,7 +126,9 @@ contract MamoruGasPolicyV2Test is Test {
         vm.chainId(143);
         assertEq(pol.gasReview(), 5 ether);
         vm.chainId(1);
-        assertEq(pol.gasReview(), 0);
+        assertEq(pol.gasReview(), 0.03 ether); // Ethereum (#307)
+        vm.chainId(42161);
+        assertEq(pol.gasReview(), 0); // off the table: fail closed
         vm.prank(SMART_SESSION);
         vm.expectRevert(abi.encodeWithSelector(MamoruGasPolicyV2.BadInit.selector, 3));
         pol.initializeWithMultiplexer(acct, ID, abi.encode(_caps(1)));
