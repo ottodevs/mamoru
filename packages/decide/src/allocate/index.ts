@@ -86,9 +86,11 @@ function liveSession(obs: Observation, grant: string): boolean {
 /**
  * otto/mamoru#171: the held position an entry into `pool` adds liquidity to instead of minting a new NFT, or null to
  * mint. Only under a policy whose manage-any in the pool carries MamoruActionPolicyV2.increase (`hasIncrease`), with a
- * live session of that grant, and only for a position this engine manages (`managed`) that the policy admitted for
- * the account (`admitted`, read by the engine at the observation block: a position minted under v2/v3 or V1 and never
- * admitted by V2 is refused by the policy, so that pool mints). The position must have liquidity, the price strictly
+ * live session of that grant, and only for a position the policy admitted for the account (`admitted`, read by the
+ * engine at the observation block: a position minted under v2/v3 or V1 and never admitted by V2 is refused by the
+ * policy, so that pool mints). Not `managed`: that flag lists the ids this engine run minted or was granted one by
+ * one, so after a restart every older position read unmanaged and each top-up minted a second NFT beside it
+ * (otto/mamoru#220: b54dda3a, 2 Nov 2026). Under manage-any every position of a policy pool is managed (isManaged). The position must have liquidity, the price strictly
  * inside its range (both amounts positive, as the grant's minimums need), and each of its edges within
  * `range.increaseToleranceBps` of the width of `range` (what a mint would get now) from that range's edge. The nearest
  * such position wins, lowest tokenId on ties. The engine re-reads admission and ownership before it builds the call.
@@ -100,7 +102,7 @@ export function reusablePosition(obs: Observation, policy: PolicyVersion, pool: 
   let best: PositionObs | null = null
   let bestDistance = 0
   for (const p of obs.positions) {
-    if (p.pool !== pool.name || p.liquidity <= 0n || !p.managed || p.admitted !== true) continue
+    if (p.pool !== pool.name || p.liquidity <= 0n || p.admitted !== true) continue
     if (!(p.tickLower < pool.tick && pool.tick < p.tickUpper)) continue
     const lower = Math.abs(p.tickLower - range.tickLower)
     const upper = Math.abs(p.tickUpper - range.tickUpper)

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV2, conservadorLiveV4, conservadorLiveV5, grantKey, type PolicyVersion } from '@mamoru/policy'
 import { address, entry, baseRegistry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { decide, mergeOf, MERGES_PER_WEEK, rangeFor, type Observation, type PoolObs, type PositionObs, type SessionObs } from './index.ts'
+import { decide, mergeOf, MERGES_PER_WEEK, rangeFor, reusablePosition, type Observation, type PoolObs, type PositionObs, type SessionObs } from './index.ts'
 
 // otto/mamoru#220: one position per pool. c23e94e1 held two NFTs per pool from before #171 (WETH 6291301+6291328 on
 // the same range, cbBTC 6291323+6351872 on two ranges).
@@ -76,6 +76,14 @@ describe('one position per pool (otto/mamoru#220)', () => {
 
   test('the same range on both (6291301/6291328): the newer tokenId goes', () => {
     expect(decide(obs([held(4n), held(3n)]), LIVE).proposal).toMatchObject({ kind: 'rerange', tokenId: 4n, why: 'merge' })
+  })
+
+  test('#220 b54dda3a: a position the policy did not admit goes first, even nearer the new range', () => {
+    expect(decide(obs([held(3n, 60), held(4n, 0, { admitted: false })]), LIVE).proposal).toMatchObject({ kind: 'rerange', tokenId: 4n, why: 'merge' })
+  })
+
+  test('#220 b54dda3a: after the merge the entry adds to the admitted one left, even read unmanaged after a restart', () => {
+    expect(reusablePosition(obs([held(3n, 0, { managed: false })]), LIVE, riskPool, fresh)?.tokenId).toBe(3n)
   })
 
   test('one live position: nothing to merge; an empty one does not count', () => {

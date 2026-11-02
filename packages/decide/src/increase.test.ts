@@ -83,7 +83,7 @@ describe('increase instead of a second mint (otto/mamoru#171)', () => {
   })
 
   test('the identical range (Revert c23e94e1, 6291301/6291328): increase on the held tokenId, same amounts the mint would take', () => {
-    const minted = decide(obs([held(3n, 0, { managed: false })], pairSessions(LAB)), LAB).proposal
+    const minted = decide(obs([held(3n, 0, { admitted: false })], pairSessions(LAB)), LAB).proposal
     const d = decide(obs([held(3n)], pairSessions(LAB)), LAB)
     expect(d.code).toBe('DECIDE_ENTER')
     expect(d.proposal).toMatchObject({ kind: 'increase_liquidity', grant: `manage-any:${RISK}`, pool: RISK, tokenId: 3n, ...fresh })
@@ -109,9 +109,9 @@ describe('increase instead of a second mint (otto/mamoru#171)', () => {
     }
   })
 
-  test('a position the engine does not manage (not minted by it, so not admitted by the policy) is not reused', () => {
-    expect(reusablePosition(obs([held(3n, 0, { managed: false })], pairSessions(LAB)), LAB, riskPool, fresh)).toBeNull()
-    expect(decide(obs([held(3n, 0, { managed: false })], pairSessions(LAB)), LAB).proposal?.kind).toBe('enter_mint')
+  test('#220: an admitted position read unmanaged after a restart (not minted in this run) is still reused', () => {
+    expect(reusablePosition(obs([held(3n, 0, { managed: false })], pairSessions(LAB)), LAB, riskPool, fresh)?.tokenId).toBe(3n)
+    expect(decide(obs([held(3n, 0, { managed: false })], pairSessions(LAB)), LAB).proposal).toMatchObject({ kind: 'increase_liquidity', tokenId: 3n })
   })
 
   test('tolerance: each edge within 10% of the width (198 of 1980 ticks at 60 spacing, as the Revert range) adds, past it mints', () => {
