@@ -46,7 +46,7 @@ is not the place.
 | Re-range (#172): `rerange { mode: eager \| lazy, edgeBufferTicks, minDwellSeconds, horizonSeconds, lvrWeightBps }`, absent = eager | yes | eager trigger in code | buffer 0-1000 ticks, dwell 0-86400 s, horizon 3600-604800 s, LVR weight 0-20000 bps |
 | Widths, bucket weights | phase 2 | code | per policy |
 | Review cadence | phase 2 | `MAMORU_REVIEW_MS` | 60-3600 s |
-| RPC budget brake | phase 2 | `MAMORU_KEYED_CU_PER_HOUR` | 5k-500k CU/h |
+| RPC budget brake | phase 2 | `MAMORU_KEYED_CU_PER_HOUR` (Alchemy), `MAMORU_KEYED_CREDITS_PER_HOUR` (QuickNode, #305) | 5k-500k CU/h; credits default 110k/h |
 | Snapshot loop, yield ledger | phase 2 | `MAMORU_SNAPSHOT`, `MAMORU_YIELD_LEDGER` | on/off |
 | Relayer subsidy limits (#38) | phase 2 | PR #38 constants | per #38 |
 

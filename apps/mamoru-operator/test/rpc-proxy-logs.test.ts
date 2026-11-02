@@ -362,6 +362,7 @@ describe('log range per provider', () => {
     expect(logRangeOf(PUBLICNODE)).toBe(2_000)
     expect(logRangeOf(BASE_ORG)).toBe(2_000)
     expect(logRangeOf(DRPC)).toBe(10_000)
+    expect(logRangeOf('https://x.base-mainnet.quiknode.pro/k/')).toBe(10_000)
     // Monad's public RPCs refuse an eth_getLogs over more than 100 blocks (1 Nov: the Monad engine's reviews all failed).
     for (const u of ['https://rpc.monad.xyz', 'https://rpc1.monad.xyz', 'https://rpc3.monad.xyz', 'https://rpc-mainnet.monadinfra.com']) expect(logRangeOf(u)).toBe(100)
     expect(logRangeOf('http://127.0.0.1:8545/')).toBe(Number.POSITIVE_INFINITY)

@@ -81,6 +81,8 @@ const LOG_RANGE_BY_HOST: readonly [RegExp, number][] = [
   [/(^|\.)publicnode\.com$/i, 2_000],
   [/(^|\.)base\.org$/i, 2_000],
   [/(^|\.)drpc\.org$/i, 10_000],
+  // QuickNode Build: 10,000 blocks per request (probed 4 Oct); the operator's upstream since 2 Nov (otto/mamoru#305).
+  [/(^|\.)quiknode\.pro$/i, 10_000],
   // Monad's public RPCs (rpc*.monad.xyz, monadinfra): "eth_getLogs is limited to a 100 range" (probed 1 Nov). Without it
   // the Monad engine's history read from the Safe's activation to the head was refused once 100 blocks (~40 s) had passed.
   [/(^|\.)monad\.xyz$/i, 100],

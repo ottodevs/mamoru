@@ -5549,7 +5549,7 @@ export class Operator {
     const hour = Math.floor(now / 3_600_000)
     if (hour !== this.budgetLoggedHour) {
       this.budgetLoggedHour = hour
-      console.log(`[budget] keyed RPC provider over ${budget.cuPerHour} CU this hour: reviews at most every ${BUDGET_REVIEW_MS / 60_000} min and armed Safes read at most once a minute until the hour ends; owner operations are not affected`)
+      console.log(`[budget] keyed RPC provider over its hourly budget (${budget.cuPerHour} Alchemy CU or ${budget.creditsPerHour} QuickNode credits): reviews at most every ${BUDGET_REVIEW_MS / 60_000} min and armed Safes read at most once a minute until the hour ends; owner operations are not affected`)
     }
     return true
   }

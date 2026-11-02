@@ -23,6 +23,10 @@ export function cuFor(method: string): number {
   return CU_TABLE[method] ?? DEFAULT_CU
 }
 
+/** QuickNode bills every method the operator calls on Base at 20 API credits (quicknode.com/api-credits/base, 2 Nov 2026). */
+export const QUICKNODE_CREDITS_PER_CALL = 20
+const isQuickNode = (provider: string) => /quiknode\.pro/i.test(provider)
+
 /** Methods this operator actually calls. An unexpected method name (a bug, or any future caller
  * that is not careful) folds into "other" instead of creating a new permanent bucket, so the
  * number of method buckets per provider is always bounded. */
@@ -221,6 +225,13 @@ class Buckets {
         for (const k of ERROR_KEYS) dest.errors[k] += counters.errors[k]
       }
     }
+  }
+
+  /** Requests over every method of the providers `match` accepts. */
+  requestsOf(match: (provider: string) => boolean): number {
+    let total = 0
+    for (const [provider, byMethod] of this.providers) if (match(provider)) for (const c of byMethod.values()) total += c.requests
+    return total
   }
 
   /** CU estimate over every provider and method of this bucket. */
@@ -442,6 +453,11 @@ export class RpcMetrics {
   /** CU estimate billed in the clock hour of `now`, over every provider (labels and folding into "other" do not matter). */
   cuThisHour(now: number = Date.now()): number {
     return this.ring.get(Math.floor(now / HOUR_MS) * HOUR_MS)?.cuTotal() ?? 0
+  }
+
+  /** QuickNode API credits spent in the clock hour of `now` (requests to quiknode.pro providers, at a flat rate). */
+  creditsThisHour(now: number = Date.now()): number {
+    return (this.ring.get(Math.floor(now / HOUR_MS) * HOUR_MS)?.requestsOf(isQuickNode) ?? 0) * QUICKNODE_CREDITS_PER_CALL
   }
 
   cuEstimateTotal(): number {
