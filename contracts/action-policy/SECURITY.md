@@ -63,7 +63,7 @@ Charged: swaps (amountIn at the range edge that values it highest), mints and in
 
 ## I6: gas (`MamoruGasPolicyV2`)
 
-V1's per-op caps, plus a per-account bucket per window and a cumulative `GAS_REVIEW` (0.01 ETH on Base, 5 MON on Monad, 0.03 ETH on Ethereum, 0 elsewhere: fail closed). Each op is charged at validation from its own capped fields, `(call + verification + preVerification + paymaster limits) x maxFeePerGas`, the EntryPoint prefund; an op that would cross either is rejected. Only SmartSession can charge (V1 let any caller write its own slot; V2's per-account state forbids it). Measured through the EntryPoint: at the caps, 3 griefing ops per day, 19 in total, then every op refused until the guardian reviews; the Safe paid 0.00053 ETH for them (the charge, 0.00988 ETH, is the prefund bound).
+V1's per-op caps, plus a per-account bucket per window and a cumulative `GAS_REVIEW` (0.01 ETH on Base, 5 MON on Monad, 0.02 ETH on Ethereum, 0 elsewhere: fail closed). Each op is charged at validation from its own capped fields, `(call + verification + preVerification + paymaster limits) x maxFeePerGas`, the EntryPoint prefund; an op that would cross either is rejected. Only SmartSession can charge (V1 let any caller write its own slot; V2's per-account state forbids it). Measured through the EntryPoint: at the caps, 3 griefing ops per day, 19 in total, then every op refused until the guardian reviews; the Safe paid 0.00053 ETH for them (the charge, 0.00988 ETH, is the prefund bound).
 
 ## I7, I8: guardian and registry
 

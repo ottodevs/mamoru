@@ -218,7 +218,7 @@ contract V4EthereumSiblingForkTest is V4Fixture {
         assertEq(p.byChainId(143).wrapped, M_WMON);
         // the pinned stack has the expected code on Ethereum (V4 runs this at every enable)
         helper.checkStack();
-        assertEq(gasPol.gasReview(), 0.03 ether);
+        assertEq(gasPol.gasReview(), 0.02 ether);
         // CCTP: USDC burnable on the canonical messenger here, USDT not
         assertEq(helper.poolInfo(E_POOL).token0, E_USDC);
     }
@@ -350,6 +350,44 @@ contract V4EthereumSiblingForkTest is V4Fixture {
         _run(safe, _batch(xs), pid);
         assertEq(IERC20T(E_WETH).balanceOf(safe), 0);
         assertGt(safe.balance + 0.0005 ether, before, "the ETH came back (less the op's gas)");
+    }
+
+    /// Review of #209: the wrapped native of Base (OP WETH9 predeploy) and Monad (WMON) credit and pay back the Safe
+    /// itself, and the unwrap's stipend reaches a Safe proxy there too (from the Safe's own execution).
+    function test_wrapUnwrapFromASafeOnBaseAndMonad() public {
+        uint256 monadFork = vm.createFork(vm.envOr("MONAD_FORK_RPC_URL", string("https://rpc.monad.xyz")), MONAD_BLOCK);
+        address[2] memory wrapped = [WETH, M_WMON];
+        uint256[2] memory forks = [baseFork, monadFork];
+        for (uint256 i; i < 2; i++) {
+            vm.selectFork(forks[i]);
+            address s = _newSafe(9_307 + i);
+            uint256 before = s.balance;
+            assertTrue(_ownerTxValue(s, wrapped[i], 0.01 ether, abi.encodeWithSignature("deposit()")), "wrap");
+            assertEq(IERC20T(wrapped[i]).balanceOf(s), 0.01 ether, "credited to the Safe");
+            assertTrue(_ownerTxValue(s, wrapped[i], 0, abi.encodeWithSignature("withdraw(uint256)", 0.01 ether)), "unwrap");
+            assertEq(IERC20T(wrapped[i]).balanceOf(s), 0);
+            assertEq(s.balance, before, "paid back to the Safe");
+        }
+    }
+
+    /// Review of #209: a route to Ethereum is CCTP domain 0, and the registry takes it like any other.
+    function test_routeToEthereumDomainZero() public {
+        vm.selectFork(baseFork);
+        _route(DOMAIN_ETHEREUM);
+        assertTrue(reg.routeOn(DOMAIN_ETHEREUM));
+    }
+
+    function _ownerTxValue(address s, address to, uint256 value, bytes memory data) internal returns (bool ok) {
+        address o = vm.addr(ownerKey);
+        bytes memory sig = abi.encodePacked(bytes32(uint256(uint160(o))), bytes32(0), uint8(1));
+        vm.prank(o);
+        (bool sent, bytes memory r) = s.call(
+            abi.encodeWithSignature(
+                "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)",
+                to, value, data, uint8(0), 0, 0, 0, address(0), address(0), sig
+            )
+        );
+        ok = sent && abi.decode(r, (bool));
     }
 
     /// The session key alone cannot move native value anywhere but the wrapped native: refused at validation.

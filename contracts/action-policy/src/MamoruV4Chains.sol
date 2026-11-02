@@ -96,9 +96,9 @@ library MamoruV4Chains {
             c.assets = [0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2, address(0)];
             c.wrapped = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
             // L1 gas: 0.1 gwei priority, 3M / 2M / 200k, 5 gwei max fee; a bucket of 0.01 ETH a day (a few ops at
-            // today's ~0.3 gwei), and GAS_REVIEW 0.03 ETH. Ethereum is a chain where funds arrive and leave, not one
+            // today's ~0.3 gwei), and GAS_REVIEW 0.02 ETH. Ethereum is a chain where funds arrive and leave, not one
             // the engine trades on every hour.
-            c.gasReview = 0.03 ether;
+            c.gasReview = 0.02 ether;
             c.remoteCaps = GasCaps(100_000_000, 3_000_000, 2_000_000, 200_000, 5_000_000_000, 0, 0.01 ether, 1 days);
         }
     }

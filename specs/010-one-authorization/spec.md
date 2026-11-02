@@ -232,7 +232,7 @@ new owner signature.
 
 - **Ethereum in the table:** chain 1, CCTP domain 0. Uniswap v3 (factory, NPM, SwapRouter02), USDC, WETH. USDT is
   left out: its CCTP burn limit is 0 there. No vault factory. The whole pinned Safe stack has the same code hashes on
-  Ethereum (read on chain, 2 Nov). `GAS_REVIEW` is 0.03 ETH. Domain 0 is never a "none" sentinel (`chainOf`).
+  Ethereum (read on chain, 2 Nov). `GAS_REVIEW` is 0.02 ETH. Domain 0 is never a "none" sentinel (`chainOf`).
 - **Sibling:** an Init with `home == account` on another domain of the table. It bridges only to its own address on
   the home domain, and only after the guardian has read that address back there (`setReady`, bound to the sibling's
   owners hash). It has no remotes.
