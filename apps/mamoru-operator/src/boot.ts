@@ -17,6 +17,7 @@ import { writeRegistry } from './chain-writes.ts'
 import { Operator, type OperatorConfig } from './operator.ts'
 import { Relayer } from './relayer.ts'
 import { BRIDGE_MONAD_CHAIN_ID, MonadBridge } from './bridge-monad.ts'
+import { ReturnHome } from './return-home.ts'
 import { CCTP_DOMAIN_MONAD, MESSAGE_TRANSMITTER_V2 } from './cctp.ts'
 import { BridgeOut, ETHEREUM_CHAIN_ID, L1_BUNDLER_TIMEOUT_MS, L1_HANDLE_OPS_GAS, L1_USDC } from './bridge-out.ts'
 import { L1Bundler, paymasterFromEnv } from './paymaster.ts'
@@ -664,6 +665,15 @@ export async function bootOperator(o: BootOptions) {
   // otto/mamoru#293, Monad side: the home chain read before a design-C Safe's step 1 (its home migrated on Base).
   const homeRpcUrl = process.env.MAMORU_HOME_RPC_URL
   const homeClient = oneAuth && chainId !== BASE_CHAIN_ID && homeRpcUrl ? createPublicClient({ transport: http(homeRpcUrl, { timeout: 15_000 }) }) : undefined
+  // otto/mamoru#278: a V4 home's returns from its Safe on Monad, minted here by the relayer (a live, writing operator only).
+  const monadV4 = (): { v4: Address; usdc: Address } | null => {
+    try {
+      return { v4: registryAddress('MamoruActionPolicyV4', monadRegistry), usdc: registryAddress('USDC', monadRegistry) }
+    } catch {
+      return null
+    }
+  }
+  const returnHome = chainId === BASE_CHAIN_ID && oneAuth && bridgeMonad ? new ReturnHome(o.stateDir, client, refusal === null ? relayer : null, monadV4) : undefined
   const remotePeers = Object.fromEntries(
     chainId === BASE_CHAIN_ID && (v6Policy || oneAuth) ? peerList.filter((p) => (v6Policy?.remoteBuckets ?? []).some((b) => b.chainId === p.chainId) || (oneAuth && p.chainId === 143)).map((p) => [p.chainId, new RemotePeer(p.chainId, p.url, o.secret)]) : [],
   )
@@ -718,6 +728,7 @@ export async function bootOperator(o: BootOptions) {
       ...(Object.keys(remotePeers).length ? { remotePeers } : {}),
       ...(oneAuth ? { oneAuth } : {}),
       ...(homeClient ? { homeClient } : {}),
+      ...(returnHome ? { returnHome } : {}),
     },
     client,
     relayer,

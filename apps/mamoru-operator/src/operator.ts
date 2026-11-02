@@ -34,6 +34,7 @@ import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
 import { buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
+import type { ReturnHome } from './return-home.ts'
 import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
 import { baseStepLines, monadStepLines, readRegistryPools, readV4Paused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
@@ -501,12 +502,14 @@ export type OperatorConfig = {
    * account has a remote value, and no bridge-out is ever signed.
    */
   bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending'>
+  /** otto/mamoru#278 (Base): a V4 home's returns from its remote Safe, followed to the mint here. Absent: none asked. */
+  returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'open' | 'request'>
   /**
    * otto/mamoru#251, Base side: the operators that run the accounts' own Safes on the chains of v6's remote buckets
    * (remote-peer.ts), by chain id. A v6 approval asks the remote one for its session key, commits to the Safe that gives,
    * and once it lands asks it to provision that Safe. Absent for a chain: no v6 approval is built for it.
    */
-  remotePeers?: Partial<Record<number, Pick<RemotePeer, 'key' | 'provision'> & Partial<Pick<RemotePeer, 'migrateV4'>>>>
+  remotePeers?: Partial<Record<number, Pick<RemotePeer, 'key' | 'provision'> & Partial<Pick<RemotePeer, 'migrateV4' | 'release' | 'releaseStatus'>>>>
   /** otto/mamoru#251: the registry a remote Safe is derived against, by chain. Absent: the pinned one (`registryFor`). */
   remoteRegistry?: (chainId: number) => Registry
   /**
@@ -5414,7 +5417,7 @@ export class Operator {
       const old = this.designC(acc)
       return {
         remote: async (block: bigint) => {
-          const a = await bridge.remote(acc.accountKey, v.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, ids)
+          const a = this.withReturns(acc, await bridge.remote(acc.accountKey, v.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, ids))
           if (!old) return a
           const b = await bridge.remote(`${acc.accountKey}#retired`, old.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, [])
           return { value: a.value + b.value - b.inFlight, inFlight: a.inFlight, ready: a.ready }
@@ -5488,6 +5491,39 @@ export class Operator {
     // Review of #202 (P0-4): `r.registry` is this build's own copy; the operator's registry is never touched (only pools the
     // registry json pins are used, registryPoolEntry), so a flag-off account reads exactly what it read before.
     return { policy: r.policy, registry: r.registry, sessions, key: read.key }
+  }
+
+  /**
+   * otto/mamoru#278: a V4 home's remote value with its return home: a burned return not minted yet is value in flight
+   * (on neither Safe), and while any return is open the bridge waits (in flight above 0: one raw unit when nothing of it
+   * is burned yet).
+   */
+  private withReturns(acc: AccountState, a: NonNullable<Observation['remote']>): NonNullable<Observation['remote']> {
+    const r = this.cfg.returnHome
+    if (!r?.busy(acc.accountKey)) return a
+    const returning = r.inFlight(acc.accountKey)
+    return { ...a, value: a.value + returning, inFlight: (a.inFlight ?? 0n) + (returning > 0n ? returning : 1n) }
+  }
+
+  /** otto/mamoru#278: the context the home asks its V4 remote Safe with (the same one it provisions it with). */
+  private v4RemoteContext(acc: AccountState): AccountContext | null {
+    const v = acc.oneAuth?.remote
+    if (!v?.ready || !v.capUsd || !v.accountKey) return null
+    const t = this.v4RemoteTarget(acc, v.sessionKey as Address, BigInt(v.capUsd))
+    if (!t || t.address.toLowerCase() !== v.address.toLowerCase()) return null
+    return { accountKey: v.accountKey, chainId: BRIDGE_MONAD_CHAIN_ID, address: v.address as Address, owners: acc.ctx.owners, saltNonce: acc.ctx.saltNonce, passkey: acc.ctx.passkey, remote: t.spec }
+  }
+
+  /** otto/mamoru#278: every minute (with tickOneAuth), each V4 home's open return is followed and minted. */
+  async tickReturns(): Promise<void> {
+    const r = this.cfg.returnHome
+    const peer = this.cfg.remotePeers?.[BRIDGE_MONAD_CHAIN_ID]
+    if (!r || !peer?.release || !peer.releaseStatus) return
+    await r.tick((key) => {
+      const acc = this.store.state.accounts[key]
+      const remote = acc ? this.v4RemoteContext(acc) : null
+      return remote ? { remote, peer: peer as Required<Pick<RemotePeer, 'release' | 'releaseStatus'>> } : null
+    })
   }
 
   /** The V4 stack, the flag scope and the account's policy allow offering the move (no reads: approvalView is sync). */
@@ -6002,6 +6038,7 @@ export class Operator {
    * a step 1 forwarded to Monad is settled from its status there.
    */
   async tickOneAuth(): Promise<void> {
+    await this.tickReturns().catch((e) => logErr('[return] tick:', e))
     for (const acc of Object.values(this.store.state.accounts)) {
       if (!acc.active || !this.onV4(acc) || acc.policyId === ONE_AUTH_V4_REMOTE) continue
       await this.lock(acc.accountKey)
