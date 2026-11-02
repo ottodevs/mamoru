@@ -34,15 +34,24 @@ Brais's rule: the user trusts Mamoru once, when creating the account, and signs 
 The owner signs the **rules** once; Mamoru picks **within** them. The rules are code, not data that someone keeps
 editing:
 
-- Which pools are eligible is decided by **rules checkable on chain** (official factory, pinned tokens, depth, TWAP),
-  not by a list someone maintains. Vaults and chains are **fixed tables in V4's code**.
+- Which pools are eligible is decided by **rules checkable on chain** (official factory, pinned tokens, a pinned
+  reference pool per pair that every other pool must agree with, depth, TWAP), not by a list someone maintains.
+  Vaults and chains are **fixed tables in V4's code**.
 - Everything that could move money to someone else (the Safe stack, CCTP, the shape of the remote account) is
   **pinned in V4's code**.
 - Each account carries **one long-lived session** whose only action policy is `MamoruActionPolicyV4` and whose userOp
   policy is `MamoruGasPolicyV2`. No expiry, no lifetime total.
 - **No one holds a key over V4 after deployment**: no guardian, no registry admin, no owner, no upgrade. Adding a
   token, a vault or a chain means a new V4 version, which the owner may adopt on the "What's new" screen; the old one
-  keeps working.
+  keeps working. A new version is adopted on **every chain of the account at once** (one prompt per chain until
+  #116), because readiness only passes between identical V4 instances: a home and a remote on different versions would
+  lose bridging, never funds.
+- **Stop means every chain.** "Stop" removes the Mamoru session on every chain where the account has one (one prompt
+  per chain until #116), and the app does not report the account as stopped until every chain reads back no session,
+  the same rule as key rotation (I4).
+- **No grant before non-exportable keys.** A V4 session never expires, so a copied key would stay valid until the owner
+  removes it. No V4 grant is issued before session keys are per account and non-exportable in a KMS or TEE (spec 009
+  KEY-01, T12); today's 0600 state file and its standby copies never hold a V4 key.
 
 | Owner signature | When |
 |---|---|
@@ -69,7 +78,8 @@ the same code on every EVM chain, so a policy on Base can reason about what live
 - **Per-chain table, keyed by `block.chainid`** (`MamoruV4Chains`):
   - Uniswap v3 factory, NPM, SwapRouter02, the wrapped native, the stable tokens (native USDC, USDT where CCTP burns
     it) and the assets (WETH, cbBTC, WMON…).
-  - The **pool classes** and their risk parameters (see "Eligibility rules").
+  - The **pool classes** and their risk parameters, and one **reference pool** per pinned pair (see "Eligibility
+    rules").
   - The **vault list**: exact vault addresses, each with its asset and ratio (see "Eligibility rules").
   - The gas parameters of `MamoruGasPolicyV2`.
   - Chains: Base, Monad and Ethereum. A chain outside the table refuses everything (fail closed). Adding Arbitrum,
@@ -91,21 +101,36 @@ re-parameterize an entry.
   4. the pool can serve `observe` over the class's `twapWindow` (enough observation cardinality; a pool that cannot
      makes the TWAP read revert, so it fails closed);
   5. at the priced use, the in-band depth covers `DEPTH_MULTIPLE` × the call's value (I2);
-  6. for a stable/stable pool, the anchor check holds (the price is within `anchorBand` of 1:1).
+  6. for a stable/stable pool, the anchor check holds (the price is within `anchorBand` of 1:1);
+  7. **the pool agrees with the pair's reference pool**: its long TWAP is within the class's `bandTicks` of the
+     reference pool's long TWAP over the same window, and its spot within `bandTicks` of the reference's spot. The
+     reference pool is an exact address in the table (the pair's deep, arbitraged pool, for example USDC/WETH 0.05 %
+     on Base). A pair without a reference pool has no eligible pool.
+
+  Rule 7 is what stops an outsider from creating a pool of pinned tokens on a new fee tier (or on a chain where the
+  pair is thin), holding its price where they want for `twapWindow` and supplying the depth themselves: such a pool
+  can only be used at a price within one band of the market the reference pool shows. The reference pool itself is
+  bound by rules 4–6. If the reference pool's liquidity moves elsewhere for good, the pair loses eligibility until a
+  new V4 version names a new reference (fail closed).
 
   Risk parameters come from the pair's **class**, a row of the table: stable/stable, and one row per pinned asset
   against the stable (`twapWindow`, `shortWindow`, `bandTicks`, `anchorBand`, `ratioBps`, fee set). They are not set per
   pool by anyone.
 - **What the old "remove immediately" protected, now by rule.** A pool that turns thin fails (5) at its next use. A
   depegging stable pool fails (6). A manipulated price fails the two-TWAP band. Exposure to one pair is capped by a
-  **per-pair sub-bucket** (keyed by the token pair, across every fee tier and pool of that pair) at the class's
-  `ratioBps` of C, so a second pool of the same pair adds no room. A token that fails as an asset (an issuer freeze, a
+  **per-asset sub-bucket** at the class's `ratioBps` of C: one sub-bucket per volatile asset, shared by every pool of
+  that asset against any pinned stable and every fee tier (so USDC/WETH and USDT/WETH share WETH's), and one for the
+  stable/stable class. A second pool adds no room. A token that fails as an asset (an issuer freeze, a
   broken bridge) is an issuer risk (spec 009 WLK-06): its exposure is capped by the pair's ratio, and a new V4 version
   drops it.
 - **Exits are never gated by eligibility.** `decrease`, `collect` and `burn` of an admitted position, and `redeem`
   from a listed vault, stay allowed whatever the pool's or vault's eligibility is now (V3's LeftClaw M-6: the anchor
-  never locks an exit). Converting the proceeds back to the budget token is a priced swap and needs an eligible pool of
-  that pair; if there is none, the tokens stay in the user's Safe, where the owner can always move them.
+  never locks an exit). `checkExit` (I9) checks only that the decrease minimums are within the band of the pool's
+  TWAP, never eligibility or the anchor, so a crash or a depeg does not block the exit. Converting the proceeds back to
+  the budget token is a priced swap: it needs an eligible pool of that pair and is **charged** to the bucket like any
+  swap. If there is no eligible pool, the tokens stay in the user's Safe, where the owner can always move them.
+- **Swaps are single-hop** (`exactInputSingle` on the pinned router), in either direction, and every swap is charged
+  at its value to the account bucket and to the asset's sub-bucket.
 - **Vaults.** Only the **exact vault addresses** in the chain's table, each with a pinned stable as `asset()` and a
   ratio ≤ `MAX_VAULT_RATIO_BPS`. A factory check alone is not enough without an admin: anyone can create a MetaMorpho
   vault with a hostile curator that allocates deposits to a losing market. Today's candidates are the vaults spec 004
@@ -145,24 +170,40 @@ re-parameterize an entry.
      the only trusted attester (the production enable flow, T1). No third party can revoke it, so deployment depends on
      nothing that can change after a mint: anyone can deploy the address at any time through the permissionless
      factory, and the result is always the user's Safe (r2 P0).
-   - **Readiness is proven on chain, by a CCTP message, not by a key** (A1; replaces the guardian's `setReady`):
-     - V4 refuses a burn unless `readyOf[account][domain]` equals `remoteOf(account, domain)` for the account's current
-       `ownersHash`.
-     - On the destination chain, anyone may call `V4.announceReady(remote)`. V4 there reads back, locally: code at
-       `remote` with the Safe proxy's `EXTCODEHASH`; owners, threshold and shared-signer (x, y) matching the
-       `ownersHash`; the 7579 adapter and the SmartSession installed; and a V4 session bound for `remote`. All of this is
-       what the guardian used to read back off chain (`apps/mamoru-guardian/src/watcher.ts`). If every check holds, it
-       sends a CCTP message through the pinned `MessageTransmitterV2` to the home domain, at finality (`2000`), with
-       body `(homeOf[remote], remote, ownersHash)`.
-     - On the home chain, V4's `handleReceiveFinalizedMessage` accepts the message only when `msg.sender` is the pinned
-       `MessageTransmitterV2`, the source domain is in the table, and the sender is `address(this)`, the same V4 on the
-       other chain. It then writes `readyOf`. Anyone can relay the message (`receiveMessage` is permissionless); the
-       user's own session does it as a userOp (spec 009 G5/G6), so the user pays.
+   - **Readiness is proven on chain, by a CCTP message, not by a key** (A1; replaces the guardian's `setReady`). It
+     applies to burns **towards a remote** (home → remote) and **towards a sibling's home** (sibling → home):
+     - V4 refuses such a burn unless `readyOf[account][domain]` equals `remoteOf(account, domain)` (for a sibling: the
+       account itself on its home domain) for the account's current `ownersHash`.
+     - **A remote burns only to its fixed `homeOf`, with no readiness check.** The home account exists by
+       construction: it registered the remote through its own V4 session, so it is deployed and runs V4. This is the
+       path the rotation recovery below uses.
+     - **Announcing.** On the chain where the target Safe lives, anyone may call `V4.announceReady(safe, toDomain)`.
+       V4 there reads back, locally: code at `safe` with the Safe proxy's `EXTCODEHASH`; owners, threshold and
+       shared-signer (x, y), from which it computes `ownersHash`; the 7579 adapter and the SmartSession installed; and a
+       V4 session bound for `safe`. All of this is what the guardian used to read back off chain
+       (`apps/mamoru-guardian/src/watcher.ts`). The destination is fixed, never free:
+       - for a remote, `toDomain` must be its recorded home domain, and V4 also checks that `safe` equals
+         `remoteOf(homeOf[safe], localDomain)` recomputed from those owners, so a look-alike Safe with the victim's
+         owners cannot announce;
+       - for a home Safe announcing to a sibling, `toDomain` must be a table chain other than the local one.
+
+       If every check holds, V4 sends a CCTP message through the pinned `MessageTransmitterV2` to `toDomain`, with
+       `destinationCaller = 0` and `minFinalityThreshold = 2000`, and body `(home, safe, ownersHash)`.
+     - **Accepting.** The receiving V4's `handleReceiveFinalizedMessage` accepts the message only when `msg.sender` is
+       the pinned `MessageTransmitterV2`, the source domain is in the table, and the sender is `address(this)`, the same
+       V4 on the other chain. `handleReceiveUnfinalizedMessage` always refuses. It writes `readyOf` only if the body's
+       `safe` equals `remoteOf(account, sourceDomain)` and its `ownersHash` is the account's current one; on a sibling,
+       only if the source domain is the home domain in the sibling's Init and `safe == account`. Anyone can relay the
+       message (`receiveMessage` is permissionless); the user's own session does it as a userOp (spec 009 G5/G6), so the
+       user pays. The fallback action allows exactly that call: `MessageTransmitterV2.receiveMessage`, with no value.
      - Any change of `remoteOf` (a key rotation) or of the account's `ownersHash` clears `readyOf`, and a new
        announcement is needed.
      - **Trust added:** none beyond CCTP, which already moves the funds. A forged message (only Circle could forge
-       one) makes V4 burn to `remoteOf`, the user's own deterministic address, which anyone can deploy with the
-       constant initializer. Circle forging it gains nothing it could not already do as issuer (spec 009 WLK-06).
+       one) passes only for the address V4 itself computes as `remoteOf`, the user's own deterministic Safe, which
+       anyone can deploy with the constant initializer. Circle forging it gains nothing it could not already do as
+       issuer (spec 009 WLK-06).
+   - **Every burn** pins `destinationCaller = 0`, `minFinalityThreshold = 2000` and `maxFee = 0`, with `mintRecipient`
+     as above.
    - The setup itself is **T1b**, run before any V4 code: the exact canonical initializer, with the
      self-attestation *inside* setup, deployed on a fork after funds were sent to its address.
 
@@ -181,7 +222,8 @@ re-parameterize an entry.
    current keys. Its one session is bound by the same V4. `registerRemote(domain, sessionKey)` is only callable
    through the account's own session.
 5. **Budget.** Per chain, one value bucket for the account, in USD-stable units, refilled each window, with:
-   - **Per pair and per vault:** at most the class's or vault's `ratioBps` of the bucket.
+   - **Per asset and per vault:** at most the class's or vault's `ratioBps` of the bucket (the per-asset sub-bucket
+     of "Eligibility rules").
    - **A rolling 30-day cap** of `3 x capUsd` per chain on spend. It bounds loss in any 30 days and never ends the
      authorization.
    - **A rolling 24 h cap** of `capUsd` (the old "breaker"). A spend that would pass it is **refused**; nothing is
@@ -193,8 +235,10 @@ re-parameterize an entry.
    `maxFeePerGas`) and replaces the guardian-reset `GAS_REVIEW` with a **rate limit that needs no clock at
    validation** (A1, and spec 009 POL-12: ERC-7562 bans `TIMESTAMP` in validation):
    - Each op is charged at validation at its most expensive cost, `c = (sum of the five gas limits) × maxFeePerGas`.
-   - **Claimed time.** Every session batch starts with a call `V4.clock(T)`, which the fallback action requires and
-     decodes at validation. The gas policy returns `validAfter = T − S` and `validUntil = T + S` in its validation
+   - **Claimed time.** Every session batch starts with a call `V4.clock(T)`. `MamoruGasPolicyV2` decodes it itself
+     from `userOp.callData` (SmartSession runs userOp policies before action policies, and an action policy sees one
+     call at a time): it requires `execute` in batch mode with the default exec type, and a first call to V4's `clock`
+     with no value. It then returns `validAfter = T − S` and `validUntil = T + S` in its validation
      data (`S`, a pinned slack of a few minutes, well under `W / 2`), so the EntryPoint admits the op only while the
      real time is within `S` of `T`. The policy thus knows the time to within `S` without reading `TIMESTAMP`. In
      execution, `clock` only asserts `|block.timestamp − T| ≤ S`.
@@ -207,20 +251,26 @@ re-parameterize an entry.
      at most that burst, and needs no reset.
    - No action-free userOp: V4 refuses an empty batch, a batch without the leading `clock`, and a call it cannot
      classify, through the fallback action.
-   - T1c probes on forks that SmartSession intersects the time range a userOp policy returns, as it does for
-     TimeFramePolicy, and that a standards-compliant bundler admits these ops.
+   - SmartSession intersects the validation data that every policy returns, userOp policies included
+     (`PolicyLib.check`, `PolicyLib.sol:73-76` in the smartsessions source). T1c confirms it on the deployed v1.0.0
+     build and that a standards-compliant bundler admits these ops; V4 is not deployed until it does.
 7. **No guardian.** V4 and `MamoruGasPolicyV2` have no `GUARDIAN`, no `pause`, `unpause`, `review`, `setReady` or
    `cancel`, no pause state, and no address with any power over them after deployment. The deploy script refuses a
    source that contains any of these (spec 009 POL-01).
 8. **Nothing to add or remove.** Eligibility is by rule (above). A token, vault or chain outside the table, or a
    different class parameter, is a new V4 version, adopted only by an owner signature.
 9. **ERC-7562-compliant validation** (spec 009 POL-12). V4's `checkAction` reads only storage keyed by the account
-   and does no external reads: targets, selectors, decoded recipients and the batch shape. The price, depth, budget
+   and does no external reads: targets, selectors and decoded recipients, one call at a time. The price, depth, budget
    and position checks run in execution, inside V4's own entry points, which are the guard spec 009 POL-12 requires.
-   The exit checks that V4 makes in validation today (`_checkExit` reads the pool and the registry entry) move to a
-   required `V4.checkExit(tokenId, liquidity, amount0Min, amount1Min)` call placed immediately before each
-   `decrease`, with its arguments bound to the `decrease` calldata, as POL-12 binds the guard. `collect` and `burn`
-   stay static (recipient = account, admitted position).
+   - **Batch shape is checked on the whole batch, by the userOp policy.** `MamoruGasPolicyV2` sees the whole
+     `userOp.callData` at validation, so it checks, statelessly and per op: batch mode with the default exec type
+     (SmartSession also refuses try mode, `SmartSession.sol:281`); the leading `clock`; each NPM `decreaseLiquidity`
+     immediately preceded by `V4.checkExit(tokenId, liquidity, amount0Min, amount1Min)` with the same arguments; and
+     each `approve` followed by its reset and `AllowanceCheck.assertZero` (spec 009 POL-07). Nothing is carried
+     between calls or between ops in storage, so a dangling or reordered call simply fails validation.
+   - The exit checks that V4 makes in validation today (`_checkExit` reads the pool and the registry entry) move to
+     that `checkExit`, which in execution checks only that the minimums are within the band of the pool's TWAP.
+     `collect` and `burn` stay static (recipient = account, admitted position).
 
 ### MamoruActionPolicyV4
 
@@ -288,9 +338,10 @@ new owner signature.
   Ethereum (read on chain, 2 Nov). Domain 0 is never a "none" sentinel (`chainOf`).
 - **Sibling:** an Init with `home == account` on another domain of the table. It bridges only to its own address on
   the home domain, and only once that address is **proven ready by a CCTP message from the home chain's V4** (A1,
-  replaces `setReady`): on the home chain, `V4.announceReady(account)` reads the home Safe back locally (code, owners
-  hash, shared signer, modules, V4 session) and sends `(account, account, ownersHash)` to the sibling's domain. The
-  sibling's V4 accepts it under the same rules as I4. A sibling has no remotes.
+  replaces `setReady`): on the home chain, `V4.announceReady(account, siblingDomain)` reads the home Safe back locally
+  (code, owners hash, shared signer, modules, V4 session) and sends `(account, account, ownersHash)` to the sibling's
+  domain. The sibling's V4 accepts it under I4's rules, only from the home domain in its Init. A sibling has no
+  remotes.
 - **Wrap:** native value only to the chain's pinned wrapped native, `deposit()` and `withdraw(uint256)`, both to the
   account. This is not charged, because the value stays the account's.
 - **The one signature on a Safe set up before V4 (#309):** the production enable flow, as on Base. One owner Safe tx
@@ -310,7 +361,7 @@ admin and a guardian are gone.
 
 | Who | What they can do | Bound |
 |---|---|---|
-| Leaked session key | V3's attacks within the band and the bucket, on any eligible pool or listed vault, and bridges to the user's own ready remotes | **Value exposed:** at most C per 24 h and 3C per rolling 30 days per chain, × the chains where the account holds funds, until the owner stops the session. There is no lifetime total (A1), so over a year the conservative figure is 36C per chain. **Value an attacker can extract:** funds only ever reach the user's own Safes (I1), so the extraction channel is trades the key forces at a bad price, which V4 bounds by the band (`MAX_BAND` 500 ticks, about 5.1 %) and the depth check: at most about 5.1 % of the spend plus pool fees, i.e. about 0.15C per 30 days per chain at the hard bounds, and less at the class parameters. Spec 007's measured loss (6.6 % of cap per day per pool) is the expected case at today's parameters. Key-free mitigations: per-account session keys in a KMS or TEE (spec 009 KEY-01/05), ops alerts that ask the owner for one tap to stop, and the 24 h and 30-day multiples sized from the engine's real spend (open question 4). |
+| Leaked session key | V3's attacks within the band and the bucket, on any eligible pool or listed vault, and bridges to the user's own ready remotes | **Conservative bound, the owner's accepted risk:** the whole permitted spend is loss, i.e. C per 24 h and 3C per 30 days per chain, × the chains where the account holds funds, with **no end in time** until the owner stops the session on every chain (A1 removed the lifetime total). Add, once per position, the band-edge loss of decreasing a position the account already holds (decreases are not charged; `checkExit` bounds their minimums by the band). Funds only ever reach the user's own Safes (I1), so the channel is trades at a bad price; the **expected** loss is far lower (spec 007 measured 6.6 % of cap per day per pool at today's parameters), and T4 derives the band-limited figure, including the two-TWAP tolerance and price impact, without it ever replacing the conservative bound. Key-free mitigations: per-account non-exportable session keys before any V4 grant (Decision), ops alerts that ask the owner to stop, and the 24 h and 30-day multiples sized from the engine's real spend (open question 4). |
 | Leaked session key, gas | Repeated no-op or tiny userOps paid by the Safe | `MamoruGasPolicyV2`'s rate: at most G per W plus a burst of about G; never more than the Safe's native balance and EntryPoint deposit. G is sized at about twice the account's normal use (open question 5). The empty batch and a batch without `clock` are refused. |
 | Hostile pool of pinned tokens | Someone creates a thin pool of pinned tokens on the official factory | The depth check at every priced use, the two-TWAP band, the anchor for stable pairs, and the per-pair sub-bucket. The pool can only be used for the pair's ratio of C, at band slippage. |
 | Listed vault's curator | Reallocates the vault within Morpho's rules | The vault's ratio of C (`held + assets ≤ C × ratio`), as spec 009 POL-07 caps an upgradeable venue. |
@@ -333,7 +384,7 @@ admin after it is deployed. r2 of this spec kept two pieces that break them, and
 |---|---|---|
 | Guardian key: pause, unpause, `review`, `setReady`, registry `cancel` | Removed (I7) | A key that can pause users is the custodial power C4 forbids, and the key is an attack target |
 | Breaker pauses the account until the guardian unpauses | The 24 h cap refuses the call; nothing to clear (I5) | Same bound, no state a person must reset |
-| 10C cumulative review threshold | Removed; the bound is the 24 h and 30-day caps plus band-limited extraction (threat model) | A review needs a reviewer with power |
+| 10C cumulative review threshold | Removed; the bound is the 24 h and 30-day caps, conservatively the whole permitted spend with no end in time (threat model) | A review needs a reviewer with power; the owner accepts the rate as the risk, and stops it on every chain |
 | `GAS_REVIEW` reset by the guardian | A clock-free GCRA rate in `MamoruGasPolicyV2` (I6) | Same purpose, no reviewer, and ERC-7562 compliant |
 | `setReady` written by the guardian after an off-chain read-back | `announceReady` on the destination chain, delivered by a CCTP message from the same V4 (I4) | The same read-back, done by code; trust only in CCTP, which already moves the funds |
 | `MamoruRegistry` with a 2-of-2 team admin and a 72 h timelock | Eligibility by rule, vault and chain tables in code (I8) | A list someone edits is an admin; rules checkable on chain give the same result with no one holding power (Morpho Blue style) |
@@ -360,12 +411,12 @@ guardian or the registry, A1 replaces it:
 | r1 P1-4 | Migration cannot prove old sessions are gone | Inventory from events, `assertNone` | Unchanged |
 | r1 P1-5 | A design-C remote Safe is not migrated | Second prompt on Monad | Unchanged |
 | r1 P1-6 | A gas-only userOp policy allows unbounded gas spend | Gas bucket per window | GCRA rate (I6) |
-| r1 P1-7 | No justification for dropping the lifetime cap | 30-day cap, breaker, guardian cancel | 24 h and 30-day caps, band-limited extraction, no admin to cancel because no one can add |
+| r1 P1-7 | No justification for dropping the lifetime cap | 30-day cap, breaker, guardian cancel | 24 h and 30-day caps, stated conservatively as the whole permitted spend with no end in time; no admin to cancel because no one can add |
 | r2 P0-1 | Remote Safe undeployable (attestation at setup) | Self-attested canonical initializer | Unchanged |
 | r2 P0-2 | Rebuild from original keys restores a revoked owner | Current owners; burns stop on change | Unchanged |
 | r2 P1-3 | Registry-chosen router or NPM | Per-chain tuple pinned | Unchanged |
 | r2 P1-4 | Admin-chosen "stable" | Tokens pinned | Unchanged |
-| r2 P1-5 | A slow leak repeats with no end | 10C review threshold by the guardian | Accepted as a rate, not a total: 3C per 30 days exposed, about 5.1 % of that extractable; mitigations in the threat model |
+| r2 P1-5 | A slow leak repeats with no end | 10C review threshold by the guardian | Accepted as a rate, not a total: C per 24 h and 3C per 30 days per chain, conservatively all of it loss, until the owner stops every chain |
 | r3 P0-1 | A revoked owner can still drain an old remote | Rotation ceremony, burns stop, alert | Unchanged |
 | r3 P0-2 | A burn can target an undeployable remote | Deploy and read back before the first burn | Read-back by `announceReady` on chain, delivered by CCTP |
 | r3 P1-3 | Approve/spend pairing | Approvals only to V4 | Unchanged |
@@ -425,7 +476,8 @@ guardian or the registry, A1 replaces it:
   - `registerRemote` with someone else's commitment; a migration with a stale session.
   - Gas griefing: bursts, many ops in one bundle, idle then burst, a claimed time outside `S`, a batch without
     `clock`; the 24 h and 30-day caps; no pause selector in the bytecode.
-  - The worst-case extractable loss per 30 days at maximum class parameters.
+  - The band-limited expected loss per 30 days at maximum class parameters, with the two-TWAP tolerance and price
+    impact; the conservative bound stays the whole permitted spend.
 - **T5** high-stakes review (GPT-6 Sol, or Opus 5.5 + Gemini 4 Argon), plus an external review if Ot wants one
   before mainnet.
 - **T6** operator #293, app #295 and the sibling flow #307 on forks, with the guardian app retired:
@@ -435,4 +487,5 @@ guardian or the registry, A1 replaces it:
   4. bridge to a table chain after `announceReady`, with no signature;
   5. withdraw (one signature).
 - **T7** deploy (Ot's GO in the deploying session): V4, gas policy and migration check on Base, Monad and Ethereum;
-  `/ops` #296; beta with Brais's account; then prod. Nothing with a guardian or a registry admin is deployed.
+  `/ops` #296; beta with Brais's account; then prod. Nothing with a guardian or a registry admin is deployed. The first
+  V4 grant waits for per-account non-exportable session keys (spec 009 KEY-01, T12).

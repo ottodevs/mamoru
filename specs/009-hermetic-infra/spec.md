@@ -50,8 +50,10 @@ USDC and the CCTP messenger, Coinbase for cbBTC). Those limits are documented (W
 **Hosted-agent aggregate exposure.** While Mamoru hosts the agent, one signing service holds many accounts' session
 keys. A compromise of that service, rather than of one key, can spend within the rolling caps of every account it
 serves. No on-chain mechanism caps a sum across independent accounts. The bound is therefore the sum of the
-per-account rolling caps (C per 24 h and 3C per 30 days per chain, of which about 5.1 % is extractable, spec 010
-threat model) and gas rates, for as long as the compromise lasts. KEY-05 publishes that bound, per account and in aggregate, and keeps it attested.
+per-account rolling caps (C per 24 h and 3C per 30 days per chain, conservatively all of it loss, spec 010 threat
+model) and gas rates, for as long as the compromise lasts: unlike a funded infra contract (C3), this exposure is
+open-ended in time, which is why it is published (KEY-05, over a stated 30-day horizon) and why no V4 grant is issued
+before per-account non-exportable keys (KEY-01). KEY-05 publishes that bound, per account and in aggregate, and keeps it attested.
 A shared on-chain global limit is rejected (KEY-06). The optional self-hosted agent mode (WLK-04, later) removes a
 user from that sum.
 
@@ -304,12 +306,15 @@ bounded by the owner's allowance.
   the authorization. The round-2 red team asked for a lifetime ceiling because a refilling bucket alone does not bound
   total loss. A1 answers it in three parts:
   - the rolling caps bound the rate: at most C per 24 h and 3C per 30 days per chain exposed;
-  - recipients are pinned to the user's own Safes (spec 010 I1), so value can leave only through trades at a bad price,
-    which the band and the depth check bound at about 5.1 % of the spend plus fees (spec 010 threat model);
+  - recipients are pinned to the user's own Safes (spec 010 I1), so value can leave only through trades at a bad price.
+    The conservative bound still counts the whole permitted spend as loss, with no end in time until the owner stops
+    the session on every chain; that is the risk the owner accepts, shown to them and published (KEY-05). The expected
+    loss is much lower, and spec 010 T4 derives it;
   - gas is bounded by a rate (POL-11).
 
   The agent cannot re-grant, widen or reset a cap; only an owner-signed grant can, and the per-account exposure is
-  shown to the owner and published (KEY-05). The owner can stop the session at any time (INV-1).
+  shown to the owner and published (KEY-05). The owner can stop the session at any time, on every chain where it
+  exists (INV-1; spec 010 Decision, "Stop means every chain").
 - **POL-04: No expiry, nothing to renew.** The session has no TimeFramePolicy (if one is ever kept: `validUntil = 0`,
   `validAfter ≠ 0`, spec 010 T1) and no usage limit that ends it. The product promise is set-and-forget: a strategy
   never stops because the user did not open the app. Security comes from POL-02/03/11 and the closed call surface
@@ -399,7 +404,8 @@ bounded by the owner's allowance.
 - **GRD-03: Per-account migration with a cutoff.** Each account moves to V4 with spec 010's one-transaction migration:
   `removeSession` for every Mamoru permission id, enable V4, then `MamoruMigrationCheck.assertNone`, so the removal of
   the V2/V3 sessions is provable on chain. V4 has no guardian, so the migration ends the guardian's power over that
-  account. The app asks every V2/V3 account to migrate now (the "What's new" screen) rather than at expiry. From a published cutoff date
+  account. `MamoruPauseGate` is a session action policy, so it goes with the session it belongs to (T9 confirms no
+  account carries it anywhere else). The app asks every V2/V3 account to migrate now (the "What's new" screen) rather than at expiry. From a published cutoff date
   the operator stops signing V2 grants and deletes its V2 session keys. Neither deletion can be proven on chain.
   **Accounts that ignore the migration:** until V2's own `validUntil`, two things remain possible:
   - a copied V2 session key can still act within V2's on-chain bounds: caps, pinned recipients, and its TWAP-band
@@ -435,6 +441,8 @@ bounded by the owner's allowance.
 
 - **KEY-01: Per-account session key.** One session key per account, non-exportable in a KMS or TEE. Today session keys
   are in a 0600 JSON state file (`state.ts:104-105`) with age-encrypted copies on the standby VPS. Those copies go away.
+  Because V4 sessions do not expire, **no V4 grant is issued before this holds** (spec 010 Decision): T12 precedes the
+  first V4 grant.
 - **KEY-02: Rotation.** V4 sessions do not expire (POL-04), so a session key is replaced only by an owner-signed
   re-grant (for example when the signing service moves to per-account KMS keys, T12). Until then a leaked key is worth
   at most the rolling caps (POL-03) and the gas rate (POL-11), for as long as it stays enabled; the owner can remove it
@@ -442,8 +450,8 @@ bounded by the owner's allowance.
 - **KEY-03: Bundler keys.** One key per chain in a KMS, no authority (INV-3), and dust only.
 - **KEY-04: One-off deployers.** Infra deployments use a throwaway key whose only power is the deployment itself.
 - **KEY-05: Published exposure.**
-  - **Per account and in aggregate.** The signing service publishes each account's maximum exposure (remaining
-    rolling caps + gas rate) and the sum across the accounts it serves. It shows the per-account figure to its owner and
+  - **Per account and in aggregate.** The signing service publishes each account's maximum exposure over a 30-day
+    horizon (3C per chain where it holds funds + 30 days of gas rate) and the sum across the accounts it serves. It shows the per-account figure to its owner and
     the aggregate on `/ops`, with an alert when the aggregate grows past a stated figure.
   - **Isolation.** Per-account keys sit under separate key policies, so one IAM grant cannot reach all of them.
   - **Attested signer.** The signer runs in an attested TEE that re-checks the V-next rules before signing, as defence
@@ -530,7 +538,7 @@ bounded by the owner's allowance.
 | Threat | Today | After v3 | Residual |
 |---|---|---|---|
 | Guardian key leaked or abused | Freezes any V2 account's automation, including exits | No guardian in V4 (spec 010 A1); key destroyed; V2/V3 accounts flagged until migrated | Unmigrated accounts until migration |
-| Session key leaked | Acts within the grant for 365 days | Rolling caps (C per 24 h, 3C per 30 days per chain), pinned own-Safe recipients, gas rate, closed call surface, per-account key in KMS/TEE | 3C per 30 days per chain exposed while enabled, about 5.1 % of it extractable (spec 010 threat model) |
+| Session key leaked | Acts within the grant for 365 days | Rolling caps (C per 24 h, 3C per 30 days per chain), pinned own-Safe recipients, gas rate, closed call surface, per-account non-exportable key before any V4 grant | Conservatively 3C per 30 days per chain, all counted as loss, until the owner stops every chain (spec 010 threat model) |
 | Session escapes policy (self-call, module install, ERC-1271, nested router call) | Self-calls not blocked by SmartSession; ERC-1271 empty | POL-05/06/07 with tests | Bugs in V-next (audit, fuzzing) |
 | Relayer key leaked | Float on three chains, one key | Dust per chain, KMS, no authority | One bundle's float |
 | Mamoru refuses or disappears | No owner signature off-domain; owner actions go through the operator | Static signer under the same RP ID from several hosts, domain held long-term, client-built owner txs (Safe-paid userOp or SafeTx refund), optional backup owner, user-chosen agent, CI test with Mamoru off | Loss of `mamoru.lol` for good, for accounts without the optional backup owner: funds stuck, not stolen (D4-R4) |
@@ -597,7 +605,8 @@ bounded by the owner's allowance.
 - **T6: Invariant fuzzing.** The per-window, 24 h and 30-day limits and the gas rate hold under batching, nonce races,
   reverting ops and re-enable. POL-03: no path widens a cap without an owner signature.
 - **T7: Migration.** Spec 010's migration moves accounts off V2/V3 and `MamoruPauseGate` (GRD-03). No renewal and no
-  wind-down: V4 sessions do not expire (POL-04).
+  wind-down: V4 sessions do not expire (POL-04). It runs only after T12: no V4 grant before per-account non-exportable
+  keys (KEY-01).
 - **T8: Self-attestation.** Self-attest SmartSession and UniActionPolicy (REG-01).
 - **T9: Per-account state check.** For every live Safe: owners, threshold, guard, fallback handler, modules, executors,
   trusted attesters and policy version (INV-3, REG-01), plus the GRD-03 cutoff and the GRD-04 flag on `/ops`.
@@ -627,8 +636,9 @@ bounded by the owner's allowance.
 ## Scenarios
 
 - **S1: Leaked session key.** A leaked session key spends as fast as it can. It is refused past C in 24 h and 3C in
-  30 days per chain, value reaches only the user's own Safes, and the extractable loss is bounded by the band (about
-  5.1 % of the spend). The owner stops it with one tap.
+  30 days per chain and value reaches only the user's own Safes; conservatively that whole spend is loss, with no end
+  in time. The owner stops it on every chain (one prompt per chain until #116), and the app reports "stopped" only when
+  every chain reads back no session.
 - **S2: Mamoru disappears.** Domain, Worker, operator and bundler are all gone. The user opens the IPFS frontend, signs
   with their passkey (static signer under `mamoru.lol`, D4-R2) or the optional backup owner, revokes every session and
   allowance, and withdraws every asset on Base, Monad and Ethereum.
