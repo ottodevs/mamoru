@@ -503,7 +503,7 @@ export type OperatorConfig = {
    */
   bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending'>
   /** otto/mamoru#278 (Base): a V4 home's returns from its remote Safe, followed to the mint here. Absent: none asked. */
-  returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'open' | 'request'>
+  returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'floor' | 'open' | 'request'>
   /**
    * otto/mamoru#251, Base side: the operators that run the accounts' own Safes on the chains of v6's remote buckets
    * (remote-peer.ts), by chain id. A v6 approval asks the remote one for its session key, commits to the Safe that gives,
@@ -5502,7 +5502,9 @@ export class Operator {
     const r = this.cfg.returnHome
     if (!r?.busy(acc.accountKey)) return a
     const returning = r.inFlight(acc.accountKey)
-    return { ...a, value: a.value + returning, inFlight: (a.inFlight ?? 0n) + (returning > 0n ? returning : 1n) }
+    const floor = r.floor(acc.accountKey)
+    const value = a.value + returning
+    return { ...a, value: value < floor ? floor : value, inFlight: (a.inFlight ?? 0n) + (returning > 0n ? returning : 1n) }
   }
 
   /** otto/mamoru#278: the context the home asks its V4 remote Safe with (the same one it provisions it with). */

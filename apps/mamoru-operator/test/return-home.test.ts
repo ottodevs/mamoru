@@ -15,6 +15,8 @@ const V4 = '0x00000000000000000000000000000000000000f4' as Address
 const MONAD_USDC = '0x00000000000000000000000000000000000000c5' as Address
 const BURN_TX = `0x${'22'.repeat(32)}` as Hex
 const AMOUNT = 4_000_000n
+/** The remote value when the return was asked. */
+const FLOOR = 5_000_000n
 const T0 = Date.parse('2026-11-02T18:00:00Z')
 const REMOTE = { accountKey: 'r-1', chainId: 143, address: '0x00000000000000000000000000000000000000b2' } as unknown as AccountContext
 
@@ -29,7 +31,7 @@ const attester = privateKeyToAccount(generatePrivateKey())
 const attest = async (m: Hex) => ({ message: m, attestation: await attester.sign({ hash: keccak256(m) }) })
 
 /** The peer: answers per id; `burnAt` is the call (1-based) from which the release is reported burned. */
-function peerOf(o: { burned?: { amount?: bigint }; cancelled?: boolean; lose?: number } = {}): ReturnPeer & { asked: string[]; statuses: number } {
+function peerOf(o: { burned?: { amount?: bigint }; cancelled?: boolean; lose?: number; refuse?: number } = {}): ReturnPeer & { asked: string[]; statuses: number } {
   const known = new Map<string, bigint>()
   let lose = o.lose ?? 0
   const p = {
@@ -38,6 +40,7 @@ function peerOf(o: { burned?: { amount?: bigint }; cancelled?: boolean; lose?: n
     release: async (_r: AccountContext, id: string, amount: bigint): Promise<ReleaseView> => {
       p.asked.push(id)
       if (lose-- > 0) throw new Error('timeout')
+      if (o.refuse) throw Object.assign(new Error('refused'), { status: o.refuse, code: 'RELEASE_OPEN' })
       known.set(id, amount)
       return { id, amount: amount.toString(), chainId: 8453, state: 'open' }
     },
@@ -107,31 +110,31 @@ describe('return home (otto/mamoru#278, Base side)', () => {
   test('a request is on disk before the peer is asked; one open return per account; busy while open', async () => {
     const s = setup()
     const p = peerOf()
-    const e = await s.r.request('acc-1', HOME, REMOTE, p, AMOUNT)
+    const e = await s.r.request('acc-1', HOME, REMOTE, p, AMOUNT, FLOOR)
     expect(s.j().returns[e.id]).toMatchObject({ state: 'requested', amount: AMOUNT.toString(), home: HOME })
     expect(p.asked).toEqual([e.id])
     expect(s.r.busy('acc-1')).toBe(true)
     expect(s.r.inFlight('acc-1')).toBe(0n)
-    await expect(s.r.request('acc-1', HOME, REMOTE, p, 1n)).rejects.toThrow('already open')
-    await expect(s.r.request('acc-2', HOME, REMOTE, p, 0n)).rejects.toThrow('return of 0')
+    await expect(s.r.request('acc-1', HOME, REMOTE, p, 1n, FLOOR)).rejects.toThrow('already open')
+    await expect(s.r.request('acc-2', HOME, REMOTE, p, 0n, FLOOR)).rejects.toThrow('return of 0')
   })
 
   test('a lost answer: the tick asks again with the same id; then follows it to burned (in flight) and cancelled', async () => {
     const s = setup()
     const p = peerOf({ lose: 1 })
-    const e = await s.r.request('acc-1', HOME, REMOTE, p, AMOUNT)
+    const e = await s.r.request('acc-1', HOME, REMOTE, p, AMOUNT, FLOOR)
     await s.r.tick(() => ({ remote: REMOTE, peer: p }))
     expect(p.asked).toEqual([e.id, e.id])
     expect(s.j().returns[e.id]!.state).toBe('requested')
     const burned = setup()
     const pb = peerOf({ burned: { amount: AMOUNT - 5n } })
-    const b = await burned.r.request('acc-1', HOME, REMOTE, pb, AMOUNT)
+    const b = await burned.r.request('acc-1', HOME, REMOTE, pb, AMOUNT, FLOOR)
     await burned.r.tick(() => ({ remote: REMOTE, peer: pb }))
     expect(burned.j().returns[b.id]).toMatchObject({ state: 'burned', burn: { amount: (AMOUNT - 5n).toString(), txHash: BURN_TX, block: 777 } })
     expect(burned.r.inFlight('acc-1')).toBe(AMOUNT - 5n)
     const cancelled = setup()
     const pc = peerOf({ cancelled: true })
-    const c = await cancelled.r.request('acc-1', HOME, REMOTE, pc, AMOUNT)
+    const c = await cancelled.r.request('acc-1', HOME, REMOTE, pc, AMOUNT, FLOOR)
     await cancelled.r.tick(() => ({ remote: REMOTE, peer: pc }))
     expect(cancelled.j().returns[c.id]!.state).toBe('cancelled')
     expect(cancelled.r.busy('acc-1')).toBe(false)
@@ -140,7 +143,7 @@ describe('return home (otto/mamoru#278, Base side)', () => {
   test('a peer reporting a burn above the request is refused (stays requested)', async () => {
     const s = setup()
     const p = peerOf({ burned: { amount: AMOUNT + 1n } })
-    const e = await s.r.request('acc-1', HOME, REMOTE, p, AMOUNT)
+    const e = await s.r.request('acc-1', HOME, REMOTE, p, AMOUNT, FLOOR)
     await s.r.tick(() => ({ remote: REMOTE, peer: p }))
     expect(s.j().returns[e.id]!.state).toBe('requested')
   })
@@ -148,7 +151,7 @@ describe('return home (otto/mamoru#278, Base side)', () => {
   const burnedSetup = async (o: Parameters<typeof setup>[0] = {}) => {
     const s = setup(o)
     const p = peerOf({ burned: {} })
-    const e = await s.r.request('acc-1', HOME, REMOTE, p, AMOUNT)
+    const e = await s.r.request('acc-1', HOME, REMOTE, p, AMOUNT, FLOOR)
     await s.r.tick(() => ({ remote: REMOTE, peer: p }))
     expect(s.j().returns[e.id]!.state).toBe('burned')
     return { ...s, e, p }
@@ -209,5 +212,42 @@ describe('return home (otto/mamoru#278, Base side)', () => {
     s.advance(RETURN_MINT_PENDING_MS / 2)
     await s.r.tick(() => null)
     expect(s.rel!.sent).toHaveLength(1)
+  })
+
+  test('review r1: a request the peer refuses (4xx) is cancelled and holds nothing; no answer keeps it', async () => {
+    const s = setup()
+    const p = peerOf({ refuse: 409 })
+    const e = await s.r.request('acc-1', HOME, REMOTE, p, AMOUNT, FLOOR)
+    expect(s.j().returns[e.id]).toMatchObject({ state: 'cancelled', note: 'refused by the peer: 409 RELEASE_OPEN' })
+    expect(s.r.busy('acc-1')).toBe(false)
+    expect(s.r.floor('acc-1')).toBe(0n)
+    // Refused on a later re-ask (the peer did not know it, then refuses): cancelled too.
+    const later = setup()
+    const lost = peerOf({ lose: 1 })
+    const l = await later.r.request('acc-1', HOME, REMOTE, lost, AMOUNT, FLOOR)
+    await later.r.tick(() => ({ remote: REMOTE, peer: peerOf({ refuse: 400 }) }))
+    expect(later.j().returns[l.id]!.state).toBe('cancelled')
+  })
+
+  test('review r1: until the burn is known the remote value floor is the value asked at; burned or closed, none', async () => {
+    const s = setup()
+    const p = peerOf({ burned: {} })
+    await s.r.request('acc-1', HOME, REMOTE, p, AMOUNT, FLOOR)
+    expect(s.r.floor('acc-1')).toBe(FLOOR)
+    await s.r.tick(() => ({ remote: REMOTE, peer: p }))
+    expect(s.r.floor('acc-1')).toBe(0n)
+    expect(s.r.inFlight('acc-1')).toBe(AMOUNT)
+  })
+
+  test('review r1: a mint refused before it is signed (gas above the ceiling) does not count against the day', async () => {
+    const s = await burnedSetup({ iris: [await attest(message())] })
+    const rel = s.rel as unknown as { send: MonadSender['send'] }
+    const send = rel.send
+    rel.send = async (tx, a, onSending, onSigned) => send(tx, a, (w, x) => onSending?.(w, { ...x, maxFeePerGas: 10n ** 12n }), onSigned)
+    s.advance(RETURN_ATTEST_FIRST_POLL_MS + 1)
+    await s.r.tick(() => null)
+    expect(s.rel!.sent).toHaveLength(0)
+    const journal = JSON.parse(readFileSync(join(s.dir, 'return-home.json'), 'utf8')) as { mintDays: Record<string, { n: number }> }
+    expect(Object.values(journal.mintDays).reduce((n, d) => n + d.n, 0)).toBe(0)
   })
 })

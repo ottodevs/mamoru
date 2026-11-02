@@ -6,8 +6,11 @@
 //   minted     Circle's attestation of that burn (source Monad), checked, and receiveMessage on Base by the relayer (or
 //              its nonce found used: anyone may mint, the message fixes recipient and amount)
 //   cancelled  the peer reports it withdrawn before any burn
-// One open return per account. While one is open the account's bridges wait in both directions (`busy`), and a burned
-// one counts as value in flight until it is minted (`inFlight`), so the account total never drops in between.
+// One open return per account. While one is open the account's bridges wait in both directions (`busy`); until its
+// burn is known the remote value never reads below the value it was asked at (`floor`), and a burned one counts as
+// value in flight until it is minted (`inFlight`). A request the peer refuses is cancelled here and holds nothing. A
+// burn never minted (attestation never matching, mints reverting) keeps the account's bridges waiting and is logged:
+// that money is in transit and nothing else moves until someone looks.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -31,6 +34,13 @@ export type ReturnEntry = {
   /** Raw savings units asked for. */
   amount: string
   state: 'requested' | 'burned' | 'minted' | 'cancelled'
+  /**
+   * The remote value the request was made at: until the burn is known, the account's remote value never reads below it
+   * (the burn may land on Monad before the peer reports it).
+   */
+  floor?: string
+  /** Why it was cancelled here or by the peer. */
+  note?: string
   /** What the peer burned (≤ amount), its Monad tx and block. */
   burn?: { amount: string; txHash: Hex; block: number }
   cctpNonce?: Hex
@@ -119,6 +129,12 @@ export class ReturnHome {
     return !!this.open(accountKey)
   }
 
+  /** The remote value floor of the account's open return not yet known burned (see `floor`); 0 when none. */
+  floor(accountKey: string): bigint {
+    const e = this.open(accountKey)
+    return e?.state === 'requested' && e.floor ? BigInt(e.floor) : 0n
+  }
+
   /** Burned on Monad and not minted here yet: value of the account in flight. */
   inFlight(accountKey: string): bigint {
     return this.returns().reduce((s, e) => (e.accountKey === accountKey && e.state === 'burned' && e.burn ? s + BigInt(e.burn.amount) : s), 0n)
@@ -128,11 +144,11 @@ export class ReturnHome {
    * Asks the remote Safe to send `amount` home: the entry is on disk before the peer is asked, so a lost answer is
    * asked again with the same id (the same request there). One open return per account: refused while one is.
    */
-  async request(accountKey: string, home: Address, remote: AccountContext, peer: ReturnPeer, amount: bigint): Promise<ReturnEntry> {
+  async request(accountKey: string, home: Address, remote: AccountContext, peer: ReturnPeer, amount: bigint, floor: bigint): Promise<ReturnEntry> {
     if (amount <= 0n) throw new Error(`return of ${amount}`)
     if (this.open(accountKey)) throw new Error(`${accountKey}: a return is already open`)
     const at = this.iso()
-    const e: ReturnEntry = { id: `ret-${this.now().toString(36)}-${randomBytes(4).toString('hex')}`, accountKey, home, amount: amount.toString(), state: 'requested', at, updatedAt: at }
+    const e: ReturnEntry = { id: `ret-${this.now().toString(36)}-${randomBytes(4).toString('hex')}`, accountKey, home, amount: amount.toString(), floor: floor.toString(), state: 'requested', at, updatedAt: at }
     this.journal.returns[e.id] = e
     try {
       this.save()
@@ -140,8 +156,27 @@ export class ReturnHome {
       delete this.journal.returns[e.id]
       throw err
     }
-    await peer.release(remote, e.id, amount).catch((err) => console.error(`[return] ${accountKey} ${e.id}: asked, no answer yet (${(err as Error).message?.split('\n')[0]}); asked again on the next tick`))
+    await this.ask(e, remote, peer)
     return e
+  }
+
+  /**
+   * POST release for this entry. The peer refusing it (an HTTP 4xx: not a remote there, a bad amount, another request
+   * open there) cancels it here, so it never holds the account; no answer keeps it, asked again on the next tick.
+   */
+  private async ask(e: ReturnEntry, remote: AccountContext, peer: ReturnPeer): Promise<void> {
+    try {
+      await peer.release(remote, e.id, BigInt(e.amount))
+    } catch (err) {
+      const status = (err as { status?: unknown }).status
+      const code = (err as { code?: unknown }).code
+      if (typeof status === 'number' && status >= 400 && status < 500) {
+        this.update(e, { state: 'cancelled', note: `refused by the peer: ${status} ${typeof code === 'string' ? code : ''}`.trim() })
+        console.error(`[return] ${e.accountKey} ${e.id}: refused by the peer (${status} ${String(code ?? '')}); cancelled`)
+        return
+      }
+      console.error(`[return] ${e.accountKey} ${e.id}: asked, no answer yet (${(err as Error).message?.split('\n')[0]}); asked again on the next tick`)
+    }
   }
 
   /**
@@ -165,10 +200,7 @@ export class ReturnHome {
 
   private async follow(e: ReturnEntry, remote: AccountContext, peer: ReturnPeer): Promise<void> {
     const v = await peer.releaseStatus(remote, e.id)
-    if (v.state === 'none') {
-      await peer.release(remote, e.id, BigInt(e.amount))
-      return
-    }
+    if (v.state === 'none') return void (await this.ask(e, remote, peer))
     if ('id' in v && v.id !== e.id) throw new Error(`peer answered release ${v.id} for ${e.id}`)
     if (v.state === 'cancelled') return void this.update(e, { state: 'cancelled' })
     if (v.state !== 'burned') return
@@ -241,7 +273,6 @@ export class ReturnHome {
       return
     }
     if ((await this.base.getGasPrice()) > MAX_BASE_GAS_PRICE_WEI) return
-    this.journal.mintDays = { [day]: { n: (this.journal.mintDays[day]?.n ?? 0) + 1 } }
     let sent: { hash: Hex; receipt: TransactionReceipt }
     try {
       sent = await this.relayer.send(
@@ -250,8 +281,11 @@ export class ReturnHome {
         (_wei, { maxFeePerGas }) => {
           if (maxFeePerGas > MAX_BASE_GAS_PRICE_WEI) throw new MintBudget('Base gas above the mint ceiling, minting later')
         },
-        // The mint's hash is on disk before the broadcast.
-        (h) => this.update(e, { mintTx: h, mintAt: this.iso() }),
+        // The mint's hash is on disk before the broadcast; only a signed mint counts against the day.
+        (h) => {
+          this.journal.mintDays = { [day]: { n: (this.journal.mintDays[day]?.n ?? 0) + 1 } }
+          this.update(e, { mintTx: h, mintAt: this.iso() })
+        },
       )
     } catch (err) {
       if (err instanceof MintBudget) return
