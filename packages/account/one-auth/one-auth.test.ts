@@ -120,7 +120,7 @@ describe('inventory (spec 010 r1 finding 4)', () => {
 })
 
 describe('buildMigrateV4 (the builder the operator prepares with and the Worker rebuilds with)', () => {
-  const pinnedBase = { ...baseRegistry, undeployed: [], entries: [...baseRegistry.entries, ...(['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'] as const).map((name, i) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: [D.registry, D.policy, D.gasPolicy, D.migrationCheck][i]!, codeHash: null }) as never)] }
+  const pinnedBase = { ...baseRegistry, undeployed: [], entries: [...baseRegistry.entries.filter((e) => !['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'].includes(e.name)), ...(['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'] as const).map((name, i) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: [D.registry, D.policy, D.gasPolicy, D.migrationCheck][i]!, codeHash: null }) as never)] }
   const input = { chainId: 8453, safe: SAFE, safeNonce: '4', step: 0 as const, capUsdc: '300000000', sessionKey: KEY, generation: '1', admit: ['7'], oldPermissionIds: [id(1), id(2)], removeIds: [id(1)], noncesBefore: ['0', '3'], home: zeroAddress, homeDomain: 0 }
 
   test('deterministic, refund fields zero, the hash is the SafeTx EIP-712 hash of its fields', () => {
