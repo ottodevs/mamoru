@@ -44,8 +44,9 @@ USDC and the CCTP messenger, Coinbase for cbBTC). Those limits are documented (W
 **Hosted-agent aggregate exposure.** While Mamoru hosts the agent, one signing service holds many accounts' session
 keys. A compromise of that service, rather than of one key, can spend the remaining `total` of every account it
 serves. No on-chain mechanism caps a sum across independent accounts. The bound is therefore the sum of the remaining
-per-account totals: KEY-05 keeps it small, published and attested. The self-hosted agent (WLK-04) removes a user from
-that sum.
+per-account totals and gas ceilings. KEY-05 publishes that bound, per account and in aggregate, and keeps it attested.
+A shared on-chain global limit is rejected (KEY-06). The optional self-hosted agent mode (WLK-04, later) removes a
+user from that sum.
 
 ## Verified facts (round 3, 2026-11-02)
 
@@ -81,7 +82,7 @@ that sum.
 
 | ID | Invariant | Proven by |
 |---|---|---|
-| INV-1 | **Owner escape.** On every supported chain the user alone can revoke every agent permission and move every transferable asset, through a published path that no Mamoru key, hook, oracle, paymaster, bundler or service can veto. | T13 (CI walkaway on forks, Mamoru services off) |
+| INV-1 | **Owner escape.** On every supported chain the user alone can revoke every agent permission and move every transferable asset, through a published path that no Mamoru key, hook, oracle, paymaster, bundler or service can veto. The one dependency left is control of the `mamoru.lol` RP ID for passkey signing, mitigated by D4-R1..R3 and disclosed as D4-R4 for accounts without the optional backup owner. | T13 (CI walkaway on forks, Mamoru services off) |
 | INV-2 | **Closed agent authority.** Every effect a session can cause (nested calls, approvals, gas, failed ops) stays inside immutable per-period **and** total limits, an exact expiry and pinned destinations. ERC-1271 by a session is impossible. The agent cannot install, renew or widen authority. | T5, T6, T7 (Foundry fork tests + invariant fuzzing) |
 | INV-3 | **No external control of a user.** No Mamoru-side address is, or can become, owner, guardian, executor with unrestricted calls, revoker or account-wide pauser. Accounts still on a guardian-bearing grant are declared non-compliant until migrated. | T9 (per-account state check: owners, threshold, guard, fallback handler, modules, executors, attesters, policy version; any Mamoru address in an authority slot fails) |
 | INV-4 | **Hermetic infra.** Every Mamoru infra contract has immutable, verified code and constructor-only configuration, no privileged state change, no upgrade, and pays only fixed recipients for fixed purposes. | T3 (inventory of every Mamoru-deployed contract on every chain: V1, V2, V3/V-next, MamoruGasPolicy, MamoruPauseGate, MamoruV3Routes, MamoruV4LiquidityPolicy; entry-point analysis of each for privileged or value-moving paths), T11 if a funded contract is built |
@@ -164,51 +165,40 @@ forbids. An EntryPoint deposit is also charged when the op reverts, so a shared 
 user can burn for all. Users hold their own gas through the self-reserve swap. On Ethereum, the Pimlico paymaster is
 bounded by the owner's allowance.
 
-### D4. The owner never depends on Mamoru
+### D4. The owner is the user's passkey; the exit never depends on Mamoru's services
 
-- **Backup owner (mandatory).** Today the only owner is a passkey with `rpId = location.hostname`
-  (`apps/mamoru-app/src/web/lib/passkey-sign.ts:72`), and backup owners are refused
-  (`apps/mamoru-app/src/api/onboarding/routes.ts:52-53`, `ONB_BACKUP_UNPROVEN`). Without mamoru.lol, its registrar or
-  Cloudflare, a user cannot produce an owner signature. Live funds therefore require a second owner that the user
-  controls and that does not depend on the domain: a wallet owner proven by a signed challenge (FR-ONB-004), with
-  threshold 1-of-2. Existing accounts add it with one passkey-signed `addOwnerWithThreshold`.
+- **Owner model.** The owner is the user's passkey: a single signer (`SafeWebAuthnSharedSigner`, verified through the
+  P-256 precompile on all three chains). One owner authorization grants Mamoru's session the bounded operational
+  permissions of V-next. No second owner is required, and onboarding does not force one: the FR-ONB-004 change that
+  would make a backup owner mandatory is not made. An **optional** backup owner (any wallet the user controls, proven
+  by a signed challenge, added with one passkey-signed `addOwnerWithThreshold(…, 1)`) is offered in settings.
+- **RP ID dependency, stated honestly.** The passkey's RP ID is `mamoru.lol` (`rpId = location.hostname`,
+  `apps/mamoru-app/src/web/lib/passkey-sign.ts:72`). A browser produces an assertion only for an origin under that RP
+  ID, so the owner's ability to sign depends on someone controlling `mamoru.lol` DNS. The Safe accepts the signature
+  on chain from any origin, so what is at stake is producing it, not verifying it. Mitigations (D4-R1..R4):
+  - **D4-R1: Domain held long-term.** `mamoru.lol` is prepaid for the longest term the registrar allows, with registrar
+    lock and DNS at more than one provider.
+  - **D4-R2: Static signer.** An open-source static signer page (build, sign and export a SafeTx or owner userOp; no
+    backend) is published with a reproducible build. Anyone can serve it under the same RP ID from several hosts:
+    Cloudflare, an IPFS gateway via DNSLink, a plain static host behind a `mamoru.lol` subdomain. Mamoru's Worker
+    going down does not remove the owner's signing path.
+  - **D4-R3: Related Origins.** WebAuthn Related Origin Requests (`/.well-known/webauthn` on `mamoru.lol` listing
+    other origins) are documented as an option for signing from another domain. They need `mamoru.lol` to serve that
+    file, so they spread hosting but do not remove the domain dependency.
+  - **D4-R4: Residual, disclosed.** If control of `mamoru.lol` is lost for good and the user never added the optional
+    backup owner, the passkey can no longer produce signatures. The funds stay in the user's Safe: no one else can move
+    them, but the user cannot either. The app says this where the optional backup owner is offered, and `/ops` counts
+    the live accounts without one.
 - **Owner actions without the operator.** Today every withdraw, Stop and renewal is prepared, checked and sent by the
-  operator (`operator.ts:4500-4640`). The app builds and signs SafeTxs and owner userOps client-side from open-source
-  code. The user sends them in either of two ways:
-  - from the backup owner EOA as `execTransaction`, paying gas from that wallet (the user's own balance). The walkaway
-    docs state the native amount the user's wallet needs per chain: an exit always needs upfront gas from some wallet
-    of the user or a willing submitter, and no design removes that;
-  - by any submitter, with a SafeTx refund (`gasPrice`, `refundReceiver = 0` so `tx.origin` is repaid by the Safe).
+  operator (`operator.ts:4500-4640`). The app and the static signer build and sign SafeTxs and owner userOps
+  client-side from open-source code. The user sends them in one of three ways:
+  - as an owner userOp through any ERC-7562 bundler, paid by the Safe;
+  - by any submitter with a SafeTx refund (`gasPrice`, `refundReceiver = 0`, so the Safe repays `tx.origin`);
+  - from the optional backup owner's wallet as `execTransaction`, paying its own gas.
 
-  The operator may offer to relay. Its refusal never blocks.
-- **Existing passkey-only accounts.** Adding a backup owner needs the current passkey, which needs the domain. Those
-  accounts are therefore exposed until they enroll. T2 runs first. Once a date is published, the app refuses new
-  deposits and new grants for accounts without a backup owner (their exit stays open). Mamoru keeps the domain serving
-  the passkey signer until every live account has enrolled or exited, and `/ops` lists the accounts still exposed.
-
-## Decisions for Ot (open)
-
-Three residuals in the review are trade-offs, not spec errors. The spec states each one and does not decide it.
-
-1. **Renewal cadence (POL-04).** A bounded expiry means a periodic owner tap, and the strategy stops if the user is away
-   longer. Removing the tap means an expiry long enough to be indefinite, with `total` as the only bound. Recommendation:
-   30 days.
-2. **Hosted-agent aggregate exposure.** Per-account limits do not cap the sum across accounts served by one signing
-   service. Options:
-   - **(a) Accept and publish it** (KEY-05).
-   - **(b) Shared global budget.** An immutable contract with a global rate limit that every V-next session debits.
-     That caps the sum across all accounts, but makes it one shared piece: one account's usage can throttle the others,
-     and it is an availability coupling between users.
-   - **(c) No hosted signer.** The user-chosen agent (WLK-04) only.
-
-   Recommendation: (a) now, with WLK-04 shipped. Evaluate (b) only if the published sum grows past what Mamoru is
-   willing to state.
-3. **Owner credential strength.** Any owner credential (the passkey or the backup wallet) is a full-control credential
-   by definition: it is the user's custody. A 1-of-2 makes either one sufficient. A 2-of-3 with a delayed single-owner
-   recovery is stronger, but adds a signature to every owner action.
-
-   Recommendation: 1-of-2. C6's "no EOA whose leak matters" applies to Mamoru-side keys; the user's own credentials
-   are the user's.
+  The walkaway docs state the native amount each path needs per chain. An exit always needs upfront gas from the Safe
+  (userOp prefund) or from some wallet, and no design removes that. The operator may offer to relay. Its refusal never
+  blocks.
 
 ## Requirements
 
@@ -222,12 +212,17 @@ Three residuals in the review are trade-offs, not spec errors. The spec states e
   so V3 alone would drop the bridge caps that UniActionPolicy holds today.
 - **POL-03: The total is a lifetime ceiling.** A generation's `total` never refills and can only be lowered. The agent
   cannot renew, widen or reset a grant. Only an owner-signed renewal starts a new generation, and its new `total` is
-  shown to the owner as the maximum loss.
-- **POL-04: Bounded session expiry.** TimeFramePolicy `validUntil` is bounded and shown to the owner. Today it is
-  365 days (`packages/policy/src/policies.ts:51`, `policies-v4.ts:53`). Because POL-03 makes `total` a lifetime
-  ceiling, the maximum loss does not depend on expiry; expiry only limits how long a leaked key stays usable. Default
-  30 days. **NEEDS CLARIFICATION (Ot):** the renewal cadence. Each renewal is one owner tap, so 30 days means a monthly
-  tap and a strategy that stops if the user is away longer. 90 days with a smaller `total` is the alternative.
+  shown to the owner as the maximum loss. Per-period limits and `total` are sized for a year of operation.
+- **POL-04: 365-day sessions, renewed ahead, wound down safely.** TimeFramePolicy `validUntil` stays 365 days
+  (`packages/policy/src/policies.ts:51`, `policies-v4.ts:53`). The product promise is set-and-forget: a strategy never
+  stops because the user did not open the app. Security comes from the per-period limits, the lifetime `total` and gas
+  ceiling sized for that year (POL-02/03/11), and the closed call surface (POL-05..07), not from a short expiry.
+  - **Renewal prompt.** About 30 days before expiry the app and a notification ask for one passkey tap to renew
+    (POL-03: a new generation with its own `total`).
+  - **Wind-down if missed.** In the last 7 days before expiry with no renewal, the agent opens no new risk: no new
+    position, no entry swap, no bridge-out. Existing positions stay as they are and remain closable by the owner
+    through the walkaway path. At expiry the session can no longer act. Funds are never locked: the owner path does not
+    depend on the session.
 - **POL-05: Configuration calls refused.** The action policy refuses every call whose target is the account itself, the
   Safe7579 adapter, SmartSession or the registry. That covers `installModule`, `uninstallModule`, `setRegistry`,
   `execTransaction`, owner and threshold changes, `setFallbackHandler`, `setGuard` and `enableModule`. SmartSession
@@ -289,12 +284,17 @@ Three residuals in the review are trade-offs, not spec errors. The spec states e
   generation's `total`, until its expiry.
 - **KEY-03: Bundler keys.** One key per chain in a KMS, no authority (INV-3), and dust only.
 - **KEY-04: One-off deployers.** Infra deployments use a throwaway key whose only power is the deployment itself.
-- **KEY-05: Aggregate exposure.**
-  - **Published sum.** The signing service publishes on `/ops` the sum of remaining `total` + gas ceiling across the
-    accounts it serves, with an alert when it grows past a stated figure.
+- **KEY-05: Published exposure.**
+  - **Per account and in aggregate.** The signing service publishes each account's maximum exposure (remaining
+    `total` + gas ceiling) and the sum across the accounts it serves. It shows the per-account figure to its owner and
+    the aggregate on `/ops`, with an alert when the aggregate grows past a stated figure.
   - **Isolation.** Per-account keys sit under separate key policies, so one IAM grant cannot reach all of them.
   - **Attested signer.** The signer runs in an attested TEE that re-checks the V-next rules before signing, as defence
     in depth. It is not a substitute for the on-chain bound.
+- **KEY-06: No shared global on-chain limit.** A contract-wide budget that every account's session debits is rejected.
+  It would couple users: one actor (a compromised account, or one with a large legitimate flow) could exhaust the
+  shared capacity and block every other user's automation. That is a censorship vector, which C4 forbids. Exposure is
+  bounded per account and published in aggregate instead.
 
 ### Registry and attesters (REG)
 
@@ -319,14 +319,15 @@ Three residuals in the review are trade-offs, not spec errors. The spec states e
   permissionless `receiveMessage` step) and ETH left on L1. The exit also enumerates every non-zero allowance the Safe
   has granted and revokes it (`approve(spender, 0)`) in the same transaction.
 - **WLK-02: Static frontend.** An open-source static frontend on IPFS with an ENS name builds and signs the exit with
-  the backup owner (D4). It needs no Mamoru backend.
+  the user's passkey, served under the `mamoru.lol` RP ID (D4-R2), or with the optional backup owner. It needs no
+  Mamoru backend.
 - **WLK-03: Tested with Mamoru off.** In CI, on a fork of each chain: Mamoru's operator, relayer, bundler, Worker and
   domain are unreachable, and the user revokes every session and withdraws every asset through a public RPC and a
   public bundler or a plain `execTransaction`.
-- **WLK-04: Agent of the user's choice.** The owner can always grant a V-next session to a key they choose. That is an
-  owner power no Mamoru component can veto, and the app exposes it from the static frontend. An open-source agent that
-  a user can run with that key is shipped, so that Mamoru refusing service stops only Mamoru's offer, never the
-  strategy.
+- **WLK-04: Agent of the user's choice.** The owner can always grant a V-next session to a key they choose. That is
+  an owner power no Mamoru component can veto, and the static frontend exposes it. An optional self-hosted agent mode
+  (open-source agent run with the user's own session key) comes later, so that Mamoru refusing service stops only
+  Mamoru's offer, never the strategy.
 - **WLK-05: Verifiable builds.** Verified source on every chain, reproducible CREATE2 bytecode, code hashes pinned in
   `packages/registry/*.json` (including the `MamoruGasPolicy` Base address, today env-only, `boot.ts:108,126`).
 - **WLK-06: What Mamoru cannot guarantee.** The docs state it:
@@ -364,11 +365,11 @@ Three residuals in the review are trade-offs, not spec errors. The spec states e
 | Threat | Today | After v3 | Residual |
 |---|---|---|---|
 | Guardian key leaked or abused | Freezes any V2 account's automation, including exits | No guardian in V-next; key destroyed; V2 accounts flagged until migrated | Unmigrated accounts until renewal |
-| Session key leaked | Acts within the grant for 365 days | Per-period + total limits on every family, bounded expiry (default 30 days), per-account key in KMS/TEE | Up to the remaining `total` of one generation |
+| Session key leaked | Acts within the grant for 365 days | Per-period + total limits and gas ceiling sized for the 365-day session, closed call surface, per-account key in KMS/TEE | Up to the remaining `total` of one generation |
 | Session escapes policy (self-call, module install, ERC-1271, nested router call) | Self-calls not blocked by SmartSession; ERC-1271 empty | POL-05/06/07 with tests | Bugs in V-next (audit, fuzzing) |
 | Relayer key leaked | Float on three chains, one key | Dust per chain, KMS, no authority | One bundle's float |
-| Mamoru refuses or disappears | No owner signature off-domain; owner actions go through the operator | Backup owner, client-built owner txs from the user's wallet or with SafeTx refund, static exit frontend, user-chosen agent, CI test with Mamoru off | Passkey-only accounts until they enroll (listed on `/ops`) |
-| Hosted signer service compromised | Every served account's session key | Per-account key policies, attested TEE, published aggregate exposure (KEY-05) | Sum of remaining totals + gas ceilings of served accounts |
+| Mamoru refuses or disappears | No owner signature off-domain; owner actions go through the operator | Static signer under the same RP ID from several hosts, domain held long-term, client-built owner txs (Safe-paid userOp or SafeTx refund), optional backup owner, user-chosen agent, CI test with Mamoru off | Loss of `mamoru.lol` for good, for accounts without the optional backup owner: funds stuck, not stolen (D4-R4) |
+| Hosted signer service compromised | Every served account's session key | Per-account key policies, attested TEE, per-account and aggregate exposure published (KEY-05); no shared global limit (KEY-06) | Sum of remaining totals + gas ceilings of served accounts |
 | Session burns gas | 32,000 ops × per-op cap | Gas ceiling per generation (POL-11) | That ceiling |
 | Rhinestone revokes an attestation | Blocks new enables and renewals of Rhinestone-only modules | Every module self-attested | New Safe deploys through the launchpad (availability) |
 | Bug in an infra contract with no admin | n/a (no funded infra) | None funded in v1; conditional `GasTreasury` bounded by lifetime ceiling | Its ceiling |
@@ -382,14 +383,19 @@ Three residuals in the review are trade-offs, not spec errors. The spec states e
 - An ownerless paymaster (D3: deferred until it can meet INV-4/5 without an oracle or a swap it can be gamed through).
 - A loss-latch hook (D1).
 - Cross-chain refuel services.
-- Changing the passkey RP ID: it stays as is, and the backup owner solves the dependency.
+- Changing the passkey RP ID: it stays `mamoru.lol` (D4).
+- A mandatory backup owner or a multi-owner threshold (D4: single passkey owner, optional backup).
+- A shared global on-chain exposure limit (KEY-06).
 
 ## Tasks
 
 **P0, no redeploy**
 - **T1: Retire the guardian.** Do GRD-01/02: destroy the key, publish the retirement, remove the copy.
-- **T2: Backup owner.** Do FR-ONB-004 (signed challenge) and make the backup owner mandatory for live funds, plus the
-  one-signature add for existing accounts.
+- **T2: Owner path.**
+  - D4-R1: prepay the domain, registrar lock, multi-provider DNS.
+  - D4-R2: the static signer, reproducible and served from at least two hosts under `mamoru.lol`.
+  - The optional backup owner in settings (FR-ONB-004 signed challenge), with the D4-R4 disclosure and the `/ops`
+    count.
 - **T3: Inventory checks.**
   - Make the self-reserve swap mandatory and delete the ETH top-up (G3).
   - Inventory every Mamoru-deployed contract on every chain with an entry-point analysis (INV-4).
@@ -410,8 +416,8 @@ Three residuals in the review are trade-offs, not spec errors. The spec states e
   - Owner ops are admitted by a standards-compliant ERC-7562 bundler.
 - **T6: Invariant fuzzing.** The per-period and total limits hold under batching, nonce races, reverting ops and
   re-enable. POL-03: no path raises a generation's `total`.
-- **T7: Renewal.** The renewal flow moves accounts off V2 and `MamoruPauseGate` (GRD-03) and sets the POL-04 expiry
-  (POL-04).
+- **T7: Renewal.** The renewal flow moves accounts off V2 and `MamoruPauseGate` (GRD-03) keeps the 365-day expiry,
+  and adds the renewal prompt and the wind-down (POL-04).
 - **T8: Self-attestation.** Self-attest SmartSession and UniActionPolicy (REG-01).
 - **T9: Per-account state check.** For every live Safe: owners, threshold, guard, fallback handler, modules, executors,
   trusted attesters and policy version (INV-3, REG-01), plus the GRD-03 cutoff and the GRD-04 flag on `/ops`.
@@ -431,15 +437,16 @@ Three residuals in the review are trade-offs, not spec errors. The spec states e
   attested signer). Delete the plaintext state copies and the standby VPS key bundles.
 - **T13: Walkaway.** Do WLK-01..03 and WLK-05: full coverage, IPFS/ENS frontend, CI on forks of all three chains with
   Mamoru off.
-- **T14: Agent of the user's choice.** WLK-04: owner-granted session to a user-chosen key from the static frontend, and
-  the open-source agent.
+- **T14: Agent of the user's choice.** WLK-04: owner-granted session to a user-chosen key from the static frontend;
+  the optional self-hosted agent mode later.
 
 ## Scenarios
 
 - **S1: Leaked session key.** A leaked session key drains as fast as it can. Loss is at most the remaining `total` of
   the generation, never more after expiry, and only to pinned destinations.
 - **S2: Mamoru disappears.** Domain, Worker, operator and bundler are all gone. The user opens the IPFS frontend, signs
-  with the backup owner, revokes every session and allowance, and withdraws every asset on Base, Monad and Ethereum.
+  with their passkey (static signer under `mamoru.lol`, D4-R2) or the optional backup owner, revokes every session and
+  allowance, and withdraws every asset on Base, Monad and Ethereum.
   They send it as `execTransaction` from their own wallet or through a public bundler. The burns still in flight are
   minted by the user.
 - **S3: Leaked guardian key.** Someone holds the retired guardian key. No V-next account can be paused. V2 accounts are
@@ -450,3 +457,5 @@ Three residuals in the review are trade-offs, not spec errors. The spec states e
   modules.
 - **S6: Relayer key leaked.** Loss is one bundle's float on one chain. No user is affected.
 - **S7: No relayer-paid user sends.** CI finds a relayer send for a user action outside `handleOps`, and the build fails.
+- **S8: Missed renewal.** The user ignores the renewal prompt. In the last 7 days the agent opens no new risk; at expiry
+  the session stops. Positions and funds stay in the Safe, closable by the owner at any time.
