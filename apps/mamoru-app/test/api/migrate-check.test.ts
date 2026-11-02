@@ -216,6 +216,8 @@ describe('a tampered input', () => {
     await refused(w.post(1, forged(input1(w), input1(w, { moveTo: undefined }))))
     await refused(w.post(1, forged(input1(w, { moveTo: undefined, transfers: undefined }), input1(w, { moveTo: undefined, transfers: undefined }), { moveTo: w.dest })))
     await refused(w.post(0, { ...prepareOf(input0(w)), moveTo: w.dest }))
+    // The signed tx moves funds but the prepare drops its destination: the card would say "no funds move" (Sol r6).
+    await refused(w.post(1, { ...prepareOf(input1(w)), moveTo: undefined }))
   })
 
   test('a step that does not exist', async () => {

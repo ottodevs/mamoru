@@ -69,7 +69,9 @@ export function checkMigrateTx(args: { tx: OwnerTxToSign; step: number; base: Ac
     // has neither (the merged operator emits none), and the card says so.
     const moves = !!input.moveTo || !!input.transfers?.length
     if (moves !== (!!input.moveTo && !!input.transfers?.length)) return fail('a destination and transfers go together')
-    if (tx.moveTo !== undefined && (!input.moveTo || !same(tx.moveTo, input.moveTo))) return fail('the announced destination is not the one built')
+    // The card reads "no funds move" from an absent tx.moveTo, so a step that moves funds must announce exactly the destination
+    // it builds, and one that moves nothing must announce none.
+    if (moves ? tx.moveTo === undefined || !same(tx.moveTo, input.moveTo!) : tx.moveTo !== undefined) return fail('the announced destination is not the one built')
     if (input.moveTo) {
       try {
         verifyRemote(
