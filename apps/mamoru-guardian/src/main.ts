@@ -19,20 +19,20 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** The RPC client of one URL; injectable so a startup failure is testable without a network. */
 export type MakeClient = (url: string) => ReturnType<typeof createPublicClient>
 
+/** The alerter, and whether it pages (a webhook sink) or only writes to the journal (no webhook configured: dev). */
+export type GuardianAlerter = Alerter & { paging: boolean }
+
 /**
- * Review of #202 r3 (Sol 2): the alerter exists before anything that can fail, from configuration alone (console, and the
- * webhook when its file is set). A webhook file that cannot be read still leaves the console sink, and says so there.
+ * Review of #202 r3/r4 (Sol 2): the alerter exists before anything that can fail, from configuration alone. A webhook that is
+ * configured but unreadable or invalid throws (the process exits at once and the unit's OnFailure pages): the guardian never
+ * runs console-only when paging is configured. No webhook at all (dev): console only, said loudly, and `paging` is false.
  */
-export function alerterFrom(env: Env): Alerter {
+export function alerterFrom(env: Env): GuardianAlerter {
   const sinks: Alerter[] = [new ConsoleAlerter()]
-  if (env.MAMORU_GUARDIAN_WEBHOOK_FILE) {
-    try {
-      sinks.push(new MattermostAlerter(webhookUrlFromFile(env.MAMORU_GUARDIAN_WEBHOOK_FILE)))
-    } catch (e) {
-      console.error(`guardian alert sink: ${(e as Error).message}`)
-    }
-  }
-  return new TeeAlerter(sinks)
+  const file = env.MAMORU_GUARDIAN_WEBHOOK_FILE
+  if (file) sinks.push(new MattermostAlerter(webhookUrlFromFile(file)))
+  else console.error('guardian: NO PAGING CONFIGURED (MAMORU_GUARDIAN_WEBHOOK_FILE unset): alerts go to the journal only')
+  return Object.assign(new TeeAlerter(sinks), { paging: !!file })
 }
 
 /** Only the short message: viem's full text carries the RPC URL. */
@@ -51,7 +51,12 @@ function stampOf(env: Env, why: string): string | null {
  * never gives up, so the page is the signal). The stamp is written only once the alert was delivered: a failed delivery
  * leaves no stamp and the next restart pages again. A stamp from the future (clock moved back) counts as expired.
  */
-export async function pageStartupFailure(alerter: Alerter, env: Env, why: string, now = Date.now()): Promise<boolean> {
+export async function pageStartupFailure(alerter: Alerter & { paging?: boolean }, env: Env, why: string, now = Date.now()): Promise<boolean> {
+  // Only a confirmed webhook delivery counts: a console-only alerter writes the line and never stamps.
+  if (!alerter.paging) {
+    await alerter.alert(`guardian failed to start (restarting with backoff): ${why}`).catch(() => {})
+    return false
+  }
   const stamp = stampOf(env, why)
   try {
     if (stamp && existsSync(stamp)) {
@@ -167,7 +172,14 @@ export async function run(env: Env, alerter: Alerter, makeClient: MakeClient = (
 
 if (import.meta.main) {
   const env = process.env
-  const alerter = alerterFrom(env)
+  let alerter: GuardianAlerter
+  try {
+    alerter = alerterFrom(env)
+  } catch (e) {
+    // A configured webhook that cannot be used: exit now, non-zero; mamoru-guardian-alert@ (OnFailure) pages.
+    console.error(`guardian: alert webhook unusable: ${(e as Error).message}`)
+    process.exit(1)
+  }
   run(env, alerter, undefined, process.argv.includes('--once')).catch(async (e) => {
     const why = shortWhy(e)
     console.error(`guardian stopped: ${why}`)

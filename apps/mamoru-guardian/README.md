@@ -66,3 +66,8 @@ bunx tsc -p apps/mamoru-guardian/tsconfig.json --noEmit
 ```
 
 The systemd template is `ops/systemd/mamoru-guardian.service` (not installed by anything in the repo).
+
+**Paging (review of #202 r4).** With `MAMORU_GUARDIAN_WEBHOOK_FILE` set, the guardian refuses to start unless the file
+holds an http(s) URL (it exits non-zero and `mamoru-guardian-alert@` pages through `OnFailure=`): it never runs
+console-only when paging is configured. Only a delivered webhook post counts as delivered (dedupe stamps, `alertOnce`).
+Without the variable (dev) it says `NO PAGING CONFIGURED` at start and writes alerts to the journal only.

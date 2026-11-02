@@ -4,4 +4,9 @@ import { alerterFrom } from './main.ts'
 
 const unit = process.argv[2] ?? 'mamoru-guardian'
 if (!/^mamoru-guardian(@[\w.-]+)?$/.test(unit)) process.exit(2)
-await alerterFrom(process.env).alert(`:warning: ${unit} failed. On the host: journalctl --user -u ${unit} -n 30`)
+try {
+  await alerterFrom(process.env).alert(`:warning: ${unit} failed. On the host: journalctl --user -u ${unit} -n 30`)
+} catch (e) {
+  console.error(`mamoru-guardian-alert: ${(e as Error).message}`)
+  process.exit(1)
+}

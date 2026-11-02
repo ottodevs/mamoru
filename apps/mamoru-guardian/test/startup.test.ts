@@ -4,14 +4,13 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Alerter } from '../src/alerts.ts'
 import { readdirSync } from 'node:fs'
 import { alerterFrom, clearStartupStamps, pageStartupFailure, run, shortWhy, type MakeClient } from '../src/main.ts'
 
 const env = () => ({ MAMORU_GUARDIAN_HOME_RPC_URL: 'http://127.0.0.1:9/', MAMORU_GUARDIAN_V4_ADDRESS: '0x00000000000000000000000000000000000000a2', MAMORU_GUARDIAN_GAS_POLICY_ADDRESS: '0x00000000000000000000000000000000000000a3', MAMORU_GUARDIAN_STATE_DIR: mkdtempSync(join(tmpdir(), 'guardian-start-')), MAMORU_GUARDIAN_FROM_BLOCK_8453: '1', MAMORU_GUARDIAN_DRY_RUN: '1' })
-const capture = () => {
+const capture = (paging = true) => {
   const alerts: string[] = []
-  const a: Alerter = { alert: async (t) => void alerts.push(t) }
+  const a = { alert: async (t: string) => void alerts.push(t), paging }
   return { a, alerts }
 }
 
@@ -39,13 +38,32 @@ describe('guardian startup failures are paged', () => {
     expect(alerts[0]).not.toContain('KEY')
   })
 
-  test('the alerter needs configuration only: an unreadable webhook file still leaves the console sink', async () => {
-    const a = alerterFrom({ MAMORU_GUARDIAN_WEBHOOK_FILE: '/nonexistent/webhook' })
-    await a.alert('test line') // no throw
+  test('a configured webhook that is unreadable or invalid refuses to build the alerter (the process exits; OnFailure pages)', () => {
+    expect(() => alerterFrom({ MAMORU_GUARDIAN_WEBHOOK_FILE: '/nonexistent/webhook' })).toThrow()
+    const bad = join(mkdtempSync(join(tmpdir(), 'guardian-hook-')), 'hook')
+    require('node:fs').writeFileSync(bad, 'not a url\n')
+    expect(() => alerterFrom({ MAMORU_GUARDIAN_WEBHOOK_FILE: bad })).toThrow('not an http(s) URL')
+  })
+
+  test('no webhook (dev): console only, paging false, and a startup failure is never stamped', async () => {
+    const a = alerterFrom({})
+    expect(a.paging).toBe(false)
+    const e = env()
+    expect(await pageStartupFailure(a, e, 'rpc down', 1_000)).toBe(false)
+    expect(readdirSync(e.MAMORU_GUARDIAN_STATE_DIR).filter((f) => f.startsWith('startup-alerted-'))).toEqual([])
+    const { a: consoleOnly } = capture(false)
+    expect(await pageStartupFailure(consoleOnly, e, 'rpc down', 2_000)).toBe(false)
+    expect(readdirSync(e.MAMORU_GUARDIAN_STATE_DIR).filter((f) => f.startsWith('startup-alerted-'))).toEqual([])
+  })
+
+  test('a configured webhook: paging true; a delivered alert is what stamps', async () => {
+    const hook = join(mkdtempSync(join(tmpdir(), 'guardian-hook-')), 'hook')
+    require('node:fs').writeFileSync(hook, 'https://mm.example/hooks/x\n')
+    expect(alerterFrom({ MAMORU_GUARDIAN_WEBHOOK_FILE: hook }).paging).toBe(true)
   })
   test('a failed delivery leaves no stamp (the next restart pages); stamps per reason; future stamps expired; cleared on start', async () => {
     const e = env()
-    const failing: Alerter = { alert: async () => { throw new Error('webhook down') } }
+    const failing = { alert: async () => { throw new Error('webhook down') }, paging: true }
     expect(await pageStartupFailure(failing, e, 'rpc down', 1_000)).toBe(false)
     expect(readdirSync(e.MAMORU_GUARDIAN_STATE_DIR).filter((f) => f.startsWith('startup-alerted-'))).toEqual([])
     const { a, alerts } = capture()
