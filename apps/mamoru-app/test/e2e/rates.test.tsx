@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { ApyView, FundingView } from '@mamoru/domain'
 import { fixtureFunding } from '../../src/web/fixtures/client.ts'
-import { accountTotal, split } from '../../src/web/lib/money.ts'
+import { accountTotal, burnedUsdc, split } from '../../src/web/lib/money.ts'
 import { bucketOf, currentRate, idleReason, monthlyRate, positionRates, sourceName, valueOf } from '../../src/web/lib/rates.ts'
 import { agoText, Balance, Idle, Indicators, Working } from '../../src/web/routes/home.tsx'
 import { render } from './render.ts'
@@ -290,16 +290,16 @@ describe('past reading when the live balance cannot be read', () => {
 describe('total balance across chains', () => {
   const bridge = (state: 'sending' | 'burned' | 'minted') => ({ progress: { step: 'bridging' as const, since: '2026-11-02T18:00:00.000Z', bridge: { chainId: 143, amountUsdc: '20000000', state } } })
   test('Base plus Monad', () => {
-    expect(accountTotal(151_470_000n, 20_000_000n, { progress: null })).toBe(171_470_000n)
+    expect(accountTotal(151_470_000n, 20_000_000n, burnedUsdc({ progress: null }))).toBe(171_470_000n)
   })
   test('USDC burned on Base and not minted on Monad yet is still counted', () => {
-    expect(accountTotal(151_470_000n, 0n, bridge('burned'))).toBe(171_470_000n)
+    expect(accountTotal(151_470_000n, 0n, burnedUsdc(bridge('burned')))).toBe(171_470_000n)
   })
   test('a burn still sending is in the Base Safe: not added twice', () => {
-    expect(accountTotal(171_470_000n, 0n, bridge('sending'))).toBe(171_470_000n)
+    expect(accountTotal(171_470_000n, 0n, burnedUsdc(bridge('sending')))).toBe(171_470_000n)
   })
   test('Monad not read yet: Base alone', () => {
-    expect(accountTotal(151_470_000n, null, undefined)).toBe(151_470_000n)
+    expect(accountTotal(151_470_000n, null, burnedUsdc(undefined))).toBe(151_470_000n)
   })
   test('Balance shows the total it is given over the Base split', () => {
     const s = split(fixtureFunding, null)

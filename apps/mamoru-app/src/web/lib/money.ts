@@ -148,14 +148,17 @@ export function humanMessage(message: string, maxWithdraw?: bigint): string {
   return message.replace(/(\d+)\s*USDC base units/g, (_, n: string) => `${usd(n)} USDC`)
 }
 
-/**
- * Brais, 2 Nov: the balance is all the account's money, on every chain, so a move between chains never changes it.
- * Base, the other chains' Safes (Monad), and USDC burned on Base whose mint on Monad has not landed yet (that USDC
- * is in neither Safe). A burn still 'sending' is not added: until it lands, its USDC is still in the Base Safe.
- * `otherChains` null (not read yet): Base alone, as before.
- */
-export function accountTotal(base: bigint, otherChains: bigint | null, f: Pick<FundingView, 'progress'> | undefined): bigint {
+/** USDC burned on Base whose mint on Monad has not landed: in neither Safe. A burn still 'sending' is still in the Base Safe. */
+export function burnedUsdc(f: Pick<FundingView, 'progress'> | undefined): bigint {
   const b = f?.progress?.bridge
-  const inFlight = b?.state === 'burned' ? BigInt(b.amountUsdc) : 0n
+  return b?.state === 'burned' ? BigInt(b.amountUsdc) : 0n
+}
+
+/**
+ * Brais, 2 Nov: the balance is all the account's money, on every chain, so a move between chains never changes it:
+ * Base, the other chains' Safes (Monad) and USDC on its way between them (`burnedUsdc`). `otherChains` null (not
+ * read yet): Base alone, as before.
+ */
+export function accountTotal(base: bigint, otherChains: bigint | null, inFlight: bigint): bigint {
   return base + (otherChains ?? 0n) + inFlight
 }

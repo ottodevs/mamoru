@@ -11,7 +11,7 @@ import { Brand, Modal } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
-import { accountTotal, belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, MIN_ENTRY_USDC, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
+import { accountTotal, belowMinimumOf, burnedUsdc, cbbtcPrice, ceilCents, humanMessage, MIN_ENTRY_USDC, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { historyEntries, moveLine, moveState } from '../lib/moves.ts'
 import { detailHead, MoveDetail, OpDetail, Sheet } from '../components/activity-detail.tsx'
@@ -1265,10 +1265,18 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const price = cbbtcPrice(pools.data)
   const s = f ? split(f, price) : null
   // Brais, 2 Nov: the balance is the account on every chain; a move to Monad does not change it.
-  const total = s ? accountTotal(s.total, otherChainsUsdc, f) : null
-  // A burn minted on Monad leaves `progress`: Monad's balance is read again at once, so its USDC never drops out between.
-  const bridging = f?.progress?.bridge?.state ?? null
+  // A burn minted on Monad leaves `progress`: its amount stays counted until Monad's balance is read again after that
+  // (asked at once below), so the total does not dip between the two reads.
   const monadKey = monadSleeve?.accountKey
+  const burned = burnedUsdc(f)
+  const held = useRef<{ usdc: bigint; goneAt: number | null } | null>(null)
+  if (burned > 0n) held.current = { usdc: burned, goneAt: null }
+  else if (held.current) {
+    if (held.current.goneAt === null) held.current.goneAt = Date.now()
+    if (!monadKey || monadFunding.dataUpdatedAt > held.current.goneAt) held.current = null
+  }
+  const total = s ? accountTotal(s.total, otherChainsUsdc, burned > 0n ? burned : (held.current?.usdc ?? 0n)) : null
+  const bridging = f?.progress?.bridge?.state ?? null
   useEffect(() => {
     if (monadKey) void qc.invalidateQueries({ queryKey: queryKeys.funding(monadKey) })
   }, [bridging, monadKey, qc])
