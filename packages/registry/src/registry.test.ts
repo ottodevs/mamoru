@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { getAddress, isAddress, isHash } from 'viem'
 import { ReasonError } from '@mamoru/domain'
-import { address, assertRegistryChain, baseRegistry, entry, isDeployed, monadRegistry, nameOf, registries, registryFor, type Registry } from './index.ts'
+import { address, assertRegistryChain, baseRegistry, entry, ethereumRegistry, isDeployed, monadRegistry, nameOf, registries, registryFor, type Registry } from './index.ts'
 
 const ACCOUNT_STACK = [
   'EntryPointV07',
@@ -23,6 +23,12 @@ const ACCOUNT_STACK = [
   'MultiSend_141',
   'Multicall3',
 ]
+
+/**
+ * Ethereum (#307) hosts only V4 siblings: the Safe stack and SmartSession, not the v1-v6 session policies (UniAction,
+ * TimeFrame, UsageLimit: TimeFrame and UsageLimit have no code there).
+ */
+const V4_ONLY_STACK = ACCOUNT_STACK.filter((n) => !['UniActionPolicy', 'TimeFramePolicy', 'UsageLimitPolicy'].includes(n))
 
 /** Not deployed on Monad: a lookup must fail loudly, never fall back to Base. */
 const MISSING_ON_MONAD = ['SafeWebAuthnSignerFactory']
@@ -109,7 +115,7 @@ describe.each(registries.map((r) => [r.chain, r] as const))('%s registry', (_cha
   })
 
   test('carries the whole account stack', () => {
-    for (const name of ACCOUNT_STACK) expect(entry(name, registry).name).toBe(name)
+    for (const name of registry === ethereumRegistry ? V4_ONLY_STACK : ACCOUNT_STACK) expect(entry(name, registry).name).toBe(name)
   })
 })
 
@@ -196,5 +202,18 @@ describe('base defaults', () => {
     expect(address('USDC')).toBe(address('USDC', baseRegistry))
     expect(entry('EntryPointV07')).toBe(entry('EntryPointV07', baseRegistry))
     expect(nameOf(address('USDC', baseRegistry))).toBe('USDC')
+  })
+})
+
+describe('ethereum registry (#307)', () => {
+  test("V4's stack sits at the same addresses as Base", () => {
+    for (const name of V4_ONLY_STACK) expect(address(name, ethereumRegistry), name).toBe(address(name, baseRegistry))
+    expect(address('TokenMessengerV2', ethereumRegistry)).toBe(address('TokenMessengerV2', baseRegistry))
+  })
+
+  test('the v1-v6 session policies are not there: a lookup fails loudly', () => {
+    for (const name of ['TimeFramePolicy', 'UsageLimitPolicy', 'MamoruActionPolicyV3']) {
+      expect(code(() => entry(name, ethereumRegistry)), name).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
+    }
   })
 })

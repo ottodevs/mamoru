@@ -1,0 +1,179 @@
+{
+  "chain": "ethereum",
+  "chainId": 1,
+  "block": 26328516,
+  "blockHash": "0x81d5be7f16367da4598271bcb850173052baa5443ebdbac04a6e9bdf3d2b5a6a",
+  "entries": [
+    {
+      "name": "USDC",
+      "kind": "token",
+      "role": "token de la política y del bridge (Circle nativo, burn CCTP en Ethereum; #307)",
+      "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "decimals": 6,
+      "codeHash": "0xd80d4b7c890cb9d6a4893e6b52bc34b56b25335cb13716e0d1d31383e6b41505"
+    },
+    {
+      "name": "WETH",
+      "kind": "token",
+      "role": "wrapped native de Ethereum (WETH9): destino único del valor nativo en V4 (#307)",
+      "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "decimals": 18,
+      "codeHash": "0xd0a06b12ac47863b5c7be4185c2deaad1c61557033f56c7d4ea74429cbb25e23"
+    },
+    {
+      "name": "UniswapV3Factory",
+      "kind": "uniswap",
+      "role": "factory de Uniswap v3 en Ethereum (MamoruV4Chains)",
+      "address": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+      "codeHash": "0x4d7b8525cd5d14343fa67a732fba5b24cddba11620ca88392f4ec6c52f91fd69"
+    },
+    {
+      "name": "NonfungiblePositionManager",
+      "kind": "uniswap",
+      "role": "LP y cobro (MamoruV4Chains)",
+      "address": "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+      "codeHash": "0x692e658b31cbe3407682854806658d315d61a58c7e4933a2f91d383dc00736c6"
+    },
+    {
+      "name": "SwapRouter02",
+      "kind": "uniswap",
+      "role": "swaps (MamoruV4Chains)",
+      "address": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+      "codeHash": "0x6ec798e80f3a19de650826338677604e54d6664f44a33b53a20b22b1939f402e"
+    },
+    {
+      "name": "pool:USDC/WETH/500",
+      "kind": "pool",
+      "role": "pool USDC/WETH 0.05% del hermano de Ethereum (#307; ring 723, TWAP 720/180 s)",
+      "address": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+      "token0": "USDC",
+      "token1": "WETH",
+      "fee": 500,
+      "tickSpacing": 10,
+      "codeHash": "0xa981b66c747a3d9fa29d7e200d5faaa2826960523d0e5a0df8148e8868c480b4"
+    },
+    {
+      "name": "EntryPointV07",
+      "kind": "erc4337",
+      "role": "EntryPoint",
+      "address": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+      "codeHash": "0x8db5ff695839d655407cc8490bb7a5d82337a86a6b39c3f0258aa6c3b582fc58"
+    },
+    {
+      "name": "SafeL2_141",
+      "kind": "safe",
+      "role": "singleton del Safe",
+      "address": "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762",
+      "codeHash": "0xb1f926978a0f44a2c0ec8fe822418ae969bd8c3f18d61e5103100339894f81ff"
+    },
+    {
+      "name": "SafeProxyFactory_141",
+      "kind": "safe",
+      "role": "factory del Safe",
+      "address": "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
+      "codeHash": "0x50c3cdc4074750a7a974204a716c999edd37482f907608d960b2b025ee0b3317"
+    },
+    {
+      "name": "Safe7579",
+      "kind": "erc7579",
+      "role": "adaptador ERC-7579",
+      "address": "0x7579EE8307284F293B1927136486880611F20002",
+      "codeHash": "0xe03f1efc4aa74c91a87731397278a9c32d81f593263931fc94ff867aa09b83ac"
+    },
+    {
+      "name": "Safe7579Launchpad",
+      "kind": "erc7579",
+      "role": "setup contrafactual",
+      "address": "0x7579011aB74c46090561ea277Ba79D510c6C00ff",
+      "codeHash": "0xe15c7413325ecf9e9fe60a315a0c9b49ad3003f3e6c254b9fa841dff8a8a32a5"
+    },
+    {
+      "name": "ModuleRegistry",
+      "kind": "erc7484",
+      "role": "registro ERC-7484 que Safe7579 consulta al instalar módulos",
+      "address": "0x000000000069E2a187AEFFb852bF3cCdC95151B2",
+      "codeHash": "0xfca74c2b3c5f01a7ebac79e397415b3adef0bd91047007be745e709c6d963aa9"
+    },
+    {
+      "name": "RhinestoneAttester",
+      "kind": "erc7484",
+      "role": "único attester de confianza de la cuenta, umbral 1",
+      "address": "0x000000333034E9f539ce08819E12c1b8Cb29084d",
+      "codeHash": "0xd7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c"
+    },
+    {
+      "name": "SmartSession",
+      "kind": "smart-sessions",
+      "role": "validador de sesiones",
+      "address": "0x00000000002B0eCfbD0496EE71e01257dA0E37DE",
+      "codeHash": "0xf2817b8943b9fc813ad3602de2f0b973dc6b7e190f1b77dc9eb02b8d3022ab0c"
+    },
+    {
+      "name": "OwnableValidator",
+      "kind": "smart-sessions",
+      "role": "validador de la session key",
+      "address": "0x2483DA3A338895199E5e538530213157e931Bf06",
+      "codeHash": "0xd9ad90a204447aec1a1528d764e1d80212c8011dc0125b3995875e58ec9a43bf"
+    },
+    {
+      "name": "SafeWebAuthnSharedSigner",
+      "kind": "safe",
+      "role": "owner passkey",
+      "address": "0x94a4F6affBd8975951142c3999aEAB7ecee555c2",
+      "codeHash": "0xeaa32d0280053e2feea48a7c3fa15a535cd07c23ff60c9469cfa1999533e9332"
+    },
+    {
+      "name": "P256Verifier",
+      "kind": "safe",
+      "role": "verificador P-256 de respaldo",
+      "address": "0xc2b78104907F722DABAc4C69f826a522B2754De4",
+      "codeHash": "0x3cd725b6ba67b40b7979190c41a015e82cf21e098eb61832ba623f8538bab7fc"
+    },
+    {
+      "name": "MultiSendCallOnly_141",
+      "kind": "safe",
+      "role": "lote del walkaway y de las operaciones del owner",
+      "address": "0x9641d764fc13c8B624c04430C7356C1C7C8102e2",
+      "codeHash": "0xecd5bd14a08c5d2122379900b2f272bdf107a7e92423c10dd5fe3254386c9939"
+    },
+    {
+      "name": "MultiSend_141",
+      "kind": "safe",
+      "role": "setup del Safe: delegatecall del launchpad y de la passkey",
+      "address": "0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
+      "codeHash": "0x0e4f7fc66550a322d1e7688e181b75e217e662a4f3f4d6a29b22bc61217c4b77"
+    },
+    {
+      "name": "Multicall3",
+      "kind": "read",
+      "role": "solo lecturas",
+      "address": "0xcA11bde05977b3631167028862bE2a173976CA11",
+      "codeHash": "0xd5c15df687b16f2ff992fc8d767b4216323184a2bbc6ee2f9c398c318e770891"
+    },
+    {
+      "name": "TokenMessengerV2",
+      "kind": "cctp",
+      "role": "Circle CCTP V2, proxy (implementación 0x555E272506C06e7E559d57418563742AFE363ec8 al añadirlo): bridge del bucket growth a la misma Safe en Monad (dominio 15), grant bridge-out de conservador-live-v6 (otto/mamoru#213); codeHash del proxy leído en el último bloque el 2026-10-27, no en el bloque del pin",
+      "address": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
+      "codeHash": "0xd2c8d48075d832fb7d07f6db5545a1bee37fdf886325c441a8dd1cef4c9dae99"
+    }
+  ],
+  "undeployed": [
+    {
+      "name": "MamoruRegistry",
+      "address": null
+    },
+    {
+      "name": "MamoruActionPolicyV4",
+      "address": null
+    },
+    {
+      "name": "MamoruGasPolicyV2",
+      "address": null
+    },
+    {
+      "name": "MamoruMigrationCheck",
+      "address": null
+    }
+  ]
+}

@@ -161,7 +161,7 @@ export function v4RemoteFromSpec(base: Pick<AccountContext, 'address' | 'owners'
   if (!spec.home || spec.home.toLowerCase() !== String(base.address).toLowerCase()) throw new ReasonError('REMOTE_SAFE_MISMATCH', `V4 remote of ${spec.home}, not of this account`)
   const homeDomain = V4_DOMAIN_BY_CHAIN[homeChainId]
   const domain = V4_DOMAIN_BY_CHAIN[spec.chainId]
-  if (!homeDomain || !domain || spec.homeDomain !== homeDomain || V4_CHAIN_BY_DOMAIN[domain] !== registry.chainId) throw new ReasonError('REMOTE_SAFE_MISMATCH', `V4 remote on chain ${spec.chainId} from domain ${spec.homeDomain}: not a route V4 pins`)
+  if (homeDomain === undefined || domain === undefined || spec.homeDomain !== homeDomain || V4_CHAIN_BY_DOMAIN[domain] !== registry.chainId) throw new ReasonError('REMOTE_SAFE_MISMATCH', `V4 remote on chain ${spec.chainId} from domain ${spec.homeDomain}: not a route V4 pins`)
   if (spec.validAfter !== 0 || spec.validUntil !== 0) throw new ReasonError('REMOTE_SAFE_MISMATCH', 'a V4 remote session has no validity window')
   const deployment = oneAuthV4Deployment(registry)
   if (!deployment) throw new ReasonError('REMOTE_SAFE_MISMATCH', `the V4 stack is not pinned on chain ${registry.chainId}`)

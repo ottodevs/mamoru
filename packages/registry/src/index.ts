@@ -2,6 +2,7 @@ import { getAddress, keccak256, type PublicClient } from 'viem'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
 import base from '../base.json' with { type: 'json' }
 import monad from '../monad.json' with { type: 'json' }
+import ethereum from '../ethereum.json' with { type: 'json' }
 
 export * from './abis.ts'
 
@@ -66,12 +67,14 @@ function load(file: RegistryFile): Registry {
 
 export const baseRegistry: Registry = load(base)
 export const monadRegistry: Registry = load(monad)
+/** Ethereum (#307): the chain an account's own address may hold funds on (a V4 sibling); never an engine chain. */
+export const ethereumRegistry: Registry = load(ethereum)
 
 /**
  * One registry per chain. Selection is by chain id only; there is no cross-chain fallback. A chain joins by
  * adding its pinned `<chain>.json` and its entry here: nothing else in this package names a chain.
  */
-export const registries: readonly Registry[] = [baseRegistry, monadRegistry]
+export const registries: readonly Registry[] = [baseRegistry, monadRegistry, ethereumRegistry]
 
 /** The registry of `chainId`, or CHAIN_UNSUPPORTED. */
 export function registryFor(chainId: number): Registry {

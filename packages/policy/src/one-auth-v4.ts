@@ -98,7 +98,11 @@ export const V4_REVOKE_FLAG = 1n << 255n
 export function encodeInitV4(i: InitV4): Hex {
   if (i.capUsd <= 0n || i.capUsd > V4_MAX_CAP_USD) throw new Error(`InitV4: capUsd ${i.capUsd} outside (0, ${V4_MAX_CAP_USD}]`)
   if (i.admit.length > V4_MAX_ADMIT) throw new Error(`InitV4: ${i.admit.length} admitted positions, at most ${V4_MAX_ADMIT}`)
-  if ((BigInt(i.home) === 0n) !== (i.homeDomain === 0)) throw new Error('InitV4: home and homeDomain are set together')
+  // V4's Init rule (BadInit(4)): a home account names no home domain; a remote's or a sibling's home domain is a chain
+  // of V4's table. CCTP domain 0 is Ethereum's, so it is a home domain like any other once `home` is set (#307).
+  const hasHome = BigInt(i.home) !== 0n
+  if (!hasHome && i.homeDomain !== 0) throw new Error('InitV4: a home account names no home domain')
+  if (hasHome && V4_CHAIN_BY_DOMAIN[i.homeDomain] === undefined) throw new Error(`InitV4: home domain ${i.homeDomain} is not a chain of V4's table`)
   return encodeAbiParameters(INIT_V4_TUPLE, [{ capUsd: i.capUsd, generation: i.generation, home: getAddress(i.home), homeDomain: i.homeDomain, admit: [...i.admit] }])
 }
 
@@ -165,16 +169,22 @@ export function decodeGasCapsV2(data: Hex): GasCapsV2 {
 export const GAS_CAPS_V2_BY_CHAIN: Readonly<Record<number, GasCapsV2>> = {
   8453: { maxPriorityFeePerGas: 10_000_000n, maxVerificationGasLimit: 3_000_000n, maxCallGasLimit: 2_000_000n, maxPreVerificationGas: 200_000n, maxFeePerGas: 100_000_000n, maxPaymasterGas: 0n, perWindow: 2_000_000_000_000_000n, window: 86_400 },
   143: { maxPriorityFeePerGas: 1_000_000_000n, maxVerificationGasLimit: 3_000_000n, maxCallGasLimit: 2_000_000n, maxPreVerificationGas: 200_000n, maxFeePerGas: 1_000_000_000_000n, maxPaymasterGas: 0n, perWindow: 1_000_000_000_000_000_000n, window: 86_400 },
+  // #307: Ethereum, MamoruV4Chains' L1 caps (0.1 gwei priority, 5 gwei max fee, a bucket of 0.01 ETH a day).
+  1: { maxPriorityFeePerGas: 100_000_000n, maxVerificationGasLimit: 3_000_000n, maxCallGasLimit: 2_000_000n, maxPreVerificationGas: 200_000n, maxFeePerGas: 5_000_000_000n, maxPaymasterGas: 0n, perWindow: 10_000_000_000_000_000n, window: 86_400 },
 }
 
-/** MamoruV4Chains: the CCTP domain of each chain V4 pins (0 = not pinned). */
-export const V4_DOMAIN_BY_CHAIN: Readonly<Record<number, number>> = { 8453: 6, 143: 15 }
-export const V4_CHAIN_BY_DOMAIN: Readonly<Record<number, number>> = { 6: 8453, 15: 143 }
+/**
+ * MamoruV4Chains: the CCTP domain of each chain V4 pins, and back. A chain or domain V4 does not pin is ABSENT
+ * (`=== undefined`), never 0: CCTP domain 0 is Ethereum (#307).
+ */
+export const V4_DOMAIN_BY_CHAIN: Readonly<Record<number, number>> = { 8453: 6, 143: 15, 1: 0 }
+export const V4_CHAIN_BY_DOMAIN: Readonly<Record<number, number>> = { 6: 8453, 15: 143, 0: 1 }
 
 /** MamoruV4Chains, per chain: the pinned stables (the budget unit, 6 decimals) and assets, by registry name. */
 export const V4_PINNED: Readonly<Record<number, { stables: readonly RegistryName[]; assets: readonly RegistryName[] }>> = {
   8453: { stables: ['USDC', 'USDT'], assets: ['WETH', 'cbBTC'] },
   143: { stables: ['USDC'], assets: ['WMON'] },
+  1: { stables: ['USDC'], assets: ['WETH'] }, // #307: USDT left out (CCTP burn limit 0 on Ethereum)
 }
 
 // ---- the policy templates --------------------------------------------------------------------------------------

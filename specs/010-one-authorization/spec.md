@@ -238,9 +238,11 @@ new owner signature.
   owners hash). It has no remotes.
 - **Wrap:** native value only to the chain's pinned wrapped native, `deposit()` and `withdraw(uint256)`, both to the
   account. This is not charged, because the value stays the account's.
-- **The one signature on a Safe set up before V4:** SmartSession's `enableSessions` and ENABLE mode check the ERC-7484
-  registry, which such a Safe cannot pass. UNSAFE_ENABLE in the first userOp skips the attestation; V4 pins the stack
-  instead.
+- **The one signature on a Safe set up before V4 (#309):** the production enable flow, as on Base. One owner Safe tx
+  (MultiSend: trust the Rhinestone attester and the Safe itself, self-attest V4 and the gas policy, which T7 deploys
+  with ModuleRecords, then `enableSessions`), relayed after a permissionless deploy of the Safe with its own
+  initializer. SmartSession ENABLE / UNSAFE_ENABLE would also work (the fork test shows it), but production keeps no
+  ENABLE signatures (`no-enable-mode.test.ts`, the base of the old-session inventory: handoff 2 Nov, not reopened).
 - **Limit:** Safe7579's owner path verifies the signature over a SafeMessage under the Safe's own domain separator,
   which contains the chain id. One passkey assertion therefore authorizes one chain. An account set up before V4
   approves once in the app, with one passkey prompt per chain where it holds funds (Guillermo: Base and Ethereum, 2).

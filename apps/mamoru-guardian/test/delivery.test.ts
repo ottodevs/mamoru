@@ -92,7 +92,8 @@ describe('config errors exit 78 (EX_CONFIG); transient ones exit 1', () => {
     const cases: [string, Record<string, string | undefined>, MakeClient?][] = [
       ['MAMORU_GUARDIAN_HOME_RPC_URL is required', { ...baseEnv(), MAMORU_GUARDIAN_HOME_RPC_URL: undefined }],
       ['MAMORU_GUARDIAN_V4_ADDRESS: not an address', { ...baseEnv(), MAMORU_GUARDIAN_V4_ADDRESS: '0xnope' }],
-      ['is not a V4 chain', { ...baseEnv(), MAMORU_GUARDIAN_HOME_CHAIN_ID: '1' }],
+      // Ethereum (1) is a V4 chain since #307: Arbitrum stands for a chain outside the table
+      ['is not a V4 chain', { ...baseEnv(), MAMORU_GUARDIAN_HOME_CHAIN_ID: '42161' }],
       ['MAMORU_GUARDIAN_INTERVAL_SECONDS: not a non-negative integer', { ...baseEnv(), MAMORU_GUARDIAN_INTERVAL_SECONDS: 'soon' }],
       ['MAMORU_GUARDIAN_FROM_BLOCK_8453: not a block number', { ...baseEnv(), MAMORU_GUARDIAN_FROM_BLOCK_8453: '-4' }],
       ['MAMORU_GUARDIAN_FROM_BLOCK_8453 is required on first start', { ...baseEnv(), MAMORU_GUARDIAN_FROM_BLOCK_8453: undefined }],
