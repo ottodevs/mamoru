@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { useApi } from '../api/client.ts'
+import { downloadJson, kitFilename } from '../lib/download.ts'
 import { queryKeys, useRegistrationChallenge } from '../api/queries.ts'
 import { errorText, useOwnerAction } from '../lib/owner-flow.ts'
 import { createOwnerPasskey } from '../lib/passkey.ts'
@@ -43,7 +44,7 @@ function KeyMark() {
  * otto/mamoru#294 (Brais, v4): the only account-creation screen. One button runs both ceremonies, the passkey and then
  * the authorization, with the progress said in place. The signed lines stay behind "What you sign" (#41).
  */
-export function CreateAccount({ phase, error, summary, onStart, onSignIn }: { phase: CreatePhase; error: string | null; summary: string[] | null; onStart: () => void; onSignIn: () => void }) {
+export function CreateAccount({ phase, error, summary, onStart, onSignIn, kit = null }: { phase: CreatePhase; error: string | null; summary: string[] | null; onStart: () => void; onSignIn: () => void; kit?: { saved: boolean; pending: boolean; onSave: () => void } | null }) {
   const copy = signatureCopy.create
   const busy = phase === 'creating' || phase === 'authorizing'
   const label = phase === 'creating' ? copy.creating : phase === 'authorizing' ? copy.authorizing : phase === 'retry' ? copy.retry : copy.action
@@ -84,6 +85,11 @@ export function CreateAccount({ phase, error, summary, onStart, onSignIn }: { ph
         {phase === 'retry' || phase === 'authorizing' ? <p className="mt-3 mb-0 text-[0.95rem] text-emerald">✓ {copy.created}</p> : null}
         {error ? <p className="err mt-3">{error}</p> : null}
       </div>
+      {kit ? (
+        <button type="button" className={`${CARD_LINK} mt-3 block`} onClick={kit.onSave} disabled={kit.pending}>
+          {kit.saved ? 'Recovery kit saved' : 'Save recovery kit'}
+        </button>
+      ) : null}
       <div className="mt-[1.6rem] flex items-center justify-between gap-4">
         {phase === 'idle' ? (
           <button type="button" className={`${CARD_LINK} min-w-0 flex-1 text-left`} onClick={onSignIn}>
@@ -128,18 +134,21 @@ export function Onboarding({ onSignIn }: { onSignIn: () => void }) {
   // Once the account exists, the authorization follows on its own: prepare it, then the passkey signs it. A failed or
   // closed step stops here with its error; the retry button resumes from this step and never makes another passkey.
   const inflight = useRef(false)
+  const step = () => {
+    inflight.current = true
+    const next = prepared ? approve().then((op) => (op ? navigate({ to: '/add' }) : undefined)) : prepare()
+    void Promise.resolve(next).finally(() => {
+      inflight.current = false
+    })
+  }
   useEffect(() => {
     if (!created || !go || busy !== null || result || inflight.current) return
     if (error) {
       setGo(false)
       return
     }
-    inflight.current = true
-    const step = prepared ? approve().then((op) => (op ? navigate({ to: '/add' }) : undefined)) : prepare()
-    void Promise.resolve(step).finally(() => {
-      inflight.current = false
-    })
-  }, [created, go, busy, result, error, prepared, prepare, approve, navigate])
+    step()
+  }, [created, go, busy, result, error, prepared])
 
   const phase: CreatePhase = !created ? (owner.isPending ? 'creating' : 'idle') : go || busy !== null ? 'authorizing' : 'retry'
   const start = () => {
@@ -148,14 +157,23 @@ export function Onboarding({ onSignIn }: { onSignIn: () => void }) {
       owner.mutate()
       return
     }
-    act.reset()
     setGo(true)
+    // The retry tap is the user gesture: an unexpired preparation is signed right here, not from an effect after
+    // another request. Only a missing or expired one is prepared again first.
+    if (prepared && Date.parse(prepared.tx.expiresAt) > Date.now()) step()
+    else act.reset()
   }
+  const kit = useMutation({
+    mutationFn: async (o: NonNullable<typeof created>) => {
+      downloadJson(kitFilename(o.address), await api.recoveryKit(o.accountKey))
+      await api.ackRecovery(o.accountKey).catch(() => undefined)
+    },
+  })
   const shownError = created ? error : owner.error ? errorText(owner.error) : null
 
   return (
     <CardFrame label="Create your Mamoru account" testId="onboarding">
-      <CreateAccount phase={phase} error={shownError} summary={prepared?.tx.summary ?? null} onStart={start} onSignIn={onSignIn} />
+      <CreateAccount phase={phase} error={shownError} summary={prepared?.tx.summary ?? null} onStart={start} onSignIn={onSignIn} kit={created ? { saved: kit.isSuccess, pending: kit.isPending, onSave: () => kit.mutate(created) } : null} />
     </CardFrame>
   )
 }

@@ -38,6 +38,10 @@ describe('before each passkey signature', () => {
     expect(retry.text).toContain('Passkey closed. Nothing was signed.')
     expect(retry.text).toContain('Authorize Mamoru')
     expect(retry.text).not.toContain('Create with passkey')
+    // Once the account exists the recovery kit is offered on the card (FR-ONB-006); before, it is not.
+    expect(retry.text).not.toContain('Save recovery kit')
+    const withKit = render(<CreateAccount phase="authorizing" error={null} summary={null} onStart={() => {}} onSignIn={() => {}} kit={{ saved: false, pending: false, onSave: () => {} }} />)
+    expect(withKit.text).toContain('Save recovery kit')
   })
 
   test('the review of an owner action says its scope before the confirm button', () => {
