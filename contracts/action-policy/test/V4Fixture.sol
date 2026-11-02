@@ -489,6 +489,7 @@ abstract contract V4Fixture is Test {
         IEntryPointT(ENTRY_POINT).handleOps(ops, payable(bundler));
         gasUsed = g - gasleft();
         Vm.Log[] memory logs = vm.getRecordedLogs();
+        _watch(logs);
         for (uint256 i; i < logs.length; i++) {
             if (logs[i].topics[0] == USER_OP_EVENT && logs[i].emitter == ENTRY_POINT) {
                 (, success,,) = abi.decode(logs[i].data, (uint256, bool, uint256, uint256));
@@ -496,6 +497,26 @@ abstract contract V4Fixture is Test {
             }
         }
         revert("no UserOperationEvent");
+    }
+
+    /// A 32-byte word to look for in the data of `watchEmitter`'s logs during the next `_runOp`.
+    address watchEmitter;
+    bytes32 watchWord;
+    bool watchSeen;
+
+    function _watch(Vm.Log[] memory logs) internal {
+        if (watchEmitter == address(0)) return;
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].emitter != watchEmitter) continue;
+            bytes memory d = logs[i].data;
+            for (uint256 o; o + 32 <= d.length; o += 32) {
+                bytes32 x;
+                assembly {
+                    x := mload(add(add(d, 32), o))
+                }
+                if (x == watchWord) watchSeen = true;
+            }
+        }
     }
 
     function _run(address safe, bytes memory callData, bytes32 pid) internal returns (uint256 gasUsed) {
