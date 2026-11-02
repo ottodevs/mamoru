@@ -1,5 +1,7 @@
 import { Hono, type Context } from 'hono'
-import type { AccountContext, RemoteSpec } from '@mamoru/domain'
+import type { AccountContext, MigrateV4Input, RemoteSpec } from '@mamoru/domain'
+import { buildMigrateV4 } from '@mamoru/account/one-auth'
+import { registryFor, type Registry } from '@mamoru/registry'
 import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
 import { accountNotFound, apiError } from '../errors.ts'
@@ -125,6 +127,63 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     }
   }
 
+  /**
+   * otto/mamoru#311 (#295, #333): a one-authorization prepare is passed on only when the Worker, with the same builder
+   * (buildMigrateV4, every contract from the chain's pinned registry), gets the same Safe tx for this owner's own account:
+   * - activate / migrate-v4 carrying `input`, and the Ethereum sibling (`built.input`), are rebuilt and their hash
+   *   compared with the one the owner is asked to sign, on the chain the prepare names;
+   * - the Safe is the row's own Safe on the row's chain; through a Base account, step 1 is its own Safe on the other
+   *   chain (re-derived from its keys) with this account as home; the Ethereum sibling's Safe and home are both this Base
+   *   account's own address.
+   * Anything else: 502 BUILD_MISMATCH, nothing signed. A prepare of these routes without the builder's input passes as
+   * before (an old activation; the operator's own check refuses a migration without it).
+   */
+  const checkBuilt = (c: Context<AppEnv>, row: AccountRow, path: string, text: string, registryOf: (chainId: number) => Registry = registryFor): Response | null => {
+    const sibling = path.endsWith('/ethereum-sibling/prepare')
+    if (!sibling && !path.endsWith('/activate/prepare') && !path.endsWith('/migrate-v4/prepare')) return null
+    let body: { safe?: string; chainId?: number; safeTxHash?: string; input?: MigrateV4Input; built?: { input?: MigrateV4Input; safeTxHash?: string } }
+    try {
+      body = JSON.parse(text)
+    } catch {
+      return null
+    }
+    const input = sibling ? body.built?.input : body.input
+    if (!input) return sibling ? refusedBuild(c, row, 'no input') : null
+    const me = row.address.toLowerCase()
+    const why = (() => {
+      const home = BigInt(input.home) !== 0n
+      if (body.chainId !== input.chainId) return 'chain'
+      if (sibling) {
+        // The account's own address on Ethereum, its home that same account on Base.
+        if (input.chainId !== 1 || input.step !== 1 || input.safe.toLowerCase() !== me || input.home.toLowerCase() !== me || row.chain_id !== BASE) return 'sibling'
+      } else if (home && row.chain_id === BASE) {
+        // Step 1 through the Base account: its own Safe on the other chain (the one its keys give, from its D1 row), whose
+        // home is this account.
+        if (input.home.toLowerCase() !== me || input.chainId === BASE || !row.remote_json) return 'home'
+        try {
+          verifyRemote(accountContext(row), { chainId: input.chainId, address: input.safe, spec: JSON.parse(row.remote_json) as RemoteSpec }, remoteRegistry)
+        } catch {
+          return 'remote safe'
+        }
+      } else if (input.safe.toLowerCase() !== me || input.chainId !== row.chain_id) return 'safe' // the row's own Safe on its own chain
+      if (body.safe && body.safe.toLowerCase() !== input.safe.toLowerCase()) return 'safe'
+      let hash: string
+      try {
+        hash = buildMigrateV4(input, registryOf(input.chainId)).safeTxHash
+      } catch (e) {
+        return `build: ${e instanceof Error ? e.message : String(e)}`
+      }
+      if (hash.toLowerCase() !== (body.safeTxHash ?? '').toLowerCase()) return 'hash'
+      if (sibling && hash.toLowerCase() !== (body.built?.safeTxHash ?? '').toLowerCase()) return 'hash'
+      return null
+    })()
+    return why ? refusedBuild(c, row, why) : null
+  }
+  const refusedBuild = (c: Context<AppEnv>, row: AccountRow, why: string) => {
+    console.error(`one-authorization prepare refused for ${row.account_key}: ${why}`)
+    return apiError(c, 502, 'Mamoru could not confirm what you are about to approve. Nothing was signed.', 'BUILD_MISMATCH')
+  }
+
   const forwardWith = (opts: { timeoutMs?: (c: Context<AppEnv>, row: AccountRow) => number; fallback?: (c: Context<AppEnv>, row: AccountRow) => Promise<Response | null> } = {}) => async (c: Context<AppEnv>) => {
     const session = await c.var.auth.current(c)
     if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
@@ -178,6 +237,10 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
       const refused = await checkRemote(c, row, method, c.req.path, text)
       if (refused) return refused
     }
+    if (res.ok && method === 'POST') {
+      const refused = checkBuilt(c, row, c.req.path, text)
+      if (refused) return refused
+    }
     return new Response(text, {
       status: res.status,
       headers: { 'content-type': res.headers.get('content-type') ?? 'application/json', 'cache-control': 'no-store' },
@@ -189,7 +252,8 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
   routes.get('/:accountKey/ops', forward)
   routes.get('/:accountKey/withdraw-assets', forward)
   routes.get('/:accountKey/bridge-out', forward)
-  for (const action of ['activate', 'transfer', 'stop', 'renew', 'bridge-out', 'eth-convert', 'migrate-v4']) {
+  routes.get('/:accountKey/ethereum-sibling', forward)
+  for (const action of ['activate', 'transfer', 'stop', 'renew', 'bridge-out', 'eth-convert', 'migrate-v4', 'ethereum-sibling']) {
     routes.post(`/:accountKey/${action}/prepare`, forward)
     routes.post(`/:accountKey/${action}`, forward)
   }
