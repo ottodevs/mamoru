@@ -473,11 +473,11 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         vm.prank(acct);
         vm.expectRevert(); // the router has no token0(): not a pool at all
         v4.swap(SwapParams(ROUTER, USDC, 1_000e6, 0, 1, vm.getBlockTimestamp()));
-        _listVault(TOKEN_MESSENGER, 10_000);
+        _listVault(TOKEN_MESSENGER, 5_000);
         vm.prank(acct);
         vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.BadVault.selector, TOKEN_MESSENGER));
         v4.deposit(TOKEN_MESSENGER, 1_000e6);
-        _listVault(NPM, 10_000);
+        _listVault(NPM, 5_000);
         vm.prank(acct);
         vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.BadVault.selector, NPM));
         v4.deposit(NPM, 1_000e6);
@@ -493,8 +493,8 @@ contract MamoruActionPolicyV4Test is V4Fixture {
     /// and Aave's static aToken (no verified membership view), are refused even after the full delay.
     function test_hostileVaultRefused() public {
         HostileVault h = new HostileVault(USDC);
-        _listVault(address(h), 10_000);
-        _listVault(WA_BAS_USDC, 10_000);
+        _listVault(address(h), 5_000);
+        _listVault(WA_BAS_USDC, 5_000);
         _approveV4(acct, USDC, 1_000e6);
         vm.startPrank(acct);
         vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.BadVault.selector, address(h)));
@@ -517,10 +517,10 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         assertEq(IERC20T(GT_USDCP).balanceOf(acct), shares, "shares to the account");
         assertEq(IERC20T(USDC).allowance(address(v4), GT_USDCP), 0, "vault allowance back to 0");
         assertEq(IERC20T(USDC).balanceOf(address(v4)), 0);
-        // the vault's ratio caps it: 20 % of C = 2,000 USDC per window
+        // the vault's ratio caps the position: 20 % of C = 2,000 USDC held, by the vault's own accounting
         _approveV4(acct, USDC, 1_001e6 + 1);
         vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BudgetExceeded.selector, GT_USDCP, 1_001e6 + 1));
+        vm.expectPartialRevert(MamoruActionPolicyV4.VaultExposure.selector);
         v4.deposit(GT_USDCP, 1_001e6 + 1);
         vm.prank(admin);
         reg.removeVault(GT_USDCP);

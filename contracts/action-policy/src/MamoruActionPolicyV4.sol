@@ -143,6 +143,8 @@ interface IERC4626V4 {
     function asset() external view returns (address);
     function deposit(uint256 assets, address receiver) external returns (uint256 shares);
     function redeem(uint256 shares, address receiver, address owner) external returns (uint256 assets);
+    function previewMint(uint256 shares) external view returns (uint256 assets);
+    function balanceOf(address owner) external view returns (uint256);
 }
 
 interface IMetaMorphoFactoryV4 {
@@ -170,6 +172,7 @@ interface ITokenMinterV4 {
 interface IPolicyRegistryV4 {
     function REGISTRY() external view returns (address);
     function admittedPool(address account, uint256 tokenId) external view returns (address);
+    function remoteOf(address account, uint32 domain) external view returns (address, uint96, bytes32, address);
 }
 
 interface ISafeOwnersV4 {
@@ -311,7 +314,7 @@ contract MamoruV4Helper {
 
     /// Spec 010 "Vaults": its asset() is a pinned stable and a pinned MetaMorpho factory created it. Aave's wrapper
     /// is not admissible (no verified membership view).
-    function vaultAsset(address vault) external view returns (address asset) {
+    function vaultAsset(address vault) public view returns (address asset) {
         MamoruV4Chains.Chain memory ch = MamoruV4Chains.byChainId(block.chainid);
         if (vault.code.length == 0) revert BadVault(vault);
         bool member;
@@ -322,6 +325,15 @@ contract MamoruV4Helper {
         if (!member) revert BadVault(vault);
         asset = IERC4626V4(vault).asset();
         if (!MamoruV4Chains.isStable(ch, asset)) revert NotPinned(asset);
+    }
+
+    /// Review r1 of #200 (P1): what `account` holds in `vault` now, by the vault's own accounting, rounded UP (against
+    /// the depositor): `previewMint` of its shares is the assets the vault would ask to mint them. V4 caps it, plus the
+    /// new deposit, at the entry's ratio of C, so the funds at risk in one vault never pass ratio x C.
+    function vaultExposure(address vault, address account) external view returns (address asset, uint256 held) {
+        asset = vaultAsset(vault);
+        uint256 shares = IERC4626V4(vault).balanceOf(account);
+        if (shares != 0) held = IERC4626V4(vault).previewMint(shares);
     }
 
     /// T6 M-4: the pool of a position `account` owns, when it is a factory pool of pinned tokens (V4 admits it).
@@ -568,6 +580,15 @@ contract MamoruV4Helper {
         createCall = MamoruRemoteSafe.createProxyCall(init, salt);
     }
 
+    /// The relayer's permissionless deployment of `account`'s registered remote on `domain`, from the account's current
+    /// owners and the registration's C and session key (V4's view, moved here for EIP-170). It equals the registered
+    /// address only while the owners have not changed: the guardian compares before `setReady`.
+    function remoteDeployment(address account, uint32 domain) external view returns (address at, bytes memory createCall) {
+        (address registered, uint96 capUsd,, address sessionKey) = IPolicyRegistryV4(POLICY).remoteOf(account, domain);
+        if (registered == address(0)) revert UnknownDomain(domain);
+        (at,, createCall) = this.remote(account, domain, sessionKey, capUsd, MamoruV4Chains.byChainId(block.chainid).domain);
+    }
+
     /// `abi.encode(Session[1])`, SmartSession's install payload of the remote (after the UNSAFE_ENABLE byte).
     function sessions(
         address account,
@@ -706,6 +727,8 @@ contract MamoruActionPolicyV4 {
     uint24 public constant MIN_BAND = 2;
     uint24 public constant MAX_BAND = 500;
     uint16 public constant MAX_RATIO_BPS = 10_000;
+    /// Review r1 of #200 (P1): at most half of C in any one vault (the planned Stable bucket is 50 % in a vault).
+    uint16 public constant MAX_VAULT_RATIO_BPS = 5_000;
     // I5 (r1 P1-7, r2 P1): the account's limits per chain, as multiples of the owner-signed C.
     uint256 public constant BUCKET_WINDOW = 1 days; // the bucket and sub-buckets refill C (resp. ratio x C) per day
     uint256 public constant BREAKER_PERIODS = 25; // hourly periods: at least the last 24 h
@@ -817,6 +840,7 @@ contract MamoruActionPolicyV4 {
     error Cap30Exceeded(uint256 spent, uint256 value);
     error WrongRecipient();
     error ZeroAmount();
+    error VaultExposure(address vault, uint256 held);
     error Expired();
     error BadBridge(uint256 field);
     error RemoteNotReady(uint32 domain);
@@ -1070,17 +1094,22 @@ contract MamoruActionPolicyV4 {
 
     /**
      * I1 + spec 010 "Vaults" (r1 finding 3): a deposit into a vault the registry lists, whose asset is a pinned stable
-     * and which a pinned MetaMorpho factory created, for exactly `assets`, shares to the account. Charged to the
-     * bucket and capped by the vault's ratio (I5).
+     * and which a pinned MetaMorpho factory created, for exactly `assets`, shares to the account. The account's whole
+     * position in the vault after it is at most ratioBps x C (ratioBps <= MAX_VAULT_RATIO_BPS); the deposit is also
+     * charged to the bucket and the vault's sub-bucket (I5).
      */
     function deposit(address vault, uint256 assets) external nonReentrant returns (uint256 shares) {
         address account = msg.sender;
         Config memory c = _live(account);
         VaultEntryV4 memory e = REGISTRY.vaultOf(vault);
         if (!e.active) revert NotListed(vault);
-        if (e.ratioBps == 0 || e.ratioBps > MAX_RATIO_BPS) revert BadEntry(vault, 6);
-        address asset = HELPER.vaultAsset(vault);
+        if (e.ratioBps == 0 || e.ratioBps > MAX_VAULT_RATIO_BPS) revert BadEntry(vault, 6);
         if (assets == 0) revert ZeroAmount();
+        // Review r1 of #200 (P1): a live cap on what is AT RISK in this vault, not only on the deposit rate: the
+        // account's current position (the vault's own accounting, rounded against the depositor) plus this deposit
+        // stays within ratioBps of C. Four deposits spaced past every window can no longer pile up 4C in one vault.
+        (address asset, uint256 held) = HELPER.vaultExposure(vault, account);
+        if (held + assets > uint256(c.capUsd) * e.ratioBps / MAX_RATIO_BPS) revert VaultExposure(vault, held);
         if (!_charge(account, c, vault, e.ratioBps, assets)) return 0;
         uint256 before = IERC20V4(asset).balanceOf(address(this));
         _pull(asset, account, assets);
@@ -1308,15 +1337,6 @@ contract MamoruActionPolicyV4 {
         Ready memory y = _ready[domain][account];
         return r.remote != address(0) && y.remote == r.remote && y.ownersHash == r.ownersHash
             && HELPER.ownersHashOf(account) == r.ownersHash;
-    }
-
-    /// The relayer's permissionless deployment of the registered remote, from the account's current owners and the
-    /// registration's C and session key (equal to the registered address only while the owners have not changed: the
-    /// guardian compares before `setReady`).
-    function remoteDeployment(address account, uint32 domain) external view returns (address at, bytes memory createCall) {
-        Remote memory r = _remote[domain][account];
-        if (r.remote == address(0)) revert RemoteNotReady(domain);
-        (at,, createCall) = HELPER.remote(account, domain, r.sessionKey, r.capUsd, _chain().domain);
     }
 
     // ---------------------------------------------------------------- internals: chain, entries, pools

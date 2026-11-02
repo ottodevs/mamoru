@@ -115,7 +115,7 @@ contract V4RemoteForkTest is V4Fixture {
         MamoruActionPolicyV4.Remote memory r = v4.remoteOf(home, DOMAIN_MONAD);
         assertTrue(r.remote != address(0));
         assertEq(r.ownersHash, helper.ownersHashOf(home));
-        (address at, bytes memory createCall) = v4.remoteDeployment(home, DOMAIN_MONAD);
+        (address at, bytes memory createCall) = helper.remoteDeployment(home, DOMAIN_MONAD);
         assertEq(at, r.remote);
         // 2. no burn before the guardian marks it ready (r4 P0)
         assertFalse(v4.isReady(home, DOMAIN_MONAD));
@@ -212,7 +212,7 @@ contract V4RemoteForkTest is V4Fixture {
         address r2 = v4.registerRemote(DOMAIN_MONAD, remoteSk);
         assertTrue(r2 != r1, "the new owners give a new remote");
         assertFalse(v4.isReady(home, DOMAIN_MONAD), "a registration starts unready");
-        (address at,) = v4.remoteDeployment(home, DOMAIN_MONAD);
+        (address at,) = helper.remoteDeployment(home, DOMAIN_MONAD);
         assertEq(at, r2);
         vm.prank(guardian);
         v4.setReady(home, DOMAIN_MONAD, r2);
@@ -257,7 +257,7 @@ contract V4RemoteForkTest is V4Fixture {
     function test_I4_remoteDeploysAnyDay() public {
         vm.prank(home);
         address r = v4.registerRemote(DOMAIN_MONAD, remoteSk);
-        (, bytes memory createCall) = v4.remoteDeployment(home, DOMAIN_MONAD);
+        (, bytes memory createCall) = helper.remoteDeployment(home, DOMAIN_MONAD);
         vm.selectFork(monadFork);
         deal(M_USDC, r, 100e6);
         vm.warp(vm.getBlockTimestamp() + 400 days);
@@ -274,7 +274,7 @@ contract V4RemoteForkTest is V4Fixture {
         vm.prank(home);
         address r = v4.registerRemote(DOMAIN_MONAD, remoteSk);
         _init(home, ConfigIdV4.wrap(bytes32(uint256(0x99))), C * 2, 2, new uint256[](0));
-        (address at,) = v4.remoteDeployment(home, DOMAIN_MONAD);
+        (address at,) = helper.remoteDeployment(home, DOMAIN_MONAD);
         assertEq(at, r);
     }
 

@@ -11,6 +11,7 @@ import {
     VaultEntryV4
 } from "../src/MamoruActionPolicyV4.sol";
 import {MamoruGasPolicyV2} from "../src/MamoruGasPolicyV2.sol";
+import {MamoruRegistry} from "../src/MamoruRegistry.sol";
 import {ConfigIdV4} from "../src/SmartSessionTypes.sol";
 
 /// A registry that returns whatever entry it is told to: V4's own bounds must refuse what MamoruRegistry never stores.
@@ -32,6 +33,31 @@ contract LooseRegistry {
     }
 }
 
+struct MarketParamsT {
+    address loanToken;
+    address collateralToken;
+    address oracle;
+    address irm;
+    uint256 lltv;
+}
+
+interface IMorphoT {
+    function createMarket(MarketParamsT memory marketParams) external;
+    function market(bytes32 id) external view returns (uint128, uint128, uint128, uint128, uint128, uint128);
+}
+
+interface IMetaMorphoT {
+    function setCurator(address) external;
+    function setIsAllocator(address, bool) external;
+    function submitCap(MarketParamsT memory marketParams, uint256 newSupplyCap) external;
+    function acceptCap(MarketParamsT memory marketParams) external;
+    function setSupplyQueue(bytes32[] calldata newSupplyQueue) external;
+}
+
+interface IERC4626T {
+    function convertToAssets(uint256 shares) external view returns (uint256);
+}
+
 interface IMetaMorphoFactoryT {
     function createMetaMorpho(address owner, uint256 timelock, address asset, string memory name, string memory symbol, bytes32 salt)
         external
@@ -46,6 +72,8 @@ interface IMetaMorphoFactoryT {
  * Plus an invariant run on the fork (LeftClawV2Invariants' shape) and the residual of the vault family.
  */
 contract V4LeftClawTest is V4Fixture {
+    address constant MORPHO = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
+
     function setUp() public {
         _forkBase();
         _listPool(POOL_BTC, 100, 0, 0, 10_000);
@@ -100,25 +128,70 @@ contract V4LeftClawTest is V4Fixture {
         assertEq(bucket, 100e6, "refilled bucket read as spent");
     }
 
-    /// Spec 010 r1 finding 3, the residual: anyone can create a MetaMorpho vault through the pinned factory, so a
-    /// factory vault with a hostile curator passes V4's membership check once the admin lists it (after 72 h in public,
-    /// guardian can cancel). What bounds it is the vault's share of the bucket, the 24 h breaker and the 30-day cap:
-    /// at the loosest entry (ratio 10,000) the account can lose at most C in a day through it.
-    function test_factoryVaultByAnyoneIsAdmissibleButCapped() public {
-        vm.prank(attacker);
-        address v = IMetaMorphoFactoryT(0xFf62A7c278C62eD665133147129245053Bbf5918).createMetaMorpho(
+    /// Review r1 of #200 (P1): the funds at risk in one listed vault are capped, not only the deposit rate. The vault
+    /// is a hostile curator's own: created by the attacker through the pinned MetaMorpho factory (so V4's membership
+    /// check passes), with an idle USDC market as its only market, listed by a compromised admin at the loosest
+    /// entry V4 takes (MAX_VAULT_RATIO_BPS, half of C). The account's position never passes ratio x C, by the vault's
+    /// own accounting rounded against the depositor: the review's four deposits of C spaced past every window now stop
+    /// at 0.5C in total.
+    function test_hostileCuratorVaultExposureCapped() public {
+        address v = _hostileCuratorVault();
+        assertEq(helper.vaultAsset(v), USDC, "an attacker's own factory vault passes V4's membership check");
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(MamoruRegistry.BadEntry.selector, 11));
+        reg.queue(MamoruRegistry.Kind.Vault, bytes32(uint256(uint160(v))), abi.encode(uint16(5_001)));
+        _listVault(v, 5_000);
+        _approveV4(acct, USDC, type(uint256).max);
+        uint256 cap = uint256(C) * 5_000 / 10_000;
+        vm.prank(acct);
+        v4.deposit(v, cap); // the whole share, in one call
+        vm.prank(acct);
+        vm.expectPartialRevert(MamoruActionPolicyV4.VaultExposure.selector);
+        v4.deposit(v, 1);
+        for (uint256 k; k < 3; k++) {
+            _nextBlock(32 days); // past the bucket, the breaker and the 30-day window
+            vm.prank(acct);
+            vm.expectPartialRevert(MamoruActionPolicyV4.VaultExposure.selector);
+            v4.deposit(v, uint256(C));
+            vm.prank(acct);
+            vm.expectPartialRevert(MamoruActionPolicyV4.VaultExposure.selector);
+            v4.deposit(v, 1);
+        }
+        uint256 held = IERC4626T(v).convertToAssets(IERC20T(v).balanceOf(acct));
+        console2.log("held in the hostile curator's vault after 4 attempts over 96 days (USDC units)", held);
+        assertLe(held, cap, "funds at risk in one vault <= ratio x C");
+        // a redeem frees room again: the cap is on the position, not on history
+        uint256 shares = IERC20T(v).balanceOf(acct);
+        _approveV4(acct, v, shares / 2);
+        vm.prank(acct);
+        v4.redeem(v, shares / 2);
+        vm.prank(acct);
+        v4.deposit(v, cap / 4);
+        assertLe(IERC4626T(v).convertToAssets(IERC20T(v).balanceOf(acct)), cap);
+    }
+
+    /// A MetaMorpho v1.1 vault the attacker owns, curates and allocates, whose only market is Morpho Blue's idle USDC
+    /// market (no collateral, no oracle): deposits sit in it, and its curator controls where they go next.
+    function _hostileCuratorVault() internal returns (address v) {
+        MarketParamsT memory idle = MarketParamsT(USDC, address(0), address(0), address(0), 0);
+        bytes32 id = keccak256(abi.encode(idle));
+        (,,,, uint128 lastUpdate,) = IMorphoT(MORPHO).market(id);
+        if (lastUpdate == 0) IMorphoT(MORPHO).createMarket(idle);
+        vm.startPrank(attacker);
+        v = IMetaMorphoFactoryT(0xFf62A7c278C62eD665133147129245053Bbf5918).createMetaMorpho(
             attacker, 1 days, USDC, "evil", "EVIL", bytes32("x")
         );
-        assertEq(helper.vaultAsset(v), USDC, "an attacker's own factory vault passes V4's membership check");
-        // The cap, shown on a real third-party factory vault (steakUSDC) at the loosest entry
-        _listVault(STEAK_USDC, 10_000);
-        _approveV4(acct, USDC, type(uint256).max);
-        vm.prank(acct);
-        v4.deposit(STEAK_USDC, uint256(C)); // the whole bucket, in one call
-        vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BudgetExceeded.selector, address(0), 1));
-        v4.deposit(STEAK_USDC, 1);
-        console2.log("most an account can put into one listed factory vault in 24 h (USDC units)", uint256(C));
+        IMetaMorphoT(v).setCurator(attacker);
+        IMetaMorphoT(v).setIsAllocator(attacker, true);
+        IMetaMorphoT(v).submitCap(idle, type(uint184).max);
+        vm.stopPrank();
+        _nextBlock(1 days + 1);
+        vm.startPrank(attacker);
+        IMetaMorphoT(v).acceptCap(idle);
+        bytes32[] memory q = new bytes32[](1);
+        q[0] = id;
+        IMetaMorphoT(v).setSupplyQueue(q);
+        vm.stopPrank();
     }
 }
 

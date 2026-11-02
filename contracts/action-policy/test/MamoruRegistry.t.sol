@@ -206,11 +206,12 @@ contract MamoruRegistryTest is Test {
         vm.expectRevert(abi.encodeWithSelector(MamoruRegistry.BadEntry.selector, 6));
         reg.queue(MamoruRegistry.Kind.Pool, k, abi.encode(uint32(1800), uint32(300), uint24(10), int24(0), uint24(0), uint16(0)));
         vm.expectRevert(abi.encodeWithSelector(MamoruRegistry.BadEntry.selector, 11));
-        reg.queue(MamoruRegistry.Kind.Vault, _key(vault), abi.encode(uint16(10_001)));
+        reg.queue(MamoruRegistry.Kind.Vault, _key(vault), abi.encode(uint16(5_001))); // at most half of C in a vault
         vm.expectRevert(abi.encodeWithSelector(MamoruRegistry.BadEntry.selector, 0));
         reg.queue(MamoruRegistry.Kind.Vault, bytes32(0), abi.encode(uint16(1)));
-        // the extreme admissible entry queues
+        // the extreme admissible entries queue
         reg.queue(MamoruRegistry.Kind.Pool, k, abi.encode(uint32(86_400), uint32(60), uint24(500), int24(0), uint24(500), uint16(10_000)));
+        reg.queue(MamoruRegistry.Kind.Vault, _key(vault), abi.encode(uint16(5_000)));
         vm.stopPrank();
     }
 

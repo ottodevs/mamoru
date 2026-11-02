@@ -58,6 +58,8 @@ Residual (accepted in the spec): a compromised (not lost) passkey controls every
 
 Charged: swaps (amountIn at the range edge that values it highest), mints and increases (desired amounts, same valuation), vault deposits (assets). Not charged: decrease, collect, burn (the band bounds their price), redeem (value returns to the account), bridge (value stays the user's, bounded by V4 on the other chain). Because the breaker never lets the crossing call execute, the stated bounds are hard: C per 24 h, 3C per 30 days, 10C between reviews, per chain, times at most MAX_CHAINS (4) chains per account.
 
+**Vaults: what is at risk is capped, not only the deposit rate** (review r1 of #200, P1). A vault entry's ratio is at most `MAX_VAULT_RATIO_BPS` (5,000: half of C), in the registry and in V4. At every deposit, the account's current position in the vault, by the vault's own accounting rounded against the depositor (`previewMint` of its shares), plus the deposit must stay within `ratioBps x C`. So the funds at risk in one listed vault are at most `ratioBps x C <= C/2` per chain, however the deposits are spaced (`test_hostileCuratorVaultExposureCapped`: a hostile curator's own factory vault, four attempts over 96 days, 0.5C held). Residual: the cap reads the vault's accounting, so after a vault reports a loss the account may deposit up to the cap again; each such refill is still bounded by the bucket, the breaker, the 30-day cap and the review threshold, and ops removes a vault that reports a loss (removal is immediate).
+
 ## I6: gas (`MamoruGasPolicyV2`)
 
 V1's per-op caps, plus a per-account bucket per window and a cumulative `GAS_REVIEW` (0.01 ETH on Base, 5 MON on Monad, 0 elsewhere: fail closed). Each op is charged at validation from its own capped fields, `(call + verification + preVerification + paymaster limits) x maxFeePerGas`, the EntryPoint prefund; an op that would cross either is rejected. Only SmartSession can charge (V1 let any caller write its own slot; V2's per-account state forbids it). Measured through the EntryPoint: at the caps, 3 griefing ops per day, 19 in total, then every op refused until the guardian reviews; the Safe paid 0.00053 ETH for them (the charge, 0.00988 ETH, is the prefund bound).
@@ -70,7 +72,7 @@ Guardian: `pause`, `unpause`, `review` (V4 and the gas policy), `setReady` / `cl
 
 | Who | Bound | Measured |
 |---|---|---|
-| Leaked session key | The whole permitted spend is the conservative bound: C per 24 h, 3C per 30 days, 10C per review, per chain. | Single-block sandwich on WETH/USDC 0.3 % with the registry at its loosest (band 500, ratio 10,000): **5.0 % of C per day** (501 bps; 10,000 USDC cap, 9,498 charged, 501.55 lost), stopped by the bucket. The bound is reached through a vault: anyone can create a MetaMorpho vault through the pinned factory (`test_factoryVaultByAnyoneIsAdmissibleButCapped`); once listed at ratio 10,000 a hostile curator can take up to **C per 24 h** per chain. |
+| Leaked session key | Swaps and positions: the whole permitted spend, C per 24 h, 3C per 30 days, 10C per review, per chain. One listed vault: the funds at risk in it are at most `ratioBps x C <= C/2` at any time (live position cap), with refills after a reported loss inside the spend limits. | Single-block sandwich on WETH/USDC 0.3 % with the registry at its loosest (band 500, ratio 10,000): **5.0 % of C per day** (501 bps; 10,000 USDC cap, 9,498 charged, 501.55 lost), stopped by the bucket. Anyone can create a MetaMorpho vault through the pinned factory; once listed (72 h in public), a hostile curator holds at most **C/2** of the account per chain (`test_hostileCuratorVaultExposureCapped`). |
 | Leaked session key, gas | Gas bucket per window, then GAS_REVIEW per chain. | Above. |
 | Leaked registry admin | Each addition waits 72 h in public; guardian cancels. Then the session-key bound. Cannot name a token, router, manager, messenger, Safe stack or remote. | Router/messenger/NPM entries and an EURC pool refused; a thin trap pool refused by depth. |
 | Admin + session key | Same as the session key. | |
@@ -79,7 +81,13 @@ Guardian: `pause`, `unpause`, `review` (V4 and the gas policy), `setReady` / `cl
 
 ## Migration (v2-v6 -> V4)
 
-One owner Safe transaction: `removeSession` for every old id, self-attest V4 and the gas policy, enable the V4 session (positions admitted in its Init), then `MamoruMigrationCheck.assertOnly(account, [v4 id])`, which reads SmartSession's own `getPermissionIDs` and reverts unless the V4 session is the only one enabled; the Safe then reverts the whole transaction (GS013). `assertNone(account, ids)` is the spec's narrower check. Measured: 1.66M gas for a v6-shaped account (9 + 9 + 3 actions). Open: an owner-signed ENABLE-mode payload of an old session that was never used could still enable it later; the migration should also `revokeEnableSignature` for every old id (operator, #293).
+One owner Safe transaction: `removeSession` for every old id; `revokeEnableSignature` for every old id; self-attest V4 and the gas policy; enable the V4 session (positions admitted in its Init); then `MamoruMigrationCheck.assertMigrated(account, [v4 id], oldIds, noncesBefore)`. The check reverts unless:
+- the V4 session is the only one enabled, read from SmartSession's own `getPermissionIDs` (`assertOnly`);
+- every old id's ENABLE nonce (`getNonce`) moved past the value the operator read when building the transaction.
+
+On a revert the Safe reverts the whole transaction (GS013).
+
+Why the revocation (review r1 of #200, P1): `removeSession` does not touch `$signerNonce[id][account]`, over which SmartSession verifies an owner-signed ENABLE payload. An unused payload from a v2-v6 renewal would otherwise re-enable the old session after the migration, outside V4. The fork test shows exactly that on the first version of the migration (`test_enableReplayReEnablesAnOldSessionWithoutRevocation`), and shows it refused after the fix (`test_enableReplayRefusedAfterMigration`). `assertNone(account, ids)` remains as the spec's narrower check. Measured: 1.73M gas for a v6-shaped account (9 + 9 + 3 actions).
 
 ## ERC-7562
 

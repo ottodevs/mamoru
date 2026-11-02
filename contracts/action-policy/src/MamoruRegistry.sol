@@ -24,7 +24,7 @@ pragma solidity ^0.8.28;
  * host this registry at the pinned address, so it cannot host V4's registry at all.
  *
  * Bounds are V3's hard bounds on the Uniswap parameters (MamoruActionPolicyV3 MIN_/MAX_ constants, LeftClaw M-1's
- * window ratio), `ratioBps <= 10,000`, `DELAY >= 48 h`, and at most MAX_CHAINS chains per account (the home chain plus
+ * window ratio), `ratioBps <= 10,000` for a pool and `<= 5,000` for a vault, `DELAY >= 48 h`, and at most MAX_CHAINS chains per account (the home chain plus
  * at most MAX_CHAINS - 1 routes). V4 holds the same constants and refuses an entry outside them.
  */
 contract MamoruRegistry {
@@ -39,6 +39,8 @@ contract MamoruRegistry {
     uint24 public constant MAX_BAND = 500;
     int24 public constant MAX_TICK = 887_272;
     uint16 public constant MAX_RATIO_BPS = 10_000;
+    /// At most half of C in any one vault (MamoruActionPolicyV4.MAX_VAULT_RATIO_BPS; review r1 of #200, P1).
+    uint16 public constant MAX_VAULT_RATIO_BPS = 5_000;
 
     enum Kind {
         Pool,
@@ -232,7 +234,7 @@ contract MamoruRegistry {
         if (kind == Kind.Vault) {
             if (params.length != 32) revert BadEntry(10);
             uint16 r = abi.decode(params, (uint16));
-            if (r == 0 || r > MAX_RATIO_BPS) revert BadEntry(11);
+            if (r == 0 || r > MAX_VAULT_RATIO_BPS) revert BadEntry(11);
             return;
         }
         if (params.length != 6 * 32) revert BadEntry(1);

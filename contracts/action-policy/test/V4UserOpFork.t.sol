@@ -8,6 +8,32 @@ import {MamoruGasPolicyV2} from "../src/MamoruGasPolicyV2.sol";
 import {MamoruMigrationCheck} from "../src/MamoruMigrationCheck.sol";
 import {ConfigIdV4, PackedUserOperationV4, Session, PolicyData, ActionData} from "../src/SmartSessionTypes.sol";
 
+interface ISmartSessionNonce {
+    function getNonce(bytes32 permissionId, address account) external view returns (uint256);
+    function revokeEnableSignature(bytes32 permissionId) external;
+    function getSessionDigest(bytes32 permissionId, address account, Session memory data, uint8 mode)
+        external
+        view
+        returns (bytes32);
+}
+
+interface ISafeDomain {
+    function domainSeparator() external view returns (bytes32);
+}
+
+/// SmartSession DataTypes.sol: ChainDigest, EnableSession.
+struct ChainDigestT {
+    uint64 chainId;
+    bytes32 sessionDigest;
+}
+
+struct EnableSessionT {
+    uint8 chainDigestIndex;
+    ChainDigestT[] hashesAndChainIds;
+    Session sessionToEnable;
+    bytes permissionEnableSig;
+}
+
 /// Stand-in for the v2-v6 action policies of the old sessions a migration removes (removeSession never calls them).
 contract OldPolicy {
     function supportsInterface(bytes4 id) external pure returns (bool) {
@@ -34,6 +60,11 @@ contract V4UserOpForkTest is V4Fixture {
     address safe;
     bytes32 pid;
     MamoruMigrationCheck check;
+    // SmartSession HashLib.sol
+    bytes32 constant CHAIN_SESSION_TYPEHASH = 0x1ea7e4bc398fa0ccd68d92b5d8931a3fd93eebe1cf0391b4ba28935801af7c80;
+    bytes32 constant MULTICHAIN_SESSION_TYPEHASH = 0x0c9d02fb89a1da34d66ea2088dc9ee6a58efee71cef6f1bb849ed74fc6003d98;
+    bytes32 constant MULTICHAIN_DOMAIN_SEPARATOR = 0x057501e891776d1482927e5f094ae44049a4d893ba2d7b334dd7db8d38d3a0e1;
+    bytes32 constant SAFE_MSG_TYPEHASH = 0x60b3cbf8b4a223d68d641b3b6ddf9a298e7f33710cf3d3a9d1146b5a6150fbca;
 
     function setUp() public {
         vm.createSelectFork(vm.envOr("BASE_FORK_RPC_URL", string("https://mainnet.base.org")), BASE_BLOCK);
@@ -292,9 +323,16 @@ contract V4UserOpForkTest is V4Fixture {
         (tokenId,) = _mintDirect(safe, 1_000e6, 0.01e8);
     }
 
-    /// Spec 010 "Migration": ONE Safe tx: removeSession for every old id, self-attest V4 and the gas policy, enable
-    /// the V4 session (the account's positions admitted in its Init), then MamoruMigrationCheck.assertOnly.
-    function _migration(Session[] memory old, uint256 removeCount, uint256 tokenId) internal view returns (bytes memory packed, bytes32 v4pid) {
+    /// Spec 010 "Migration" with review r1 of #200 (P1): ONE Safe tx: removeSession for the first `removeCount` old ids,
+    /// revokeEnableSignature for the first `revokeCount` (it bumps each id's ENABLE nonce, so no owner-signed ENABLE
+    /// payload made before the migration verifies any more), self-attest V4 and the gas policy, enable the V4 session
+    /// (the account's positions admitted in its Init), then MamoruMigrationCheck.assertMigrated over the nonces read now.
+    /// `legacy`: the first version of this PR (no revocation, assertOnly), to show the vector the review found.
+    function _migration(Session[] memory old, uint256 removeCount, uint256 revokeCount, uint256 tokenId, bool legacy)
+        internal
+        view
+        returns (bytes memory packed, bytes32 v4pid)
+    {
         uint256[] memory admit = new uint256[](1);
         admit[0] = tokenId;
         Session[] memory nu = new Session[](1);
@@ -302,24 +340,145 @@ contract V4UserOpForkTest is V4Fixture {
         v4pid = _pid(nu[0]);
         address[] memory mods = new address[](2);
         (mods[0], mods[1]) = (address(v4), address(gasPol));
+        bytes32[] memory ids = new bytes32[](old.length);
+        uint256[] memory noncesBefore = new uint256[](old.length);
+        for (uint256 i; i < old.length; i++) {
+            ids[i] = _pid(old[i]);
+            noncesBefore[i] = ISmartSessionNonce(SMART_SESSION).getNonce(ids[i], safe);
+        }
         for (uint256 i; i < removeCount; i++) {
-            packed = abi.encodePacked(packed, _ms(0, SMART_SESSION, abi.encodeCall(ISmartSessionT.removeSession, (_pid(old[i])))));
+            packed = abi.encodePacked(packed, _ms(0, SMART_SESSION, abi.encodeCall(ISmartSessionT.removeSession, (ids[i]))));
+        }
+        for (uint256 i; i < (legacy ? 0 : revokeCount); i++) {
+            packed = abi.encodePacked(packed, _ms(0, SMART_SESSION, abi.encodeCall(ISmartSessionNonce.revokeEnableSignature, (ids[i]))));
         }
         bytes32[] memory keep = new bytes32[](1);
         keep[0] = v4pid;
+        bytes memory last = legacy
+            ? abi.encodeCall(MamoruMigrationCheck.assertOnly, (safe, keep))
+            : abi.encodeCall(MamoruMigrationCheck.assertMigrated, (safe, keep, ids, noncesBefore));
         packed = abi.encodePacked(
             packed,
             _trustAndAttest(safe, mods),
             _ms(0, SMART_SESSION, abi.encodeCall(ISmartSessionT.enableSessions, (nu))),
-            _ms(0, address(check), abi.encodeCall(MamoruMigrationCheck.assertOnly, (safe, keep)))
+            _ms(0, address(check), last)
         );
+    }
+
+    function _execMigration(bytes memory packed) internal returns (bool ok, bytes memory err) {
+        address o = vm.addr(ownerKey);
+        bytes memory sig = abi.encodePacked(bytes32(uint256(uint160(o))), bytes32(0), uint8(1));
+        vm.prank(o);
+        (ok, err) = safe.call(
+            abi.encodeCall(ISafeT.execTransaction, (MULTISEND, 0, _multiSend(packed), 1, 0, 0, 0, address(0), payable(address(0)), sig))
+        );
+    }
+
+    // ------------------------------------------------------------ ENABLE payloads (review r1 of #200, P1)
+
+    /// An owner-signed SmartSession ENABLE payload for `s` on `safe`, signed now (over the current ENABLE nonce): what a
+    /// v2-v6 renewal could have produced and an old session key's holder could have kept unused.
+    function _ownerSignedEnable(Session memory s) internal view returns (EnableSessionT memory e) {
+        bytes32 digest = ISmartSessionNonce(SMART_SESSION).getSessionDigest(_pid(s), safe, s, 1); // mode ENABLE
+        e.hashesAndChainIds = new ChainDigestT[](1);
+        e.hashesAndChainIds[0] = ChainDigestT(uint64(block.chainid), digest);
+        e.sessionToEnable = s;
+        bytes32 chainsHash = keccak256(abi.encodePacked(keccak256(abi.encode(CHAIN_SESSION_TYPEHASH, uint64(block.chainid), digest))));
+        bytes32 hash = keccak256(abi.encodePacked(bytes2(0x1901), MULTICHAIN_DOMAIN_SEPARATOR, keccak256(abi.encode(MULTICHAIN_SESSION_TYPEHASH, chainsHash))));
+        // Safe7579.isValidSignature with validator address(0): Safe.checkSignatures over the SafeMessage of `hash`
+        bytes32 msgHash = keccak256(
+            abi.encodePacked(
+                bytes2(0x1901), ISafeDomain(safe).domainSeparator(), keccak256(abi.encode(SAFE_MSG_TYPEHASH, keccak256(abi.encode(hash))))
+            )
+        );
+        (uint8 v, bytes32 r, bytes32 sg) = vm.sign(ownerKey, msgHash);
+        e.permissionEnableSig = abi.encodePacked(address(0), r, sg, v);
+    }
+
+    /// A userOp in SmartSession ENABLE mode: the payload plus the old session key's signature, one call the old
+    /// session's policies admit.
+    function _enableModeOp(EnableSessionT memory e) internal view returns (PackedUserOperationV4 memory op) {
+        op = _op(safe, _single(address(0x1000), abi.encodeWithSelector(0x095ea7b3, attacker, 1)), bytes32(0));
+        bytes32 h = IEntryPointT(ENTRY_POINT).getUserOpHash(op);
+        (uint8 v, bytes32 r, bytes32 sg) = vm.sign(sessionKey, keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", h)));
+        op.signature = abi.encodePacked(uint8(1), _flzLiterals(abi.encode(e, abi.encodePacked(r, sg, v))));
+    }
+
+    /// A valid FastLZ stream made of literal runs only (control byte = run length - 1, runs of at most 32 bytes), which
+    /// SmartSession's `flzDecompress` (Solady LibZip) expands back to `data`.
+    function _flzLiterals(bytes memory data) internal pure returns (bytes memory out) {
+        for (uint256 i; i < data.length; i += 32) {
+            uint256 n = data.length - i < 32 ? data.length - i : 32;
+            bytes memory chunk = new bytes(n);
+            for (uint256 k; k < n; k++) {
+                chunk[k] = data[i + k];
+            }
+            out = abi.encodePacked(out, uint8(n - 1), chunk);
+        }
+    }
+
+    function _sendOp(PackedUserOperationV4 memory op) internal returns (bool ok) {
+        PackedUserOperationV4[] memory ops = new PackedUserOperationV4[](1);
+        ops[0] = op;
+        vm.prank(bundler, bundler);
+        (ok,) = ENTRY_POINT.call(abi.encodeCall(IEntryPointT.handleOps, (ops, payable(bundler))));
+    }
+
+    /// The vector, on the first version of the migration (no revocation): an ENABLE payload the owner signed before
+    /// the migration re-enables the removed session afterwards, and its key acts outside V4.
+    function test_enableReplayReEnablesAnOldSessionWithoutRevocation() public {
+        (Session[] memory old, uint256 tokenId) = _v6Account();
+        vm.prank(safe);
+        ISmartSessionT(SMART_SESSION).removeSession(_pid(old[0])); // the payload is for a session not enabled now,
+        EnableSessionT memory e = _ownerSignedEnable(old[0]); //     as when a renewal was prepared and never sent
+        Session[] memory rest = new Session[](2);
+        (rest[0], rest[1]) = (old[1], old[2]);
+        (bytes memory packed,) = _migration(rest, 2, 0, tokenId, true);
+        (bool ok,) = _execMigration(packed);
+        assertTrue(ok, "legacy migration");
+        assertTrue(_sendOp(_enableModeOp(e)), "the old payload still enables");
+        assertTrue(ISmartSessionT(SMART_SESSION).isPermissionEnabled(_pid(e.sessionToEnable), safe), "old session back");
+    }
+
+    /// The fix: the migration revokes every old id's ENABLE signature, so the same payload is refused at validation,
+    /// the old session stays removed, and its key cannot act.
+    function test_enableReplayRefusedAfterMigration() public {
+        (Session[] memory old, uint256 tokenId) = _v6Account();
+        EnableSessionT memory e = _ownerSignedEnable(old[0]); // signed while old[0] is enabled: nonce 0
+        uint256 n0 = ISmartSessionNonce(SMART_SESSION).getNonce(_pid(old[0]), safe);
+        (bytes memory packed, bytes32 v4pid) = _migration(old, 3, 3, tokenId, false);
+        (bool ok,) = _execMigration(packed);
+        assertTrue(ok, "migration");
+        assertEq(ISmartSessionNonce(SMART_SESSION).getNonce(_pid(old[0]), safe), n0 + 1, "ENABLE nonce moved");
+        assertFalse(_sendOp(_enableModeOp(e)), "the old payload is refused at validation");
+        assertFalse(ISmartSessionT(SMART_SESSION).isPermissionEnabled(_pid(old[0]), safe), "old session stays removed");
+        _rejected(safe, _single(address(0x1000), abi.encodeWithSelector(0x095ea7b3, attacker, 1)), _pid(old[0])); // nor acts
+        assertEq(ISmartSessionT(SMART_SESSION).getPermissionIDs(safe).length, 1, "only V4's session");
+        assertTrue(ISmartSessionT(SMART_SESSION).isPermissionEnabled(v4pid, safe));
+    }
+
+    /// assertMigrated reverts the whole migration when one old id's ENABLE signature was not revoked.
+    function test_migrationMissingARevocationReverts() public {
+        (Session[] memory old, uint256 tokenId) = _v6Account();
+        (bytes memory packed, bytes32 v4pid) = _migration(old, 3, 2, tokenId, false); // forgets the third revocation
+        (bool ok, bytes memory err) = _execMigration(packed);
+        assertFalse(ok);
+        assertEq(keccak256(err), keccak256(abi.encodeWithSignature("Error(string)", "GS013")));
+        assertTrue(ISmartSessionT(SMART_SESSION).isPermissionEnabled(_pid(old[2]), safe), "nothing removed");
+        assertFalse(ISmartSessionT(SMART_SESSION).isPermissionEnabled(v4pid, safe), "V4 not enabled");
+        uint256[] memory before = new uint256[](1);
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = _pid(old[2]);
+        bytes32[] memory keep = ISmartSessionT(SMART_SESSION).getPermissionIDs(safe);
+        vm.expectRevert(abi.encodeWithSelector(MamoruMigrationCheck.EnableNotRevoked.selector, ids[0], 0));
+        check.assertMigrated(safe, keep, ids, before);
     }
 
     function test_gas_migrationOnV6ShapedAccount() public {
         (Session[] memory old, uint256 tokenId) = _v6Account();
-        (bytes memory packed, bytes32 v4pid) = _migration(old, 3, tokenId);
+        (bytes memory packed, bytes32 v4pid) = _migration(old, 3, 3, tokenId, false);
         uint256 g = _ownerTxGas(safe, MULTISEND, _multiSend(packed), 1);
-        console2.log("migration tx (removeSession x3 [9+9+3 actions] + attest + enable V4 w/ 1 admit + assertOnly)", g);
+        console2.log("migration tx (removeSession x3 [9+9+3 actions] + revokeEnableSignature x3 + attest + enable V4 w/ 1 admit + assertMigrated)", g);
         for (uint256 i; i < 3; i++) {
             assertFalse(ISmartSessionT(SMART_SESSION).isPermissionEnabled(_pid(old[i]), safe), "old session removed");
         }
@@ -335,7 +494,7 @@ contract V4UserOpForkTest is V4Fixture {
     /// is removed, V4 is not enabled.
     function test_migrationWithStaleSessionReverts() public {
         (Session[] memory old, uint256 tokenId) = _v6Account();
-        (bytes memory packed, bytes32 v4pid) = _migration(old, 2, tokenId); // forgets the third
+        (bytes memory packed, bytes32 v4pid) = _migration(old, 2, 3, tokenId, false); // forgets the third removal
         address o = vm.addr(ownerKey);
         bytes memory sig = abi.encodePacked(bytes32(uint256(uint160(o))), bytes32(0), uint8(1));
         vm.prank(o);

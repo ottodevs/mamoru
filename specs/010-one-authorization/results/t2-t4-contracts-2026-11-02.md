@@ -18,7 +18,7 @@ call its own transaction, cold state, intrinsic gas included where it says "tx")
 | `src/MamoruV4Chains.sol` | The per-chain pinned tuple (Base, Monad). |
 | `src/MamoruActionPolicyV4.sol` | T3: V4, and `MamoruV4Helper` (V3's price checks, the depth walk, the remote derivation), which V4's constructor creates. |
 | `src/MamoruGasPolicyV2.sol` | T3: per-op caps, gas bucket, GAS_REVIEW. |
-| `src/MamoruMigrationCheck.sol` | T3: `assertNone` (spec) and `assertOnly` (stronger). |
+| `src/MamoruMigrationCheck.sol` | T3: `assertNone` (spec), `assertOnly` and `assertMigrated` (only V4 enabled, and every old id's ENABLE nonce moved). |
 | `src/SmartSessionTypes.sol` | SmartSession's structs, as V4 encodes them. |
 | `test/OneAuthRemoteInitFork.t.sol` | T1b. |
 | `test/MamoruRegistry.t.sol`, `test/MamoruGasPolicyV2.t.sol` | T2, I6 units. |
@@ -26,9 +26,9 @@ call its own transaction, cold state, intrinsic gas included where it says "tx")
 | `foundry.toml` | V4's file compiles viaIR at 200 runs (stack depth). |
 | `SECURITY.md` | V4's threat model, check by check. |
 
-Sizes (runtime, EIP-170 24,576): V4 24,249 (327 to spare), helper 20,964, gas policy 6,969, registry 5,840,
-MamoruRemoteInit 1,719, MigrationCheck 1,143. V4's init code (with the helper and MamoruRemoteInit) 47,561 (EIP-3860
-49,152).
+Sizes (runtime, EIP-170 24,576), after review r1 of #200: V4 23,931 (645 to spare; `remoteDeployment` moved to the
+helper to make room for the vault cap), helper 21,913, gas policy 6,969, MamoruRemoteInit 1,719, MigrationCheck 2,601.
+V4's init code (with the helper and MamoruRemoteInit) 48,192 (EIP-3860 49,152).
 
 ## 1. T1b: the canonical remote initializer
 
@@ -58,7 +58,7 @@ setup delegatecalls MamoruRemoteInit directly.
 The encoders V4 shares with today's TypeScript (`Safe.setup` arguments, MultiSend packing, `configure`,
 `createProxyWithNonce`, the factory's CREATE2) rebuild `test/fixtures/remote-safe-monad.json`'s factory call and
 address byte for byte (`V4RemoteParity`). The V4 initializer itself differs from today's design-C one (MamoruRemoteInit
-instead of the launchpad, one fallback session); #293 builds the TypeScript twin against `V4.remoteDeployment`.
+instead of the launchpad, one fallback session); #293 builds the TypeScript twin against `MamoruV4Helper.remoteDeployment`.
 
 ## 2. Deviations from the spec, with reasons
 
@@ -93,8 +93,12 @@ instead of the launchpad, one fallback session); #293 builds the TypeScript twin
 13. **Depth walk capped at 64 ticks per direction** (only under-counts: refuses more). At MAX_BAND on a spacing-1 pool
     the uncapped walk would be ~1,000 cold reads.
 14. **Registry admin and guardian are immutable** (no rotation): a new admin means a new registry, hence a new V4.
-15. **`MamoruMigrationCheck.assertOnly`** besides the spec's `assertNone`: SmartSession's own `getPermissionIDs` must be
-    exactly the V4 session, so an id the inventory missed reverts the migration too. The migration test uses it.
+15. **`MamoruMigrationCheck.assertMigrated`** besides the spec's `assertNone`: SmartSession's own `getPermissionIDs` must be
+    exactly the V4 session, so an id the inventory missed reverts the migration too, and every old id's ENABLE nonce must
+    have moved (the migration revokes them, §7).
+17. **Vaults: a live position cap and a hard vault ratio** (review r1 of #200): `MAX_VAULT_RATIO_BPS` = 5,000 in V4 and in
+    the registry; a deposit is refused when the account's position in the vault (`previewMint` of its shares) plus the
+    deposit would pass ratio x C.
 16. A pause (breaker, review, guardian) ends with a renewal (a higher generation), as V3's did.
 
 ## 3. Gas
@@ -104,7 +108,7 @@ instead of the launchpad, one fallback session); #293 builds the TypeScript twin
 | Trust + self-attest V4 and MamoruGasPolicyV2 (owner tx, once per migrated account) | 451,344 |
 | enableSessions, the V4 fallback session, real Init, no admit (owner tx) | 732,782 |
 | Same, one position admitted | 796,170 |
-| **Migration tx, v6-shaped account**: removeSession x3 (9 + 9 + 3 actions) + attest + enable V4 (1 admit) + assertOnly | **1,655,283** |
+| **Migration tx, v6-shaped account**: removeSession x3 (9 + 9 + 3 actions) + revokeEnableSignature x3 + attest + enable V4 (1 admit) + assertMigrated | **1,728,621** |
 | handleOps: swap 1,000 USDC on USDC/cbBTC (approve + V4.swap) | 1,001,496 |
 | handleOps: mint (2 approves + V4.mint) | 1,169,874 |
 | handleOps: registerRemote | 372,242 |
@@ -130,11 +134,11 @@ every priced use (two directions, one cold `ticks()` read per boundary) plus V3'
 | MamoruActionPolicyV4Test (Base) | 24 | 0 |
 | V4BudgetTest (Base) | 6 | 0 |
 | V4LeftClawTest + V4LeftClawInvariants (12 runs x 20 calls) | 4 + 3 | 0 |
-| V4UserOpForkTest (Base, real SmartSession / EntryPoint) | 8 | 0 |
+| V4UserOpForkTest (Base, real SmartSession / EntryPoint) | 11 | 0 |
 | V4RemoteForkTest (Base + Monad) | 6 | 0 |
 | V4RemoteParityTest (TS fixture) | 2 | 0 |
-| **New, total** | **81** | 0 |
-| Whole `forge test -j 4` (V1-V3 suites included, unchanged) | 410 | 0 |
+| **New, total** | **84** | 0 |
+| Whole `forge test -j 4` (V1-V3 suites included, unchanged) | 413 | 0 |
 
 T4 checklist: V3's LeftClaw H-1, M-1, M-2 (x2), M-3 (x2), M-4, M-5 (x2), M-6, L-7 ported, plus the invariants; a thin
 trap pool after DELAY refused (depth); a non-pinned token pool refused (EURC/USDC); a hostile (non-factory) vault and
@@ -142,7 +146,10 @@ Aave's static aToken refused; the registry naming the router, the NPM or the mes
 table refused; approve to anything but V4 refused (directly and at validation); direct router, NPM, messenger, vault,
 transfer, self-call, empty call, empty batch, mixed batch refused at validation; a leftover (even unlimited) allowance on
 V4 inert; registerRemote with another account's state refused; burn without readiness refused; readiness cleared on an
-owner change; a migration with a stale session reverts (assertOnly and assertNone); gas griefing hits the bucket (3 ops)
+owner change; a migration with a stale session reverts (assertMigrated and assertNone); an old owner-signed ENABLE
+payload re-enables an old session on the first migration (the vector) and is refused after the fix; a migration that
+misses one revocation reverts; a hostile curator's own factory vault holds at most ratio x C after four deposits over
+96 days; gas griefing hits the bucket (3 ops)
 then GAS_REVIEW (19 ops; 0.00988 ETH charged, 0.00053 ETH actually paid); the breaker at C in 24 h; the 10C review; the
 rolling 3C over 30 days; the session cannot sign ERC-1271 for the Safe.
 
@@ -154,22 +161,25 @@ block (no TWAP moves). Each round the attacker pushes the spot to the edge of V4
 account swaps at the edge price, the attacker pushes back; then the same the other way. V4 stopped it after 5 rounds
 (9,498 USDC charged, the bucket's C): **loss 501.55 USDC = 5.0 % of C per day per chain (501 bps)** on the swap path.
 
-The stated bound is the whole permitted spend, **C per 24 h per chain** (3C per 30 days, 10C per review, x 4 chains),
-and it is reachable: anyone can create a MetaMorpho vault through the pinned factory (the test creates one and V4's
-membership check passes), so a compromised admin whose listing the guardian does not cancel within 72 h can route up to
-C a day into a vault whose curator takes it.
+The stated bounds (after review r1 of #200):
+- **Swaps and positions**: the whole permitted spend, C per 24 h per chain (3C per 30 days, 10C per review, x 4 chains).
+- **One listed vault**: the funds at risk in it are at most **ratioBps x C <= C/2 per chain**, a live cap on the position
+  (by the vault's own accounting, rounded against the depositor) checked at every deposit. Deposit throughput is not the
+  bound. Anyone can create a MetaMorpho vault through the pinned factory, so a hostile curator's vault can be listed by a
+  compromised admin whose queue entry the guardian does not cancel within 72 h. The test builds one (the attacker owns,
+  curates and allocates it, with an idle USDC market). After four deposit attempts over 96 days, spaced past every
+  window, it holds 0.5C (5,000 USDC on C = 10,000). Residual: after the vault reports a loss the account may deposit up
+  to the cap again. Each refill stays inside the spend limits, and ops removes the vault at once.
 
 ## 6. Open risks
 
-- **Hostile-curator MetaMorpho vault** (above): the factory check proves the code, not the curator. Mitigation is
-  operational (72 h public queue, ops alert on `Queued`, guardian cancel) and the vault's ratio. A curated allowlist of
-  vaults in V4 would close it at the price of the "no signature for a new vault" goal.
+- **Hostile-curator MetaMorpho vault**: now capped at ratio x C <= C/2 held at any time; refills after a reported loss
+  remain possible inside the spend limits. A curated vault allowlist in V4 would close it, at the price of the "no
+  signature for a new vault" goal.
 - **T7 deployment path**: the home enable flow attests V4 and the gas policy, so they must have ModuleRegistry records
   (`deployModule`). ModuleRegistry's code hash differs between Base and Monad (base.json / monad.json): T7 must confirm
   `deployModule` gives the same address on both, or deploy through the deterministic deployer and register the modules.
   The tests use the deterministic deployer (cross-chain) and `deployModule` (single chain) separately.
-- **Stale ENABLE-mode signatures**: an owner-signed ENABLE payload of an old session that was never used could enable
-  it after the migration; the migration should `revokeEnableSignature` each old id (#293).
 - **Guardian trust for readiness**: V4 cannot read the remote chain; a compromised guardian can mark V4's own computed
   address ready before it is deployed (funds still land only at the user's canonical Safe address).
 - **Gas**: every swap pays the depth walk (handleOps ~1.0M); fine under the 2M call cap at today's bands, a liveness
@@ -178,3 +188,20 @@ C a day into a vault whose curator takes it.
   the TypeScript side of the V4 initializer (#293); a deployment script with pinned init code hashes (T7).
 - **Accepted by the spec and unchanged**: a compromised passkey controls every remote until rotated; ERC-7562
   non-compliance (Mamoru bundles its own ops); Circle, Uniswap, Safe, SmartSession and Safe7579 as deployed.
+
+## 7. Operator notes for #293 (the migration transaction)
+
+Build ONE owner Safe transaction (MultiSend 1.4.1, delegatecall), in this order:
+1. `SmartSession.removeSession(id)` for every old Mamoru permission id of the account. The inventory comes from
+   SmartSession's events, cross-checked with `SmartSession.getPermissionIDs(account)`.
+2. `SmartSession.revokeEnableSignature(id)` for every old id (review r1 of #200, P1). `removeSession` leaves the id's
+   ENABLE nonce as it is, so an unused owner-signed ENABLE payload from a v2-v6 renewal would re-enable the old session
+   later. Revoking bumps `getNonce(id, account)`. Include ids whose sessions are already removed when any ENABLE payload
+   was ever produced for them.
+3. `ModuleRegistry.trustAttesters` + `attest` for V4 and MamoruGasPolicyV2 (the production enable flow).
+4. `SmartSession.enableSessions([the V4 session])`, with the account's positions in `InitV4.admit`.
+5. `MamoruMigrationCheck.assertMigrated(account, [V4 permission id], oldIds, noncesBefore)`. `noncesBefore[i]` is
+   `SmartSession.getNonce(oldIds[i], account)` read when the transaction is built. The call reverts (and with it the
+   Safe transaction) unless V4's session is the only one enabled and every old nonce moved.
+
+Measured: 1,728,621 gas for three old sessions (9 + 9 + 3 actions).
