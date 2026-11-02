@@ -27,7 +27,7 @@ const v6 = resolveV6Policy('base', { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTIO
 function pinned(r: Registry): Registry {
   const names = ['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'] as const
   const at = [D.registry, D.policy, D.gasPolicy, D.migrationCheck]
-  return { ...r, undeployed: [], entries: [...r.entries, ...names.map((name, i) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: at[i]!, codeHash: null }) as never)] }
+  return { ...r, undeployed: [], entries: [...r.entries.filter((e) => !(names as readonly string[]).includes(e.name)), ...names.map((name, i) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: at[i]!, codeHash: null }) as never)] }
 }
 const base6 = pinned(reg6)
 

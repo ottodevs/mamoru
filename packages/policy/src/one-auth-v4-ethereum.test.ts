@@ -53,9 +53,9 @@ describe('Ethereum in the V4 tables (otto/mamoru#307, #308)', () => {
     expect(c.perWindow).toBeLessThanOrEqual(2n * 10n ** 16n) // the policy refuses a bucket above GAS_REVIEW
   })
 
-  test('the ethereum registry resolves, and V4 is not pinned there until T7 deploys it', () => {
+  test('the ethereum registry resolves, with V4 pinned there by T7 (same address as Base)', () => {
     expect(registryFor(1)).toBe(ethereumRegistry)
-    expect(oneAuthV4Deployment(ethereumRegistry)).toBeNull()
+    expect(oneAuthV4Deployment(ethereumRegistry)?.policy).toBe(oneAuthV4Deployment(registryFor(8453))!.policy)
   })
 })
 

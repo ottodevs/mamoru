@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { decodeFunctionData, getAddress, keccak256, toHex, zeroAddress, type Hex } from 'viem'
-import { address, baseRegistry, moduleRegistryAbi, multiSendCallOnlyAbi, smartSessionAbi } from '@mamoru/registry'
+import { address, baseRegistry, ethereumRegistry, monadRegistry, moduleRegistryAbi, multiSendCallOnlyAbi, smartSessionAbi } from '@mamoru/registry'
 import { decodeGasCapsV2, decodeInitV4, GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment } from '@mamoru/policy'
 import { permissionIdOf } from '../sessions/index.ts'
 import { webAuthnSigner } from '../safe/index.ts'
@@ -57,8 +57,11 @@ describe('the V4 session', () => {
     expect(a.address).not.toBe(b.address) // the Init is part of the address
   })
 
-  test('the deployment is null until the four contracts are pinned (fail closed)', () => {
-    expect(oneAuthV4Deployment(baseRegistry)).toBeNull()
+  test('T7 (2 Nov): the four contracts are pinned at the same addresses on Base, Monad and Ethereum', () => {
+    const want = { registry: '0x2a70976970964faB1FBadaFF2f0b3851C2Cb74C7', policy: '0xb1383F8E5045aFdcfF2031743d3c25082C8858a4', gasPolicy: '0xe58dad8B381FF93A28Aa2A43De80acb96F535C7B', migrationCheck: '0xc04046b4649471875372FA9e800143491cD4fB31' }
+    for (const r of [baseRegistry, monadRegistry, ethereumRegistry]) expect(oneAuthV4Deployment(r) as Record<string, string> | null).toEqual(want)
+    // and the address is the script's pinned one (contracts/action-policy/script/DeployV4.s.sol EXPECTED_POLICY)
+    expect(readFileSync(new URL('../../../contracts/action-policy/script/DeployV4.s.sol', import.meta.url), 'utf8')).toContain(`EXPECTED_POLICY = ${want.policy}`)
   })
 })
 
@@ -129,7 +132,7 @@ describe('buildMigrateV4 (the builder the operator prepares with and the Worker 
   })
 
   test('refuses what the operator never prepares', () => {
-    expect(() => buildMigrateV4(input, baseRegistry)).toThrow() // V4 not pinned
+    expect(() => buildMigrateV4(input, { ...baseRegistry, entries: baseRegistry.entries.filter((e) => e.name !== 'MamoruActionPolicyV4'), undeployed: ['MamoruActionPolicyV4'] })).toThrow() // V4 not pinned
     expect(() => buildMigrateV4({ ...input, moveTo: SAFE, transfers: [] }, pinnedBase)).toThrow() // step 0 moves nothing
     expect(() => buildMigrateV4({ ...input, noncesBefore: ['0'] }, pinnedBase)).toThrow()
     expect(() => buildMigrateV4({ ...input, step: 1 }, pinnedBase)).toThrow() // step 1 names a home

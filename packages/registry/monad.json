@@ -217,12 +217,35 @@
       "role": "política de acción de las Safes propias en Monad (contracts/action-policy/src/MamoruActionPolicyV3.sol, otto/mamoru#251); desplegada en Monad el 2026-10-31 por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con ModuleRegistry.deployModule (script DeployV3.s.sol, pinned), tx 0xebe22a443b42cd6ca2c030dd56e15682ed154caef5039204419f2983e373ef88, bloque 118179730",
       "address": "0xd660610193851b0EF85bB526eea35A942cc4F934",
       "codeHash": "0xeda33ac759687545901552fcd408d9f592fdef9edb1693ad26971fcfcf4a053a"
+    },
+    {
+      "name": "MamoruRegistry",
+      "kind": "read",
+      "role": "MamoruRegistry de spec 010: pools, vaults y rutas con timelock de 72 h; ADMIN el Safe 1/1 0x109a3483F18FdF866955f13CC1a45C944d182e46 (temporal, #314), GUARDIAN 0xA8E6EF87e612fA5c54668Cc1fF0aC809e1321FdD; desplegado el 2026-11-02 (T7, otto/mamoru#292/#307) por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con script/DeployV4.s.sol en main 7845f8f0, misma dirección en Base, Monad y Ethereum; Sourcify exact_match; codeHash leído en el bloque 118824248, no en el del pin",
+      "address": "0x2a70976970964faB1FBadaFF2f0b3851C2Cb74C7",
+      "codeHash": "0x7600355273c8405039ac04afd18df9095cbb8c5a98ad10b474e79155f8915615"
+    },
+    {
+      "name": "MamoruActionPolicyV4",
+      "kind": "smart-sessions-policy",
+      "role": "MamoruActionPolicyV4 (una autorización, spec 010): la única política de la sesión V4 de cada cuenta; helper 0xcE3F72538476961CF1BA31Ac483a7998B66aaCac, remote init 0xeba5Fa4F7eFEbd5F5A1Ec278C4caF00CC24C23F0; desplegado el 2026-11-02 (T7, otto/mamoru#292/#307) por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con script/DeployV4.s.sol en main 7845f8f0, misma dirección en Base, Monad y Ethereum; Sourcify exact_match; codeHash leído en el bloque 118824248, no en el del pin",
+      "address": "0xb1383F8E5045aFdcfF2031743d3c25082C8858a4",
+      "codeHash": "0x4647129822bf39da6828b96c650736894c1ca9203f1cd47ee75e9ba9b8468db5"
+    },
+    {
+      "name": "MamoruGasPolicyV2",
+      "kind": "smart-sessions-policy",
+      "role": "MamoruGasPolicyV2: la única userOp policy de la sesión V4 (topes por op, bucket y GAS_REVIEW por cadena); desplegado el 2026-11-02 (T7, otto/mamoru#292/#307) por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con script/DeployV4.s.sol en main 7845f8f0, misma dirección en Base, Monad y Ethereum; Sourcify exact_match; codeHash leído en el bloque 118824248, no en el del pin",
+      "address": "0xe58dad8B381FF93A28Aa2A43De80acb96F535C7B",
+      "codeHash": "0x1df4655d0b0a8582b68a4630f213570a143800c1b489a6977117a08044c5b6c5"
+    },
+    {
+      "name": "MamoruMigrationCheck",
+      "kind": "read",
+      "role": "MamoruMigrationCheck: la comprobación final de la transacción de migración a V4 (solo queda la sesión V4); desplegado el 2026-11-02 (T7, otto/mamoru#292/#307) por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con script/DeployV4.s.sol en main 7845f8f0, misma dirección en Base, Monad y Ethereum; Sourcify exact_match; codeHash leído en el bloque 118824248, no en el del pin",
+      "address": "0xc04046b4649471875372FA9e800143491cD4fB31",
+      "codeHash": "0x57311ce323fd44ab4727b2c12aaeb5b9a2f6d0cd531978a659a4b5ed740ca769"
     }
   ],
-  "undeployed": [
-    { "name": "MamoruRegistry", "address": null },
-    { "name": "MamoruActionPolicyV4", "address": null },
-    { "name": "MamoruGasPolicyV2", "address": null },
-    { "name": "MamoruMigrationCheck", "address": null }
-  ]
+  "undeployed": []
 }

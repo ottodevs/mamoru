@@ -120,6 +120,9 @@ async function pin(lab: Lab, registry: Registry, stack: Record<string, Address>)
   for (const [name, a] of Object.entries(stack)) {
     const i = registry.undeployed.indexOf(name)
     if (i >= 0) registry.undeployed.splice(i, 1)
+    // since T7 (2 Nov) the names are pinned at mainnet's addresses: the fork's own deployment replaces them
+    const j = entries.findIndex((e) => e.name === name)
+    if (j >= 0) entries.splice(j, 1)
     entries.push({ name, kind: 'smart-sessions-policy', role: 'e2e-one-auth pin', address: a, codeHash: await readCodeHash(lab.client, a) } as never)
   }
 }
