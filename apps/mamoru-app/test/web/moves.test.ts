@@ -127,6 +127,17 @@ describe('move detail (#219)', () => {
     expect(stepLine(mint, 'out')).toBe('Opened a position in range')
   })
 
+  test('a merge (#220) says it folded two positions into one', () => {
+    const merge = { ...close, why: 'merge' as const }
+    const inc = eng('e', 'increase_liquidity', '2026-10-26T14:18:00.000Z', { tokenId: '6291301', tickLower: 11, tickUpper: 52 })
+    const m = (historyEntries([merge, swap, inc])[0] as { type: 'move'; move: Move }).move
+    expect(moveLine(m)).toBe('Merged your two USDC/USDT positions')
+    expect(moveLine({ ...m, open: null, stalled: true })).toBe('Closed your second USDC/USDT position')
+    expect(stepLine(merge, 'merge')).toBe('Closed the second position')
+    expect(stepLine(inc, 'merge')).toBe('Added to the position in range')
+    expect(moveReason('merge')).toContain('two positions in this pool')
+  })
+
   test('the reason is plain, and old rows get the general rule', () => {
     expect(moveReason('out')).toContain('left your range')
     expect(moveReason(undefined)).toContain('leaves it or comes close to its edge')

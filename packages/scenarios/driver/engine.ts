@@ -286,7 +286,7 @@ export type EngineConfig = {
    * otto/mamoru#218: this account's confirmed re-ranges from before this engine started (block timestamp and pool),
    * for the weekly cap and the cooldown across a restart. The newest also seeds `lastRerangeAt`. Absent: none.
    */
-  rerangeHistory?: { pool: string; at: bigint }[]
+  rerangeHistory?: { pool: string; at: bigint; merge?: true }[]
   /**
    * Live wait rule: since when each position was out of range at this account's last review before a restart, and the
    * block time of that review (`seenAt`). Kept only when the first review comes within OUT_OF_RANGE_SEED_GAP_S of it:
@@ -487,7 +487,7 @@ export class Engine {
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. */
   lastRerangeAt: bigint | null = null
   /** otto/mamoru#218: confirmed re-ranges (seeded, then appended on inclusion); handed to `decide` only when not empty. */
-  readonly reranges: { pool: string; at: bigint; block?: bigint }[] = []
+  readonly reranges: { pool: string; at: bigint; block?: bigint; merge?: true }[] = []
   /**
    * otto/mamoru#172: since when each position has been out of range, as this engine saw it (`outOfRangeSinceOf`).
    * Kept at every review; handed to `decide` only under a policy with `range.lazy`, so an eager observation stays
@@ -535,7 +535,7 @@ export class Engine {
     this.outOfRangeSeed = cfg.outOfRangeSeed
     // #218: a restart keeps the cooldown and the weekly count.
     for (const r of cfg.rerangeHistory ?? []) {
-      this.reranges.push({ pool: r.pool, at: r.at })
+      this.reranges.push({ pool: r.pool, at: r.at, ...(r.merge ? { merge: true as const } : {}) })
       if (this.lastRerangeAt === null || r.at > this.lastRerangeAt) this.lastRerangeAt = r.at
     }
   }
@@ -1152,7 +1152,8 @@ export class Engine {
     if (proposal.kind === 'rerange') {
       const inc = op.included!
       this.lastRerangeAt = (await this.client.getBlock({ blockNumber: inc.blockNumber })).timestamp
-      this.reranges.push({ pool: proposal.pool, at: this.lastRerangeAt, block: inc.blockNumber })
+      // #220: a merge keeps the cooldown and the re-mint path, not the weekly cap.
+      this.reranges.push({ pool: proposal.pool, at: this.lastRerangeAt, block: inc.blockNumber, ...(proposal.why === 'merge' ? { merge: true as const } : {}) })
       this.hooks.onReranged?.(proposal.pool, this.lastRerangeAt, inc.blockNumber)
       const i = this.allowedTokenIds.indexOf(proposal.tokenId)
       if (i >= 0) this.allowedTokenIds.splice(i, 1)

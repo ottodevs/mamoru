@@ -43,8 +43,9 @@ export type Observation = {
   /**
    * otto/mamoru#218: block timestamps of this account's confirmed re-ranges in the last 7 days, with the pool, for the
    * weekly cap (`policy.range.maxPerWeek`). Absent when there are none, so such an observation hashes as before.
+   * `merge` (#220): a close that folded a second position of the pool into the other; it keeps the cooldown, not the cap.
    */
-  recentReranges?: { pool: string; at: bigint }[]
+  recentReranges?: { pool: string; at: bigint; merge?: true }[]
   /**
    * otto/mamoru#184: the positions every other Mamoru account holds on this chain, as the operator last observed them.
    * Depth sizing counts them with the account's own, so Mamoru as a whole stays under the share limit of a pool.
@@ -293,9 +294,10 @@ export type RerangeProposal = {
   liquidity: bigint
   /**
    * otto/mamoru#219: why the range moves, for the owner's history: the price left the range (`out`), sat near an
-   * edge (`edge`), or volatility widened it early (`widen`); and the range it leaves. Not part of any call.
+   * edge (`edge`), or volatility widened it early (`widen`); #220: or the pool held a second position (`merge`). And
+   * the range it leaves. Not part of any call.
    */
-  why?: 'out' | 'edge' | 'widen'
+  why?: 'out' | 'edge' | 'widen' | 'merge'
   tickLower?: number
   tickUpper?: number
 }

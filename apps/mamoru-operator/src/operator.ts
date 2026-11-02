@@ -316,13 +316,13 @@ export function outOfRangeSeedOf(o: AccountState['outOfRange']): EngineConfig['o
  * otto/mamoru#218: the confirmed re-ranges of the last 7 days from the account's stored ops, for a new engine's
  * cooldown and weekly count. A stored op records the pool and the inclusion block, and `rerangeAt` its block
  * timestamp, written when the engine confirmed it (no RPC at boot, and no clock guess). A row without one is skipped:
- * it predates the field.
+ * it predates the field. #220: a merge says so, for the cooldown only.
  */
-export function rerangeHistoryOf(ops: readonly StoredOp[], nowSeconds: number): { pool: string; at: bigint }[] {
+export function rerangeHistoryOf(ops: readonly StoredOp[], nowSeconds: number): { pool: string; at: bigint; merge?: true }[] {
   const since = BigInt(nowSeconds) - 7n * 86_400n
   return ops
     .filter((o) => o.rerange && o.state === 'confirmed' && o.pool && o.rerangeAt)
-    .map((o) => ({ pool: o.pool!, at: BigInt(o.rerangeAt!) }))
+    .map((o) => ({ pool: o.pool!, at: BigInt(o.rerangeAt!), ...(o.why === 'merge' ? { merge: true as const } : {}) }))
     .filter((r) => r.at > since)
 }
 

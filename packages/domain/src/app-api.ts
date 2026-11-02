@@ -426,7 +426,7 @@ export type OpView = {
   /** otto/mamoru#293: set on every migrate-v4 op, the step it runs (0 Base, 1 the design-C Safe on Monad). */
   migrateStep?: number
   cause?: string
-  why?: 'out' | 'edge' | 'widen'
+  why?: 'out' | 'edge' | 'widen' | 'merge'
   /** The position acted on (rerange/reduce/harvest/increase) or minted (enter_mint), and its range. */
   tokenId?: string
   tickLower?: number

@@ -8,7 +8,7 @@ import { fallFreezeOf } from './guard/index.ts'
 import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
-import { anyKey, convertKey, idleConvertOf, isManaged, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
+import { anyKey, convertKey, idleConvertOf, isManaged, mergeOf, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, GuardNote, Observation, Proposal, RerangeProposal, ShadowNote, ShadowRisk } from './types.ts'
 import { withinCap } from './cap.ts'
 import { tvlShadowRisk } from './shadow-tvl.ts'
@@ -31,7 +31,7 @@ export { MAX_FEE_APR_BPS, outOfRangeSinceOf, rerangeWorth, RERANGE_OPS, withOutO
 export { weightTargets } from './rebalance/weights.ts'
 export { depegExitOf, depeggedPool, pegDeviationBps, pegStep, PEG_CLEAR, type PegState } from './guard/depeg.ts'
 export { fallFromBps, stageStep, thirdsOut, type StageInput, type StageState } from './rebalance/staged.ts'
-export { amountsOf, bucketValues, positionValue, rerangeOf, reduceOf, EDGE_BPS, DRIFT_BPS } from './rerange/index.ts'
+export { amountsOf, bucketValues, mergeOf, positionValue, rerangeOf, reduceOf, EDGE_BPS, DRIFT_BPS } from './rerange/index.ts'
 
 /** Lab (#101 round 3): drift band of a bucket under a staged exit, so the risk bucket's third (3.3 points) is reduced. */
 const STAGED_DRIFT_BPS = 100
@@ -226,6 +226,9 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     // Lab (#101 round 3): the depeg exit goes before anything else.
     const exit = depegged ? depegExitOf(obs, policy, depegged) : null
     const lab = depegged || policy.stagedExit ? { ...(depegged ? { skip: new Set([depegged.name]) } : {}), driftBps: stagedDrift } : undefined
+    // otto/mamoru#220: a second position in a pool is folded into the other before fees or weights are looked at.
+    const merge = exit || reranges.length ? null : mergeOf(obs, policy, policyPools, depegged ? new Set([depegged.name]) : undefined)
+    if (merge) reranges.push(merge)
     const reduce = exit || reranges.length || harvests.length ? null : reduceOf(obs, policy, policyPools, lab)
     // A frozen bucket's idle token waits where it is: the guard never turns a pause into a sell-back.
     const frozenPools = guards.filter((g) => frozen.has(g.bucket)).map((g) => g.pool)

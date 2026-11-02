@@ -1,9 +1,9 @@
 import type { ReasonCode } from '@mamoru/domain'
-import { grantKeyFor, hasManageAny, preferenceTotal, type LazyRerange, type PolicyVersion } from '@mamoru/policy'
+import { grantKeyFor, hasIncrease, hasManageAny, preferenceTotal, type LazyRerange, type PolicyVersion } from '@mamoru/policy'
 import type { RegistryName } from '@mamoru/registry'
 import { keccak256 } from 'viem'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { edgeBpsOf, widenEarly } from '../geometry/index.ts'
+import { edgeBpsOf, rangeFor, widenEarly } from '../geometry/index.ts'
 import type { EnterSwapProposal, Observation, PoolObs, PositionObs, RerangeProposal, ReduceProposal } from '../types.ts'
 import { inSavings, opCostInSavings, volatileOf } from '../value.ts'
 import { rerangeWorth } from '../rebalance/lazy.ts'
@@ -30,7 +30,7 @@ function atWeeklyCap(obs: Observation, policy: PolicyVersion, pool: PoolObs): bo
   const max = policy.range.maxPerWeek
   if (max === undefined) return false
   const since = obs.block.timestamp - WEEK
-  return (obs.recentReranges ?? []).filter((r) => r.pool === pool.name && r.at > since).length >= max
+  return (obs.recentReranges ?? []).filter((r) => r.pool === pool.name && r.at > since && !r.merge).length >= max
 }
 
 /** Session key of a live manage grant for `pool`: `name`, or `name:<pool>` on a multi-pool policy. */
@@ -137,6 +137,33 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   const w = rerangeWorth(obs, policy, p, pool, EAGER_COST_TEST)
   if (w && !w.worth) return { code: 'DECIDE_RANGE_BELOW_COST', proposal: null }
   return { code: 'DECIDE_RANGE_ADJUST', proposal: proposal(outside ? 'out' : near ? 'edge' : 'widen') }
+}
+
+/**
+ * otto/mamoru#220: one position per pool. Where the account holds more than one live position in a pool, the one
+ * furthest from the range a new entry would get now is closed (ties: the newer tokenId), one per review and after the
+ * re-range cooldown. Its money goes back in through the entry: into the position that stays when it is close enough
+ * (#171), else into a fresh one, which is then the closest and stays. Not counted toward the weekly cap. Only where
+ * the policy can add to a held position (spec 007 `increase`): without it every top-up is a new NFT, and a merge would
+ * close one review after review.
+ */
+export function mergeOf(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>, skip?: ReadonlySet<string>): RerangeProposal | null {
+  if (!hasManageAny(policy)) return null
+  const last = obs.lastRerangeAt ?? null
+  if (last !== null && obs.block.timestamp - last < BigInt(policy.range.cooldownSeconds)) return null
+  for (const pool of obs.pools) {
+    if (!policyPools.has(pool.name) || skip?.has(pool.name) || !hasIncrease(policy, pool.name)) continue
+    // A bucket at preference 0 is being left: `reduce` empties it.
+    if (policy.buckets.find((b) => b.pools.includes(pool.name as never))?.preference === 0) continue
+    const live = obs.positions.filter((p) => p.pool === pool.name && p.liquidity > 0n && isManaged(p, policy, policyPools))
+    if (live.length < 2) continue
+    const fresh = rangeFor(obs, policy, pool)
+    const distance = (p: PositionObs) => Math.abs(p.tickLower - fresh.tickLower) + Math.abs(p.tickUpper - fresh.tickUpper)
+    let far = live[0]!
+    for (const p of live.slice(1)) if (distance(p) > distance(far) || (distance(p) === distance(far) && p.tokenId > far.tokenId)) far = p
+    return { kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: far.tokenId, liquidity: far.liquidity, why: 'merge', tickLower: far.tickLower, tickUpper: far.tickUpper }
+  }
+  return null
 }
 
 export type BucketValue = { bucket: string; target: bigint; value: bigint; pool: RegistryName | null }

@@ -15,6 +15,9 @@ describe('rerangeHistoryOf', () => {
       { pool: 'pool:USDC/USDT/100', at: BigInt(NOW - 6 * 86_400) },
     ])
   })
+  test('a merge (#220) is kept and marked, for the cooldown but not the weekly cap', () => {
+    expect(rerangeHistoryOf([op({ why: 'merge' })], NOW)).toEqual([{ pool: 'pool:USDC/cbBTC/500', at: BigInt(NOW - 3600), merge: true }])
+  })
   test('skips old, unconfirmed, non-re-range and untimed rows', () => {
     const rows = [
       op({ rerangeAt: String(NOW - 8 * 86_400) }),

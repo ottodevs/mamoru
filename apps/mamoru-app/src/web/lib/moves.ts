@@ -133,6 +133,7 @@ export function moveState(m: Move): 'done' | 'pending' | 'stalled' {
 /** The history line of a move. */
 export function moveLine(m: Move): string {
   const s = moveState(m)
+  if (m.why === 'merge') return s === 'done' ? `Merged your two ${pair(m.pool)} positions` : s === 'stalled' ? `Closed your second ${pair(m.pool)} position` : `Merging your two ${pair(m.pool)} positions`
   if (s === 'stalled') return `Closed your ${pair(m.pool)} range, not reopened yet`
   return s === 'done' ? `Moved your ${pair(m.pool)} range` : `Moving your ${pair(m.pool)} range`
 }
@@ -142,6 +143,7 @@ export function moveReason(why: OpView['why']): string {
   if (why === 'out') return 'The price left your range. Outside it, the money stops earning fees, so Mamoru closed the position and opened a new one around the current price.'
   if (why === 'edge') return 'The price came close to the edge of your range. Mamoru moved the range so the money keeps earning if the price goes on.'
   if (why === 'widen') return 'Prices got more volatile. Mamoru widened the range so it keeps earning through larger moves.'
+  if (why === 'merge') return 'You had two positions in this pool. Mamoru closed one and put its money into a single position, so there is one range to follow.'
   return 'Mamoru moves a range when the price leaves it or comes close to its edge: outside the range, the money stops earning fees.'
 }
 
@@ -152,6 +154,7 @@ export function stepLine(op: OpView, why?: OpView['why']): string {
     case 'rerange':
       if (why === 'out') return done ? 'Closed the out-of-range position' : 'Closing the out-of-range position'
       if (why === 'edge') return done ? 'Closed the position near the edge of its range' : 'Closing the position near the edge of its range'
+      if (why === 'merge') return done ? 'Closed the second position' : 'Closing the second position'
       return done ? 'Closed the old position' : 'Closing the old position'
     case 'enter_swap': {
       const out = op.amountOut && op.tokenOut ? `about ${formatAmount(op.amountOut, op.tokenOut)}` : op.tokenOut

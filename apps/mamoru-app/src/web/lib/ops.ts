@@ -84,6 +84,7 @@ export function opLine(op: OpView): string {
       // otto/mamoru#219: a range move's close and a trim of an over-weight bucket used to share "Rebalanced".
       if (engineKind(op) === 'rerange') {
         const out = op.why === 'out' ? ' out-of-range' : ''
+        if (op.why === 'merge' && op.pool) return done ? `Closed the second ${pair(op.pool)} position to merge it` : `Closing the second ${pair(op.pool)} position to merge it`
         if (!op.pool) return done ? 'Closed a position to move its range' : 'Closing a position to move its range'
         return done ? `Closed${out} ${pair(op.pool)} position to move its range` : `Closing${out} ${pair(op.pool)} position to move its range`
       }
