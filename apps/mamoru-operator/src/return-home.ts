@@ -149,14 +149,19 @@ export class ReturnHome {
    * Nothing open or sending on the peer: its latest release is in any other state, or the peer does not know this
    * Safe at all (404 NOT_A_REMOTE to the status too). Unreadable otherwise, or open or sending: not nothing.
    */
-  private async nothingOpen(remote: AccountContext, peer: ReturnPeer): Promise<boolean> {
+  private async nothingOpen(remote: AccountContext, peer: ReturnPeer, id: string): Promise<boolean> {
     try {
-      const v = await peer.releaseStatus(remote)
-      return v.state !== 'open' && v.state !== 'sending' && (v.state as string | undefined) !== undefined
+      const latest = await peer.releaseStatus(remote)
+      if (latest.state === 'open' || latest.state === 'sending' || (latest.state as string | undefined) === undefined) return false
+      // ... and this very id unknown there.
+      return (await peer.releaseStatus(remote, id)).state === 'none'
     } catch (err) {
       return (err as { status?: unknown }).status === 404 && (err as { code?: unknown }).code === 'NOT_A_REMOTE'
     }
   }
+
+  /** Entries being asked right now: one ask per entry at a time (the tick and a new request never overlap on one). */
+  private readonly asking = new Set<string>()
 
   async request(accountKey: string, home: Address, remote: AccountContext, peer: ReturnPeer, amount: bigint, floor: bigint): Promise<ReturnEntry> {
     if (amount <= 0n) throw new Error(`return of ${amount}`)
@@ -180,20 +185,31 @@ export class ReturnHome {
    * no answer (asked again on the next tick), or another release open there this journal does not know (409).
    */
   private async ask(e: ReturnEntry, remote: AccountContext, peer: ReturnPeer): Promise<void> {
+    if (this.asking.has(e.id)) return
+    this.asking.add(e.id)
     try {
       await peer.release(remote, e.id, BigInt(e.amount))
     } catch (err) {
       const status = (err as { status?: unknown }).status
       const code = (err as { code?: unknown }).code
       // A stopped Safe also answers 404 to a new request: only with nothing open or sending there is it nothing held.
-      const nothingThere = status === 404 && code === 'NOT_A_REMOTE' && (await this.nothingOpen(remote, peer))
+      const nothingThere = status === 404 && code === 'NOT_A_REMOTE' && (await this.nothingOpen(remote, peer, e.id))
+      // Still requested after those reads (nothing else moved it meanwhile).
+      if (e.state !== 'requested') return
       if ((status === 400 && code === 'BAD_REQUEST') || nothingThere) {
         this.update(e, { state: 'cancelled', note: `refused by the peer: ${status} ${typeof code === 'string' ? code : ''}`.trim() })
         console.error(`[return] ${e.accountKey} ${e.id}: refused by the peer (${status} ${String(code ?? '')}); cancelled`)
         return
       }
       console.error(`[return] ${e.accountKey} ${e.id}: not taken yet (${typeof status === 'number' ? `${status} ${String(code ?? '')}` : (err as Error).message?.split('\n')[0]}); kept, asked again on the next tick`)
+    } finally {
+      this.asking.delete(e.id)
     }
+  }
+
+  /** When the account's last return closed (minted or cancelled), ms; 0 when none did. */
+  lastClosedAt(accountKey: string): number {
+    return this.returns().reduce((t, e) => (e.accountKey === accountKey && (e.state === 'minted' || e.state === 'cancelled') ? Math.max(t, Date.parse(e.updatedAt)) : t), 0)
   }
 
   /**

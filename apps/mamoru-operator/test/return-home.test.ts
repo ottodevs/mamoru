@@ -245,7 +245,7 @@ describe('return home (otto/mamoru#278, Base side)', () => {
     expect(s.r.busy('acc-1')).toBe(true)
     // The latest release there finished (burned): nothing open, the new return is cancelled.
     const done = setup()
-    const finished: ReturnPeer = { ...stopped, releaseStatus: async () => ({ id: 'older', amount: '1', chainId: 8453, state: 'burned', burn: { amount: '1', txHash: `0x${'33'.repeat(32)}`, block: 1 } }) }
+    const finished: ReturnPeer = { ...stopped, releaseStatus: async (_r, id) => (id ? { state: 'none' } : { id: 'older', amount: '1', chainId: 8453, state: 'burned', burn: { amount: '1', txHash: `0x${'33'.repeat(32)}`, block: 1 } }) }
     const d = await done.r.request('acc-1', HOME, REMOTE, finished, AMOUNT, FLOOR)
     expect(done.j().returns[d.id]!.state).toBe('cancelled')
     // The peer does not know the Safe at all (404 to the status too): cancelled.
@@ -258,6 +258,20 @@ describe('return home (otto/mamoru#278, Base side)', () => {
     const blind: ReturnPeer = { ...stopped, releaseStatus: async () => Promise.reject(new Error('timeout')) }
     const b = await t.r.request('acc-1', HOME, REMOTE, blind, AMOUNT, FLOOR)
     expect(t.j().returns[b.id]!.state).toBe('requested')
+  })
+
+  test('security review: a 404 with the latest finished but this id known there keeps holding; closing is timestamped', async () => {
+    const s = setup()
+    const known: ReturnPeer = {
+      release: async () => Promise.reject(Object.assign(new Error('stopped'), { status: 404, code: 'NOT_A_REMOTE' })),
+      releaseStatus: async (_r, id) => (id ? { id, amount: AMOUNT.toString(), chainId: 8453, state: 'open' } : { id: 'older', amount: '1', chainId: 8453, state: 'burned', burn: { amount: '1', txHash: `0x${'33'.repeat(32)}`, block: 1 } }),
+    }
+    const e = await s.r.request('acc-1', HOME, REMOTE, known, AMOUNT, FLOOR)
+    expect(s.j().returns[e.id]!.state).toBe('requested')
+    expect(s.r.lastClosedAt('acc-1')).toBe(0)
+    const c = setup()
+    await c.r.request('acc-1', HOME, REMOTE, peerOf({ refuse: 400, code: 'BAD_REQUEST' }), AMOUNT, FLOOR)
+    expect(c.r.lastClosedAt('acc-1')).toBe(T0)
   })
 
   test('review r2: the real RemotePeer throws a refusal with the status and code ReturnHome reads', async () => {
