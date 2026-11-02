@@ -80,6 +80,15 @@ describe('the Monad V4 remote policy keeps a bucket (review of #202 r2, Opus 4)'
     expect(r.policy.buckets.flatMap((b) => b.pools)).toEqual(['pool:WMON/USDC/3000'])
     expect(r.policy.buckets[0]!.preference).toBeGreaterThan(0)
   })
+
+  test('#278: the remote policy carries the bridge-out session (its return home), a home without remote buckets does not', () => {
+    const { oneAuthV4RemoteMonad } = require('@mamoru/policy') as typeof import('@mamoru/policy')
+    const { monadRegistry } = require('@mamoru/registry') as typeof import('@mamoru/registry')
+    const wmon = { ...staticPool('pool:WMON/USDC/3000', monadRegistry), entry: { twapWindow: 600, twapShortWindow: 60, bandTicks: 100, anchorTick: 0, anchorBand: 0, ratioBps: 10_000, active: true } }
+    expect(withRegistryPools(oneAuthV4RemoteMonad, D, [wmon], monadRegistry).policy.session.grants.map((g) => g.name)).toContain('bridge-out')
+    const solo = { ...oneAuthV4Live, remoteBuckets: [] }
+    expect(withRegistryPools(solo, D, [entryOf('pool:USDC/USDT/100'), entryOf('pool:WETH/USDC/3000')], baseRegistry).policy.session.grants.map((g) => g.name)).not.toContain('bridge-out')
+  })
 })
 
 describe('every bucket the policy declares is kept, pools resolved by chain and pair (review of #202 r3, Sol 1)', () => {

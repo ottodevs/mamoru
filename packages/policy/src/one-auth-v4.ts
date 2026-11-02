@@ -202,7 +202,7 @@ export const V4_USAGE_LIMIT = 2 ** 31 - 1
 /** Off chain only (no TimeFramePolicy in a V4 session): the validUntil the engine's view of the session carries. */
 export const V4_VALID_UNTIL = 2 ** 32 - 1
 
-/** The bridge leg's template, for a home account with a remote bucket (`bridge-out`, decide's name). */
+/** The bridge leg's template, for a home account with a remote bucket and for a remote Safe (`bridge-out`, decide's name). */
 export function v4BridgeTemplate(): GrantTemplate {
   return { name: 'bridge-out', perPosition: false, usageLimit: V4_USAGE_LIMIT, actions: [], requiresActionPolicy: true, actionPolicyOnly: true }
 }
@@ -323,7 +323,9 @@ export function withRegistryPools(policy: PolicyVersion, deployment: Pick<OneAut
     twapByPool[n.name] = { long: n.pool.entry.twapWindow, short: n.pool.entry.twapShortWindow }
   }
   const caps = GAS_CAPS_V2_BY_CHAIN[registry.chainId]!
-  const grants = [...named.map((n) => v4PoolTemplate(n.name)), ...((policy.remoteBuckets ?? []).length ? [v4BridgeTemplate()] : [])]
+  // A home with a remote bucket bridges out to it; a remote Safe bridges home on its home's request (#278). Same session.
+  const bridges = (policy.remoteBuckets ?? []).length > 0 || policy.policyId === ONE_AUTH_V4_REMOTE || policy.policyId === `${ONE_AUTH_V4_REMOTE}-lab`
+  const grants = [...named.map((n) => v4PoolTemplate(n.name)), ...(bridges ? [v4BridgeTemplate()] : [])]
   const out: PolicyVersion = {
     ...policy,
     buckets,

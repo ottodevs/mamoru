@@ -268,3 +268,54 @@ describe('the Monad v6 Safe enters under its one manage-any session', () => {
     expect(d.reason).toBe('SESSION_MISSING')
   })
 })
+
+// otto/mamoru#278: a remote Safe asked by its home account to send savings back frees them and bridges them home.
+describe('release: the remote Safe sends savings home', () => {
+  const anyGrant = grantKeyFor(liveWmonUsdcMonadV6, 'manage-any', MONAD_POOL)
+  const sessions = [
+    { grant: anyGrant, permissionId: `0x${'03'.repeat(32)}` as const, validUntil: 10_000, active: true },
+    { grant: 'bridge-out', permissionId: `0x${'03'.repeat(32)}` as const, validUntil: 10_000, active: true },
+  ]
+  const live = (over: Partial<Observation>) => monadObs({ sessions, native: 3n * 10n ** 18n, ...over })
+  const held = position({ pool: MONAD_POOL, tickLower: MONAD_TICK - 6_000, tickUpper: MONAD_TICK + 6_000, liquidity: 10n ** 15n })
+
+  test('the savings are there: bridges exactly the amount home, and places nothing else', () => {
+    const d = decide(live({ balances: { USDC: 10_000_000n, WMON: 0n }, release: { amount: 4_000_000n, chainId: 8453 } }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toEqual({ kind: 'bridge_out', grant: 'bridge-out', bucket: 'risk', chainId: 8453, pool: MONAD_POOL, amount: 4_000_000n })
+    expect(d.reason).toBe('DECIDE_RELEASE')
+  })
+
+  test('without the release the same Safe enters the pool as before', () => {
+    const d = decide(live({ balances: { USDC: 10_000_000n, WMON: 0n } }), liveWmonUsdcMonadV6)
+    expect(d.proposal?.kind).toBe('enter_swap')
+  })
+
+  test('idle WMON and too little USDC: sells the WMON first', () => {
+    const d = decide(live({ balances: { USDC: 1_000_000n, WMON: 10n ** 22n }, release: { amount: 4_000_000n, chainId: 8453 } }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toMatchObject({ kind: 'enter_swap', grant: anyGrant, pool: MONAD_POOL, tokenIn: 'WMON', tokenOut: 'USDC', amountIn: 10n ** 22n })
+    expect(d.reason).toBe('DECIDE_RELEASE')
+  })
+
+  test('the value sits in the position: reduces what is missing plus 1 %, never more than the position', () => {
+    const d = decide(live({ balances: { USDC: 0n, WMON: 0n }, positions: [held], release: { amount: 1_000n, chainId: 8453 } }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toMatchObject({ kind: 'reduce', grant: anyGrant, pool: MONAD_POOL, tokenId: held.tokenId })
+    const part = (d.proposal as { liquidity: bigint }).liquidity
+    expect(part > 0n && part < held.liquidity).toBe(true)
+    const all = decide(live({ balances: { USDC: 0n, WMON: 0n }, positions: [held], release: { amount: 10n ** 15n, chainId: 8453 } }), liveWmonUsdcMonadV6)
+    expect(all.proposal).toMatchObject({ kind: 'reduce', liquidity: held.liquidity })
+  })
+
+  test('nothing more to free: bridges what there is; nothing at all: holds on DECIDE_RELEASE_EMPTY', () => {
+    const some = decide(live({ balances: { USDC: 900_000n, WMON: 0n }, release: { amount: 4_000_000n, chainId: 8453 } }), liveWmonUsdcMonadV6)
+    expect(some.proposal).toMatchObject({ kind: 'bridge_out', chainId: 8453, amount: 900_000n })
+    const none = decide(live({ balances: { USDC: 0n, WMON: 0n }, release: { amount: 4_000_000n, chainId: 8453 } }), liveWmonUsdcMonadV6)
+    expect(none.proposal).toBeNull()
+    expect(none.reason).toBe('DECIDE_RELEASE_EMPTY')
+  })
+
+  test('no bridge session: holds on SESSION_MISSING instead of entering', () => {
+    const d = decide(live({ sessions: [sessions[0]!], balances: { USDC: 10_000_000n, WMON: 0n }, release: { amount: 4_000_000n, chainId: 8453 } }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toBeNull()
+    expect(d.reason).toBe('SESSION_MISSING')
+  })
+})

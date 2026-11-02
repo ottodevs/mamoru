@@ -116,9 +116,10 @@ const ETH_PRICE_POOL = 'pool:WETH/USDC/3000'
 
 /**
  * otto/mamoru#215: the CCTP V2 domain of each chain a bridge-out may go to (MessageTransmitterV2.localDomain() there).
- * Monad's is 15 (read on chain 143, 2026-10-27). A chain not listed here is never bridged to.
+ * Monad's is 15 (read on chain 143, 2026-10-27). Base's is 6, for a remote Safe's return home (#278; V4 pins it to its
+ * home domain on chain). A chain not listed here is never bridged to, nor the engine's own chain.
  */
-export const CCTP_DOMAIN_BY_CHAIN: Readonly<Record<number, number>> = { 143: 15 }
+export const CCTP_DOMAIN_BY_CHAIN: Readonly<Record<number, number>> = { 143: 15, 8453: 6 }
 /**
  * otto/mamoru#251: MamoruActionPolicyV3 keeps every V2 path as it is (increase, the guardian pause, the swap deadline, the
  * exit range without the anchor), so whatever the engine does for V2 it does for V3.
@@ -1513,7 +1514,7 @@ export class Engine {
   private bridgeRecipient(): Address {
     if (isV4Policy(this.cfg.policy.actionPolicy)) {
       const to = this.cfg.v4BridgeRecipient?.()
-      if (!to || BigInt(to) === 0n) throw new ReasonError('POLICY_DENIED_RECIPIENT', 'bridge_out: V4 has no remote marked ready for this account')
+      if (!to || BigInt(to) === 0n) throw new ReasonError('POLICY_DENIED_RECIPIENT', 'bridge_out: V4 has no remote marked ready for this account, or no home for this remote')
       if (isAddressEqual(to, this.cfg.account)) throw new ReasonError('POLICY_DENIED_RECIPIENT', 'bridge_out: the mint recipient is this account itself, not its Safe on the other chain')
       return getAddress(to)
     }
@@ -1548,9 +1549,9 @@ export class Engine {
    */
   private prepareBridgeOutV4(p: Extract<Proposal, { kind: 'bridge_out' }>): Prepared {
     const domain = CCTP_DOMAIN_BY_CHAIN[p.chainId]
-    if (domain === undefined) throw new ReasonError('POLICY_DENIED_TARGET', `bridge_out to chain ${p.chainId}: no CCTP domain known for it`)
+    if (domain === undefined || p.chainId === this.cfg.chainId) throw new ReasonError('POLICY_DENIED_TARGET', `bridge_out to chain ${p.chainId}: no CCTP domain known for it, or this chain`)
     if (p.amount <= 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `bridge_out of ${p.amount}`)
-    this.bridgeRecipient() // refuses when V4 has no ready remote
+    this.bridgeRecipient() // refuses when V4 has no ready remote (a home) or no home (a remote, #278)
     const v4 = this.cfg.policy.actionPolicy!.address
     const token = address(this.cfg.policy.savingsAsset, this.registry)
     return {
@@ -1564,7 +1565,7 @@ export class Engine {
 
   private prepareBridgeOut(p: Extract<Proposal, { kind: 'bridge_out' }>): Prepared {
     const domain = CCTP_DOMAIN_BY_CHAIN[p.chainId]
-    if (domain === undefined) throw new ReasonError('POLICY_DENIED_TARGET', `bridge_out to chain ${p.chainId}: no CCTP domain known for it`)
+    if (domain === undefined || p.chainId === this.cfg.chainId) throw new ReasonError('POLICY_DENIED_TARGET', `bridge_out to chain ${p.chainId}: no CCTP domain known for it, or this chain`)
     if (p.amount <= 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `bridge_out of ${p.amount}`)
     const savings = this.cfg.policy.savingsAsset
     if (!isDeployed('TokenMessengerV2', this.registry) || !isDeployed(savings, this.registry)) throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', `bridge_out: TokenMessengerV2 or ${savings} is not in the ${this.registry.chain} registry`)

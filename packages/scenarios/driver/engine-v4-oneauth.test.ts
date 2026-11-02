@@ -101,3 +101,12 @@ describe('V4 bridge journal (#293): the burn is journaled with V4 as its deposit
     expect(getAddress(got[0]!.recipient)).toBe(getAddress(REMOTE))
   })
 })
+
+describe('V4 bridge to this chain (#278): refused before any call is built', () => {
+  test('bridge_out with chainId = the engine chain is POLICY_DENIED_TARGET', async () => {
+    const p = { kind: 'bridge_out', grant: 'bridge-out', bucket: 'growth', chainId: 8453, pool: 'pool:WMON/USDC/3000', amount: 1_000_000n } as unknown as Proposal
+    await withEngine(async (e) => {
+      await expect(prepare(e, p)).rejects.toThrow('POLICY_DENIED_TARGET')
+    })
+  })
+})

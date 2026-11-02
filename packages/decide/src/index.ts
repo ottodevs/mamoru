@@ -8,6 +8,7 @@ import { fallFreezeOf } from './guard/index.ts'
 import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf } from './harvest/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
+import { releaseOf } from './release/index.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, mergeOf, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, GuardNote, Observation, Proposal, RerangeProposal, ShadowNote, ShadowRisk } from './types.ts'
 import { withinCap } from './cap.ts'
@@ -218,6 +219,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // Plan §9, steps 2, 4 and 8: slot, pause, then one proposal in FR-DEC-011 order.
   let proposal: Proposal | null = null
   let reason: ReasonCode
+  let releasing = false
   if (obs.slot) {
     reason = 'DECIDE_SLOT_BUSY'
   } else if (obs.intents.paused) {
@@ -237,8 +239,16 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     if (depegged) frozenPools.push(depegged.name)
     const keep = frozenPools.length ? new Set([...(pendingMint ?? []), ...frozenPools]) : pendingMint
     const idle = exit || reranges.length || harvests.length || reduce?.proposal ? null : idleConvertOf(obs, policy, policyPools, keep)
-    proposal = exit ?? reranges[0] ?? harvests[0] ?? reduce?.proposal ?? idle ?? entries[0] ?? null
-    reason = proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()
+    // otto/mamoru#278: an open release (the home account wants savings back) is all this Safe does until it is sent.
+    const release = releaseOf(obs, policy, policyPools)
+    if (release) {
+      releasing = true
+      proposal = exit ?? release.proposal
+      reason = exit ? PROPOSAL_CODE[exit.kind] : release.code
+    } else {
+      proposal = exit ?? reranges[0] ?? harvests[0] ?? reduce?.proposal ?? idle ?? entries[0] ?? null
+      reason = proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()
+    }
   }
 
   // Plan §9, step 9: a preliminary NO GO drops the proposal with its code.
@@ -247,7 +257,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     let gate = gateOf(proposal)
     trail.push(gate)
     // otto/mamoru#215: a bridge that cannot go now never starves the Base buckets: the entry it displaced goes instead.
-    if (gate.verdict !== 'GO' && proposal.kind === 'bridge_out' && displaced) {
+    if (gate.verdict !== 'GO' && proposal.kind === 'bridge_out' && displaced && !releasing) {
       proposal = displaced
       reason = PROPOSAL_CODE[proposal.kind]
       gate = gateOf(proposal)

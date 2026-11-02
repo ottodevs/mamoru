@@ -100,6 +100,10 @@ export const REASON_CODES = [
   'DECIDE_WAIT_BRIDGE',
   // otto/mamoru#215: savings go to the account's own sleeve on another chain (CCTP), for the bucket served there.
   'DECIDE_BRIDGE_OUT',
+  // otto/mamoru#278: the home account asked this remote Safe to send savings back; it frees them and bridges them home, nothing else.
+  'DECIDE_RELEASE',
+  // otto/mamoru#278: a release is open but this Safe holds nothing more to send.
+  'DECIDE_RELEASE_EMPTY',
   // otto/mamoru#215: a bridge-out is never signed before it is in the operator's bridge journal (it would be in flight unseen).
   'BRIDGE_JOURNAL_UNAVAILABLE',
   // otto/mamoru#127: the quote of an entry swap is worse than the depth policy allows; refused before sending.

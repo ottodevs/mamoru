@@ -38,6 +38,11 @@ export type Observation = {
     /** The sleeve on the other chain exists and runs (deployed, activated): only then may savings be bridged to it. */
     ready?: boolean
   }
+  /**
+   * otto/mamoru#278: savings (raw units) the home account asked this remote Safe to send back to it on `chainId`, not
+   * burned yet. While it is open the engine only frees and bridges (`releaseOf`). Absent: none, and it hashes as before.
+   */
+  release?: { amount: bigint; chainId: ChainId }
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
   lastRerangeAt?: bigint | null
   /**
@@ -320,7 +325,10 @@ export type BridgeOutProposal = {
   grant: 'bridge-out'
   bucket: string
   chainId: ChainId
-  /** The remote bucket's pool, a registry name on `chainId`: never one of `obs.pools`, never acted on here. */
+  /**
+   * The remote bucket's pool, a registry name on `chainId`: never one of `obs.pools`, never acted on here. For a return
+   * home (#278, `releaseOf`) it is the local pool the value leaves.
+   */
   pool: RegistryName
   /** Raw savings units. */
   amount: bigint
