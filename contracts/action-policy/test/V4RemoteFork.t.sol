@@ -6,7 +6,7 @@ import {V4Fixture, IERC20T, ISafeT, ISmartSessionT} from "./V4Fixture.sol";
 import {MamoruActionPolicyV4, MamoruV4Helper, InitV4, SwapParams} from "../src/MamoruActionPolicyV4.sol";
 import {MamoruGasPolicyV2} from "../src/MamoruGasPolicyV2.sol";
 import {ISharedSignerV4} from "../src/MamoruRemoteSafe.sol";
-import {Session} from "../src/SmartSessionTypes.sol";
+import {Session, ConfigIdV4} from "../src/SmartSessionTypes.sol";
 
 interface ISafeModulesT {
     function isModuleEnabled(address module) external view returns (bool);
@@ -266,6 +266,16 @@ contract V4RemoteForkTest is V4Fixture {
         assertTrue(ok);
         assertEq(abi.decode(ret, (address)), r);
         assertEq(IERC20T(M_USDC).balanceOf(r), 100e6);
+    }
+
+    /// The registered address is what the relayer deploys even after the home renews with another C (the remote's
+    /// Init carries the C of its registration).
+    function test_I4_deploymentStableAcrossHomeRenewal() public {
+        vm.prank(home);
+        address r = v4.registerRemote(DOMAIN_MONAD, remoteSk);
+        _init(home, ConfigIdV4.wrap(bytes32(uint256(0x99))), C * 2, 2, new uint256[](0));
+        (address at,) = v4.remoteDeployment(home, DOMAIN_MONAD);
+        assertEq(at, r);
     }
 
     /// Gas of registerRemote's Solidity derivation of the canonical initializer (spec 010 open question 2: < ~1M).

@@ -187,6 +187,17 @@ contract V4UserOpForkTest is V4Fixture {
         assertEq(IERC20T(USDC).allowance(safe, ROUTER), 0);
     }
 
+    /// The session key cannot sign for the account (ERC-1271): the V4 session carries no ERC-1271 policy, so SmartSession
+    /// refuses, and a `permit` or Permit2 signature is never available to a leaked key.
+    function test_sessionKeyCannotSignForTheAccount() public {
+        _enable();
+        bytes32 h = keccak256("a USDC permit digest");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(sessionKey, h);
+        bytes memory sig = abi.encodePacked(SMART_SESSION, pid, r, s, v);
+        (bool ok, bytes memory ret) = safe.staticcall(abi.encodeWithSignature("isValidSignature(bytes32,bytes)", h, sig));
+        assertTrue(!ok || ret.length < 4 || bytes4(ret) != bytes4(0x1626ba7e), "a session signature is never valid for the Safe");
+    }
+
     /// A V4 call that validates (V4's entry points are admitted) but fails its own checks at execution reverts there:
     /// nothing moves, and the op is still charged to the gas bucket (validation-time charge, I6).
     function test_executionCheckFailsSafely() public {

@@ -755,9 +755,10 @@ contract MamoruActionPolicyV4 {
         uint8 reasons; // PAUSE_* bits
     }
 
-    /// I4: a registered remote, bound to the owner state it was computed from.
+    /// I4: a registered remote, bound to the owner state, C and session key it was computed from.
     struct Remote {
         address remote;
+        uint96 capUsd; // C embedded in the remote's Init (a later renewal of the home does not move the address)
         bytes32 ownersHash;
         address sessionKey;
     }
@@ -1158,7 +1159,7 @@ contract MamoruActionPolicyV4 {
         if (!REGISTRY.routeOn(domain)) revert NotListed(address(uint160(domain)));
         bytes32 oh;
         (remote, oh,) = HELPER.remote(account, domain, sessionKey, c.capUsd, ch.domain);
-        _remote[domain][account] = Remote(remote, oh, sessionKey);
+        _remote[domain][account] = Remote(remote, uint96(c.capUsd), oh, sessionKey);
         delete _ready[domain][account];
         emit RemoteRegistered(account, domain, remote, oh, sessionKey);
     }
@@ -1309,12 +1310,13 @@ contract MamoruActionPolicyV4 {
             && HELPER.ownersHashOf(account) == r.ownersHash;
     }
 
-    /// The relayer's permissionless deployment of the registered remote, from the account's current owners (equal to
-    /// the registered address only while they have not changed: the guardian compares before `setReady`).
+    /// The relayer's permissionless deployment of the registered remote, from the account's current owners and the
+    /// registration's C and session key (equal to the registered address only while the owners have not changed: the
+    /// guardian compares before `setReady`).
     function remoteDeployment(address account, uint32 domain) external view returns (address at, bytes memory createCall) {
         Remote memory r = _remote[domain][account];
         if (r.remote == address(0)) revert RemoteNotReady(domain);
-        (at,, createCall) = HELPER.remote(account, domain, r.sessionKey, _config[account].capUsd, _chain().domain);
+        (at,, createCall) = HELPER.remote(account, domain, r.sessionKey, r.capUsd, _chain().domain);
     }
 
     // ---------------------------------------------------------------- internals: chain, entries, pools
