@@ -42,3 +42,21 @@ export function useChain(): SleeveChain {
 
 export const explorerTx = (c: SleeveChain, tx: string) => `https://${c.explorer.host}/tx/${tx}`
 export const explorerAddress = (c: SleeveChain, address: string) => `https://${c.explorer.host}/address/${address}`
+
+/** Whether this SPA knows the chain: an id the operator sends that it does not is shown by its raw label and gets no links. */
+export function knownChain(chainId: number | undefined): boolean {
+  return CHAINS.some((c) => c.chainId === chainId)
+}
+
+/**
+ * otto/mamoru#269: a Safe's page on its own chain's explorer, built here from the chain id and the address; the operator's
+ * `explorerUrl` is never used as a link. Null (no link) for an unknown chain or an address that is not 20 bytes of hex.
+ */
+export function safeLink(chainId: number, safe: string): string | null {
+  return knownChain(chainId) && /^0x[0-9a-fA-F]{40}$/.test(safe) ? explorerAddress(sleeveChain(chainId), safe) : null
+}
+
+/** A tx on its chain's explorer; null for an unknown chain or a hash that is not 32 bytes of hex. */
+export function txLink(chainId: number, tx: string): string | null {
+  return knownChain(chainId) && /^0x[0-9a-fA-F]{64}$/.test(tx) ? explorerTx(sleeveChain(chainId), tx) : null
+}

@@ -76,6 +76,40 @@ export function split(f: FundingView, price: bigint | null): Split {
 }
 
 /**
+ * otto/mamoru#269: the total Home shows. The operator's money map already sums every chain and every transfer in flight
+ * (and keeps a chain it cannot read at its last value); an older operator sends none, so the Base balance stands in.
+ */
+export function moneyTotal(f: FundingView, price: bigint | null = null): bigint {
+  return f.money ? BigInt(f.money.totalUsdc) : split(f, price).total
+}
+
+/**
+ * otto/mamoru#269: the funding view Working and Idle show. With the money map, every chain's positions (each tagged with
+ * its `chainId`) and every chain's idle tokens, summed by token; so Working + Idle + what is in flight is the total.
+ * Without it (an older operator) the view and its split are today's. Withdraw and Start keep using the Base `split(f)`.
+ */
+export function wholeMoney(f: FundingView, price: bigint | null = null): { f: FundingView; s: Split } {
+  if (!f.money) return { f, s: split(f, price) }
+  const byToken = new Map<string, { token: string; amount: bigint; decimals: number; valueUsdc: bigint }>()
+  for (const c of f.money.chains)
+    for (const t of c.idle) {
+      const h = byToken.get(t.token) ?? { token: t.token, amount: 0n, decimals: t.decimals, valueUsdc: 0n }
+      h.amount += BigInt(t.amount)
+      h.valueUsdc += BigInt(t.valueUsdc)
+      byToken.set(t.token, h)
+    }
+  const idle = [...byToken.values()].map((h) => ({ token: h.token, amount: h.amount.toString(), decimals: h.decimals, valueUsdc: h.valueUsdc.toString() }))
+  const whole: FundingView = {
+    ...f,
+    idle,
+    usdc: (byToken.get('USDC')?.amount ?? 0n).toString(),
+    cbbtc: (byToken.get('cbBTC')?.amount ?? 0n).toString(),
+    positions: f.money.chains.flatMap((c) => c.positions),
+  }
+  return { f: whole, s: split(whole, price) }
+}
+
+/**
  * The whole account by token: what sits idle plus both sides of every position, largest value first. Null when the
  * operator does not report values per token yet.
  */

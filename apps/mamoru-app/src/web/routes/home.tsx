@@ -11,17 +11,17 @@ import { Brand, Modal } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
-import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, MIN_ENTRY_USDC, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
+import { belowMinimumOf, cbbtcPrice, ceilCents, DUST_USDC, humanMessage, MIN_ENTRY_USDC, moneyTotal, overCapOf, wholeMoney, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { historyEntries, moveLine, moveState } from '../lib/moves.ts'
 import { detailHead, MoveDetail, OpDetail, Sheet } from '../components/activity-detail.tsx'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
-import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine, vaultAddress } from '../lib/positions.ts'
+import { chainLabel, pairLabel, poolAddress, poolTokens, positionAmounts, progressLine, vaultAddress } from '../lib/positions.ts'
 import { activateLine, signatureCopy } from '../lib/signature.ts'
 import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel } from '../lib/price-divergence.ts'
 import { localTime } from '../lib/time.ts'
-import { explorerAddress, explorerTx, useChain } from '../lib/chain.tsx'
+import { BASE_SLEEVE, explorerAddress, explorerTx, knownChain, sleeveChain, useChain } from '../lib/chain.tsx'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
@@ -32,6 +32,7 @@ import { useThrottledRefresh } from '../lib/refresh-throttle.ts'
 import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '../components/monad-consent.tsx'
 import { isVaultTarget } from '../lib/policies.ts'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
+import { MoneyMapCard, moneyCopy, showsMoneyMap, totalScopeNote, unreadChains } from '../components/money-map.tsx'
 
 export const homeCopy = {
   total: 'Total balance',
@@ -198,6 +199,8 @@ export function Balance({
   past = null,
   down = false,
   chain = null,
+  total = null,
+  scopeNote = null,
 }: {
   s: Split | null
   earnedSoFarUsd?: string | null
@@ -210,6 +213,10 @@ export function Balance({
   down?: boolean
   /** otto/mamoru#238: the balance is a read from chain (the operator is down): the total is live, every action is off. */
   chain?: FundingView['chainRead'] | null
+  /** otto/mamoru#269: the whole money (every chain and what is in flight); without it the Base balance `s.total` stands in. */
+  total?: bigint | null
+  /** otto/mamoru#269: why the total is not the whole account (a chain not read yet, an operator that sees Base only). */
+  scopeNote?: string | null
 }) {
   const shownPast = past
   return (
@@ -219,12 +226,17 @@ export function Balance({
           {homeCopy.total}
         </p>
         <p className={`sum${shownPast ? ' past' : ''}`} data-testid="total">
-          {shownPast ? usd(shownPast.totalUsd) : s ? <TweenUsd raw={s.total} countUp /> : '0.00'}
+          {shownPast ? usd(shownPast.totalUsd) : s ? <TweenUsd raw={total ?? s.total} countUp /> : '0.00'}
           <span className="unit">USDC</span>
         </p>
         {shownPast ? (
           <p className="past-reading" data-testid="past-reading">
             {homeCopy.pastReading(agoText(shownPast.readAt))}
+          </p>
+        ) : null}
+        {scopeNote ? (
+          <p className="past-reading" data-testid="total-scope" role="status">
+            {scopeNote}
           </p>
         ) : null}
         {chain ? (
@@ -342,11 +354,15 @@ export function rangeHoldCopy(code: string | undefined): string {
   return homeCopy.paused
 }
 
-function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView['positions'][number]; r: PositionRate; i: number; readFromChain?: boolean; hold?: string }) {
+function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView['positions'][number] & { chainId?: number }; r: PositionRate; i: number; readFromChain?: boolean; hold?: string }) {
   const legs = positionAmounts(p).filter((l) => l.amount !== '0')
   // otto/mamoru#210: USDC supplied to a lending vault: one token, the vault as venue, always earning.
-  const addr = p.vault ? vaultAddress(p.vault.name) : poolAddress(p.pool)
-  const chain = useChain()
+  const addr = p.vault ? vaultAddress(p.vault.name) : poolAddress(p.pool, p.chainId)
+  // otto/mamoru#269: a position of the money map names its own chain; one of an older operator is the sleeve's.
+  const sleeve = useChain()
+  // An id this SPA does not know keeps its raw label and gets no explorer link (never a wrong chain's).
+  const chain = p.chainId === undefined ? sleeve : sleeveChain(p.chainId)
+  const known = p.chainId === undefined || knownChain(p.chainId)
   const venue = p.vault ? p.vault.label : 'Uniswap v3'
   const tokens = p.vault ? ['USDC'] : poolTokens(p.pool, p.amounts)
   // otto/mamoru#216: against a target, the share is of the whole account (the target's own base); otherwise of working capital.
@@ -366,7 +382,7 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
           {r.bucket} · {p.vault ? homeCopy.lending : pair(p)}
         </span>
         <span className="wc-venue">
-          {addr ? (
+          {addr && known ? (
             <a className="seg" href={explorerAddress(chain, addr)} target="_blank" rel="noreferrer">
               {venue}
             </a>
@@ -375,7 +391,7 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
           )}
           {' · '}
           <span className="seg" data-testid="position-chain">
-            {chain.name}
+            {known ? chain.name : chainLabel(p.chainId!)}
           </span>
           {/* Out of range the gauge alone follows, and it is decorative: the separator is too. */}
           {p.vault ? null : p.inRange ? ' · ' : p.range ? <span aria-hidden="true"> · </span> : null}
@@ -457,11 +473,20 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
  * range, value in USDC with each token, share of working capital and the pool's current and monthly rates. A
  * paused (out-of-range) position earns 0% today and says Mamoru puts it back to work.
  */
+/** Range holds name a token id only, and ids repeat across chains: they belong to the account's own chain's positions. */
+function holdsApply(p: { chainId?: number }, homeChain: number): boolean {
+  return p.chainId === undefined || p.chainId === homeChain
+}
+
 export function Working({ f, s, apy, price = null, onStop, onStart = null, otherChainsUsdc = 0n }: { f: FundingView; s: Split; apy?: ApyView; price?: bigint | null; onStop: (() => void) | null; onStart?: (() => void) | null; otherChainsUsdc?: bigint | null }) {
   const n = f.positions.length
+  const homeChain = useChain().chainId
   // otto/mamoru#216: targets are shares of the whole account, sleeves on other chains included; while their value is
   // unknown (null) no share is set against a target.
-  const rows = positionRates(f, apy, price, s.priced && otherChainsUsdc !== null ? s.total + otherChainsUsdc : null)
+  // otto/mamoru#269: with the operator's money map the share is against the whole money, in flight included.
+  // No share is set against a total that is not the whole money: a chain never read, or a transfer not confirmed (#216).
+  const accountTotal = f.money ? (f.money.complete && unreadChains(f.money).length === 0 ? BigInt(f.money.totalUsdc) : null) : s.priced && otherChainsUsdc !== null ? s.total + otherChainsUsdc : null
+  const rows = positionRates(f, apy, price, accountTotal)
   const inRange = f.positions.filter((p) => p.inRange).length
   // An operation in flight says what it is; between operations the engine says whether more is coming and when it looks next.
   const line = progressLine(f.progress) ?? engineLine(f)
@@ -505,7 +530,7 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
           </div>
           <ul className="m-0 list-none p-0">
             {f.positions.map((p, i) => (
-              <PositionRow key={p.tokenId} p={p} r={rows[i]!} i={i} readFromChain={f.source === 'chain'} hold={f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code} />
+              <PositionRow key={`${(p as { chainId?: number }).chainId ?? ''}:${p.tokenId}`} p={p} r={rows[i]!} i={i} readFromChain={f.source === 'chain'} hold={holdsApply(p as { chainId?: number }, homeChain) ? f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code : undefined} />
             ))}
           </ul>
           {noRate ? <p className="m-0 pt-2 font-mono text-[0.72rem] text-stone">{homeCopy.noRate}</p> : null}
@@ -556,7 +581,7 @@ export function engineLine(f: FundingView): string | null {
   if (!f.engine.nextReviewAt) return null
   const next = new Date(f.engine.nextReviewAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
   // Only a hold whose position is still out of range now: the price may have come back since the last review.
-  const hold = f.engine.rangeHolds?.find((h) => f.positions.some((p) => p.tokenId === h.tokenId && !p.inRange))
+  const hold = f.engine.rangeHolds?.find((h) => f.positions.some((p) => p.tokenId === h.tokenId && !p.inRange && holdsApply(p as { chainId?: number }, BASE_SLEEVE.chainId)))
   return hold ? homeCopy.upToDateHeld(hold.code, next) : homeCopy.upToDate(next)
 }
 
@@ -565,7 +590,14 @@ export function engineLine(f: FundingView): string | null {
  * and any other token left over), so this replaces the separate token list. It opens per token only when more
  * than one token is idle.
  */
-export function Idle({ f, s }: { f: FundingView; s: Split }) {
+/** otto/mamoru#269: "Base 1.10 · Monad 2.07" when idle money sits on more than one chain. */
+function idleByChain(f: FundingView): string | null {
+  const parts = (f.money?.chains ?? []).map((c) => ({ c, v: c.idle.reduce((a, t) => a + BigInt(t.valueUsdc), 0n) })).filter((x) => x.v > 0n)
+  return parts.length > 1 ? parts.map((x) => `${chainLabel(x.c.chainId)} ${usd(x.v)}`).join(' · ') : null
+}
+
+export function Idle({ f, s, home = s }: { f: FundingView; s: Split; /** The account's own (Base) balance: why money is idle is said of it, never of money on another chain. */ home?: Split }) {
+  const reason = f.money && home.idle < DUST_USDC && s.idle >= DUST_USDC ? null : idleReason(f, home)
   // One idle token that is not USDC (cbBTC left over, say) is named on the line itself, since nothing opens.
   const only = s.idleTokens.length === 1 && s.idleTokens[0]!.token !== 'USDC' ? s.idleTokens[0]! : null
   const unpriced = s.idleTokens.filter((t) => t.unpriced).map((t) => t.token)
@@ -586,7 +618,7 @@ export function Idle({ f, s }: { f: FundingView; s: Split }) {
             {' · '}
           </>
         ) : null}
-        {idleReason(f, s)}
+        {[reason, idleByChain(f)].filter(Boolean).join(' · ')}
         {unpriced.length ? ` · ${homeCopy.unpricedIdle(unpriced.join(', '))}` : ''}
       </span>
     </>
@@ -1230,7 +1262,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // otto/mamoru#216: the Monad sleeve's balance, for shares of the whole account against a multichain target.
   const sessionData = useSession().data
   const monadSleeve = (sessionData?.sleeves ?? []).find((x) => x.chainId === 143 && x.accountKey !== accountKey)
-  const monadFunding = useFunding(monadSleeve?.accountKey, !!monadSleeve, 60_000)
+  // With the operator's money map Monad is read once, there; the sleeve's own read is for an operator without it.
+  const monadFunding = useFunding(monadSleeve?.accountKey, !!monadSleeve && funding.data !== undefined && !funding.data.money, 60_000)
   const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop' | 'start'>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [howOpen, setHowOpen] = useState(false)
@@ -1253,7 +1286,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const f = liveDown && !keepOpen ? undefined : cached
   const multichain = isMultichainTarget(f?.approval?.policyId)
   // Unknown until the session has said whether a Monad sleeve exists and, if so, its balance has loaded (#142 review).
-  const otherChainsUsdc = !multichain ? 0n : !sessionData ? null : !monadSleeve ? 0n : monadFunding.data ? split(monadFunding.data, null).total : null
+  const otherChainsUsdc = funding.data?.money ? null : !multichain ? 0n : !sessionData ? null : !monadSleeve ? 0n : monadFunding.data ? split(monadFunding.data, null).total : null
   // The session ended while Home was open: ask again, and the first screen offers the sign-in.
   const qc = useQueryClient()
   // otto/mamoru#340: a deposit raised the idle balance: the history is asked again for its row (the operator keeps
@@ -1269,14 +1302,17 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   }, [signedOut, qc])
   const price = cbbtcPrice(pools.data)
   const s = f ? split(f, price) : null
+  // otto/mamoru#269: what Home calls the balance is the whole money; `s` stays the Base balance the actions work on.
+  const total = f ? moneyTotal(f, price) : null
+  const whole = f ? wholeMoney(f, price) : null
   // The past reading: this tab's last good read, or, with none, the last snapshot in D1. Its total is the one shown
   // while the read was live (review round 4): re-pricing it with a newer pool price would move a "last reading".
   const lastLiveTotal = useRef<bigint | null>(null)
-  if (!liveDown && s) lastLiveTotal.current = s.total
+  if (!liveDown && total !== null) lastLiveTotal.current = total
   const past = !liveDown
     ? null
     : cached
-      ? { totalUsd: (lastLiveTotal.current ?? split(cached, price).total).toString(), readAt: new Date(funding.dataUpdatedAt).toISOString() }
+      ? { totalUsd: (lastLiveTotal.current ?? moneyTotal(cached, price)).toString(), readAt: new Date(funding.dataUpdatedAt).toISOString() }
       : (yieldLedger.data?.lastBalance ?? null)
   const apy = useApy()
   const armed = activationLive(opList)
@@ -1313,7 +1349,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const fromChain = f?.source === 'chain'
   // Positions not read: no Working card ("nothing placed" would be a claim) and no rates, only the idle money.
   const noPositions = fromChain && f?.chainRead?.positions !== 'listed'
-  const stopped = !!f && !fromChain && !f.active && f.positions.length === 0 && !inFlight && ranBefore
+  const stopped = !!f && !fromChain && !f.active && whole!.f.positions.length === 0 && !inFlight && ranBefore
   // Over the cap, the withdraw that clears it is the one notice-worthy thing (a Start would refuse anyway); this
   // state wins over an armed activation. Only a withdraw already on its way hides it. Start itself stays offered
   // next to it (otto/mamoru#135 review): the notice is a read on the same poll as everything else here, up to
@@ -1391,8 +1427,10 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         past={past}
         down={liveDown}
         chain={fromChain ? (f?.chainRead ?? { positions: 'unknown', listedAt: null }) : null}
+        total={total}
+        scopeNote={past && !cached ? moneyCopy.pastScope : totalScopeNote(f, !!monadSleeve)}
       />
-      <Indicators f={noPositions ? undefined : f} apy={apy.data} price={price} noRead={(!f && liveDown) || noPositions} />
+      <Indicators f={noPositions ? undefined : whole?.f} apy={apy.data} price={price} noRead={(!f && liveDown) || noPositions} />
       <WrongNetwork accountKey={accountKey} />
       {past ? (
         <section className="card" data-testid="past-notice" role="status">
@@ -1442,8 +1480,9 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           ) : f.active && f.approval && approvalOpen && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) && !renewing ? (
             <ApprovalRow key={approvalRowKey(f.approval)} approval={f.approval} onOpen={openApproval} />
           ) : null}
-          {noPositions ? null : <Working f={f} s={s as Split} apy={apy.data} price={price} otherChainsUsdc={otherChainsUsdc} onStop={!fromChain && (f.active || f.positions.length > 0) ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />}
-          <Idle f={f} s={s as Split} />
+          {showsMoneyMap(f.money) ? <MoneyMapCard money={f.money} /> : null}
+          {noPositions ? null : <Working f={whole!.f} s={whole!.s} apy={apy.data} price={price} otherChainsUsdc={otherChainsUsdc} onStop={!fromChain && (f.active || whole!.f.positions.length > 0) ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />}
+          <Idle f={whole!.f} s={whole!.s} home={s as Split} />
           <History ops={opList} onRetry={retry} loaded={ops.isSuccess} />
         </>
       )}

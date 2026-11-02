@@ -18,3 +18,16 @@ export function localTime(iso: string, now: Date = new Date()): string {
   if (sameDay(d, y)) return `Yesterday ${t}`
   return `${d.getFullYear() === now.getFullYear() ? dm.format(d) : dmy.format(d)}, ${t}`
 }
+
+/** "10:36" today; with the date ("2 Nov, 00:12") when `iso` is not on the same local day as `now`, so a window across midnight is not ambiguous. */
+export function clockOrDate(iso: string, now: Date = new Date()): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return sameDay(d, now) ? hm.format(d) : `${dm.format(d)}, ${hm.format(d)}`
+}
+
+/** "10:36": the clock time of an ISO instant in the viewer's time zone; empty for an unreadable one. */
+export function clockTime(iso: string): string {
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '' : hm.format(d)
+}

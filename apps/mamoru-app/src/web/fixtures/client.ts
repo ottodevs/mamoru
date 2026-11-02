@@ -2,6 +2,7 @@ import { overCap, PRODUCTION_BANNER, type AppConfig, type BridgeOutView, type Fu
 import { ApiRequestError, type ApiClient } from '../api/client.ts'
 import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-account.ts'
 import { poolsResponse } from './pools.ts'
+import { braisFunding, withMonadOnlyPositions, withoutMoney, withStaleMonad, withUnreadMonad, type BraisMoment } from './money.ts'
 
 // Dev (VITE_FIXTURES=1) and tests only. Never imported by the production build.
 export const fixtureConfig: AppConfig = {
@@ -189,6 +190,14 @@ const chainView = (): FundingView => {
   return { ...listed, active: false, overCap: null, source: 'chain', chainRead: operatorChainIdle ? { positions: 'unknown', listedAt: null } : { positions: 'listed', listedAt: new Date(Date.now() - 40 * 60_000).toISOString() } }
 }
 let fundingReads = 0
+// ?braismoney=before|flight|arriving|minted|monadonly (dev only, otto/mamoru#269): Brais's account around the 2.075638 USDC that crossed Base to
+// Monad. Add &stale, &unread or &old for a chain read late, never read, or an operator without the money map.
+const brais = typeof location !== 'undefined' && liveGate ? new URLSearchParams(location.search).get('braismoney') : null
+const braisView = (): FundingView | null => {
+  if (!brais) return null
+  const f = brais === 'monadonly' ? withMonadOnlyPositions() : braisFunding((['before', 'flight', 'minted', 'arriving'].includes(brais) ? brais : 'flight') as BraisMoment)
+  return param('old') ? withoutMoney(f) : param('unread') ? withUnreadMonad(f) : param('stale') ? withStaleMonad(f) : f
+}
 const upgradeApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 1000) + 300 * 86_400, renewDue: false, expired: false, policyId: 'conservador-live-v5', upgrade: true, upgradePolicy: 'conservador-live-v6' } })
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
 // ?history (dev only, otto/mamoru#235): a running account with events in each state, and one more landing 4 s in.
@@ -357,7 +366,7 @@ export const fixtureClient: ApiClient = {
       ? new Promise((_, reject) => setTimeout(() => reject(new ApiRequestError(503, { error: 'The operator is not reachable. Nothing was sent. Try again.', code: 'OPERATOR_UNAVAILABLE' })), 150))
       : operatorChain || operatorChainIdle
         ? delay(chainView())
-        : delay(isMonad(k) ? monadState.funding : liveState.funding),
+        : delay(isMonad(k) ? monadState.funding : (braisView() ?? liveState.funding)),
   // ?wrongchain (dev only): 150 USDC was sent on Ethereum to the Base address.
   otherChains: () =>
     delay({

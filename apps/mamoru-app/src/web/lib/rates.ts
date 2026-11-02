@@ -16,8 +16,8 @@ const BUCKET_LABEL: Record<BucketId, Bucket> = { stables: 'Stable', 'stables-lp'
 const STABLES = new Set(['USDC', 'USDT', 'EURC', 'DAI'])
 
 /** The bucket a pool belongs to in Mamoru's plans; a pool no plan names is sorted by its tokens. */
-export function bucketOf(pool: string | undefined, amounts?: Position['amounts'], policyId?: string): Bucket {
-  const name = poolName(pool)
+export function bucketOf(pool: string | undefined, amounts?: Position['amounts'], policyId?: string, chainId?: number): Bucket {
+  const name = poolName(pool, chainId)
   // otto/mamoru#201: in the mix with Monad (v6), WETH/USDC is the Balance bucket and Growth lives on Monad.
   if (isMultichainTarget(policyId)) {
     const [a, b] = poolTokens(pool, amounts)
@@ -86,14 +86,15 @@ export function positionRates(f: FundingView, apy: ApyView | undefined, price: b
   const known = values.every((v) => v !== null)
   const total = known ? values.reduce<bigint>((a, v) => a + v!, 0n) : 0n
   return f.positions.map((p, i) => {
+    const chainId = (p as { chainId?: number }).chainId
     // otto/mamoru#210: a vault row is rated under its own registry name.
-    const name = p.vault?.name ?? poolName(p.pool)
+    const name = p.vault?.name ?? poolName(p.pool, chainId)
     const src = name ? apy?.byPool?.find((b) => b.pool === name) : undefined
     const value = values[i]!
     return {
       tokenId: p.tokenId,
       pool: p.pool,
-      bucket: p.vault ? 'Stable' : bucketOf(p.pool, p.amounts, policyId),
+      bucket: p.vault ? 'Stable' : bucketOf(p.pool, p.amounts, policyId, chainId),
       inRange: p.inRange,
       valueUsdc: value,
       unpriced: valued[i]!.unpriced,

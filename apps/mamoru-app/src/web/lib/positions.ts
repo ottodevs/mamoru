@@ -13,15 +13,21 @@ const ENTRIES = registry.entries as Entry[]
 const POOLS = [...ENTRIES, ...(monad.entries as Entry[])].filter((e) => e.kind === 'pool')
 const DEFAULT_PAIR: [string, string] = ['USDC', 'cbBTC']
 
-function poolEntry(pool: string | undefined): Entry | undefined {
+const POOLS_BY_CHAIN = new Map<number, Entry[]>([
+  [8453, ENTRIES.filter((e) => e.kind === 'pool')],
+  [143, (monad.entries as Entry[]).filter((e) => e.kind === 'pool')],
+])
+
+/** otto/mamoru#269: with a `chainId` (a position of the money map) only that chain's own pools are searched; an unknown chain has none. */
+function poolEntry(pool: string | undefined, chainId?: number): Entry | undefined {
   if (!pool) return undefined
   const p = pool.toLowerCase()
-  return POOLS.find((e) => e.name.toLowerCase() === p || e.address.toLowerCase() === p)
+  return (chainId === undefined ? POOLS : (POOLS_BY_CHAIN.get(chainId) ?? [])).find((e) => e.name.toLowerCase() === p || e.address.toLowerCase() === p)
 }
 
 /** The two tokens of a pool, from its registry name or address, else from the position amounts. */
-export function poolTokens(pool: string | undefined, amounts?: Position['amounts']): [string, string] {
-  const e = poolEntry(pool)
+export function poolTokens(pool: string | undefined, amounts?: Position['amounts'], chainId?: number): [string, string] {
+  const e = poolEntry(pool, chainId)
   if (e?.token0 && e.token1) return [e.token0, e.token1]
   const m = pool ? /^pool:([^/]+)\/([^/]+)\//.exec(pool) : null
   if (m) return [m[1]!, m[2]!]
@@ -36,8 +42,8 @@ export function pairLabel(pool: string | undefined, amounts?: Position['amounts'
 }
 
 /** The pool's registry name ("pool:USDC/USDT/100") whether the view carries the name or the address; null when unknown. */
-export function poolName(pool: string | undefined): string | null {
-  return poolEntry(pool)?.name ?? (pool && /^pool:/.test(pool) ? pool : null)
+export function poolName(pool: string | undefined, chainId?: number): string | null {
+  return poolEntry(pool, chainId)?.name ?? (pool && /^pool:/.test(pool) ? pool : null)
 }
 
 /** otto/mamoru#210: a vault's contract address for the explorer, by its registry name; null when unknown. */
@@ -46,8 +52,8 @@ export function vaultAddress(vault: string): string | null {
 }
 
 /** The pool's contract address for the explorer of its chain, whether the view carries the name or the address. */
-export function poolAddress(pool: string): string | null {
-  return poolEntry(pool)?.address ?? (/^0x[0-9a-fA-F]{40}$/.test(pool) ? pool : null)
+export function poolAddress(pool: string, chainId?: number): string | null {
+  return poolEntry(pool, chainId)?.address ?? (/^0x[0-9a-fA-F]{40}$/.test(pool) ? pool : null)
 }
 
 /** Both sides of a position, in pool order; old views without `amounts` fall back to USDC + cbBTC. */
