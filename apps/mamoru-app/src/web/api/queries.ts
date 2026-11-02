@@ -1,4 +1,4 @@
-import type { FundingView } from '@mamoru/domain'
+import type { FundingView, OpView } from '@mamoru/domain'
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { useCallback } from 'react'
 import { useApi, type ApiClient } from './client.ts'
@@ -175,14 +175,23 @@ export function useBridgeOut(accountKey: string | undefined) {
   })
 }
 
-/** Operations on the account. Polls every 4 s while any operation is not confirmed or failed. */
+/**
+ * Operations on the account. Polls every 4 s while any operation is not confirmed or failed; otto/mamoru#340: every
+ * 30 s while only a deposit is arriving (it turns confirmed once its block is safe, minutes later, nothing to watch).
+ */
+export function opsInterval(ops: readonly Pick<OpView, 'kind' | 'state'>[] | undefined): number | false {
+  const open = (ops ?? []).filter((op) => !TERMINAL.has(op.state))
+  if (open.some((op) => op.kind !== 'deposit')) return 4_000
+  return open.length ? 30_000 : false
+}
+
 export function useOps(accountKey: string | undefined, enabled: boolean) {
   const api = useApi()
   return useQuery({
     queryKey: queryKeys.ops(accountKey ?? ''),
     queryFn: () => api.ops(accountKey as string),
     enabled: enabled && accountKey !== undefined,
-    refetchInterval: (q) => (q.state.data?.ops.some((op) => !TERMINAL.has(op.state)) ? 4_000 : false),
+    refetchInterval: (q) => opsInterval(q.state.data?.ops),
   })
 }
 

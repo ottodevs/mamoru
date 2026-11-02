@@ -124,6 +124,7 @@ describe('deposit rows', () => {
   test('opLine says what came in and from where', () => {
     expect(opLine(deposit)).toBe('Added 25.00 USDC from 0xabab…abab')
     expect(opLine({ ...deposit, from: undefined, amountUsdc: undefined })).toBe('Added USDC')
+    expect(opLine({ ...deposit, state: 'submitted' })).toBe('Arriving: 25.00 USDC from 0xabab…abab')
   })
   test('historyOps lists it', () => {
     expect(historyOps([deposit]).map((o) => o.opId)).toEqual([deposit.opId])

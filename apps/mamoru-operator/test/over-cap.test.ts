@@ -3402,8 +3402,77 @@ describe('a deposit shows at once in funding and in the history', () => {
     land(w, address('vault:gtUSDCp', baseRegistry).toLowerCase() as Hex, 2_000_000n, 102n)
     land(w, `0x${'0'.repeat(40)}`, 3_000_000n, 103n)
     at(4_000)
-    await w.op.funding(ctx)
+    // Review of #229 (Gemini P1 3): no row, but the balance they move is read at once all the same.
+    expect((await w.op.funding(ctx)).usdc).toBe('11000000')
     expect(w.op.ops(ctx, null).ops.some((o) => o.kind === 'deposit')).toBe(false)
+  })
+
+  // Security review: anyone can send a Safe dust; it must cost no row, no write and no chain read.
+  test('dust (under 0.01 USDC) is no row, no write and no new balance read', async () => {
+    const w = await stored(5_000_000n)
+    let saves = 0
+    ;(w.op as unknown as { store: { save: () => void } }).store.save = () => void saves++
+    const count = reads(w.op)
+    land(w, WALLET, 9_999n, 101n)
+    at(4_000)
+    expect((await w.op.funding(ctx)).usdc).toBe('5000000')
+    expect(count()).toBe(0)
+    expect(saves).toBe(0)
+    expect(w.op.ops(ctx, null).ops.some((o) => o.kind === 'deposit')).toBe(false)
+  })
+
+  // Security review: a deposit past the chain's safe block may still reorg, and a node behind may not have served
+  // its logs: it shows at once as arriving, the cursor stays at the safe block, and a reorg takes the row away.
+  test('past the safe block a deposit is arriving, the cursor stays behind, a reorg drops it, safety confirms it', async () => {
+    const w = await stored(5_000_000n)
+    let safe = 100n
+    const client = (w.op as unknown as { client: { getBlock: (a?: { blockTag?: string; blockNumber?: bigint }) => Promise<{ number: bigint }> } }).client
+    const { getBlock } = client
+    client.getBlock = (a) => (a?.blockTag === 'safe' ? Promise.resolve({ number: safe }) : getBlock(a))
+    land(w, WALLET, 25_000_000n, 101n)
+    at(4_000)
+    expect((await w.op.funding(ctx)).usdc).toBe('30000000')
+    const arriving = () => w.op.ops(ctx, null).ops.filter((o) => o.kind === 'deposit')
+    expect(arriving()).toEqual([expect.objectContaining({ state: 'submitted', amountUsdc: '25000000' })])
+    expect(w.state.accounts[ctx.accountKey]!.deposits ?? []).toEqual([])
+    expect(w.state.accounts[ctx.accountKey]!.depositsSeen?.block).toBe('100')
+    // Reorged out before it was safe: gone from the history on the next look.
+    w.knobs.transfers.length = 0
+    at(8_000)
+    await w.op.funding(ctx)
+    expect(arriving()).toEqual([])
+    // Mined again and now safe: a confirmed row, kept in the state file.
+    w.knobs.transfers.push({ from: WALLET, value: 25_000_000n, block: 101n, tx: keccak256(stringToHex('deposit-101')), logIndex: 3 })
+    safe = 101n
+    at(12_000)
+    await w.op.funding(ctx)
+    expect(arriving()).toEqual([expect.objectContaining({ state: 'confirmed', amountUsdc: '25000000' })])
+    expect(w.state.accounts[ctx.accountKey]!.deposits).toHaveLength(1)
+  })
+
+  // Review of #229 (Gemini P1 2): the cursor reaches the state file as it moves, not only when a deposit lands.
+  test('the cursor is written every DEPOSITS_SAVE_BLOCKS of progress', async () => {
+    const w = await stored(5_000_000n)
+    let saves = 0
+    ;(w.op as unknown as { store: { save: () => void } }).store.save = () => void saves++
+    for (let i = 1; i <= 4; i++) {
+      w.knobs.head = 100n + 100n * BigInt(i)
+      at(4_000 * i)
+      await w.op.funding(ctx)
+    }
+    expect(saves).toBe(1)
+    expect(w.state.accounts[ctx.accountKey]!.depositsSeen?.block).toBe('500')
+  })
+
+  // Review of #229 (Gemini P0 1): a deposit's id as the ?after cursor never hides ops added after it.
+  test('GET /ops?after=<deposit id> still returns ops added later', async () => {
+    const w = await stored(5_000_000n)
+    land(w, WALLET, 25_000_000n, 101n)
+    at(4_000)
+    await w.op.funding(ctx)
+    const dep = w.op.ops(ctx, null).ops.find((o) => o.kind === 'deposit')!
+    w.state.accounts[ctx.accountKey]!.ops.push({ opId: 'own-9-transfer', kind: 'transfer', state: 'submitted', updatedAt: new Date().toISOString() } as never)
+    expect(w.op.ops(ctx, dep.opId).ops.map((o) => o.opId)).toContain('own-9-transfer')
   })
 
   test('with the deposit look current, polls every 15 s cost one balance read a minute, as the 60 s poll did', async () => {

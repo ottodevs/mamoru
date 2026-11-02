@@ -1220,7 +1220,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const opList = ops.data?.ops ?? []
   // An owner prepare that was never signed is not in flight; only armed or sent ops are. Keeps funding polling
   // fast (otto/mamoru#135) while one is on its way: an activation, renewal, transfer or stop.
-  const inFlight = opList.some((o) => !TERMINAL.has(o.state) && !(o.state === 'proposed' && o.code !== 'ARMED' && !o.txHash))
+  // otto/mamoru#340: an arriving deposit is no op of the owner's: already in the balance, nothing to poll fast for.
+  const inFlight = opList.some((o) => o.kind !== 'deposit' && !TERMINAL.has(o.state) && !(o.state === 'proposed' && o.code !== 'ARMED' && !o.txHash))
   const funding = useFunding(accountKey, true, FUNDING_IDLE_MS, inFlight)
   // otto/mamoru#135: the poll can be 15-60 s behind a deposit. Opening a dialog that shows an amount asks for a
   // read at most 2 s old; nothing waits on it, and nothing is decided on it (prepare reads the chain).

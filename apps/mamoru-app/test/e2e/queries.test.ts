@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { FundingView } from '@mamoru/domain'
 import { QueryClient } from '@tanstack/react-query'
-import { depositArrived, fetchFreshFunding, FUNDING_IDLE_MS, fundingInterval, queryKeys } from '../../src/web/api/queries.ts'
+import { depositArrived, opsInterval, fetchFreshFunding, FUNDING_IDLE_MS, fundingInterval, queryKeys } from '../../src/web/api/queries.ts'
 import { fixtureFunding } from '../../src/web/fixtures/client.ts'
 
 // otto/mamoru#135: a home tab polled funding every 6 s regardless of what was happening, 24/7. The cadence is
@@ -128,5 +128,14 @@ describe('depositArrived', () => {
   })
   test('Home polls funding every 15 s when nothing moves', () => {
     expect(FUNDING_IDLE_MS).toBe(15_000)
+  })
+})
+
+describe('opsInterval', () => {
+  test('4 s while an op is in flight, 30 s while only a deposit is arriving, off otherwise', () => {
+    expect(opsInterval([{ kind: 'transfer', state: 'submitted' }, { kind: 'deposit', state: 'submitted' }])).toBe(4_000)
+    expect(opsInterval([{ kind: 'deposit', state: 'submitted' }, { kind: 'activate', state: 'confirmed' }])).toBe(30_000)
+    expect(opsInterval([{ kind: 'deposit', state: 'confirmed' }])).toBe(false)
+    expect(opsInterval(undefined)).toBe(false)
   })
 })

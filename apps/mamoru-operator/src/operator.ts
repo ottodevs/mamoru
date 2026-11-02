@@ -52,7 +52,7 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, amountsForLiquidity, inUsdc, livePool, nativePricePool, positionUsdc, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
-import { DEPOSIT_PAGE_BLOCKS, depositOpView, depositRange, depositsOf, mergeDeposits, readTransfersIn, type DepositRow } from './deposits.ts'
+import { balanceMoves, DEPOSIT_PAGE_BLOCKS, depositId, depositOpView, depositRange, depositsOf, mergeDeposits, readTransfersIn, type DepositRow } from './deposits.ts'
 import { elsewhereOf, exposureOf, joinReads, totalOf, type ChainExposure, type ExposureWire, type PeerExposure, type PeerRead } from './exposure.ts'
 import { closeCalls, planReduce, planVaultExit, routeOf, swapBackCalls, vaultExitCalls, type SwapBack, type VaultExit } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
@@ -127,6 +127,12 @@ const DEPOSIT_SCAN_WAIT_MS = 1_500
 const DEPOSIT_CURRENT_MS = 2 * DEPOSIT_SCAN_MS
 /** Pages of DEPOSIT_PAGE_BLOCKS one look reads at most; a longer gap is caught up over the next looks. */
 const DEPOSIT_PAGES_PER_PASS = 5
+/**
+ * otto/mamoru#340: one account's deposit looks. `cursor`: the last block read for confirmed rows (never past the safe
+ * block), `saved` what the state file holds of it; `arriving`: deposits past the safe block at the last look;
+ * `moved`: the transfers that already moved the account (fundingMoved once per transfer, not once per look).
+ */
+type DepositLook = { at: number; safe?: string; cursor?: bigint; saved?: bigint; okAt?: number; pending?: Promise<void>; arriving: DepositRow[]; moved: Set<string> }
 /**
  * otto/mamoru#212: how old the peer operators' read of an account may be: for a Start check (prepare, submit, the armed
  * watcher, the send), for an engine review and for what funding shows. A peer that cannot be read fails closed.
@@ -886,7 +892,7 @@ export class Operator {
   /** otto/mamoru#135: one readSafe shared by every open tab and poll of the same account; dropped whenever the account moves (fundingMoved). */
   private readonly fundingCache = new FundingCache<SafeRead>(Date.now, FUNDING_STALE_MS)
   /** otto/mamoru#340: per account, the last look for a deposit (watchDeposits): when, how far, and the one in flight. */
-  private readonly depositLooks = new Map<string, { at: number; safe?: string; cursor?: bigint; okAt?: number; pending?: Promise<void> }>()
+  private readonly depositLooks = new Map<string, DepositLook>()
   /** #149: usage counters read from the chain per account (readChainUsage), keyed by lower-case permission id. */
   private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage>; budgets?: Map<string, number>; paused?: boolean }>()
   /** Ops whose execTransaction went to the provider in this attempt: only then can a refusal be about a copy already out. */
@@ -1839,7 +1845,7 @@ export class Operator {
   private watchDeposits(acc: AccountState, safe: Address): Promise<void> {
     if (this.store.state.accounts[acc.accountKey] !== acc) return Promise.resolve()
     let w = this.depositLooks.get(acc.accountKey)
-    if (!w) this.depositLooks.set(acc.accountKey, (w = { at: 0 }))
+    if (!w) this.depositLooks.set(acc.accountKey, (w = { at: 0, arriving: [], moved: new Set() }))
     if (w.pending) return w.pending
     const now = Date.now()
     if (now - w.at < (this.rpcOverBudget(now) ? DEPOSIT_SCAN_BRAKED_MS : DEPOSIT_SCAN_MS)) return Promise.resolve()
@@ -1854,50 +1860,71 @@ export class Operator {
     return p
   }
 
-  private async lookForDeposits(acc: AccountState, safe: Address, w: { safe?: string; cursor?: bigint; okAt?: number }): Promise<void> {
+  private async lookForDeposits(acc: AccountState, safe: Address, w: DepositLook): Promise<void> {
     const at = safe.toLowerCase()
     if (w.safe !== at) {
       w.safe = at
-      w.cursor = acc.depositsSeen?.safe === at ? BigInt(acc.depositsSeen.block) : undefined
+      w.cursor = w.saved = acc.depositsSeen?.safe === at ? BigInt(acc.depositsSeen.block) : undefined
+      w.arriving = []
+      w.moved.clear()
     }
-    const head = await this.client.getBlockNumber()
-    const range = depositRange(w.cursor, head, DEPOSIT_PAGES_PER_PASS)
-    if (!range) {
-      w.okAt = Date.now()
-      return
-    }
+    // Confirmed rows only up to the chain's safe block, read on the same node as the head: a block past it may still
+    // reorg, and a node behind may not have served its logs yet, so the cursor never passes it. Past it, up to the
+    // head, deposits are read again on every look and shown as arriving.
+    const [head, safeBlock] = await Promise.all([this.client.getBlockNumber(), this.client.getBlock({ blockTag: 'safe' }).then((b) => b.number!)])
     const usdc = address(this.policyOf(acc).savingsAsset, this.cfg.registry)
     const foundAt = now()
     const found: DepositRow[] = []
+    const moves: string[] = []
     try {
-      for (let from = range.from; from <= range.to; from += DEPOSIT_PAGE_BLOCKS) {
-        const to = from + DEPOSIT_PAGE_BLOCKS - 1n < range.to ? from + DEPOSIT_PAGE_BLOCKS - 1n : range.to
-        found.push(...depositsOf(await readTransfersIn(this.client, usdc, safe, from, to), safe, this.cfg.registry, foundAt))
-        w.cursor = to
+      const range = depositRange(w.cursor, safeBlock, DEPOSIT_PAGES_PER_PASS)
+      if (range) {
+        for (let from = range.from; from <= range.to; from += DEPOSIT_PAGE_BLOCKS) {
+          const to = from + DEPOSIT_PAGE_BLOCKS - 1n < range.to ? from + DEPOSIT_PAGE_BLOCKS - 1n : range.to
+          const logs = await readTransfersIn(this.client, usdc, safe, from, to)
+          found.push(...depositsOf(logs, safe, this.cfg.registry, foundAt))
+          moves.push(...balanceMoves(logs, safe))
+          w.cursor = to
+        }
       }
-      if (w.cursor === head) w.okAt = Date.now()
+      // Arriving: only once the confirmed rows are read up to the safe block, the last page before the head at most.
+      if (w.cursor !== undefined && w.cursor >= safeBlock) {
+        const from = safeBlock + DEPOSIT_PAGE_BLOCKS > head ? safeBlock + 1n : head - DEPOSIT_PAGE_BLOCKS + 1n
+        const logs = from <= head ? await readTransfersIn(this.client, usdc, safe, from, head) : []
+        const before = new Map(w.arriving.map((d) => [depositId(d), d]))
+        const confirmed = new Set((acc.deposits ?? []).map(depositId))
+        // A row seen on an earlier look keeps its time; one a reorg dropped is gone from this read, so from the history.
+        w.arriving = depositsOf(logs, safe, this.cfg.registry, foundAt).filter((d) => !confirmed.has(depositId(d))).map((d) => before.get(depositId(d)) ?? d)
+        moves.push(...balanceMoves(logs, safe))
+        w.okAt = Date.now()
+      }
     } finally {
       // What the pages that answered found is kept, and the cursor stays where they ended.
       const { rows, added } = mergeDeposits(acc.deposits ?? [], found)
       if (added.length) acc.deposits = rows
       if (w.cursor !== undefined) {
-        const saved = acc.depositsSeen?.safe === at ? BigInt(acc.depositsSeen.block) : undefined
         acc.depositsSeen = { safe: at, block: w.cursor.toString() }
-        if (added.length || saved === undefined || w.cursor - saved >= DEPOSITS_SAVE_BLOCKS) this.store.save()
+        if (added.length || w.saved === undefined || w.cursor - w.saved >= DEPOSITS_SAVE_BLOCKS) {
+          this.store.save()
+          w.saved = w.cursor
+        }
       }
-      if (added.length) {
-        console.log(`[deposits] ${acc.accountKey} ${added.length} deposit${added.length === 1 ? '' : 's'} to ${safe} through block ${w.cursor}`)
-        this.fundingMoved(acc)
-      }
+      // Once per transfer (an arriving one moved the account already when it is confirmed later), dust never.
+      const fresh = moves.filter((id) => !w.moved.has(id))
+      if (w.moved.size > 1_000) w.moved.clear()
+      for (const id of fresh) w.moved.add(id)
+      if (added.length) console.log(`[deposits] ${acc.accountKey} ${added.length} deposit${added.length === 1 ? '' : 's'} to ${safe} through block ${w.cursor}`)
+      if (fresh.length) this.fundingMoved(acc)
     }
     // The block's own time for a row the node gave none (rare: only for new deposits), after the balance moved.
-    const untimed = (acc.deposits ?? []).filter((d) => d.at === foundAt)
+    const untimed = [...(acc.deposits ?? []), ...w.arriving].filter((d) => d.at === foundAt)
     for (const block of new Set(untimed.map((d) => d.block))) {
       const t = await this.client.getBlock({ blockNumber: BigInt(block) }).then((b) => new Date(Number(b.timestamp) * 1000).toISOString(), () => null)
       if (t) for (const d of untimed) if (d.block === block) d.at = t
     }
-    if (untimed.length) this.store.save()
+    if (untimed.some((d) => (acc.deposits ?? []).includes(d))) this.store.save()
   }
+
 
   /** readSafe with the positions Mamoru admitted on this account named (otto/mamoru#140 part2 #4: see MAX_INVENTORY). */
   private async readOf(acc: AccountState, safe: Address): Promise<SafeRead> {
@@ -1994,13 +2021,18 @@ export class Operator {
       const b = o.bridge && this.cfg.bridgeMonad?.view((o as { userOpHash?: Hex }).userOpHash)
       return b ? { ...o, bridge: b } : o
     })
-    // otto/mamoru#340: and every deposit found (watchDeposits), after the ops; the history orders by block and time.
-    all.push(...(acc.deposits ?? []).map(depositOpView))
-    if (!after) return { ops: all }
+    // otto/mamoru#340: and every deposit found (watchDeposits), after the ops (the history orders by block and time):
+    // the confirmed ones, then those past the safe block, as arriving.
+    const look = this.depositLooks.get(acc.accountKey)
+    const deposits = [...(acc.deposits ?? []).map((d) => depositOpView(d)), ...(look?.safe === acc.ctx.address.toLowerCase() ? look.arriving.map((d) => depositOpView(d, true)) : [])]
+    if (!after) return { ops: [...all, ...deposits] }
+    // An op id cursor pages the ops as before; deposit rows are not in that order, so a deposit's id as the cursor is
+    // answered like an unknown one (everything), never with a slice that would skip ops added after it.
+    if (after.startsWith('dep-')) return { ops: [...all, ...deposits] }
     const i = all.findIndex((o) => o.opId === after)
     if (i >= 0) return { ops: all.slice(i + 1) }
     const t = Date.parse(after)
-    return { ops: Number.isNaN(t) ? all : all.filter((o) => Date.parse(o.updatedAt) > t) }
+    return { ops: Number.isNaN(t) ? [...all, ...deposits] : [...all, ...deposits].filter((o) => Date.parse(o.updatedAt) > t) }
   }
 
   // ---- owner side: prepare -------------------------------------------------
