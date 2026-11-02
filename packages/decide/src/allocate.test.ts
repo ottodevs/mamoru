@@ -485,6 +485,7 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     expect(decide(v6Obs({ ...over, remote: { value: 400n * USDC, inFlight: 0n, ready: false } }), V6).returnDue).toBeUndefined()
     const paused = v6Obs({ ...over, remote: { value: 400n * USDC, inFlight: 0n, ready: true } })
     expect(decide({ ...paused, intents: { paused: true, exitRequested: false } }, V6).returnDue).toBeUndefined()
+    expect(decide({ ...paused, intents: { paused: false, exitRequested: true } }, V6).returnDue).toBeUndefined()
     // A tiny account: the excess is under what an entry must be worth.
     expect(decide(v6Obs({ balances: { USDC: 60_000n, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 40_000n, inFlight: 0n, ready: true } }), V6).returnDue).toBeUndefined()
   })

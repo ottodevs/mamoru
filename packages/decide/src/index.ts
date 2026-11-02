@@ -163,7 +163,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     // Lab (#101 round 3): a bucket frozen by the depeg guard says so, not that it waits for a fall.
     for (const b of a.buckets) buckets.push({ bucket: b.bucket, code: depegged && b.bucket === 'stables' && b.code === 'DECIDE_ENTRY_PAUSED_FALL' ? 'RISK_DEPEG_PAIRED' : b.code })
     waiting = a.waiting
-    if (!obs.intents.paused) returnDue = a.returnDue
+    // Never while paused or with the owner's exit asked for: the stop decides where the money goes then.
+    if (!obs.intents.paused && !obs.intents.exitRequested) returnDue = a.returnDue
     trail.push(...a.trail)
     if (a.proposal) {
       enterEvaluated = true

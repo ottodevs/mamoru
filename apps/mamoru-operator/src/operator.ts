@@ -503,7 +503,7 @@ export type OperatorConfig = {
    */
   bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending'>
   /** otto/mamoru#278 (Base): a V4 home's returns from its remote Safe, followed to the mint here. Absent: none asked. */
-  returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'floor' | 'open' | 'request'>
+  returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'floor' | 'open' | 'request' | 'lastClosedAt'>
   /**
    * otto/mamoru#251, Base side: the operators that run the accounts' own Safes on the chains of v6's remote buckets
    * (remote-peer.ts), by chain id. A v6 approval asks the remote one for its session key, commits to the Safe that gives,
@@ -5520,10 +5520,12 @@ export class Operator {
    * otto/mamoru#278: a V4 home's review found its remote bucket above target and band: the remote Safe is asked for
    * the excess, once (one open return per account), and never while the account is stopping or migrating.
    */
-  private async askReturn(acc: AccountState, amount: bigint, remoteValue: bigint): Promise<void> {
+  private async askReturn(acc: AccountState, amount: bigint, remoteValue: bigint, observedAt: number): Promise<void> {
     const r = this.cfg.returnHome
     const peer = this.cfg.remotePeers?.[BRIDGE_MONAD_CHAIN_ID]
     if (!r || !peer?.release || !peer.releaseStatus || !this.onV4(acc) || !acc.active || r.busy(acc.accountKey)) return
+    // A return that closed since this review began makes its view of the remote stale: the next review decides again.
+    if (r.lastClosedAt(acc.accountKey) >= observedAt) return
     // Never against a bridge the other way still in flight (the review that found the excess saw none; one signed
     // since would be on the bridge journal).
     if (this.stopInFlight(acc) || this.migrationHold(acc) || this.cfg.bridgeMonad?.pending(acc.accountKey)) return
@@ -6739,7 +6741,7 @@ export class Operator {
             else console.log(prefix)
             safeMetrics(() => this.engineHealth.record(acc.accountKey, true, d.code, undefined))
             // otto/mamoru#278: Growth above its target and band on the remote Safe: ask it for the excess.
-            if (d.returnDue) await this.askReturn(acc, d.returnDue.amount, r.observation.remote?.value ?? 0n).catch((e) => logErr(`[return] ${acc.accountKey}:`, e))
+            if (d.returnDue) await this.askReturn(acc, d.returnDue.amount, r.observation.remote?.value ?? 0n, startedAt).catch((e) => logErr(`[return] ${acc.accountKey}:`, e))
             // otto/mamoru#8: this review's own balance read (no extra RPC call), against the account's alert threshold.
             safeMetrics(() => this.recordGasReserve(acc, r.observation.native, r.observation.gas))
             // otto/mamoru#262: and a low reserve is refilled, off the review's path (it never waits on the relayer).
