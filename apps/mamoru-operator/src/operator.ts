@@ -5729,6 +5729,9 @@ export class Operator {
     if (!rec || rec.address.toLowerCase() !== now0.remote.toLowerCase() || rec.ready !== now0.ready) {
       acc.oneAuth = { ...acc.oneAuth, remote: { domain, address: now0.remote, sessionKey: now0.sessionKey, ready: now0.ready, registeredAt: rec?.registeredAt ?? now() } }
       this.store.save()
+      // The engine's remote leg is fixed when its loop starts (remoteOf): a remote that became ready, or stopped being
+      // ready, restarts the loop so the bridge follows V4's readiness.
+      if (acc.active && (rec?.ready === true) !== now0.ready) this.startLoop(acc)
     }
     if (!now0.ready && peer) {
       const res = await peer.provision({ accountKey: remoteAccountKey(acc.accountKey, BRIDGE_MONAD_CHAIN_ID), chainId: BRIDGE_MONAD_CHAIN_ID, address: now0.remote, owners: acc.ctx.owners, saltNonce: acc.ctx.saltNonce, passkey: acc.ctx.passkey, remote: target.spec })
