@@ -68,6 +68,8 @@ export type BridgeBurn = {
   account: Address
   /** otto/mamoru#251: the account's own Safe on Monad, the burn's mint recipient (the bridge-out grant allows no other). */
   recipient: Address
+  /** otto/mamoru#293: the burn's depositor and CCTP message sender when it is not `account` (V4); absent = `account`. */
+  depositor?: Address
   opId: string
   chainId: number
   destinationDomain: number
@@ -281,6 +283,7 @@ export class MonadBridge {
       accountKey,
       account: getAddress(b.account),
       recipient: getAddress(b.recipient),
+      ...(isAddressEqual(b.depositor, b.account) ? {} : { depositor: getAddress(b.depositor) }),
       opId: b.opId,
       chainId: b.chainId,
       destinationDomain: b.destinationDomain,
@@ -565,7 +568,7 @@ export class MonadBridge {
     const amount = BigInt(b.amount)
     const att = atts.find((a) => {
       try {
-        return cctpMessageKey(a.message) === b.messageKey && mintIsFor(decodeCctpMessage(a.message), BASE_USDC, b.recipient, amount, { source: CCTP_DOMAIN_BASE, destination: CCTP_DOMAIN_MONAD }, b.account)
+        return cctpMessageKey(a.message) === b.messageKey && mintIsFor(decodeCctpMessage(a.message), BASE_USDC, b.recipient, amount, { source: CCTP_DOMAIN_BASE, destination: CCTP_DOMAIN_MONAD }, b.depositor ?? b.account)
       } catch {
         return false
       }
@@ -665,7 +668,7 @@ export class MonadBridge {
 }
 
 /** The one DepositForBurn of this burn in a userOp's logs, and the MessageSent next to it; null unless exactly that. */
-export function burnOf(logs: Log[], b: Pick<BridgeBurn, 'account' | 'recipient' | 'amount' | 'destinationDomain'>, registry: Registry = baseRegistry): { message: Hex } | null {
+export function burnOf(logs: Log[], b: Pick<BridgeBurn, 'account' | 'depositor' | 'recipient' | 'amount' | 'destinationDomain'>, registry: Registry = baseRegistry): { message: Hex } | null {
   const messenger = address('TokenMessengerV2', registry)
   const burns = parseEventLogs({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', logs: logs.filter((l) => isAddressEqual(l.address, messenger)) })
   const sent = parseEventLogs({ abi: messageTransmitterV2Abi, eventName: 'MessageSent', logs: logs.filter((l) => isAddressEqual(l.address, MESSAGE_TRANSMITTER_V2)) })
@@ -673,7 +676,7 @@ export function burnOf(logs: Log[], b: Pick<BridgeBurn, 'account' | 'recipient' 
   const a = burns[0]!.args
   const ok =
     isAddressEqual(a.burnToken, address('USDC', registry)) &&
-    isAddressEqual(a.depositor, b.account) &&
+    isAddressEqual(a.depositor, b.depositor ?? b.account) &&
     a.amount === BigInt(b.amount) &&
     a.mintRecipient.toLowerCase() === pad(b.recipient, { size: 32 }).toLowerCase() &&
     a.destinationDomain === b.destinationDomain &&

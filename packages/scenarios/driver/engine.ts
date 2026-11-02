@@ -155,6 +155,8 @@ export type BridgeSigning = {
   account: Address
   /** otto/mamoru#251: the account's own Safe on `chainId`, the only mint recipient its bridge-out grant allows. */
   recipient: Address
+  /** The DepositForBurn depositor and the CCTP message sender: the account itself, or V4 under one authorization (#293). */
+  depositor: Address
   chainId: number
   pool: RegistryName
   bucket: string
@@ -1000,7 +1002,7 @@ export class Engine {
     const destinationDomain = CCTP_DOMAIN_BY_CHAIN[p.chainId]
     if (destinationDomain === undefined) return `no CCTP domain for chain ${p.chainId}`
     try {
-      this.hooks.beforeBridgeSign({ opId, account: this.cfg.account, recipient: this.bridgeRecipient(), chainId: p.chainId, pool: p.pool, bucket: p.bucket, amount: p.amount, destinationDomain, userOpHash: hash, nonceKey: this.nonceKey, nonce, prepareBlock })
+      this.hooks.beforeBridgeSign({ opId, account: this.cfg.account, recipient: this.bridgeRecipient(), depositor: this.bridgeDepositor(), chainId: p.chainId, pool: p.pool, bucket: p.bucket, amount: p.amount, destinationDomain, userOpHash: hash, nonceKey: this.nonceKey, nonce, prepareBlock })
       return null
     } catch (e) {
       return `bridge journal: ${(e as Error).message?.split('\n')[0] ?? String(e)}`
@@ -1731,6 +1733,11 @@ export class Engine {
    * token), and burns once: one DepositForBurn of TokenMessengerV2, from this account, of the amount, to this account
    * on the chain's domain, any caller, no fee, Standard finality, no hook.
    */
+  /** otto/mamoru#293: under V4 the burn is V4's own call (it pulled the amount from the account first), so V4 is the depositor. */
+  private bridgeDepositor(): Address {
+    return isV4Policy(this.cfg.policy.actionPolicy) ? this.cfg.policy.actionPolicy.address : this.cfg.account
+  }
+
   private bridgeMismatch(p: Extract<Proposal, { kind: 'bridge_out' }>, sim: Simulation): string | null {
     const savings = this.cfg.policy.savingsAsset
     const d = sim.deltas[savings] ?? 0n
@@ -1744,7 +1751,7 @@ export class Engine {
     const ok =
       isAddressEqual(a.burnToken, address(savings, this.registry)) &&
       // otto/mamoru#293: under V4 the burn is V4's own call (it pulled the amount from the account first).
-      isAddressEqual(a.depositor, isV4Policy(this.cfg.policy.actionPolicy) ? this.cfg.policy.actionPolicy.address : this.cfg.account) &&
+      isAddressEqual(a.depositor, this.bridgeDepositor()) &&
       a.amount === p.amount &&
       a.mintRecipient.toLowerCase() === pad(this.bridgeRecipient(), { size: 32 }).toLowerCase() &&
       a.destinationDomain === CCTP_DOMAIN_BY_CHAIN[p.chainId] &&

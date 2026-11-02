@@ -27,7 +27,7 @@ const T0 = Date.parse('2026-10-27T10:00:00Z')
 const EP = address('EntryPointV07', baseRegistry)
 
 const signing = (over: Partial<BridgeSigning> = {}): BridgeSigning => ({
-  opId: 'op-1', account: ACCOUNT, recipient: MONAD_SAFE, chainId: 143, pool: 'pool:WMON/USDC/3000', bucket: 'growth', amount: AMOUNT, destinationDomain: 15,
+  opId: 'op-1', account: ACCOUNT, recipient: MONAD_SAFE, depositor: ACCOUNT, chainId: 143, pool: 'pool:WMON/USDC/3000', bucket: 'growth', amount: AMOUNT, destinationDomain: 15,
   userOpHash: UOP, nonceKey: 0n, nonce: 7n, prepareBlock: 1_000n, ...over,
 })
 
@@ -44,8 +44,8 @@ const userOpEvent = parseAbiItem('event UserOperationEvent(bytes32 indexed userO
 const beforeExecution = parseAbiItem('event BeforeExecution()')
 
 /** The handleOps receipt logs of the burn userOp: BeforeExecution, MessageSent, DepositForBurn, UserOperationEvent. */
-function burnReceiptLogs(o: { recipient?: Hex; amount?: bigint; success?: boolean } = {}): Log[] {
-  const dfb = encodeEventTopics({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', args: { burnToken: BASE_USDC, depositor: ACCOUNT, minFinalityThreshold: 2000 } }) as Hex[]
+function burnReceiptLogs(o: { recipient?: Hex; amount?: bigint; success?: boolean; depositor?: Hex } = {}): Log[] {
+  const dfb = encodeEventTopics({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', args: { burnToken: BASE_USDC, depositor: o.depositor ?? ACCOUNT, minFinalityThreshold: 2000 } }) as Hex[]
   const dfbData = encodeAbiParameters(
     [{ type: 'uint256' }, { type: 'bytes32' }, { type: 'uint32' }, { type: 'bytes32' }, { type: 'bytes32' }, { type: 'uint256' }, { type: 'bytes' }],
     [o.amount ?? AMOUNT, pad(o.recipient ?? MONAD_SAFE, { size: 32 }), 15, pad(TOKEN_MESSENGER_V2, { size: 32 }), zeroHash, 0n, '0x'],
@@ -54,7 +54,7 @@ function burnReceiptLogs(o: { recipient?: Hex; amount?: bigint; success?: boolea
   const uoe = encodeEventTopics({ abi: [userOpEvent], eventName: 'UserOperationEvent', args: { userOpHash: UOP, sender: ACCOUNT, paymaster: '0x0000000000000000000000000000000000000000' } }) as Hex[]
   return [
     log(EP, encodeEventTopics({ abi: [beforeExecution], eventName: 'BeforeExecution' }) as Hex[], '0x', 0),
-    log(MESSAGE_TRANSMITTER_V2, sent, encodeAbiParameters([{ type: 'bytes' }], [message({ recipient: o.recipient, amount: o.amount })]), 1),
+    log(MESSAGE_TRANSMITTER_V2, sent, encodeAbiParameters([{ type: 'bytes' }], [message({ recipient: o.recipient, amount: o.amount, sender: o.depositor })]), 1),
     log(TOKEN_MESSENGER_V2, dfb, dfbData, 2),
     log(EP, uoe, encodeAbiParameters([{ type: 'uint256' }, { type: 'bool' }, { type: 'uint256' }, { type: 'uint256' }], [7n, o.success ?? true, 1n, 1n]), 3),
   ]
@@ -65,7 +65,7 @@ function burnReceiptLogs(o: { recipient?: Hex; amount?: bigint; success?: boolea
  * nonce at a block: 8 from the block the burn landed in (inclusion spends it), else `nonceAtSafe` or 7. `ranges`
  * records every getLogs range.
  */
-function baseClient(o: { safe: bigint; landed?: { block: bigint; success?: boolean; recipient?: Hex; amount?: bigint }; nonceAtSafe?: bigint; ranges?: [bigint, bigint][] }): PublicClient {
+function baseClient(o: { safe: bigint; landed?: { block: bigint; success?: boolean; recipient?: Hex; amount?: bigint; depositor?: Hex }; nonceAtSafe?: bigint; ranges?: [bigint, bigint][] }): PublicClient {
   return {
     getBlock: async () => ({ number: o.safe }),
     getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
@@ -708,5 +708,46 @@ describe('the remote Safe is ready only when every committed session is enabled 
   test('no permission ids given (a record from before the approval named them): never ready', async () => {
     expect((await bridgeOn(monadSafe().client).remote('acc-1', MONAD_SAFE, WINDOW)).ready).toBe(false)
     expect((await bridgeOn(monadSafe().client).remote('acc-1', MONAD_SAFE, WINDOW, undefined, [])).ready).toBe(false)
+  })
+})
+
+describe('one authorization (V4, otto/mamoru#293): V4 is the depositor and the message sender', () => {
+  const V4 = '0x00000000000000000000000000000000000000f4' as Hex
+
+  test('a V4 burn is journaled with its depositor, marked burned and minted from an attestation whose sender is V4', async () => {
+    let now = T0
+    const att = await attest(message({ nonce: 43n, executed: true, sender: V4 }))
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n, depositor: V4 } }), iris: { [BURN_TX]: [att] } })
+    s.bridge.recordSending('acc-1', signing({ depositor: V4 }))
+    expect(s.j().burns[UOP]!.depositor?.toLowerCase()).toBe(V4)
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.state).toBe('burned')
+    now += 6 * 60_000
+    await s.bridge.tick()
+    expect(s.relayer!.sent).toHaveLength(1)
+    expect(s.j().burns[UOP]!.state).toBe('minted')
+  })
+
+  test('a V4 burn whose landed depositor is the account, or whose attested sender is the account, is refused', async () => {
+    const wrong = setup({ base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }) })
+    wrong.bridge.recordSending('acc-1', signing({ depositor: V4 }))
+    await wrong.bridge.tick()
+    expect(wrong.j().burns[UOP]!.state).toBe('sending')
+
+    let now = T0
+    const att = await attest(message({ nonce: 44n, executed: true }))
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n, depositor: V4 } }), iris: { [BURN_TX]: [att] } })
+    s.bridge.recordSending('acc-1', signing({ depositor: V4 }))
+    await s.bridge.tick()
+    now += 6 * 60_000
+    await s.bridge.tick()
+    expect(s.relayer!.sent).toHaveLength(0)
+    expect(s.j().burns[UOP]!.state).toBe('burned')
+  })
+
+  test('a pre-V4 burn keeps no depositor on disk and is checked against the account', () => {
+    const s = setup()
+    s.bridge.recordSending('acc-1', signing())
+    expect(s.j().burns[UOP]!.depositor).toBeUndefined()
   })
 })

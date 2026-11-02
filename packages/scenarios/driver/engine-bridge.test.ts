@@ -199,7 +199,7 @@ describe('a bridge-out is journaled before it is signed', () => {
     await withEngine(conservadorLabV6, async (e) => {
       expect(journal(e, bridge())).toBeNull()
       expect(got).toHaveLength(1)
-      expect(got[0]).toMatchObject({ opId: 'op-1', account: ACCOUNT, recipient: getAddress(MONAD_SAFE), chainId: 143, destinationDomain: 15, amount: AMOUNT, userOpHash: hash, nonce: 5n, prepareBlock: 1000n, bucket: 'growth' })
+      expect(got[0]).toMatchObject({ opId: 'op-1', account: ACCOUNT, recipient: getAddress(MONAD_SAFE), depositor: ACCOUNT, chainId: 143, destinationDomain: 15, amount: AMOUNT, userOpHash: hash, nonce: 5n, prepareBlock: 1000n, bucket: 'growth' })
     }, { beforeBridgeSign: (b) => void got.push(b) })
     await withEngine(conservadorLabV6, async (e) => {
       expect(journal(e, bridge())).toContain('disk full')

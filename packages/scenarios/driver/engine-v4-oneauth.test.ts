@@ -5,7 +5,7 @@
 // precheck mirror of V4's checkAction. Decide's proposal kinds: enter_swap (entries and converts), enter_mint,
 // increase_liquidity, harvest, rerange, reduce, bridge_out: all walked here.
 import { describe, expect, test } from 'bun:test'
-import { decodeFunctionData, encodeFunctionResult, toFunctionSelector, zeroAddress, type Hex } from 'viem'
+import { decodeFunctionData, encodeFunctionResult, getAddress, toFunctionSelector, zeroAddress, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import type { Proposal } from '@mamoru/decide'
@@ -15,7 +15,7 @@ import { precheck, SessionLedger } from '@mamoru/account/precheck'
 import { executeCallData, useModeSignature } from '@mamoru/account/sessions'
 import type { Execution } from '@mamoru/account/safe'
 import { FakeChain, Revert } from '../../rpc/test/fake-chain.ts'
-import { Engine, type EngineSession } from './engine.ts'
+import { Engine, type BridgeSigning, type EngineHooks, type EngineSession } from './engine.ts'
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa' as Address
 const V4 = '0x00000000000000000000000000000000000000b4' as Address
@@ -30,7 +30,7 @@ const NPM = address('NonfungiblePositionManager', baseRegistry)
 const grant = { policyId: 'one-auth-v4', policyHash: `0x${'00'.repeat(32)}`, name: 'manage-any', salt: `0x${'02'.repeat(32)}`, chainId: 8453, account: ACCOUNT, sessionValidator: 'OwnableValidator', sessionKey: sessionKey.address, userOp: { validAfter: 0, validUntil: 2 ** 32 - 1, usageLimit: 2 ** 31 - 1 }, permitERC4337Paymaster: false, erc7739: 'none', fallbackAction: 'none', actions: [], requiresActionPolicy: true, actionPolicyOnly: true, oneAuthV4: { policy: V4, npm: NPM } } as unknown as SessionGrant
 const session: EngineSession = { name: `manage-any:${POOL}`, grant, permissionId: `0x${'0d'.repeat(32)}` }
 
-async function withEngine<T>(fn: (e: Engine, chain: FakeChain) => Promise<T>): Promise<T> {
+async function withEngine<T>(fn: (e: Engine, chain: FakeChain) => Promise<T>, hooks: Partial<EngineHooks> = {}): Promise<T> {
   const chain = new FakeChain()
   chain.code.set(ACCOUNT.toLowerCase(), '0x6001')
   chain.contracts.set(V4.toLowerCase(), (data: Hex) => {
@@ -43,7 +43,7 @@ async function withEngine<T>(fn: (e: Engine, chain: FakeChain) => Promise<T>): P
   try {
     const e = new Engine(
       { mode: 'live', chainId: 8453, signingChainIds: [8453], rpcUrl: rpc.url, bundlerUrl: 'http://127.0.0.1:9/', policy, account: ACCOUNT, sessionKey, nonceLane: 0, depositsAfter: 800n, historyFromBlock: 800n, sessions: [], v4BridgeRecipient: () => REMOTE },
-      { waitBlock: async () => {} },
+      { waitBlock: async () => {}, ...hooks },
     )
     return await fn(e, chain)
   } finally {
@@ -86,4 +86,18 @@ describe('V4: every engine step goes through V4 or the manager exits, never Swap
     })
   }
   void zeroAddress
+})
+
+describe('V4 bridge journal (#293): the burn is journaled with V4 as its depositor', () => {
+  test('beforeBridgeSign gets depositor = V4, recipient = the ready remote', async () => {
+    const got: BridgeSigning[] = []
+    const p = { kind: 'bridge_out', grant: 'bridge-out', bucket: 'growth', chainId: 143, pool: 'pool:WMON/USDC/3000', amount: 1_000_000n } as unknown as Proposal
+    await withEngine(async (e) => {
+      const err = (e as unknown as { journalBridge: (opId: string, p: Proposal, h: Hex, n: bigint, b: bigint) => string | null }).journalBridge('op-1', p, `0x${'33'.repeat(32)}`, 5n, 1000n)
+      expect(err).toBeNull()
+    }, { beforeBridgeSign: (b) => void got.push(b) })
+    expect(got).toHaveLength(1)
+    expect(getAddress(got[0]!.depositor)).toBe(getAddress(V4))
+    expect(getAddress(got[0]!.recipient)).toBe(getAddress(REMOTE))
+  })
 })
