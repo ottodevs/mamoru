@@ -106,7 +106,7 @@ describe('one position per pool (otto/mamoru#220)', () => {
     const two = Array.from({ length: MERGES_PER_WEEK }, (_, i) => ({ pool: RISK, at: 10_000n + BigInt(i), merge: true as const }))
     expect(mergeOf(obs([held(3n, 60), held(4n)], { recentReranges: two }), LIVE, pools)).toBeNull()
     expect(mergeOf(obs([held(3n, 60), held(4n)], { recentReranges: two.slice(1) }), LIVE, pools)).toMatchObject({ tokenId: 3n })
-    // Re-ranges do not use up merges, and merges older than a week do not count.
+    // Re-ranges do not use up merges.
     expect(mergeOf(obs([held(3n, 60), held(4n)], { recentReranges: [{ pool: RISK, at: 10_000n }, { pool: RISK, at: 10_001n }] }), LIVE, pools)).toMatchObject({ tokenId: 3n })
   })
 
