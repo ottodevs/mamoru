@@ -5,7 +5,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { TransactionReceiptNotFoundError, type Hex } from 'viem'
+import { TransactionNotFoundError, TransactionReceiptNotFoundError, type Hex } from 'viem'
 import { BridgeOut, SIBLING_RESENDS, UNCONFIRMED_GIVEUP_MS, type StoredSibling } from '../src/bridge-out.ts'
 
 const SAFE = '0x0000000000000000000000000000000000000aaa' as const
@@ -15,7 +15,7 @@ const T0 = Date.parse('2026-11-02T20:00:00Z')
 const SUCCESS = '0x442e715f626346e8c54381002da614f62bee8d27386535b2521ec8540898556e'
 const FAILURE = '0x23428b18acfb3ea64b08dc0c1d296ea9c09702c09083ca5272e64d115b687d23'
 
-type Chain = { enabled: boolean; nonceFinal: bigint; receipt: 'none' | 'success' | 'reverted' | 'error'; execLog: 'none' | 'success' | 'failure'; finalized: bigint; sendLands: boolean }
+type Chain = { enabled: boolean; nonceFinal: bigint; receipt: 'none' | 'success' | 'reverted' | 'error'; execLog: 'none' | 'success' | 'failure'; finalized: bigint; sendLands: boolean; pending?: boolean; sendThrowsAfterSign?: boolean }
 
 function make(stored: Partial<StoredSibling>, chain: Chain, now: () => number) {
   const dir = mkdtempSync(join(tmpdir(), 'mamoru-sib-'))
@@ -36,6 +36,10 @@ function make(stored: Partial<StoredSibling>, chain: Chain, now: () => number) {
     },
     getCode: async () => '0x6080',
     getLogs: async () => (chain.execLog === 'none' ? [] : [{ topics: [chain.execLog === 'success' ? SUCCESS : FAILURE, HASH], data: '0x', transactionHash: TX }]),
+    getTransaction: async ({ hash }: { hash: Hex }) => {
+      if (chain.pending) return { hash }
+      throw new TransactionNotFoundError({ hash })
+    },
     getTransactionReceipt: async ({ hash }: { hash: Hex }) => {
       if (chain.receipt === 'error') throw new Error('provider down')
       if (chain.receipt === 'none') throw new TransactionReceiptNotFoundError({ hash })
@@ -44,8 +48,10 @@ function make(stored: Partial<StoredSibling>, chain: Chain, now: () => number) {
   }
   const relayer = {
     address: '0x0000000000000000000000000000000000000001' as const,
-    send: async (tx: { data?: Hex }, onSent?: (h: Hex) => void) => {
+    send: async (tx: { data?: Hex }, onSent?: (h: Hex) => void, _onSending?: unknown, onSigned?: (h: Hex, n: number) => void) => {
       sent.push(tx.data!)
+      onSigned?.(TX, 0)
+      if (chain.sendThrowsAfterSign) throw new Error('provider accepted it, then the call timed out')
       onSent?.(TX)
       if (chain.sendLands) chain.enabled = true
       return { hash: TX, receipt: { status: chain.sendLands ? 'success' : 'reverted', logs: chain.sendLands ? [{ address: SAFE, topics: [SUCCESS, HASH], data: '0x' }] : [], gasUsed: 1n, effectiveGasPrice: 1n } as never }
@@ -140,6 +146,34 @@ describe('sibling resend guards (security review of #227)', () => {
     const m = make({ l1Tx: TX }, { ...base, receipt: 'reverted' }, () => T0 + 60_000)
     await m.bo.tick()
     expect(m.sent).toEqual([])
+    expect(m.journal().state).toBe('unconfirmed')
+  })
+})
+
+describe('sibling review r2 of #227', () => {
+  test('never signed for broadcast (crash after the deploy): failed after the give-up, never resent', async () => {
+    let now = T0 + 60_000
+    const m = make({ state: 'sending', deployTx: TX, l1Tx: undefined }, base, () => now)
+    await m.bo.tick()
+    expect(m.journal().state).toBe('sending')
+    now = T0 + UNCONFIRMED_GIVEUP_MS + 1
+    await m.bo.tick()
+    expect(m.journal().state).toBe('failed')
+    expect(m.sent).toEqual([])
+  })
+
+  test('a tx still pending in the mempool is not resent beside itself', async () => {
+    const m = make({ l1Tx: TX }, { ...base, pending: true }, () => T0 + UNCONFIRMED_GIVEUP_MS + 1)
+    await m.bo.tick()
+    expect(m.sent).toEqual([])
+    expect(m.journal().state).toBe('unconfirmed')
+  })
+
+  test('a provider that accepts the resend and then fails the call: counted once the hash is signed, stays unconfirmed', async () => {
+    const m = make({ l1Tx: TX }, { ...base, sendThrowsAfterSign: true }, () => T0 + UNCONFIRMED_GIVEUP_MS + 1)
+    await m.bo.tick()
+    expect(m.sent.length).toBe(1)
+    expect(m.journal().resends).toBe(1)
     expect(m.journal().state).toBe('unconfirmed')
   })
 })

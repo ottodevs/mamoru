@@ -8,7 +8,7 @@ import { address, baseRegistry, entryPointV07Abi, erc20Abi, ethereumRegistry } f
 import { buildMigrateV4, smartSessionV4Abi } from '@mamoru/account/one-auth'
 import { oneAuthV4Deployment } from '@mamoru/policy'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { chmodSync } from 'node:fs'
+import { chmodSync, closeSync, fsyncSync, openSync, writeSync } from 'node:fs'
 import { browserOwnerSignature, deployCall, encodeWebAuthnSignature, liveAccountFromContext, ownerSafeTx, readSafeNonce, safeContractSignature, safeTxHashOf, verifyOwnerSignature, type LiveAccount } from '@mamoru/account/live'
 import { execTransactionData, type SafeTx } from '@mamoru/account/safe'
 import { userOpHash } from '@mamoru/account/sessions'
@@ -87,6 +87,8 @@ export const SIBLING_ENABLE_GAS = 2_500_000n
 export const SIBLING_MIN_WEI = MIN_CONVERT_WEI
 /** A dropped or reverted enable is resent with the same signature at most this many times, then alerted (fail closed). */
 export const SIBLING_RESENDS = 3
+/** A sibling out of resends is read again at most this often (it is alerted; ops looks). */
+export const SIBLING_STUCK_POLL_MS = 10 * 60_000
 /** CCTP domain of Base: a sibling's only home. */
 export const SIBLING_HOME_DOMAIN = 6
 
@@ -298,6 +300,8 @@ export type StoredSibling = {
   execData?: Hex
   /** Resends of execData after a dropped or reverted send (at most SIBLING_RESENDS). */
   resends?: number
+  /** Every V4 permission id this account has signed for its sibling (review r2 of #227): any of them is its own. */
+  signedIds?: Hex[]
   at: string
 }
 
@@ -588,10 +592,10 @@ export class BridgeOut {
    * One relayer send, charged to the day. The bound is written to disk before the send, so a restart while waiting for
    * the receipt keeps it charged; a receipt then replaces it with what the transaction really cost.
    */
-  private async charged(tx: { to: Address; data: Hex; gas: bigint }, onSent: (hash: Hex) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+  private async charged(tx: { to: Address; data: Hex; gas: bigint }, onSent: (hash: Hex) => void, onSigned?: (hash: Hex) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     const bound = await this.affordable(tx.gas)
     this.spend(bound)
-    const r = await this.relayer.send(tx, onSent)
+    const r = await this.relayer.send(tx, onSent, undefined, onSigned ? (h) => onSigned(h) : undefined)
     const cost = r.receipt.gasUsed * r.receipt.effectiveGasPrice
     if (cost < bound) this.spend(cost - bound)
     return r
@@ -624,7 +628,7 @@ export class BridgeOut {
     this.on(ctx.accountKey)
     const live = this.live(ctx)
     if (await this.blocking(this.journal.routes[ctx.accountKey])) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
-    if (this.convertBlocking(ctx.accountKey)) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    if (this.convertBlocking(ctx.accountKey) || this.siblingInFlight(ctx.accountKey)) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     const moves = this.journal.moves[ctx.accountKey]
     if (moves && moves.day === this.day() && moves.n >= MOVES_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
     const amount = await this.usdcAt(live.safe)
@@ -1236,7 +1240,7 @@ export class BridgeOut {
   async prepareConvert(ctx: AccountContext): Promise<EthConvertToSign> {
     this.on(ctx.accountKey)
     const live = this.live(ctx)
-    if (this.convertBlocking(ctx.accountKey) || (await this.blocking(this.journal.routes[ctx.accountKey]))) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    if (this.convertBlocking(ctx.accountKey) || this.siblingInFlight(ctx.accountKey) || (await this.blocking(this.journal.routes[ctx.accountKey]))) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     if (this.convertsToday(ctx.accountKey) >= CONVERTS_PER_ACCOUNT_DAY) throw new HttpError(429, 'BRIDGE_ACCOUNT_LIMIT', 'too many moves from Ethereum today, try tomorrow')
     const amountIn = await this.l1.getBalance({ address: live.safe })
     if (amountIn < MIN_CONVERT_WEI) throw new HttpError(409, 'CONVERT_NOTHING', 'there is no ETH on Ethereum to convert')
@@ -1369,7 +1373,13 @@ export class BridgeOut {
     if (keys[accountKey]) return keys[accountKey]!
     keys[accountKey] = generatePrivateKey()
     const tmp = `${this.keyFile}.tmp`
-    writeFileSync(tmp, JSON.stringify(keys, null, 1), { mode: 0o600 })
+    const fd = openSync(tmp, 'w', 0o600)
+    try {
+      writeSync(fd, JSON.stringify(keys, null, 1))
+      fsyncSync(fd) // a key that signed an enable must survive a crash (review r2 of #227)
+    } finally {
+      closeSync(fd)
+    }
     chmodSync(tmp, 0o600)
     renameSync(tmp, this.keyFile)
     return keys[accountKey]!
@@ -1384,6 +1394,12 @@ export class BridgeOut {
   siblingView(accountKey: string): SiblingView {
     const c = this.journal.siblings?.[accountKey]
     return c ? { state: c.state, safe: c.safe, sessionKey: c.sessionKey, ...(c.l1Tx ? { l1Tx: c.l1Tx } : {}) } : { state: 'none' }
+  }
+
+  /** A sibling enable on its way (it signs the Safe's nonce on Ethereum): conversions and moves wait for it. */
+  private siblingInFlight(accountKey: string): boolean {
+    const c = this.journal.siblings?.[accountKey]
+    return !!c && (c.state === 'sending' || c.state === 'unconfirmed')
   }
 
   private siblingBlocking(accountKey: string): boolean {
@@ -1404,19 +1420,27 @@ export class BridgeOut {
     if (this.siblingBlocking(ctx.accountKey)) throw new HttpError(409, 'SIBLING_IN_PROGRESS', 'your Safe on Ethereum is already set up or being set up')
     const cap = this.siblingCapUsd(ctx)
     if (!cap || cap <= 0n) throw new HttpError(503, 'SIBLING_UNAVAILABLE', 'your account limit could not be read just now, try again in a minute')
+    // One Safe nonce at a time on Ethereum (review r2 of #227): never beside a conversion or a move in flight.
+    if (this.convertBlocking(ctx.accountKey) || (await this.blocking(this.journal.routes[ctx.accountKey]))) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     const [eth, usdc, state] = await Promise.all([this.l1.getBalance({ address: live.safe }), this.usdcAt(live.safe), readSafeNonce(this.l1, live.safe)])
-    if (eth < SIBLING_MIN_WEI && usdc < MIN_USDC) throw new HttpError(409, 'SIBLING_NOTHING', 'there is nothing on Ethereum for Mamoru to move')
     if (state.deployed) {
-      const ids = (await this.l1.readContract({ address: address('SmartSession', ethereumRegistry), abi: smartSessionV4Abi, functionName: 'getPermissionIDs', args: [live.safe] })) as Hex[]
+      // Before the funds check (review r2 of #227): an emptied Safe whose own enable landed late still becomes done.
+      const ids = ((await this.l1.readContract({ address: address('SmartSession', ethereumRegistry), abi: smartSessionV4Abi, functionName: 'getPermissionIDs', args: [live.safe] })) as Hex[]).map((x) => x.toLowerCase())
       const own = this.journal.siblings?.[ctx.accountKey]
-      // A late landing of the account's own earlier enable (review r1 of #227): it is done, not a mismatch.
-      if (own && ids.length === 1 && ids[0]!.toLowerCase() === own.permissionId.toLowerCase()) {
+      const mine = new Set([...(own?.signedIds ?? []), ...(own ? [own.permissionId] : [])].map((x) => x.toLowerCase()))
+      // A late landing of one of the account's own earlier enables: it is done, not a mismatch.
+      if (own && ids.length === 1 && mine.has(ids[0]!)) {
+        own.permissionId = ids[0] as Hex
         own.state = 'done'
         this.writeSibling(ctx.accountKey, own)
         throw new HttpError(409, 'SIBLING_IN_PROGRESS', 'your Safe on Ethereum is already set up')
       }
-      if (ids.length) throw new HttpError(409, 'SIBLING_INVENTORY_MISMATCH', 'your Safe on Ethereum has permissions Mamoru did not give: nothing was prepared, and the team was alerted')
+      if (ids.length) {
+        logErr(`[alert] bridge-out sibling ${ctx.accountKey.slice(0, 8)}: ${live.safe} on Ethereum has ${ids.length} SmartSession permission(s) Mamoru does not know: nothing prepared`, undefined)
+        throw new HttpError(409, 'SIBLING_INVENTORY_MISMATCH', 'your Safe on Ethereum has permissions Mamoru did not give: nothing was prepared, and the team was alerted')
+      }
     }
+    if (eth < SIBLING_MIN_WEI && usdc < MIN_USDC) throw new HttpError(409, 'SIBLING_NOTHING', 'there is nothing on Ethereum for Mamoru to move')
     const priv = this.siblingKey(ctx.accountKey)
     const sessionKey = privateKeyToAccount(priv).address
     const input: MigrateV4Input = { chainId: ETHEREUM_CHAIN_ID, safe: live.safe, safeNonce: state.nonce.toString(), step: 1, capUsdc: cap.toString(), sessionKey, generation: '1', admit: [], oldPermissionIds: [], removeIds: [], noncesBefore: [], home: live.safe, homeDomain: SIBLING_HOME_DOMAIN }
@@ -1462,7 +1486,7 @@ export class BridgeOut {
     if (state.deployed !== p.deployed || state.nonce !== p.tx.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'your Safe on Ethereum changed, tap again')
     const exec = execTransactionData(p.tx, signature)
     if (p.deployed) await this.simulate(p.live.safe, exec)
-    const c: StoredSibling = { id: p.prepareId, safe: p.live.safe, safeNonce: p.tx.nonce.toString(), safeTxHash: p.safeTxHash, permissionId: p.permissionId, sessionKey: p.sessionKey, capUsdc: p.capUsdc.toString(), fromBlock: head.toString(), state: 'sending', sentAt: new Date(this.now()).toISOString(), execData: exec, resends: 0, at: '' }
+    const c: StoredSibling = { id: p.prepareId, safe: p.live.safe, safeNonce: p.tx.nonce.toString(), safeTxHash: p.safeTxHash, permissionId: p.permissionId, sessionKey: p.sessionKey, capUsdc: p.capUsdc.toString(), fromBlock: head.toString(), state: 'sending', sentAt: new Date(this.now()).toISOString(), execData: exec, resends: 0, signedIds: [...new Set([...(this.journal.siblings?.[ctx.accountKey]?.signedIds ?? []), p.permissionId])], at: '' }
     this.writeSibling(ctx.accountKey, c)
     try {
       if (!p.deployed) {
@@ -1477,12 +1501,15 @@ export class BridgeOut {
       const est = await this.l1.estimateGas({ account: this.relayer.address, to: p.live.safe, data: exec })
       const gas = (est * 13n) / 10n
       if (gas > SIBLING_ENABLE_GAS) throw new Error(`sibling enable would take ${est} gas`)
-      // Started only once a hash exists: a refusal before the send (gas price, budget) leaves nothing to reconcile.
-      const r = await this.charged({ to: p.live.safe, data: exec, gas }, (h) => {
+      // Started once SIGNED (review r2 of #227): the hash exists before the broadcast, so a provider that accepts the tx
+      // and then fails the call leaves it 'unconfirmed' (reconciled), never 'failed' while it can still land. A refusal
+      // before signing (gas price, budget) leaves nothing to reconcile.
+      const started = (h: Hex) => {
         c.l1Tx = h
         c.execStarted = true
         this.writeSibling(ctx.accountKey, c)
-      })
+      }
+      const r = await this.charged({ to: p.live.safe, data: exec, gas }, started, started)
       await this.settleSibling(c, r.receipt)
     } catch (e) {
       logErr(`[bridge-out] sibling ${ctx.accountKey.slice(0, 8)}:`, e)
@@ -1536,9 +1563,15 @@ export class BridgeOut {
       }
       return
     }
+    // Out of resends (alerted): looked at again only every SIBLING_STUCK_POLL_MS, not every tick (review r2 of #227).
+    if ((c.resends ?? 0) >= SIBLING_RESENDS && this.now() - Date.parse(c.at) < SIBLING_STUCK_POLL_MS) return
     const before = c.state
     if (await this.siblingEnabled(c)) c.state = 'done'
-    else {
+    else if (!c.l1Tx) {
+      // Never signed for broadcast (a refusal or a crash before the exec, e.g. after the deploy): its signature never left
+      // this host, so no one can run it. Failed after the give-up time; the account can prepare again.
+      if (this.now() - Date.parse(c.sentAt ?? c.at) > UNCONFIRMED_GIVEUP_MS) c.state = 'failed'
+    } else {
       const fin = (await this.l1.getBlock({ blockTag: 'finalized' })).number
       const ran = fin < BigInt(c.fromBlock) ? null : await this.findExecution(c.safe, c.safeTxHash, BigInt(c.fromBlock), fin)
       if (ran && !ran.success) c.state = 'failed'
@@ -1556,13 +1589,24 @@ export class BridgeOut {
             }
           }
           if (receipt?.status === 'success') await this.settleSibling(c, receipt)
-          // Dropped or reverted alike, a resend waits UNCONFIRMED_GIVEUP_MS from the last send: never a burst.
-          else if (this.now() - Date.parse(c.sentAt ?? c.at) > UNCONFIRMED_GIVEUP_MS) await this.resendSibling(accountKey, c)
+          // Dropped or reverted alike, a resend waits UNCONFIRMED_GIVEUP_MS from the last send: never a burst. A tx still
+          // pending in the mempool (stuck under its max fee) is never resent beside itself (review r2 of #227).
+          else if (this.now() - Date.parse(c.sentAt ?? c.at) > UNCONFIRMED_GIVEUP_MS && !(receipt === null && (await this.pending(c.l1Tx)))) await this.resendSibling(accountKey, c)
           else if (c.state === 'sending') c.state = 'unconfirmed'
         }
       }
     }
     if (c.state !== before) this.writeSibling(accountKey, c)
+  }
+
+  /** Whether `hash` is known to the provider but not mined (pending). A provider error counts as pending: no resend. */
+  private async pending(hash: Hex): Promise<boolean> {
+    try {
+      await this.l1.getTransaction({ hash })
+      return true
+    } catch (e) {
+      return !(e instanceof TransactionNotFoundError)
+    }
   }
 
   /**
@@ -1587,17 +1631,25 @@ export class BridgeOut {
         logErr(`[alert] bridge-out sibling ${accountKey.slice(0, 8)}: the resend of ${c.safe}'s enable would take ${est} gas: not sent`, undefined)
         return
       }
-      const r = await this.charged({ to: c.safe, data, gas }, (h) => {
+      let counted = false
+      const started = (h: Hex) => {
         c.l1Tx = h
-        c.resends = (c.resends ?? 0) + 1
-        c.sentAt = new Date(this.now()).toISOString()
+        if (!counted) {
+          counted = true
+          c.resends = (c.resends ?? 0) + 1
+          c.sentAt = new Date(this.now()).toISOString()
+        }
         this.writeSibling(accountKey, c)
-      })
+      }
+      const r = await this.charged({ to: c.safe, data, gas }, started, started)
       await this.settleSibling(c, r.receipt)
     }).catch((e) => logErr(`[bridge-out] sibling resend ${accountKey.slice(0, 8)}:`, e))
   }
 
   private writeSibling(accountKey: string, c: StoredSibling): void {
+    // A late write of an older row never replaces a newer one (review r2 of #227).
+    const cur = this.journal.siblings?.[accountKey]
+    if (cur && cur.id !== c.id) return
     c.at = new Date(this.now()).toISOString()
     this.journal.siblings = { ...(this.journal.siblings ?? {}), [accountKey]: c }
     this.save()
