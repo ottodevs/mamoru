@@ -103,6 +103,8 @@ describe('config errors exit 78 (EX_CONFIG); transient ones exit 1', () => {
       ['answers another chain id', baseEnv(), onChain(1)],
       ['MAMORU_GUARDIAN_KEY_FILE is required', { ...baseEnv(), MAMORU_GUARDIAN_DRY_RUN: undefined }],
       ['MAMORU_GUARDIAN_KEY_FILE: ENOENT', { ...baseEnv(), MAMORU_GUARDIAN_KEY_FILE: '/nonexistent/key' }],
+      ['MAMORU_GUARDIAN_STATE_DIR: not an absolute path', { ...baseEnv(), MAMORU_GUARDIAN_STATE_DIR: '%h/.local/state/mamoru-guardian-ethereum' }],
+      ['MAMORU_GUARDIAN_STATE_DIR: not an absolute path', { ...baseEnv(), MAMORU_GUARDIAN_STATE_DIR: 'state' }],
     ]
     const open = join(tmp(), 'key')
     writeFileSync(open, `0x${'0'.repeat(63)}1\n`)

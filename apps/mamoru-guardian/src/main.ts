@@ -142,7 +142,11 @@ export async function run(env: Env, alerter: Alerter, makeClient: MakeClient = (
   const clients: Record<number, ChainClient> = {}
   const registryAt: Record<number, Address> = {}
   const fromBlock: Record<number, bigint> = {}
-  const store = new StateStore(need('MAMORU_GUARDIAN_STATE_DIR'))
+  // Review r5/r6 of #223: an unexpanded systemd specifier (%h in an EnvironmentFile) or a relative path is a config error,
+  // never a state dir under the working directory.
+  const stateDir = need('MAMORU_GUARDIAN_STATE_DIR')
+  if (!stateDir.startsWith('/') || stateDir.includes('%')) throw new ConfigError('MAMORU_GUARDIAN_STATE_DIR: not an absolute path (an EnvironmentFile does not expand %h)')
+  const store = new StateStore(stateDir)
   for (const [k, url] of Object.entries(urls)) {
     const id = Number(k)
     const pc = makeClient(url)
