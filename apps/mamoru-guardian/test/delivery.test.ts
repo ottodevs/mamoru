@@ -2,7 +2,7 @@
 // `failed`, OnFailure pages) and the OnFailure helper pages through its own channel, never the guardian's webhook file.
 // (2) A journal-only alert is never "delivered": not recorded, the cursor holds, and a later webhook replays it.
 import { describe, expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, linkSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ConsoleAlerter, MattermostAlerter, TeeAlerter } from '../src/alerts.ts'
@@ -132,17 +132,59 @@ describe('config errors exit 78 (EX_CONFIG); transient ones exit 1', () => {
 })
 
 describe('mamoru-guardian-alert@ pages through its own channel', () => {
-  test('the alert unit loads its own env file, never the guardian one', () => {
+  test('the alert unit loads its own env file, and the guardian one only optionally (to learn its webhook path)', () => {
     const unit = readFileSync(join(import.meta.dir, '../../../ops/systemd/mamoru-guardian-alert@.service'), 'utf8')
     expect(unit).toMatch(/^EnvironmentFile=%h\/\.config\/mamoru-guardian-alert\/env$/m)
+    expect(unit).toMatch(/^EnvironmentFile=-%h\/\.config\/mamoru-guardian\/env$/m)
     expect(unit).not.toMatch(/^EnvironmentFile=%h\/\.config\/mamoru-guardian\/env$/m)
+  })
+
+  test('refuses the guardian webhook: same path, a symlink to it, a hard link to it, the same URL in another file; exits 1', async () => {
+    const posts: string[] = []
+    const g = hookFile('https://mm.example/hooks/GUARD')
+    const sym = join(tmp(), 'sym')
+    symlinkSync(g, sym)
+    const hard = join(tmp(), 'hard')
+    linkSync(g, hard)
+    const copy = hookFile('https://mm.example/hooks/GUARD')
+    for (const alertFile of [g, sym, hard, copy]) {
+      const env = { MAMORU_GUARDIAN_WEBHOOK_FILE: g, MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE: alertFile }
+      expect(() => unitAlerterFrom(env, okFetch(posts)), alertFile).toThrow('must not be the guardian webhook')
+      expect(await quiet(() => pageUnitFailure(env, 'mamoru-guardian', okFetch(posts)))).toBe(1)
+    }
+    // The guardian's path is a symlink to the alert file: refused too.
+    const own = hookFile('https://mm.example/hooks/OPS')
+    const gsym = join(tmp(), 'gsym')
+    symlinkSync(own, gsym)
+    expect(() => unitAlerterFrom({ MAMORU_GUARDIAN_WEBHOOK_FILE: gsym, MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE: own }, okFetch(posts))).toThrow('must not be the guardian webhook')
+    expect(posts).toEqual([])
+  })
+
+  test('a different webhook pages; a guardian webhook file that is missing or broken does not stop it', async () => {
+    const posts: string[] = []
+    const own = hookFile('https://mm.example/hooks/OPS')
+    const broken = join(tmp(), 'broken')
+    writeFileSync(broken, 'not a url\n', { mode: 0o600 })
+    for (const g of [hookFile('https://mm.example/hooks/GUARD'), '/nonexistent/hook', broken])
+      expect(await pageUnitFailure({ MAMORU_GUARDIAN_WEBHOOK_FILE: g, MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE: own }, 'mamoru-guardian', okFetch(posts))).toBe(0)
+    expect(posts.length).toBe(3)
+  })
+
+  test('any failure to post exits non-zero (the alert unit lands in failed): HTTP error, network error, invalid or missing file', async () => {
+    const http500 = (async () => new Response('no', { status: 500 })) as unknown as typeof fetch
+    const netDown = (async () => { throw new Error('ECONNREFUSED') }) as unknown as typeof fetch
+    const bad = join(tmp(), 'bad')
+    writeFileSync(bad, 'nope\n', { mode: 0o600 })
+    expect(await quiet(() => pageUnitFailure({ MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE: hookFile() }, 'mamoru-guardian', http500))).toBe(1)
+    expect(await quiet(() => pageUnitFailure({ MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE: hookFile() }, 'mamoru-guardian', netDown))).toBe(1)
+    expect(await quiet(() => pageUnitFailure({ MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE: bad }, 'mamoru-guardian', okFetch([])))).toBe(1)
+    expect(await quiet(() => pageUnitFailure({ MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE: '/nonexistent/hook' }, 'mamoru-guardian', okFetch([])))).toBe(1)
+    expect(await quiet(() => pageUnitFailure({}, 'mamoru-guardian', okFetch([])))).toBe(1)
   })
 
   test('it ignores MAMORU_GUARDIAN_WEBHOOK_FILE: without its own variable it does not page through the guardian webhook', async () => {
     const posts: string[] = []
     expect(() => unitAlerterFrom({ MAMORU_GUARDIAN_WEBHOOK_FILE: hookFile() }, okFetch(posts))).toThrow('MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE is not set')
-    const same = hookFile()
-    expect(() => unitAlerterFrom({ MAMORU_GUARDIAN_WEBHOOK_FILE: same, MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE: same }, okFetch(posts))).toThrow('must not be the guardian webhook file')
     expect(await quiet(() => pageUnitFailure({ MAMORU_GUARDIAN_WEBHOOK_FILE: hookFile() }, 'mamoru-guardian', okFetch(posts)))).toBe(1)
     expect(posts).toEqual([])
   })

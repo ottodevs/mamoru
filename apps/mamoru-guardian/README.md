@@ -70,7 +70,8 @@ The systemd template is `ops/systemd/mamoru-guardian.service` (not installed by 
 **Paging (review of #202 r4, r5).** With `MAMORU_GUARDIAN_WEBHOOK_FILE` set, the guardian refuses to start unless the
 file holds an http(s) URL: it exits 78 (EX_CONFIG), the unit stops restarting and enters `failed`, and
 `mamoru-guardian-alert@` pages through `OnFailure=` on its own channel (`MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE` from
-`~/.config/mamoru-guardian-alert/env`; it never reads the guardian's webhook file). Every other configuration error
+`~/.config/mamoru-guardian-alert/env`; it never posts through the guardian's webhook and refuses when both name the
+same file, inode or URL; if it cannot post it exits non-zero and lands in `failed` itself). Every other configuration error
 exits 78 too; a transient one (an RPC down) exits 1 and restarts with backoff. It never runs console-only when paging is
 configured. Without the variable (dev) it says `NO PAGING CONFIGURED` at start and writes alerts to the journal only.
 

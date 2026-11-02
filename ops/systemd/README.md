@@ -145,9 +145,13 @@ Which secret file each unit reads (all 0600, none in the repo, none in an env fi
 | Unit | Env file | Secret files it names |
 |---|---|---|
 | `mamoru-guardian` | `~/.config/mamoru-guardian/env` | `MAMORU_GUARDIAN_KEY_FILE` (guardian key), `MAMORU_GUARDIAN_WEBHOOK_FILE` (guardian alerts webhook) |
-| `mamoru-guardian-alert@` | `~/.config/mamoru-guardian-alert/env` | `MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE` only: a second Mattermost incoming webhook (e.g. ops-mamoru), its own file |
+| `mamoru-guardian-alert@` | `~/.config/mamoru-guardian-alert/env` (and, optional, `~/.config/mamoru-guardian/env`) | posts through `MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE` only: a second Mattermost incoming webhook (e.g. ops-mamoru), its own file |
 
-The alert unit never loads the guardian's env file or webhook file, so a broken guardian webhook still pages. Deploy
+The alert unit loads the guardian's env file only to learn `MAMORU_GUARDIAN_WEBHOOK_FILE`, and refuses to post when both
+variables name the same webhook (same path or realpath, same device+inode, or the same URL in two files). It never posts
+through the guardian's webhook and never reads the guardian key, so a broken guardian webhook still pages. If the alert
+unit cannot post, for any reason (not configured, the same webhook, an HTTP error), it exits non-zero and lands in
+`failed` itself: fleet-watchdog's backstop below then shows two failed units in `#infra`. Deploy
 step: create the second webhook in Mattermost, write its URL to its own 0600 file (e.g.
 `~/.config/mamoru-guardian-alert/webhook`), and put `MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE=<that path>` in
 `~/.config/mamoru-guardian-alert/env`. Check it with
