@@ -302,6 +302,8 @@ export type StoredSibling = {
   resends?: number
   /** Every V4 permission id this account has signed for its sibling (review r2 of #227): any of them is its own. */
   signedIds?: Hex[]
+  /** When a stuck row (out of resends) was last read (review r3 of #227: its own clock, `at` does not move). */
+  polledAt?: string
   at: string
 }
 
@@ -1559,14 +1561,19 @@ export class BridgeOut {
     const c = this.journal.siblings?.[accountKey]
     if (!c || c.state === 'done' || this.inFlight) return
     if (c.state === 'failed') {
-      if (c.l1Tx && (await this.siblingEnabled(c))) {
+      // Any failed row (review r3 of #227): a never-broadcast one too, since the browser still holds a valid signature.
+      if (await this.siblingEnabled(c)) {
         c.state = 'done'
         this.writeSibling(accountKey, c)
       }
       return
     }
-    // Out of resends (alerted): looked at again only every SIBLING_STUCK_POLL_MS, not every tick (review r2 of #227).
-    if ((c.resends ?? 0) >= SIBLING_RESENDS && this.now() - Date.parse(c.at) < SIBLING_STUCK_POLL_MS) return
+    // Out of resends (alerted): looked at again only every SIBLING_STUCK_POLL_MS, not every tick (review r2/r3 of #227).
+    if ((c.resends ?? 0) >= SIBLING_RESENDS) {
+      if (c.polledAt && this.now() - Date.parse(c.polledAt) < SIBLING_STUCK_POLL_MS) return
+      c.polledAt = new Date(this.now()).toISOString()
+      this.save()
+    }
     const before = c.state
     if (await this.siblingEnabled(c)) c.state = 'done'
     else if (!c.l1Tx) {
@@ -1577,7 +1584,11 @@ export class BridgeOut {
       const fin = (await this.l1.getBlock({ blockTag: 'finalized' })).number
       const ran = fin < BigInt(c.fromBlock) ? null : await this.findExecution(c.safe, c.safeTxHash, BigInt(c.fromBlock), fin)
       if (ran && !ran.success) c.state = 'failed'
-      else if (!ran) {
+      else if (ran?.success) {
+        // Executed, yet SmartSession does not list the session (removed since, or a read behind): never stuck silently.
+        logErr(`[alert] bridge-out sibling ${accountKey.slice(0, 8)}: ${c.safe}'s enable executed (${ran.tx}) but the V4 session is not listed`, undefined)
+        c.state = 'unconfirmed'
+      } else if (!ran) {
         const code = fin < BigInt(c.fromBlock) ? '0x' : await this.l1.getCode({ address: c.safe, blockNumber: fin })
         const nonceFin = !code || code === '0x' ? null : ((await this.l1.readContract({ address: c.safe, abi: safeNonceAbi, functionName: 'nonce', blockNumber: fin })) as bigint)
         if (nonceFin !== null && nonceFin > BigInt(c.safeNonce)) c.state = 'failed' // taken by another tx: this one can never run
@@ -1625,7 +1636,11 @@ export class BridgeOut {
     }
     if (this.inFlight || this.bundling.size > 0) return
     const data = c.execData
+    const seen = { l1Tx: c.l1Tx, sentAt: c.sentAt }
     await this.exclusive(async () => {
+      // Overlapping ticks (review r3 of #227): another resend may have gone out meanwhile: then this one is not sent.
+      const now = this.journal.siblings?.[accountKey]
+      if (!now || now.id !== c.id || now.l1Tx !== seen.l1Tx || now.sentAt !== seen.sentAt) return
       await this.simulate(c.safe, data)
       const est = await this.l1.estimateGas({ account: this.relayer.address, to: c.safe, data })
       const gas = (est * 13n) / 10n
