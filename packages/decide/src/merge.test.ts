@@ -78,8 +78,9 @@ describe('one position per pool (otto/mamoru#220)', () => {
     expect(decide(obs([held(4n), held(3n)]), LIVE).proposal).toMatchObject({ kind: 'rerange', tokenId: 4n, why: 'merge' })
   })
 
-  test('#220 b54dda3a: a position the policy did not admit goes first, even nearer the new range', () => {
-    expect(decide(obs([held(3n, 60), held(4n, 0, { admitted: false })]), LIVE).proposal).toMatchObject({ kind: 'rerange', tokenId: 4n, why: 'merge' })
+  test('#217 review: only admitted positions merge; the policy refuses to close or add to any other', () => {
+    for (const admitted of [false, undefined]) expect(mergeOf(obs([held(3n, 60), held(4n, 0, { admitted })]), LIVE, new Set([RISK]))).toBeNull()
+    expect(mergeOf(obs([held(3n, 60), held(4n, 0), held(5n, 90, { admitted: false })]), LIVE, new Set([RISK]))).toMatchObject({ tokenId: 3n })
   })
 
   test('#220 b54dda3a: after the merge the entry adds to the admitted one left, even read unmanaged after a restart', () => {

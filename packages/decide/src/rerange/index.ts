@@ -149,8 +149,7 @@ export const MERGES_PER_WEEK = 2
 
 /**
  * otto/mamoru#220: one position per pool. Where the account holds more than one live position in a pool, all of them
- * in range, one not admitted by the policy (it cannot take an entry), else the one furthest from the range a new entry
- * would get now is closed (ties: the newer tokenId), one per
+ * in range, the one furthest from the range a new entry would get now is closed (ties: the newer tokenId), one per
  * review, after the re-range cooldown and at most MERGES_PER_WEEK times a week per pool (not counted toward the
  * re-range cap). Its money goes back in through the entry: into the position that stays when it is close enough
  * (#171), else into a fresh one, which is then the closest and stays. A position out of range is the re-range rule's,
@@ -169,15 +168,15 @@ export function mergeOf(obs: Observation, policy: PolicyVersion, policyPools: Re
     if (policy.buckets.find((b) => b.pools.includes(pool.name as never))?.preference === 0) continue
     const grant = anyKey(policy, 'manage-any', pool.name)
     if (!liveSession(obs, grant)) continue
-    const live = obs.positions.filter((p) => p.pool === pool.name && p.liquidity > 0n && isManaged(p, policy, policyPools))
+    // Only positions the policy admitted (spec 007): it refuses to decrease or add to any other, so a merge of one
+    // would fail review after review, and one could never take the entry.
+    const live = obs.positions.filter((p) => p.pool === pool.name && p.liquidity > 0n && p.admitted === true && isManaged(p, policy, policyPools))
     if (live.length < 2 || live.some((p) => pool.tick < p.tickLower || pool.tick >= p.tickUpper)) continue
     if ((obs.recentReranges ?? []).filter((r) => r.pool === pool.name && r.at > since && r.merge).length >= MERGES_PER_WEEK) continue
     const fresh = rangeFor(obs, policy, pool)
     const distance = (p: PositionObs) => Math.abs(p.tickLower - fresh.tickLower) + Math.abs(p.tickUpper - fresh.tickUpper)
-    // A position the policy did not admit cannot take the entry (#171): it goes first, whatever its distance.
-    const closesBefore = (a: PositionObs, b: PositionObs) => (a.admitted === true) !== (b.admitted === true) ? a.admitted !== true : distance(a) !== distance(b) ? distance(a) > distance(b) : a.tokenId > b.tokenId
     let far = live[0]!
-    for (const p of live.slice(1)) if (closesBefore(p, far)) far = p
+    for (const p of live.slice(1)) if (distance(p) > distance(far) || (distance(p) === distance(far) && p.tokenId > far.tokenId)) far = p
     return { kind: 'rerange', grant, pool: pool.name, tokenId: far.tokenId, liquidity: far.liquidity, why: 'merge', tickLower: far.tickLower, tickUpper: far.tickUpper }
   }
   return null
