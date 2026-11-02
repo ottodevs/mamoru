@@ -47,7 +47,8 @@ export type CheckInput = {
   remoteRegistry: Registry
 }
 
-export type CheckResult = { ok: true } | { ok: false; failed: string }
+/** `transient`: a read failed or is still in progress: not a proof of anything (review r3 of #223: never cleared on it). */
+export type CheckResult = { ok: true } | { ok: false; failed: string; transient?: true }
 
 const fail = (failed: string): CheckResult => ({ ok: false, failed })
 const sameList = (a: readonly Address[], b: readonly Address[]) => a.length === b.length && a.every((x, i) => isAddressEqual(x, b[i]!))
@@ -61,6 +62,9 @@ async function read<T>(label: string, f: () => Promise<T>): Promise<{ v: T } | {
     return { failed: `${label}: read failed` }
   }
 }
+
+/** A failed result whose cause is a read (RPC) failure: transient. */
+const readFail = (failed: string): CheckResult => ({ ok: false, failed, ...(failed.endsWith(': read failed') ? { transient: true as const } : {}) })
 
 export async function checkRemote(i: CheckInput, r: CheckReads): Promise<CheckResult> {
   const { account, event, remoteRegistry } = i
@@ -194,7 +198,18 @@ export type SiblingReads = {
   homeHistory(account: Address): Promise<HomeHistory>
 }
 
-export type HomeHistory = { complete: boolean; allowances: readonly { token: Address; spender: Address }[]; approvedForAll: readonly Address[]; signedMessages: number }
+export type HomeHistory = {
+  complete: boolean
+  /** Why it is not complete (e.g. no archive RPC to find the deploy block). */
+  note?: string
+  allowances: readonly { token: Address; spender: Address }[]
+  approvedForAll: readonly Address[]
+  signedMessages: number
+  /** Review r3 of #223 (P0-B): owner txs with operation DELEGATECALL to anything but MultiSendCallOnly, and module txs with DELEGATECALL. */
+  delegatecalls: number
+  /** Review r3 (P1-2): positions of the home with a single-token approval still set (ERC-721 getApproved). */
+  positionApprovals: readonly bigint[]
+}
 
 const ZERO: Address = '0x0000000000000000000000000000000000000000'
 
@@ -215,53 +230,53 @@ export async function checkSibling(
   r: SiblingReads,
 ): Promise<CheckResult> {
   const sib = await read('siblingConfig', () => r.config('sibling', i.account))
-  if ('failed' in sib) return fail(sib.failed)
+  if ('failed' in sib) return readFail(sib.failed)
   if (!sib.v.set || !isAddressEqual(sib.v.home, i.account) || sib.v.homeDomain !== i.homeDomain) return fail('siblingConfig: not a sibling of this account on this domain')
   for (const side of ['sibling', 'home'] as const) {
     const h = await read('codeHash', () => r.codeHash(side, i.account))
-    if ('failed' in h) return fail(h.failed)
+    if ('failed' in h) return readFail(h.failed)
     if (!h.v) return fail(side === 'home' ? 'homeCode: the home account is not deployed' : 'codeHash: the sibling has no code')
     if (h.v.toLowerCase() !== SAFE_PROXY_CODEHASH) return fail(`codeHash: the ${side} is not a SafeProxy 1.4.1`)
   }
   const single = await read('homeSingleton', () => r.homeSingleton(i.account))
-  if ('failed' in single) return fail(single.failed)
+  if ('failed' in single) return readFail(single.failed)
   if (!isAddressEqual(single.v, address('SafeL2_141', i.homeRegistry))) return fail('homeSingleton: not a Safe of the pinned singleton')
   const home = await read('homeConfig', () => r.config('home', i.account))
-  if ('failed' in home) return fail(home.failed)
+  if ('failed' in home) return readFail(home.failed)
   if (!home.v.set || BigInt(home.v.home) !== 0n) return fail('homeConfig: the address is not a V4 home account there')
   const a = await read('ownersHash', () => r.ownersHash('sibling', i.account))
-  if ('failed' in a) return fail(a.failed)
+  if ('failed' in a) return readFail(a.failed)
   const b = await read('ownersHash', () => r.ownersHash('home', i.account))
-  if ('failed' in b) return fail(b.failed)
+  if ('failed' in b) return readFail(b.failed)
   if (a.v.toLowerCase() !== b.v.toLowerCase()) return fail('ownersHash: the keys differ between the sibling and its home')
   // P1-1: nothing but the owners and V4-bounded sessions can execute on the home.
   const safe7579 = address('Safe7579', i.homeRegistry)
   const smart = address('SmartSession', i.homeRegistry)
   const mods = await read('homeModules', () => r.modules(i.account))
-  if ('failed' in mods) return fail(mods.failed)
+  if ('failed' in mods) return readFail(mods.failed)
   if (!sameList(mods.v, [safe7579])) return fail('homeModules: Safe7579 must be the only Safe module')
   const guard = await read('homeGuard', () => r.guard(i.account))
-  if ('failed' in guard) return fail(guard.failed)
+  if ('failed' in guard) return readFail(guard.failed)
   if (!isAddressEqual(guard.v, ZERO)) return fail('homeGuard: a transaction guard is set')
   const fb = await read('homeFallbackHandler', () => r.fallbackHandler(i.account))
-  if ('failed' in fb) return fail(fb.failed)
+  if ('failed' in fb) return readFail(fb.failed)
   if (!isAddressEqual(fb.v, safe7579)) return fail('homeFallbackHandler: not Safe7579')
   const vals = await read('homeValidators7579', () => r.validators7579(i.account))
-  if ('failed' in vals) return fail(vals.failed)
+  if ('failed' in vals) return readFail(vals.failed)
   if (!sameList(vals.v, [smart])) return fail('homeValidators7579: SmartSession must be the only validator')
   const execs = await read('homeExecutors7579', () => r.executors7579(i.account))
-  if ('failed' in execs) return fail(execs.failed)
+  if ('failed' in execs) return readFail(execs.failed)
   if (execs.v.length !== 0) return fail('homeExecutors7579: an executor is installed')
   const hook = await read('homeHook7579', () => r.hook7579(i.account))
-  if ('failed' in hook) return fail(hook.failed)
+  if ('failed' in hook) return readFail(hook.failed)
   if (!isAddressEqual(hook.v, ZERO)) return fail('homeHook7579: a hook is installed')
   const ids = await read('homePermissions', () => r.permissionIds(i.account))
-  if ('failed' in ids) return fail(ids.failed)
+  if ('failed' in ids) return readFail(ids.failed)
   if (ids.v.length === 0) return fail('homePermissions: no V4 session on the home')
   const ownable = address('OwnableValidator', i.homeRegistry)
   for (const id of ids.v) {
     const s = await read('homePermissions', () => r.session(i.account, id))
-    if ('failed' in s) return fail(s.failed)
+    if ('failed' in s) return readFail(s.failed)
     const v4Bound = s.v.actions.length === 1 && s.v.actions[0]!.toLowerCase() === FALLBACK_ACTION_ID
       && sameList(s.v.fallbackPolicies, [i.deployment.policy]) && sameList(s.v.userOpPolicies, [i.deployment.gasPolicy])
       && s.v.erc1271Policies.length === 0 && isAddressEqual(s.v.validator, ownable)
@@ -273,13 +288,24 @@ export async function checkSibling(
   // no stored message. (Safe7579 pre-validation hooks, P1-b: the pinned Safe7579 has no getPrevalidationHook, read on
   // Base 2 Nov: not installable there.)
   const hist = await read('homeHistory', () => r.homeHistory(i.account))
-  if ('failed' in hist) return fail(hist.failed)
-  if (!hist.v.complete) return fail("homeHistory: the home's history is still being read")
-  const allowed = new Set([...i.homeRegistry.entries.map((e) => e.address.toLowerCase()), i.deployment.policy.toLowerCase(), i.deployment.gasPolicy.toLowerCase()])
+  if ('failed' in hist) return readFail(hist.failed)
+  if (!hist.v.complete) return { ok: false, failed: `homeHistory: the home's history is still being read${hist.v.note ? ` (${hist.v.note})` : ''}`, transient: true }
+  // Review r3 of #223 (P0-B): a DELEGATECALL lets whoever was an owner rewrite any storage of the home with no event
+  // (approvedHashes for the new owners, an unlinked module, a hidden owner, signedMessages): reading its state back then
+  // proves nothing. Mamoru only ever delegatecalls MultiSendCallOnly (call-only inner txs) and never from a module.
+  if (hist.v.delegatecalls) return fail(`homeDelegatecall: the home ran ${hist.v.delegatecalls} delegatecall(s) Mamoru never makes`)
+  // P0-A: only spenders that pull from msg.sender in their own logic (never a contract that forwards arbitrary calls:
+  // Multicall3, MultiSend, a module registry).
+  const pulls = new Set([
+    ...i.homeRegistry.entries.filter((e) => e.kind === 'vault' || e.name === 'SwapRouter02' || e.name === 'NonfungiblePositionManager' || e.name === 'TokenMessengerV2').map((e) => e.address.toLowerCase()),
+    i.deployment.policy.toLowerCase(),
+  ])
+  const allowed = pulls
   const foreign = hist.v.allowances.find((x) => !allowed.has(x.spender.toLowerCase()))
   if (foreign) return fail(`homeAllowance: ${foreign.token} may be spent by ${foreign.spender}`)
   if (hist.v.approvedForAll.length) return fail(`homeApprovedForAll: ${hist.v.approvedForAll[0]} may move the home's positions`)
   if (hist.v.signedMessages) return fail('homeSignedMessages: the home stored a signed message')
+  if (hist.v.positionApprovals.length) return fail(`homePositionApproval: position ${hist.v.positionApprovals[0]} has an approved operator`)
   // P1-a, bounded: the home's C is never above the sibling's (the C Mamoru signs for both).
   if (home.v.capUsd > sib.v.capUsd) return fail("homeConfig: the home's C is above the sibling's")
   return { ok: true }

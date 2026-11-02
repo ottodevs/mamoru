@@ -16,7 +16,7 @@ export type ChainClient = {
   getCode(a: { address: Address; blockNumber?: bigint }): Promise<Hex | undefined>
   getStorageAt(a: { address: Address; slot: Hex }): Promise<Hex | undefined>
   readContract(a: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[] }): Promise<unknown>
-  getLogs(a: { address: Address; event: unknown; args?: Record<string, unknown>; fromBlock: bigint; toBlock: bigint }): Promise<{ args: Record<string, unknown> }[]>
+  getLogs(a: { address?: Address; event: unknown; args?: Record<string, unknown>; fromBlock: bigint; toBlock: bigint }): Promise<{ args: Record<string, unknown>; address?: Address }[]>
 }
 
 export type SetReady = (a: { account: Address; domain: number; remote: Address }) => Promise<Hex>
@@ -226,9 +226,16 @@ function configOf(raw: unknown): V4Config {
 const approvalEvent = parseAbiItem('event Approval(address indexed owner, address indexed spender, uint256 value)')
 const approvalForAllEvent = parseAbiItem('event ApprovalForAll(address indexed owner, address indexed operator, bool approved)')
 const signMsgEvent = parseAbiItem('event SignMsg(bytes32 indexed msgHash)')
+const nftApprovalEvent = parseAbiItem('event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)')
+const safeMultiSigEvent = parseAbiItem('event SafeMultiSigTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures, bytes additionalInfo)')
+const safeModuleTxEvent = parseAbiItem('event SafeModuleTransaction(address module, address to, uint256 value, bytes data, uint8 operation)')
+/** Logs are read this many blocks short of the head (review r3 of #223, P2: a reorg never skips a log behind the cursor). */
+const HISTORY_CONFIRMATIONS = 10n
 const allowanceViewAbi = [
   { type: 'function', name: 'allowance', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'address' }], outputs: [{ type: 'uint256' }] },
   { type: 'function', name: 'isApprovedForAll', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'address' }], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'getApproved', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'address' }] },
+  { type: 'function', name: 'ownerOf', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'address' }] },
 ] as const satisfies Abi
 
 /**
@@ -239,26 +246,42 @@ const allowanceViewAbi = [
  */
 async function homeHistoryOf(cfg: WatcherConfig, d: WatcherDeps, s: Sibling, home: ChainClient, homeChainId: number): Promise<HomeHistory> {
   const reg = registryFor(homeChainId)
-  const head = await home.getBlockNumber()
-  const h = (s.hist ??= { next: '', spenders: {}, operators: [], signed: 0 })
+  const tip = await home.getBlockNumber()
+  const head = tip > HISTORY_CONFIRMATIONS ? tip - HISTORY_CONFIRMATIONS : 0n
+  const h = (s.hist ??= { next: '', spenders: {}, operators: [], signed: 0, delegatecalls: 0, nftIds: [] })
+  h.delegatecalls ??= 0
+  h.nftIds ??= []
+  const empty = (note?: string): HomeHistory => ({ complete: false, ...(note ? { note } : {}), allowances: [], approvedForAll: [], signedMessages: 0, delegatecalls: 0, positionApprovals: [] })
   if (h.next === '') {
-    const at = await deployBlockOf(home, s.account, head)
-    if (at === null) return { complete: false, allowances: [], approvedForAll: [], signedMessages: 0 }
+    let at: bigint | null
+    try {
+      at = await deployBlockOf(home, s.account, tip)
+    } catch {
+      return empty('the home chain RPC has no history: its deploy block cannot be found') // P2: alerted, not silent
+    }
+    if (at === null) return empty()
     h.next = at.toString()
   }
-  const tokens = reg.entries.filter((e) => e.kind === 'token').map((e) => e.address)
   const npm = reg.entries.find((e) => e.name === 'NonfungiblePositionManager')?.address
+  const callOnly = address('MultiSendCallOnly_141', reg)
   let next = BigInt(h.next)
   for (let page = 0; page < cfg.maxPagesPerStream && next <= head; page++) {
     const to = next + cfg.logPage - 1n < head ? next + cfg.logPage - 1n : head
-    for (const t of tokens) {
-      for (const l of await home.getLogs({ address: t, event: approvalEvent, args: { owner: s.account }, fromBlock: next, toBlock: to })) {
-        const k = getAddress(t)
-        h.spenders[k] = [...new Set([...(h.spenders[k] ?? []), getAddress(String(l.args.spender))])]
-      }
+    // Review r3 (P1-1): Approval(owner = home) on EVERY token (one query, no address filter). The position manager's
+    // ERC-721 approvals share the topic; they are read apart below.
+    for (const l of await home.getLogs({ event: approvalEvent, args: { owner: s.account }, fromBlock: next, toBlock: to })) {
+      if (!l.address || (npm && isAddressEqual(l.address, npm)) || l.args.spender === undefined) continue
+      const k = getAddress(l.address)
+      h.spenders[k] = [...new Set([...(h.spenders[k] ?? []), getAddress(String(l.args.spender))])]
     }
-    if (npm) for (const l of await home.getLogs({ address: npm, event: approvalForAllEvent, args: { owner: s.account }, fromBlock: next, toBlock: to })) h.operators = [...new Set([...h.operators, getAddress(String(l.args.operator))])]
+    for (const l of await home.getLogs({ event: approvalForAllEvent, args: { owner: s.account }, fromBlock: next, toBlock: to })) {
+      if (l.address) h.operators = [...new Set([...h.operators, `${getAddress(l.address)}:${getAddress(String(l.args.operator))}`])] as Address[]
+    }
+    if (npm) for (const l of await home.getLogs({ address: npm, event: nftApprovalEvent, args: { owner: s.account }, fromBlock: next, toBlock: to })) if (l.args.tokenId !== undefined) h.nftIds = [...new Set([...h.nftIds, String(l.args.tokenId)])]
     h.signed += (await home.getLogs({ address: s.account, event: signMsgEvent, fromBlock: next, toBlock: to })).length
+    // Review r3 (P0-B): every owner tx and every module tx of the home (SafeL2 events).
+    for (const l of await home.getLogs({ address: s.account, event: safeMultiSigEvent, fromBlock: next, toBlock: to })) if (Number(l.args.operation) === 1 && !isAddressEqual(getAddress(String(l.args.to)), callOnly)) h.delegatecalls++
+    for (const l of await home.getLogs({ address: s.account, event: safeModuleTxEvent, fromBlock: next, toBlock: to })) if (Number(l.args.operation) === 1) h.delegatecalls++
     next = to + 1n
     h.next = next.toString()
     d.store.save()
@@ -267,12 +290,26 @@ async function homeHistoryOf(cfg: WatcherConfig, d: WatcherDeps, s: Sibling, hom
   const allowances: { token: Address; spender: Address }[] = []
   for (const [token, spenders] of Object.entries(h.spenders)) {
     for (const spender of spenders) {
-      if ((await call<bigint>(home, token as Address, allowanceViewAbi, 'allowance', [s.account, spender])) > 0n) allowances.push({ token: token as Address, spender })
+      // An allowance that cannot be read is counted as live (fail closed).
+      const v = await call<bigint>(home, token as Address, allowanceViewAbi, 'allowance', [s.account, spender]).catch(() => 1n)
+      if (v > 0n) allowances.push({ token: token as Address, spender })
     }
   }
   const approvedForAll: Address[] = []
-  if (npm) for (const op of h.operators) if (await call<boolean>(home, npm, allowanceViewAbi, 'isApprovedForAll', [s.account, op])) approvedForAll.push(op)
-  return { complete, allowances, approvedForAll, signedMessages: h.signed }
+  for (const pair of h.operators) {
+    const [contract, op] = String(pair).split(':') as [Address, Address]
+    if (await call<boolean>(home, contract, allowanceViewAbi, 'isApprovedForAll', [s.account, op]).catch(() => true)) approvedForAll.push(op)
+  }
+  const positionApprovals: bigint[] = []
+  if (npm) {
+    for (const id of h.nftIds) {
+      const owner = await call<Address>(home, npm, allowanceViewAbi, 'ownerOf', [BigInt(id)]).catch(() => null)
+      if (!owner || !isAddressEqual(owner, s.account)) continue // burned or moved: no longer the home's
+      const approved = await call<Address>(home, npm, allowanceViewAbi, 'getApproved', [BigInt(id)]).catch(() => s.account)
+      if (BigInt(approved) !== 0n) positionApprovals.push(BigInt(id))
+    }
+  }
+  return { complete, allowances, approvedForAll, signedMessages: h.signed, delegatecalls: h.delegatecalls, positionApprovals }
 }
 
 /** Safe proxy storage slot 0: its singleton. */
@@ -369,7 +406,10 @@ async function processSiblings(cfg: WatcherConfig, d: WatcherDeps): Promise<stri
       if (ready) {
         s.checkedAt = now
         d.store.save()
-        if (!res.ok) {
+        if (!res.ok && res.transient) {
+          // Review r3 of #223 (P2): a read failure or a scan in progress proves nothing: alerted, never cleared on it.
+          await alertOnce(d, `sib:recheck:${k}:${res.failed}`, `Ready sibling's re-check incomplete, ${where}: ${res.failed}`, cfg.realertMs)
+        } else if (!res.ok) {
           // Review r2 of #223 (P1-c): the guardian clears it (revoke-only) instead of letting the bridge continue.
           if (!cfg.dryRun && d.clear) {
             const tx = await d.clear({ account: s.account, domain: s.domain }).catch(() => null)

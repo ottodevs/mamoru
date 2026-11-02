@@ -14,7 +14,7 @@ export type Sibling = {
   /** Unix ms of the last read-back of a ready sibling (re-checked every realert window; a change clears it). */
   checkedAt?: number
   /** Review r2 of #223 (P0-1): the home's log scan from its deploy block (next block; spenders per token; operators). */
-  hist?: { next: string; spenders: Record<string, Address[]>; operators: Address[]; signed: number }
+  hist?: { next: string; spenders: Record<string, Address[]>; operators: Address[]; signed: number; delegatecalls?: number; nftIds?: string[] }
 }
 export type State = {
   v: 1

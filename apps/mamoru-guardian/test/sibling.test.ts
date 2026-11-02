@@ -32,6 +32,9 @@ function world() {
     approvedForAll: true,
     signMsgs: 0,
     head: 10n,
+    ownerTxs: [] as { to: Address; operation: number }[],
+    moduleTxs: [] as { operation: number }[],
+    nftApprovals: [] as { tokenId: bigint; approved: Address; owned: boolean }[],
     sibCode: PROXY as Hex | undefined,
     home: {
       code: PROXY as Hex | undefined,
@@ -62,9 +65,13 @@ function client(w: W, side: 'sibling' | 'home'): ChainClient {
       const name = (event as { name: string }).name
       if (name === 'PolicySet') return side === 'sibling' ? w.logs : []
       if (side !== 'home') return []
-      if (name === 'Approval') return w.approvals.filter((x) => x.token.toLowerCase() === at.toLowerCase()).map((x) => ({ args: { owner: ACCOUNT, spender: x.spender } }))
-      if (name === 'ApprovalForAll') return w.approvalForAll.map((o) => ({ args: { owner: ACCOUNT, operator: o } }))
+      const npm = address('NonfungiblePositionManager', baseRegistry)
+      if (name === 'Approval' && at && at.toLowerCase() === npm.toLowerCase()) return w.nftApprovals.map((x) => ({ address: npm, args: { owner: ACCOUNT, approved: x.approved, tokenId: x.tokenId } }))
+      if (name === 'Approval') return w.approvals.map((x) => ({ address: x.token, args: { owner: ACCOUNT, spender: x.spender } }))
+      if (name === 'ApprovalForAll') return w.approvalForAll.map((o) => ({ address: npm, args: { owner: ACCOUNT, operator: o } }))
       if (name === 'SignMsg') return Array.from({ length: w.signMsgs }, () => ({ args: {} }))
+      if (name === 'SafeMultiSigTransaction') return w.ownerTxs.map((t) => ({ args: { to: t.to, operation: t.operation } }))
+      if (name === 'SafeModuleTransaction') return w.moduleTxs.map((t) => ({ args: { operation: t.operation } }))
       return []
     },
     readContract: async ({ functionName, args }: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[] }) => {
@@ -74,6 +81,8 @@ function client(w: W, side: 'sibling' | 'home'): ChainClient {
         case 'configOf': return s ? { capUsd: w.sibling.capUsd, generation: 1n, homeDomain: w.sibling.homeDomain, set: w.sibling.set, home: w.sibling.home, initHash: HASH } : { capUsd: w.home.capUsd, generation: 1n, homeDomain: 0, set: w.home.set, home: w.home.home, initHash: HASH }
         case 'allowance': return w.allowance[String(args?.[1]).toLowerCase()] ?? 1n
         case 'isApprovedForAll': return w.approvedForAll
+        case 'ownerOf': { const n = w.nftApprovals.find((x) => x.tokenId === args?.[0]); return n?.owned ? ACCOUNT : A(0xdead) }
+        case 'getApproved': return w.nftApprovals.find((x) => x.tokenId === args?.[0])?.approved ?? A(0)
         case 'ownersHashOf': return s ? w.sibling.ownersHash : w.home.ownersHash
         case 'isReady': return w.sibling.ready
         case 'getModulesPaginated': return [w.home.modules, A(1)]
@@ -191,6 +200,15 @@ describe('V4 sibling readiness (#310)', () => {
     ['a token allowance to someone else, still live', (w) => { w.approvals = [{ token: address('USDC', baseRegistry), spender: A(0xbad) }] }, 'homeAllowance'],
     ['an operator approved for all positions', (w) => { w.approvalForAll = [A(0xbad)] }, 'homeApprovedForAll'],
     ['a stored signed message', (w) => { w.signMsgs = 1 }, 'homeSignedMessages'],
+    // review r3 (P0-A): a spender that forwards arbitrary calls (it is in the registry, it does not pull from msg.sender)
+    ['an allowance to Multicall3', (w) => { w.approvals = [{ token: address('USDC', baseRegistry), spender: address('Multicall3', baseRegistry) }] }, 'homeAllowance'],
+    ['an allowance to MultiSendCallOnly', (w) => { w.approvals = [{ token: address('USDC', baseRegistry), spender: address('MultiSendCallOnly_141', baseRegistry) }] }, 'homeAllowance'],
+    ['an allowance on a token outside the registry', (w) => { w.approvals = [{ token: A(0xda1), spender: A(0xbad) }] }, 'homeAllowance'],
+    // review r3 (P0-B): storage the owner could rewrite with no event
+    ['an owner delegatecall to anything but MultiSendCallOnly', (w) => { w.ownerTxs = [{ to: A(0xbad), operation: 1 }] }, 'homeDelegatecall'],
+    ['a module delegatecall', (w) => { w.moduleTxs = [{ operation: 1 }] }, 'homeDelegatecall'],
+    // review r3 (P1-2): a single position approved to someone
+    ['a position approved to an operator', (w) => { w.nftApprovals = [{ tokenId: 7n, approved: A(0xbad), owned: true }] }, 'homePositionApproval'],
     ["the home's C above the sibling's", (w) => { w.home.capUsd = 10_000n }, 'homeConfig'],
     // review r1 (P1-2): code that is not a SafeProxy, on either side
     ['the home is not a SafeProxy', (w) => { w.home.code = '0x6080' }, 'codeHash'],
@@ -244,8 +262,17 @@ describe("the home's history (review r2 of #223, P0-1)", () => {
     expect(s.sent.length).toBe(1)
   })
 
+  test("Mamoru's own owner txs (MultiSendCallOnly delegatecall, plain calls) and a moved position's old approval pass", async () => {
+    const w = world()
+    w.ownerTxs = [{ to: address('MultiSendCallOnly_141', baseRegistry), operation: 1 }, { to: A(0x1234), operation: 0 }]
+    w.nftApprovals = [{ tokenId: 9n, approved: A(0xbad), owned: false }]
+    const s = setup(w)
+    await runPass(s.cfg, s.deps)
+    expect(s.sent.length).toBe(1)
+  })
+
   test('a long history is read over several passes: not ready until it reached the head', async () => {
-    const w = world(); w.head = 10_000n
+    const w = world(); w.head = 10_010n
     const s = setup(w, { logPage: 100n, maxPagesPerStream: 10 })
     await runPass(s.cfg, s.deps)
     expect(s.sent).toEqual([])
