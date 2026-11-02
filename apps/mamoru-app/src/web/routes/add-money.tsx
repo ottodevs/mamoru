@@ -1,11 +1,14 @@
 import type { FundingView, OverCap } from '@mamoru/domain'
+import { useMutation } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
+import { useApi } from '../api/client.ts'
 import { useFunding, useSession } from '../api/queries.ts'
 import { ConnectWallet } from '../components/connect-wallet.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { AddressBlock, Brand, Copy, Qr, Waiting } from '../components/ui.tsx'
 import { BASE_SLEEVE, explorerAddress, useChain, type SleeveChain } from '../lib/chain.tsx'
+import { downloadJson, kitFilename } from '../lib/download.ts'
 import { capNote, ceilCents, overCapOf, usd, usdPlain } from '../lib/money.ts'
 import { localTime } from '../lib/time.ts'
 import { useInjectedWallets } from '../lib/wallets.ts'
@@ -89,6 +92,15 @@ export function AddMoneyPage() {
   const arrived = hasMoney(f)
   const over = overCapOf(f)
   const [leaving, setLeaving] = useState(false)
+  // otto/mamoru#294: the onboarding is one tap now, so the recovery kit is offered here too, before any deposit.
+  const api = useApi()
+  const kit = useMutation({
+    mutationFn: async () => {
+      if (!accountKey || !f) return
+      downloadJson(kitFilename(f.address), await api.recoveryKit(accountKey))
+      await api.ackRecovery(accountKey).catch(() => undefined)
+    },
+  })
 
   useEffect(() => {
     // No session on a deep link: most likely a returning owner, so open on the sign-in card.
@@ -140,9 +152,12 @@ export function AddMoneyPage() {
         </div>
         <WrongNetwork accountKey={accountKey} />
         {funding.isError ? <p className="err">Could not check your balance. Retrying.</p> : null}
-        <p className="m-0">
+        <p className="m-0 flex flex-wrap gap-x-6 gap-y-2">
           <button type="button" className="text-[0.88rem] text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => void navigate({ to: '/' })}>
             {over ? addCopy.overCapNext : 'Later'}
+          </button>
+          <button type="button" className="text-[0.88rem] text-stone underline decoration-wash underline-offset-4 hover:text-ink" onClick={() => kit.mutate()} disabled={!f || kit.isPending}>
+            {kit.isSuccess ? 'Recovery kit saved' : 'Save recovery kit'}
           </button>
         </p>
       </section>
