@@ -2,12 +2,12 @@
 // the setReady sender, the alerter and the state are injected. Nothing here imports the operator, and the only write it
 // can make is V4.setReady (never funds).
 import { readFileSync } from 'node:fs'
-import { getAddress, isAddressEqual, pad, parseAbiItem, slice, type Abi, type Address, type Hex } from 'viem'
+import { getAddress, isAddressEqual, keccak256, pad, parseAbiItem, slice, type Abi, type Address, type Hex } from 'viem'
 import { mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi } from '@mamoru/account/one-auth'
 import { V4_CHAIN_BY_DOMAIN, type OneAuthV4Deployment } from '@mamoru/policy'
 import { address, registryFor, safe7579Abi, safeAbi, safeWebAuthnSharedSignerAbi } from '@mamoru/registry'
 import type { Alerter } from './alerts.ts'
-import { checkRemote, checkSibling, type CheckReads, type Side, type SiblingReads, type V4Config } from './checks.ts'
+import { checkRemote, checkSibling, FALLBACK_ACTION_ID, type CheckReads, type Side, type SiblingReads, type V4Config } from './checks.ts'
 import type { StateStore } from './state.ts'
 
 /** The slice of a viem PublicClient the guardian uses (a real client is cast to it in main.ts). */
@@ -197,6 +197,7 @@ async function scanRegistrations(cfg: WatcherConfig, d: WatcherDeps) {
 /**
  * #310: every V4 enable on this chain emits PolicySet; an account whose Init names itself as home is a sibling. Its own
  * cursor ('sib') starts at the chain's first block to scan, as the registrations' does (the same V4, the same chain).
+ * The entry is keyed by account: a later Init of the account replaces its home domain (review r1, Argon 2).
  */
 async function scanSiblings(cfg: WatcherConfig, d: WatcherDeps) {
   const st = d.store.state
@@ -205,7 +206,10 @@ async function scanSiblings(cfg: WatcherConfig, d: WatcherDeps) {
     for (const l of logs) {
       const account = getAddress(String(l.args.account))
       const c = configOf(await call<unknown>(home, cfg.v4, mamoruActionPolicyV4Abi, 'configOf', [account]))
-      if (c.set && isAddressEqual(c.home, account)) st.siblings[regKey(account, c.homeDomain)] ??= { account, domain: c.homeDomain }
+      if (c.set && isAddressEqual(c.home, account)) {
+        const prev = st.siblings[account]
+        if (!prev || prev.domain !== c.homeDomain) st.siblings[account] = { account, domain: c.homeDomain }
+      }
     }
   }, (n) => d.store.setCursor('sib', n), () => d.store.cursor('sib'))
 }
@@ -217,45 +221,124 @@ function configOf(raw: unknown): V4Config {
 
 /** Safe proxy storage slot 0: its singleton. */
 const SINGLETON_SLOT: Hex = '0x0000000000000000000000000000000000000000000000000000000000000000'
+/** A sent setReady is not sent again within this window: Ethereum's inclusion plus a lagging read RPC. */
+const SIBLING_RESEND_MS = 15 * 60_000
 
-/** #310: read each sibling's home back and mark it ready (or alert). A ready sibling is re-checked only when it stops being ready. */
-async function processSiblings(cfg: WatcherConfig, d: WatcherDeps) {
+const sessionViewsAbi = [
+  { type: 'function', name: 'getEnabledActions', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'bytes32' }], outputs: [{ type: 'bytes32[]' }] },
+  { type: 'function', name: 'getActionPolicies', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'bytes32' }, { type: 'bytes32' }], outputs: [{ type: 'address[]' }] },
+  { type: 'function', name: 'getUserOpPolicies', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'bytes32' }], outputs: [{ type: 'address[]' }] },
+  { type: 'function', name: 'getERC1271Policies', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'bytes32' }], outputs: [{ type: 'address[]' }] },
+  { type: 'function', name: 'getSessionValidatorAndConfig', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'bytes32' }], outputs: [{ type: 'address' }, { type: 'bytes' }] },
+] as const satisfies Abi
+
+/** The reads of checkSibling over the sibling's chain and its home chain. */
+export function siblingReadsFor(cfg: WatcherConfig, sibChain: ChainClient, homeClient: ChainClient, homeChainId: number, helper: Address): SiblingReads {
+  const on = (side: 'sibling' | 'home') => (side === 'sibling' ? sibChain : homeClient)
+  const homeReg = registryFor(homeChainId)
+  const smart = address('SmartSession', homeReg)
+  return {
+    config: async (side, a) => configOf(await call<unknown>(on(side), cfg.v4, mamoruActionPolicyV4Abi, 'configOf', [a])),
+    codeHash: async (side, a) => {
+      const code = await on(side).getCode({ address: a })
+      return code && code !== '0x' ? keccak256(code) : undefined
+    },
+    homeSingleton: async (a) => getAddress(slice(pad((await homeClient.getStorageAt({ address: a, slot: SINGLETON_SLOT })) ?? '0x', { size: 32 }), 12)),
+    ownersHash: (side, a) => call<Hex>(on(side), helper, mamoruV4HelperAbi, 'ownersHashOf', [a]),
+    modules: async (a) => {
+      const out: Address[] = []
+      let start: Address = SENTINEL
+      for (let i = 0; i < 20; i++) {
+        const [page, next] = await call<readonly [readonly Address[], Address]>(homeClient, a, modulesAbi, 'getModulesPaginated', [start, 10n])
+        out.push(...page)
+        if (isAddressEqual(next, SENTINEL) || BigInt(next) === 0n) return out
+        start = next
+      }
+      throw new Error('too many modules')
+    },
+    guard: async (a) => getAddress(slice(pad((await homeClient.getStorageAt({ address: a, slot: GUARD_SLOT })) ?? '0x', { size: 32 }), 12)),
+    fallbackHandler: async (a) => getAddress(slice(pad((await homeClient.getStorageAt({ address: a, slot: FALLBACK_SLOT })) ?? '0x', { size: 32 }), 12)),
+    validators7579: (a) => paginated(homeClient, a, 'getValidatorsPaginated'),
+    executors7579: (a) => paginated(homeClient, a, 'getExecutorsPaginated'),
+    hook7579: (a) => call(homeClient, a, safe7579ViewsAbi, 'getActiveHook'),
+    permissionIds: (a) => call(homeClient, smart, smartSessionV4Abi, 'getPermissionIDs', [a]),
+    session: async (a, id) => {
+      const [actions, fallbackPolicies, userOpPolicies, erc1271Policies, [validator]] = await Promise.all([
+        call<readonly Hex[]>(homeClient, smart, sessionViewsAbi, 'getEnabledActions', [a, id]),
+        call<readonly Address[]>(homeClient, smart, sessionViewsAbi, 'getActionPolicies', [a, id, FALLBACK_ACTION_ID]),
+        call<readonly Address[]>(homeClient, smart, sessionViewsAbi, 'getUserOpPolicies', [a, id]),
+        call<readonly Address[]>(homeClient, smart, sessionViewsAbi, 'getERC1271Policies', [a, id]),
+        call<readonly [Address, Hex]>(homeClient, smart, sessionViewsAbi, 'getSessionValidatorAndConfig', [a, id]),
+      ])
+      return { actions, fallbackPolicies, userOpPolicies, erc1271Policies, validator }
+    },
+  }
+}
+
+/**
+ * #310: read each sibling's home back and mark it ready, or alert. Review r1 of #227:
+ * - a sibling whose Init no longer names itself (or names another domain) is dropped, never alerted forever;
+ * - a sent setReady is not sent again for SIBLING_RESEND_MS (send waits for a successful receipt; the read may lag);
+ * - a ready sibling is read back again once per realert window, and a change is alerted (the guardian's clearReady
+ *   stays a manual step);
+ * - each sibling is its own section: one that throws does not stop the others.
+ */
+async function processSiblings(cfg: WatcherConfig, d: WatcherDeps): Promise<string[]> {
   const sibChain = d.clients[cfg.homeChainId]!
   const st = d.store.state
-  if (Object.keys(st.siblings).length === 0) return
+  const errors: string[] = []
+  if (Object.keys(st.siblings).length === 0) return errors
   const helper = await call<Address>(sibChain, cfg.v4, mamoruActionPolicyV4Abi, 'HELPER')
   for (const [k, s] of Object.entries(st.siblings)) {
-    if (await call<boolean>(sibChain, cfg.v4, mamoruActionPolicyV4Abi, 'isReady', [s.account, s.domain])) continue
     const where = `sibling ${s.account} on chain ${cfg.homeChainId}, home domain ${s.domain}`
-    const homeChainId = V4_CHAIN_BY_DOMAIN[s.domain]
-    const homeClient = homeChainId === undefined ? undefined : d.clients[homeChainId]
-    if (homeChainId === undefined || !homeClient) {
-      await alertOnce(d, `sib:${k}:rpc`, `Sibling not marked ready, ${where}: no RPC configured for its home chain`, cfg.realertMs)
-      continue
-    }
-    const on = (side: 'sibling' | 'home') => (side === 'sibling' ? sibChain : homeClient)
-    const reads: SiblingReads = {
-      config: async (side, a) => configOf(await call<unknown>(on(side), cfg.v4, mamoruActionPolicyV4Abi, 'configOf', [a])),
-      homeCode: (a) => homeClient.getCode({ address: a }),
-      homeSingleton: async (a) => getAddress(slice(pad((await homeClient.getStorageAt({ address: a, slot: SINGLETON_SLOT })) ?? '0x', { size: 32 }), 12)),
-      ownersHash: (side, a) => call<Hex>(on(side), helper, mamoruV4HelperAbi, 'ownersHashOf', [a]),
-    }
-    const res = await checkSibling({ account: s.account, homeDomain: s.domain, homeRegistry: registryFor(homeChainId) }, reads)
-    if (!res.ok) {
-      await alertOnce(d, `sib:${k}:${res.failed}`, `Sibling not marked ready, ${where}: ${res.failed}`, cfg.realertMs)
-      continue
-    }
-    if (cfg.dryRun) {
-      await alertOnce(d, `sib:dry:${k}`, `[dry-run] all checks passed, would setReady: ${where}`, cfg.realertMs)
-      continue
-    }
     try {
-      const tx = await d.send({ account: s.account, domain: s.domain, remote: s.account })
-      await alertOnce(d, `sib:ready:${k}:${tx}`, `setReady sent: ${where} tx=${tx}`)
-    } catch {
-      await alertOnce(d, `sib:sendfail:${k}`, `setReady failed to send, will retry: ${where}`, cfg.realertMs)
+      const c = configOf(await call<unknown>(sibChain, cfg.v4, mamoruActionPolicyV4Abi, 'configOf', [s.account]))
+      if (!c.set || !isAddressEqual(c.home, s.account) || c.homeDomain !== s.domain) {
+        delete st.siblings[k]
+        d.store.save()
+        continue
+      }
+      const ready = await call<boolean>(sibChain, cfg.v4, mamoruActionPolicyV4Abi, 'isReady', [s.account, s.domain])
+      const now = d.now()
+      if (ready && s.checkedAt !== undefined && now - s.checkedAt < cfg.realertMs) continue
+      if (!ready && s.sentAt !== undefined && now - s.sentAt < SIBLING_RESEND_MS) continue
+      const homeChainId = V4_CHAIN_BY_DOMAIN[s.domain]
+      const homeClient = homeChainId === undefined ? undefined : d.clients[homeChainId]
+      if (homeChainId === undefined || !homeClient) {
+        await alertOnce(d, `sib:${k}:rpc`, `Sibling not marked ready, ${where}: no RPC configured for its home chain`, cfg.realertMs)
+        continue
+      }
+      const res = await checkSibling({ account: s.account, homeDomain: s.domain, homeRegistry: registryFor(homeChainId), deployment: { policy: cfg.v4, gasPolicy: cfg.gasPolicy } }, siblingReadsFor(cfg, sibChain, homeClient, homeChainId, helper))
+      if (ready) {
+        s.checkedAt = now
+        d.store.save()
+        if (!res.ok) await alertOnce(d, `sib:changed:${k}:${res.failed}`, `Ready sibling's home changed, ${where}: ${res.failed}. Consider V4.clearReady`, cfg.realertMs)
+        continue
+      }
+      if (!res.ok) {
+        await alertOnce(d, `sib:${k}:${res.failed}`, `Sibling not marked ready, ${where}: ${res.failed}`, cfg.realertMs)
+        continue
+      }
+      if (cfg.dryRun) {
+        await alertOnce(d, `sib:dry:${k}`, `[dry-run] all checks passed, would setReady: ${where}`, cfg.realertMs)
+        continue
+      }
+      try {
+        const tx = await d.send({ account: s.account, domain: s.domain, remote: s.account })
+        s.sentAt = now
+        s.checkedAt = now
+        d.store.save()
+        await alertOnce(d, `sib:ready:${k}:${tx}`, `setReady sent: ${where} tx=${tx}`)
+      } catch {
+        await alertOnce(d, `sib:sendfail:${k}`, `setReady failed to send, will retry: ${where}`, cfg.realertMs)
+      }
+    } catch (e) {
+      const why = `sibling ${s.account}: ${(e as { shortMessage?: string; name?: string }).shortMessage ?? (e as Error).name}`
+      errors.push(why)
+      await alertOnce(d, `sib:error:${k}`, `guardian sibling check failed: ${why}`, cfg.realertMs).catch(() => {})
     }
   }
+  return errors
 }
 
 async function scanQueued(cfg: WatcherConfig, d: WatcherDeps, chainId: number) {
@@ -379,7 +462,7 @@ export async function runPass(cfg: WatcherConfig, d: WatcherDeps): Promise<strin
   for (const chainId of Object.keys(d.clients).map(Number)) await section(`queued:${chainId}`, () => scanQueued(cfg, d, chainId))
   await section('process', () => processRegistrations(cfg, d))
   await section('siblings', () => scanSiblings(cfg, d))
-  await section('process-siblings', () => processSiblings(cfg, d))
+  await section('process-siblings', async () => { errors.push(...(await processSiblings(cfg, d))) })
   for (const k of Object.keys(d.store.state.safes)) await section(`exec:${k}`, () => scanSafe(cfg, d, k))
   d.store.save()
   return errors

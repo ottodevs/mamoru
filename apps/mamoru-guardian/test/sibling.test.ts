@@ -8,18 +8,39 @@ import { address, baseRegistry } from '@mamoru/registry'
 import type { Alerter } from '../src/alerts.ts'
 import { StateStore } from '../src/state.ts'
 import { runPass, type ChainClient, type WatcherConfig, type WatcherDeps } from '../src/watcher.ts'
+import { FALLBACK_ACTION_ID } from '../src/checks.ts'
 import { A, GAS_POLICY, HELPER, REGISTRY, V4 } from './helpers.ts'
 
 const ETH = 1
 const BASE = 8453
 const ACCOUNT = A(0x6111)
 const HASH: Hex = `0x${'ab'.repeat(32)}`
+/** SafeProxy 1.4.1's runtime code, read on Base (its keccak is SAFE_PROXY_CODEHASH). */
+const PROXY: Hex = '0x608060405273ffffffffffffffffffffffffffffffffffffffff600054167fa619486e0000000000000000000000000000000000000000000000000000000060003514156050578060005260206000f35b3660008037600080366000845af43d6000803e60008114156070573d6000fd5b3d6000f3fea264697066735822122003d1488ee65e08fa41e58e888a9865554c535f2c77126a82cb4c0f917f31441364736f6c63430007060033'
+const PID: Hex = `0x${'77'.repeat(32)}`
+const SAFE7579 = address('Safe7579', baseRegistry)
+const SMART = address('SmartSession', baseRegistry)
 
 function world() {
   return {
     logs: [{ args: { id: `0x${'00'.repeat(32)}`, multiplexer: A(0x55), account: ACCOUNT } }] as { args: Record<string, unknown> }[],
     sibling: { set: true, home: ACCOUNT as Address, homeDomain: 6, ownersHash: HASH as Hex, ready: false },
-    home: { code: '0x6080' as Hex | undefined, singleton: address('SafeL2_141', baseRegistry) as Address, set: true, home: A(0) as Address, ownersHash: HASH as Hex },
+    sibCode: PROXY as Hex | undefined,
+    home: {
+      code: PROXY as Hex | undefined,
+      singleton: address('SafeL2_141', baseRegistry) as Address,
+      set: true,
+      home: A(0) as Address,
+      ownersHash: HASH as Hex,
+      modules: [SAFE7579] as Address[],
+      guard: A(0) as Address,
+      handler: SAFE7579 as Address,
+      validators: [SMART] as Address[],
+      executors: [] as Address[],
+      hook: A(0) as Address,
+      pids: [PID] as Hex[],
+      session: { actions: [FALLBACK_ACTION_ID] as Hex[], fallbackPolicies: [V4] as Address[], userOpPolicies: [GAS_POLICY] as Address[], erc1271Policies: [] as Address[], validator: address('OwnableValidator', baseRegistry) as Address },
+    },
   }
 }
 type W = ReturnType<typeof world>
@@ -27,8 +48,8 @@ type W = ReturnType<typeof world>
 function client(w: W, side: 'sibling' | 'home'): ChainClient {
   return {
     getBlockNumber: async () => 10n,
-    getCode: async () => (side === 'home' ? w.home.code : '0x6080'),
-    getStorageAt: async () => pad(w.home.singleton, { size: 32 }),
+    getCode: async () => (side === 'home' ? w.home.code : w.sibCode),
+    getStorageAt: async ({ slot }) => pad(slot.startsWith('0x4a204f62') ? w.home.guard : slot.startsWith('0x6c9a6c4a') ? w.home.handler : w.home.singleton, { size: 32 }),
     getLogs: async ({ event }) => ((event as { name: string }).name === 'PolicySet' && side === 'sibling' ? w.logs : []),
     readContract: async ({ functionName }: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[] }) => {
       const s = side === 'sibling'
@@ -37,6 +58,16 @@ function client(w: W, side: 'sibling' | 'home'): ChainClient {
         case 'configOf': return s ? { capUsd: 1n, generation: 1n, homeDomain: w.sibling.homeDomain, set: w.sibling.set, home: w.sibling.home, initHash: HASH } : { capUsd: 1n, generation: 1n, homeDomain: 0, set: w.home.set, home: w.home.home, initHash: HASH }
         case 'ownersHashOf': return s ? w.sibling.ownersHash : w.home.ownersHash
         case 'isReady': return w.sibling.ready
+        case 'getModulesPaginated': return [w.home.modules, A(1)]
+        case 'getValidatorsPaginated': return [w.home.validators, A(1)]
+        case 'getExecutorsPaginated': return [w.home.executors, A(1)]
+        case 'getActiveHook': return w.home.hook
+        case 'getPermissionIDs': return w.home.pids
+        case 'getEnabledActions': return w.home.session.actions
+        case 'getActionPolicies': return w.home.session.fallbackPolicies
+        case 'getUserOpPolicies': return w.home.session.userOpPolicies
+        case 'getERC1271Policies': return w.home.session.erc1271Policies
+        case 'getSessionValidatorAndConfig': return [w.home.session.validator, '0x']
         default: throw new Error(`unexpected read ${functionName}`)
       }
     },
@@ -71,13 +102,50 @@ describe('V4 sibling readiness (#310)', () => {
     expect(s.sent.length).toBe(1) // ready: not sent again
   })
 
-  test('readiness lost (an owner change on the sibling) is read back and sent again', async () => {
+  test('readiness lost (an owner change on the sibling) is read back and sent again, once the resend window passed', async () => {
     const w = world()
+    let now = 1_000
     const s = setup(w)
+    s.deps.now = () => now
     await runPass(s.cfg, s.deps)
     w.sibling.ready = false
     await runPass(s.cfg, s.deps)
+    expect(s.sent.length).toBe(1) // review r1 (P1-3): not re-sent while the first may still land
+    now += 16 * 60_000
+    await runPass(s.cfg, s.deps)
     expect(s.sent.length).toBe(2)
+  })
+
+  test('a send that has not landed yet is not repeated every pass (review r1, P1-3)', async () => {
+    const w = world()
+    const s = setup(w)
+    s.deps.send = async (a) => { s.sent.push(a); return '0x02' } // mined later: isReady stays false for now
+    for (let i = 0; i < 4; i++) await runPass(s.cfg, s.deps)
+    expect(s.sent.length).toBe(1)
+  })
+
+  test('a sibling whose Init no longer names itself is dropped, not alerted forever (review r1, Argon 1)', async () => {
+    const w = world(); w.home.code = '0x' // refused once
+    const s = setup(w)
+    await runPass(s.cfg, s.deps)
+    expect(Object.keys(s.store.state.siblings).length).toBe(1)
+    w.sibling.home = A(0) // re-enabled as a home account
+    await runPass(s.cfg, s.deps)
+    expect(Object.keys(s.store.state.siblings)).toEqual([])
+  })
+
+  test('a ready sibling whose home changes is alerted on the periodic re-check', async () => {
+    const w = world()
+    let now = 1_000
+    const s = setup(w)
+    s.deps.now = () => now
+    await runPass(s.cfg, s.deps)
+    expect(s.sent.length).toBe(1)
+    w.home.modules = [SAFE7579, A(0xbad)]
+    now += 2_000 // past realertMs (1000 in setup)
+    await runPass(s.cfg, s.deps)
+    expect(s.alerts.some((a) => a.includes("Ready sibling's home changed") && a.includes('homeModules'))).toBe(true)
+    expect(s.sent.length).toBe(1)
   })
 
   const refusals: [string, (w: W) => void, string][] = [
@@ -86,6 +154,22 @@ describe('V4 sibling readiness (#310)', () => {
     ['the Base address is not a V4 home', (w) => { w.home.set = false }, 'homeConfig'],
     ['the Base address is itself a remote', (w) => { w.home.home = A(0x1234) }, 'homeConfig'],
     ['the keys differ (rotated on one side)', (w) => { w.home.ownersHash = `0x${'cd'.repeat(32)}` }, 'ownersHash'],
+    // review r1 (P1-1): a home someone else deployed and armed, whatever its owners became
+    ['an extra Safe module on the home', (w) => { w.home.modules = [SAFE7579, A(0xbad)] }, 'homeModules'],
+    ['a transaction guard on the home', (w) => { w.home.guard = A(0xbad) }, 'homeGuard'],
+    ['another fallback handler', (w) => { w.home.handler = A(0xbad) }, 'homeFallbackHandler'],
+    ['a second 7579 validator', (w) => { w.home.validators = [SMART, A(0xbad)] }, 'homeValidators7579'],
+    ['a 7579 executor', (w) => { w.home.executors = [A(0xbad)] }, 'homeExecutors7579'],
+    ['a 7579 hook', (w) => { w.home.hook = A(0xbad) }, 'homeHook7579'],
+    ['no session at all', (w) => { w.home.pids = [] }, 'homePermissions'],
+    ['a session with another action policy', (w) => { w.home.session.fallbackPolicies = [A(0xbad)] }, 'homePermissions'],
+    ['a session with a specific action besides the fallback', (w) => { w.home.session.actions = [FALLBACK_ACTION_ID, `0x${'99'.repeat(32)}`] }, 'homePermissions'],
+    ['a session without the gas policy', (w) => { w.home.session.userOpPolicies = [] }, 'homePermissions'],
+    ['a session that can sign (ERC-1271 policy)', (w) => { w.home.session.erc1271Policies = [A(0xbad)] }, 'homePermissions'],
+    ['a session with another validator', (w) => { w.home.session.validator = A(0xbad) }, 'homePermissions'],
+    // review r1 (P1-2): code that is not a SafeProxy, on either side
+    ['the home is not a SafeProxy', (w) => { w.home.code = '0x6080' }, 'codeHash'],
+    ['the sibling is not a SafeProxy', (w) => { w.sibCode = '0x6080' }, 'codeHash'],
   ]
   for (const [name, mutate, failed] of refusals) {
     test(`refused (${name}): no setReady, one alert naming ${failed}`, async () => {

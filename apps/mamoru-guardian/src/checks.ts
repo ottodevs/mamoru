@@ -158,30 +158,62 @@ export async function checkRemote(i: CheckInput, r: CheckReads): Promise<CheckRe
 /** A V4 Config, as `configOf` returns it. */
 export type V4Config = { set: boolean; home: Address; homeDomain: number; generation: bigint }
 
+/** SafeProxy 1.4.1's runtime code hash (the same proxy on Base, Monad and Ethereum; read on chain 2 Nov). */
+export const SAFE_PROXY_CODEHASH: Hex = '0xd7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c'
+/** SmartSession's FALLBACK_ACTIONID: keccak256(abi.encodePacked(address(1), bytes4(0x00000001))). */
+export const FALLBACK_ACTION_ID: Hex = '0xd884b6afa19f8ace90a388daca691e4e28f20cdac5aeefd46ad8bd1c074d28cf'
+
+/** One SmartSession permission of an account, as SmartSession's own views give it. */
+export type SessionShape = { actions: readonly Hex[]; fallbackPolicies: readonly Address[]; userOpPolicies: readonly Address[]; erc1271Policies: readonly Address[]; validator: Address }
+
 export type SiblingReads = {
   /** V4.configOf(account) on the sibling's chain (this guardian's chain) and on its home chain (V4 is at the same address). */
   config(side: 'sibling' | 'home', account: Address): Promise<V4Config>
-  /** Bytecode at the account's address on the home chain. */
-  homeCode(account: Address): Promise<Hex | undefined>
+  /** keccak256 of the code at the account's address on that chain (undefined: no code). */
+  codeHash(side: 'sibling' | 'home', account: Address): Promise<Hex | undefined>
   /** Storage slot 0 of the account on the home chain: a Safe proxy's singleton. */
   homeSingleton(account: Address): Promise<Address>
   /** MamoruV4Helper.ownersHashOf(account) on each chain (the helper is at the same address). */
   ownersHash(side: 'sibling' | 'home', account: Address): Promise<Hex>
+  /** The home Safe's other execution paths: Safe modules, guard, fallback handler, Safe7579's validators, executors, hook. */
+  modules(account: Address): Promise<readonly Address[]>
+  guard(account: Address): Promise<Address>
+  fallbackHandler(account: Address): Promise<Address>
+  validators7579(account: Address): Promise<readonly Address[]>
+  executors7579(account: Address): Promise<readonly Address[]>
+  hook7579(account: Address): Promise<Address>
+  /** Every SmartSession permission enabled for the home, and each one's shape. */
+  permissionIds(account: Address): Promise<readonly Hex[]>
+  session(account: Address, permissionId: Hex): Promise<SessionShape>
 }
+
+const ZERO: Address = '0x0000000000000000000000000000000000000000'
 
 /**
  * Spec 010 #307 + otto/mamoru#310: before `setReady(account, homeDomain, account)` on the sibling's chain, the same address
- * on the home chain must be the user's Mamoru account: deployed, a Safe of the pinned singleton, a V4 HOME there (set,
- * no home of its own), and owned by the same keys (V4's owners hash, owners + threshold + passkey, equal on both chains).
+ * on the home chain must be the user's Mamoru account, with no way for anyone but its owners and V4 to move its funds:
+ * - the sibling here and the home there are SafeProxy 1.4.1 (code hash), the home's singleton the pinned SafeL2;
+ * - the home is a V4 home there (`configOf`: set, no home of its own), with V4's owners hash equal on both chains;
+ * - review r1 of #223 (P1-1): the home's other execution paths are Mamoru's shape only: Safe7579 the one Safe module and
+ *   the fallback handler, no guard, SmartSession the one 7579 validator, no 7579 executor or hook, and every SmartSession
+ *   permission a V4 session (the fallback action alone, V4 its one action policy, MamoruGasPolicyV2 its one userOp
+ *   policy, no ERC-1271 policy, OwnableValidator). A home someone else deployed first and armed with a module, a guard or
+ *   a session of their own is refused, whatever its owners became.
  * An undeployed home is not marked ready (fail closed): the app deploys it at Start, in the same approval.
  */
-export async function checkSibling(i: { account: Address; homeDomain: number; homeRegistry: Registry }, r: SiblingReads): Promise<CheckResult> {
+export async function checkSibling(
+  i: { account: Address; homeDomain: number; homeRegistry: Registry; deployment: Pick<OneAuthV4Deployment, 'policy' | 'gasPolicy'> },
+  r: SiblingReads,
+): Promise<CheckResult> {
   const sib = await read('siblingConfig', () => r.config('sibling', i.account))
   if ('failed' in sib) return fail(sib.failed)
   if (!sib.v.set || !isAddressEqual(sib.v.home, i.account) || sib.v.homeDomain !== i.homeDomain) return fail('siblingConfig: not a sibling of this account on this domain')
-  const code = await read('homeCode', () => r.homeCode(i.account))
-  if ('failed' in code) return fail(code.failed)
-  if (!code.v || code.v === '0x') return fail('homeCode: the home account is not deployed')
+  for (const side of ['sibling', 'home'] as const) {
+    const h = await read('codeHash', () => r.codeHash(side, i.account))
+    if ('failed' in h) return fail(h.failed)
+    if (!h.v) return fail(side === 'home' ? 'homeCode: the home account is not deployed' : 'codeHash: the sibling has no code')
+    if (h.v.toLowerCase() !== SAFE_PROXY_CODEHASH) return fail(`codeHash: the ${side} is not a SafeProxy 1.4.1`)
+  }
   const single = await read('homeSingleton', () => r.homeSingleton(i.account))
   if ('failed' in single) return fail(single.failed)
   if (!isAddressEqual(single.v, address('SafeL2_141', i.homeRegistry))) return fail('homeSingleton: not a Safe of the pinned singleton')
@@ -193,5 +225,38 @@ export async function checkSibling(i: { account: Address; homeDomain: number; ho
   const b = await read('ownersHash', () => r.ownersHash('home', i.account))
   if ('failed' in b) return fail(b.failed)
   if (a.v.toLowerCase() !== b.v.toLowerCase()) return fail('ownersHash: the keys differ between the sibling and its home')
+  // P1-1: nothing but the owners and V4-bounded sessions can execute on the home.
+  const safe7579 = address('Safe7579', i.homeRegistry)
+  const smart = address('SmartSession', i.homeRegistry)
+  const mods = await read('homeModules', () => r.modules(i.account))
+  if ('failed' in mods) return fail(mods.failed)
+  if (!sameList(mods.v, [safe7579])) return fail('homeModules: Safe7579 must be the only Safe module')
+  const guard = await read('homeGuard', () => r.guard(i.account))
+  if ('failed' in guard) return fail(guard.failed)
+  if (!isAddressEqual(guard.v, ZERO)) return fail('homeGuard: a transaction guard is set')
+  const fb = await read('homeFallbackHandler', () => r.fallbackHandler(i.account))
+  if ('failed' in fb) return fail(fb.failed)
+  if (!isAddressEqual(fb.v, safe7579)) return fail('homeFallbackHandler: not Safe7579')
+  const vals = await read('homeValidators7579', () => r.validators7579(i.account))
+  if ('failed' in vals) return fail(vals.failed)
+  if (!sameList(vals.v, [smart])) return fail('homeValidators7579: SmartSession must be the only validator')
+  const execs = await read('homeExecutors7579', () => r.executors7579(i.account))
+  if ('failed' in execs) return fail(execs.failed)
+  if (execs.v.length !== 0) return fail('homeExecutors7579: an executor is installed')
+  const hook = await read('homeHook7579', () => r.hook7579(i.account))
+  if ('failed' in hook) return fail(hook.failed)
+  if (!isAddressEqual(hook.v, ZERO)) return fail('homeHook7579: a hook is installed')
+  const ids = await read('homePermissions', () => r.permissionIds(i.account))
+  if ('failed' in ids) return fail(ids.failed)
+  if (ids.v.length === 0) return fail('homePermissions: no V4 session on the home')
+  const ownable = address('OwnableValidator', i.homeRegistry)
+  for (const id of ids.v) {
+    const s = await read('homePermissions', () => r.session(i.account, id))
+    if ('failed' in s) return fail(s.failed)
+    const v4Bound = s.v.actions.length === 1 && s.v.actions[0]!.toLowerCase() === FALLBACK_ACTION_ID
+      && sameList(s.v.fallbackPolicies, [i.deployment.policy]) && sameList(s.v.userOpPolicies, [i.deployment.gasPolicy])
+      && s.v.erc1271Policies.length === 0 && isAddressEqual(s.v.validator, ownable)
+    if (!v4Bound) return fail(`homePermissions: permission ${id} is not a V4 session`)
+  }
   return { ok: true }
 }

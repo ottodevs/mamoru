@@ -6,7 +6,14 @@ import type { Address, Hex } from 'viem'
 export type Registration = { account: Address; domain: number; remote: Address; ownersHash: Hex; sessionKey: Address }
 export type WatchedSafe = { chainId: number; address: Address; next: string }
 /** #310: a V4 sibling (Init home == account) on this guardian's chain, and its home domain. */
-export type Sibling = { account: Address; domain: number }
+export type Sibling = {
+  account: Address
+  domain: number
+  /** Unix ms of the last setReady this guardian sent for it (review r1: never re-sent while it may still land). */
+  sentAt?: number
+  /** Unix ms of the last read-back of a ready sibling (re-checked every realert window; a change is alerted). */
+  checkedAt?: number
+}
 export type State = {
   v: 1
   /** Next block to scan, by stream key (`reg`, `queued:<chainId>`). */
