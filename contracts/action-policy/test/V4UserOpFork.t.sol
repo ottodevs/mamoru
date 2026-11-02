@@ -48,10 +48,11 @@ contract OldPolicy {
 }
 
 /**
- * Spec 010 T4 (otto/mamoru#292) on a Base fork, through the real stack: a Mamoru-shaped Safe (passkey + EOA owner,
- * Safe7579, SmartSession), the production enable flow (trust + self-attest, then enableSessions from an owner Safe
- * tx), and userOps signed by the session key through EntryPoint v0.7. V4, MamoruGasPolicyV2 and the registry are
- * deployed through ModuleRegistry.deployModule so the Safe can attest them (T7's deployment path).
+ * Spec 010 T4 + A1 (otto/mamoru#292, #316, #317) on a Base fork, through the real stack: a Mamoru-shaped Safe (passkey +
+ * EOA owner, Safe7579, SmartSession), the production enable flow (trust + self-attest, then enableSessions from an owner
+ * Safe tx), and userOps signed by the session key through EntryPoint v0.7. V4 and MamoruGasPolicyV2 are deployed
+ * through ModuleRegistry.deployModule so the Safe can attest them (T7's deployment path). Every session op is a batch
+ * that starts with `V4.clock(T)` (I6) and wraps each approval in approve / use / reset / assertZero (I9, POL-07).
  *
  *   nix shell nixpkgs#foundry --command forge test --isolate --match-path test/V4UserOpFork.t.sol -vv
  * (--isolate: each top-level call is its own transaction, so the gas figures are cold and include the intrinsic.)
@@ -69,8 +70,6 @@ contract V4UserOpForkTest is V4Fixture {
     function setUp() public {
         vm.createSelectFork(vm.envOr("BASE_FORK_RPC_URL", string("https://mainnet.base.org")), BASE_BLOCK);
         _deployStackViaModuleRegistry();
-        _listBase();
-        _route(DOMAIN_MONAD);
         check = new MamoruMigrationCheck();
         safe = _newSafe(1);
         deal(USDC, safe, 100_000e6);
@@ -109,10 +108,7 @@ contract V4UserOpForkTest is V4Fixture {
     // ------------------------------------------------------------ the engine's userOps
 
     function _swapBatch(address pool, address tokenIn, uint256 amountIn) internal view returns (bytes memory) {
-        Execution[] memory xs = new Execution[](2);
-        xs[0] = Execution(tokenIn, 0, abi.encodeCall(IERC20T.approve, (address(v4), amountIn)));
-        xs[1] = Execution(address(v4), 0, _swapCall(pool, tokenIn, amountIn));
-        return _batch(xs);
+        return _batch(_approved(tokenIn, amountIn, address(v4), _swapCall(pool, tokenIn, amountIn)));
     }
 
     function test_gas_swapMintBridgeUserOps() public {
@@ -123,22 +119,27 @@ contract V4UserOpForkTest is V4Fixture {
         assertGt(IERC20T(CBBTC).balanceOf(safe), b0, "swap executed");
         // mint
         MintParams memory m = _mintParams(safe, 1_000e6, 0.01e8);
-        Execution[] memory xs = new Execution[](3);
+        Execution[] memory xs = new Execution[](7);
         xs[0] = Execution(USDC, 0, abi.encodeCall(IERC20T.approve, (address(v4), 1_000e6)));
         xs[1] = Execution(CBBTC, 0, abi.encodeCall(IERC20T.approve, (address(v4), 0.01e8)));
         xs[2] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.mint, (m)));
+        xs[3] = Execution(USDC, 0, abi.encodeCall(IERC20T.approve, (address(v4), 0)));
+        xs[4] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.assertZero, (USDC)));
+        xs[5] = Execution(CBBTC, 0, abi.encodeCall(IERC20T.approve, (address(v4), 0)));
+        xs[6] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.assertZero, (CBBTC)));
         uint256 mintGas = _run(safe, _batch(xs), pid);
         assertEq(INPMT(NPM).balanceOf(safe), 1, "position minted");
-        // registerRemote (session) + guardian readiness + bridge
+        // registerRemote (session) + readiness (A1: a CCTP message from the remote's V4, delivered here by the pinned
+        // transmitter; the real two-chain path is test/V4RemoteFork.t.sol) + bridge
         address sk = makeAddr("remote session key");
         uint256 regGas = _run(safe, _single(address(v4), abi.encodeCall(MamoruActionPolicyV4.registerRemote, (DOMAIN_MONAD, sk))), pid);
-        address remote = v4.remoteOf(safe, DOMAIN_MONAD).remote;
-        assertTrue(remote != address(0));
-        vm.prank(guardian);
-        v4.setReady(safe, DOMAIN_MONAD, remote);
-        xs = new Execution[](2);
-        xs[0] = Execution(USDC, 0, abi.encodeCall(IERC20T.approve, (address(v4), 100e6)));
-        xs[1] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.bridge, (DOMAIN_MONAD, USDC, 100e6)));
+        MamoruActionPolicyV4.Remote memory r = v4.remoteOf(safe, DOMAIN_MONAD);
+        assertTrue(r.remote != address(0));
+        vm.prank(v4.MESSAGE_TRANSMITTER());
+        v4.handleReceiveFinalizedMessage(DOMAIN_MONAD, bytes32(uint256(uint160(address(v4)))), 2000, abi.encode(safe, r.remote, r.ownersHash));
+        assertTrue(v4.isReady(safe, DOMAIN_MONAD));
+        address remote = r.remote;
+        xs = _approved(USDC, 100e6, address(v4), abi.encodeCall(MamoruActionPolicyV4.bridge, (DOMAIN_MONAD, USDC, 100e6)));
         uint256 u0 = IERC20T(USDC).balanceOf(safe);
         (watchEmitter, watchWord) = (TOKEN_MESSENGER, bytes32(uint256(uint160(remote))));
         uint256 bridgeGas = _run(safe, _batch(xs), pid);
@@ -169,24 +170,23 @@ contract V4UserOpForkTest is V4Fixture {
         uint256 gBridge = vm.lastCallGas().gasTotalUsed;
         uint256 tokenId = INPMT(NPM).tokenOfOwnerByIndex(safe, 0);
         (,,,,,,, uint128 liq,,,,) = INPMT(NPM).positions(tokenId);
-        (uint256 min0, uint256 min1) = helper.decreaseMins(safe, tokenId, liq);
+        (uint256 min0, uint256 min1) = lens.decreaseMins(safe, tokenId, liq);
         bytes memory dec = abi.encodeWithSelector(0x0c49ccbe, tokenId, liq, min0, min1, vm.getBlockTimestamp());
         vm.prank(SMART_SESSION);
         assertEq(v4.checkAction(id, safe, NPM, 0, dec), 0);
         uint256 gDec = vm.lastCallGas().gasTotalUsed;
-        PackedUserOperationV4 memory op = _op(safe, "", pid);
         vm.prank(SMART_SESSION);
         gasPol.initializeWithMultiplexer(safe, id, abi.encode(_baseCaps()));
-        opMaxFee = 1; // a tiny charge, so the measurement does not hit the bucket
-        op = _op(safe, "", pid);
+        opMaxFee = 1; // a tiny charge, so the measurement does not hit the rate
+        PackedUserOperationV4 memory op = _op(safe, _swapBatch(POOL_BTC, USDC, 1_000e6), pid);
         vm.prank(SMART_SESSION);
-        assertEq(gasPol.checkUserOpPolicy(id, op), 0);
+        assertEq(gasPol.checkUserOpPolicy(id, op) >> 160, ((vm.getBlockTimestamp() - 300) << 48) | (vm.getBlockTimestamp() + 300));
         uint256 gGas = vm.lastCallGas().gasTotalUsed;
-        console2.log("checkUserOpPolicy tx gas (incl. 21k): MamoruGasPolicyV2 charge", gGas);
+        console2.log("checkUserOpPolicy tx gas (incl. 21k): MamoruGasPolicyV2 rate + batch shape (swap batch)", gGas);
         console2.log("checkAction tx gas (incl. 21k): approve(V4)", gApprove);
         console2.log("checkAction tx gas (incl. 21k): V4.swap / V4.mint / V4.increase (same path)", gSwap);
         console2.log("checkAction tx gas (incl. 21k): V4.bridge", gBridge);
-        console2.log("checkAction tx gas (incl. 21k): NPM decreaseLiquidity (oracle + positions)", gDec);
+        console2.log("checkAction tx gas (incl. 21k): NPM decreaseLiquidity (static, I9)", gDec);
     }
 
     // ------------------------------------------------------------ refusals at validation (nothing executes)
@@ -207,11 +207,18 @@ contract V4UserOpForkTest is V4Fixture {
         console2.log("transfer:", _rejected(safe, _single(USDC, abi.encodeCall(IERC20T.transfer, (attacker, 1e6))), pid));
         console2.log("depositForBurn direct:", _rejected(safe, _single(TOKEN_MESSENGER, abi.encodeWithSelector(0x8e0250ee)), pid));
         console2.log("empty call:", _rejected(safe, _single(USDC, ""), pid));
-        console2.log("empty batch:", _rejected(safe, _batch(new Execution[](0)), pid));
+        console2.log("action-free batch (clock only):", _rejected(safe, _batch(new Execution[](0)), pid));
         console2.log("a call to the Safe itself:", _rejected(safe, _single(safe, abi.encodeWithSignature("addOwnerWithThreshold(address,uint256)", attacker, 1)), pid));
+        console2.log("installModule on the Safe:", _rejected(safe, _single(safe, abi.encodeWithSignature("installModule(uint256,address,bytes)", 2, attacker, "")), pid));
+        // I6, I9: the gas policy's batch shape
+        console2.log("single mode:", _rejected(safe, _rawSingle(address(v4), _swapCall(POOL_BTC, USDC, 1e6)), pid));
+        Execution[] memory xs = new Execution[](1);
+        xs[0] = Execution(USDC, 0, abi.encodeCall(IERC20T.approve, (address(v4), 0)));
+        console2.log("batch without the leading clock:", _rejected(safe, _rawBatch(xs), pid));
+        console2.log("approve never reset:", _rejected(safe, _single(USDC, abi.encodeCall(IERC20T.approve, (address(v4), 1e6))), pid));
         // a batch with one allowed and one forbidden call: all-or-nothing
-        Execution[] memory xs = new Execution[](2);
-        xs[0] = Execution(USDC, 0, abi.encodeCall(IERC20T.approve, (address(v4), 1e6)));
+        xs = new Execution[](2);
+        xs[0] = Execution(USDC, 0, abi.encodeCall(IERC20T.approve, (address(v4), 0)));
         xs[1] = Execution(USDC, 0, abi.encodeCall(IERC20T.approve, (ROUTER, 1e6)));
         console2.log("mixed batch:", _rejected(safe, _batch(xs), pid));
         assertEq(IERC20T(USDC).balanceOf(safe), u0);
@@ -230,38 +237,37 @@ contract V4UserOpForkTest is V4Fixture {
     }
 
     /// A V4 call that validates (V4's entry points are admitted) but fails its own checks at execution reverts there:
-    /// nothing moves, and the op is still charged to the gas bucket (validation-time charge, I6).
+    /// nothing moves, and the op still advances the gas rate (validation-time charge, I6).
     function test_executionCheckFailsSafely() public {
         _enable();
         SwapParams memory s = _swapParams(POOL_BTC, USDC, 1_000e6);
         s.amountOutMinimum = 0; // looser than the range edge
-        Execution[] memory xs = new Execution[](2);
-        xs[0] = Execution(USDC, 0, abi.encodeCall(IERC20T.approve, (address(v4), 1_000e6)));
-        xs[1] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.swap, (s)));
+        Execution[] memory xs = _approved(USDC, 1_000e6, address(v4), abi.encodeCall(MamoruActionPolicyV4.swap, (s)));
         uint256 u0 = IERC20T(USDC).balanceOf(safe);
         (bool ok,) = _runOp(safe, _batch(xs), pid);
         assertFalse(ok, "execution reverted");
         assertEq(IERC20T(USDC).balanceOf(safe), u0, "nothing moved");
-        assertGt(gasPol.chargedSinceReview(safe), 0, "charged to the gas bucket");
+        assertGt(gasPol.tatOf(safe), vm.getBlockTimestamp(), "the gas rate advanced");
     }
 
     // ------------------------------------------------------------ I6: gas griefing
 
-    /// A leaked session key sends valid, useless userOps at the highest fields the caps allow. The gas bucket stops it
-    /// within a window, and the cumulative GAS_REVIEW (0.01 ETH on Base) stops it for good until the guardian reviews.
-    function test_gasGriefingHitsBucketThenReview() public {
+    /// A leaked session key sends valid, useless userOps at the highest fields the caps allow, each with a correct
+    /// claimed time. The GCRA rate (A1, I6) stops it at G per W (0.002 ETH a day on Base) plus one burst: no reviewer,
+    /// nothing to reset, and the account keeps working the next window.
+    function test_gasGriefingHitsTheRate() public {
         _enable();
         opVerification = 3_000_000;
         opCall = 2_000_000;
         opPre = 200_000;
         opMaxFee = 100_000_000; // the caps' maxFeePerGas
-        bytes memory noop = _single(USDC, abi.encodeCall(IERC20T.approve, (address(v4), 1)));
         uint256 charge = (opVerification + opCall + opPre) * opMaxFee;
         uint256 eth0 = safe.balance;
         uint256 ops;
         uint256 firstWindow;
         for (uint256 day; day < 30; day++) {
             while (true) {
+                bytes memory noop = _single(USDC, abi.encodeCall(IERC20T.approve, (address(v4), 0)));
                 PackedUserOperationV4[] memory one = new PackedUserOperationV4[](1);
                 one[0] = _op(safe, noop, pid);
                 vm.prank(bundler, bundler);
@@ -272,17 +278,32 @@ contract V4UserOpForkTest is V4Fixture {
             if (day == 0) firstWindow = ops;
             _nextBlock(1 days);
         }
-        console2.log("griefing ops accepted in the first window (bucket 0.002 ETH)", firstWindow);
-        console2.log("griefing ops accepted over 30 days before GAS_REVIEW", ops);
-        console2.log("charged since review (wei)", gasPol.chargedSinceReview(safe));
+        console2.log("griefing ops accepted in the first window (G = 0.002 ETH)", firstWindow);
+        console2.log("griefing ops accepted over 30 days", ops);
         console2.log("ETH the Safe actually paid (wei)", eth0 - safe.balance);
         assertEq(firstWindow, 0.002 ether / charge);
-        assertEq(ops, 0.01 ether / charge);
-        assertLe(eth0 - safe.balance, 0.01 ether, "the Safe never paid more than GAS_REVIEW");
-        _rejected(safe, noop, pid);
-        vm.prank(guardian);
-        gasPol.review(safe);
-        _run(safe, noop, pid);
+        assertLe(ops * charge, 31 * 0.002 ether, "at most G per W (plus the first burst)");
+        assertLe(eth0 - safe.balance, 31 * 0.002 ether, "the Safe never paid more than the rate allows");
+        // nothing to reset: the next window serves again
+        _run(safe, _single(USDC, abi.encodeCall(IERC20T.approve, (address(v4), 0))), pid);
+    }
+
+    /// A1 (T1c, on the real stack): SmartSession intersects the gas policy's time range and the EntryPoint enforces
+    /// it. An op whose claimed time is more than S in the past or the future is refused at validation.
+    function test_claimedTimeOutsideSlackRefused() public {
+        _enable();
+        Execution[] memory xs = new Execution[](2);
+        xs[1] = Execution(USDC, 0, abi.encodeCall(IERC20T.approve, (address(v4), 0)));
+        xs[0] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.clock, (vm.getBlockTimestamp() - 301)));
+        string memory r1 = _rejected(safe, _rawBatch(xs), pid);
+        xs[0] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.clock, (vm.getBlockTimestamp() + 301)));
+        string memory r2 = _rejected(safe, _rawBatch(xs), pid);
+        console2.log("claimed time 301 s in the past:", r1);
+        console2.log("claimed time 301 s in the future:", r2);
+        assertEq(keccak256(bytes(r1)), keccak256("AA22 expired or not due"));
+        assertEq(keccak256(bytes(r2)), keccak256("AA22 expired or not due"));
+        xs[0] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.clock, (vm.getBlockTimestamp() - 299)));
+        _run(safe, _rawBatch(xs), pid);
     }
 
     // ------------------------------------------------------------ migration (v2-v6 -> V4)
@@ -398,7 +419,7 @@ contract V4UserOpForkTest is V4Fixture {
     /// A userOp in SmartSession ENABLE mode: the payload plus the old session key's signature, one call the old
     /// session's policies admit.
     function _enableModeOp(EnableSessionT memory e) internal view returns (PackedUserOperationV4 memory op) {
-        op = _op(safe, _single(address(0x1000), abi.encodeWithSelector(0x095ea7b3, attacker, 1)), bytes32(0));
+        op = _op(safe, _rawSingle(address(0x1000), abi.encodeWithSelector(0x095ea7b3, attacker, 1)), bytes32(0));
         bytes32 h = IEntryPointT(ENTRY_POINT).getUserOpHash(op);
         (uint8 v, bytes32 r, bytes32 sg) = vm.sign(sessionKey, keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", h)));
         op.signature = abi.encodePacked(uint8(1), _flzLiterals(abi.encode(e, abi.encodePacked(r, sg, v))));
@@ -452,7 +473,7 @@ contract V4UserOpForkTest is V4Fixture {
         assertEq(ISmartSessionNonce(SMART_SESSION).getNonce(_pid(old[0]), safe), n0 + 1, "ENABLE nonce moved");
         assertFalse(_sendOp(_enableModeOp(e)), "the old payload is refused at validation");
         assertFalse(ISmartSessionT(SMART_SESSION).isPermissionEnabled(_pid(old[0]), safe), "old session stays removed");
-        _rejected(safe, _single(address(0x1000), abi.encodeWithSelector(0x095ea7b3, attacker, 1)), _pid(old[0])); // nor acts
+        _rejected(safe, _rawSingle(address(0x1000), abi.encodeWithSelector(0x095ea7b3, attacker, 1)), _pid(old[0])); // nor acts
         assertEq(ISmartSessionT(SMART_SESSION).getPermissionIDs(safe).length, 1, "only V4's session");
         assertTrue(ISmartSessionT(SMART_SESSION).isPermissionEnabled(v4pid, safe));
     }

@@ -5,164 +5,143 @@ import {console2} from "forge-std/Test.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {V4Fixture, IERC20T} from "./V4Fixture.sol";
 import {MamoruActionPolicyV4, SwapParams} from "../src/MamoruActionPolicyV4.sol";
-import {MamoruRegistry} from "../src/MamoruRegistry.sol";
 
 /**
- * Spec 010 I5 (otto/mamoru#292) on a Base fork: the account bucket (C a day), the per-pool share (ratioBps of C), the
- * rolling 30-day cap (3C), the circuit breaker (C in 24 h, pauses by itself) and the review threshold (10C since the
- * guardian's last review, pauses by itself). Then the worst-case loss per day with the registry at its loosest
- * (T4 deliverable, r1 P1-7): measured, and compared with the stated bound.
+ * Spec 010 I5 + A1 (otto/mamoru#292, #316) on a Base fork: the account bucket (C a day), the per-asset sub-bucket
+ * (the class's ratioBps of C, shared by every pool of the asset), the rolling 30-day cap (3C) and the rolling 24 h cap
+ * (C). A call that would pass any of them is refused; nothing pauses, nobody resets anything, and the next window works
+ * again by itself. Then the worst-case loss per day at the class's parameters (T4 deliverable, r1 P1-7): measured, and
+ * compared with the stated bound.
  */
 contract V4BudgetTest is V4Fixture {
+    address constant POOL_ETH_05 = 0xd0b53D9277642d899DF5C87A3966A349A798F224; // USDC/WETH 0.05 %, eligible by rule
+
     function setUp() public {
         _forkBase();
-        _listPool(POOL_BTC, 100, 0, 0, 10_000); // the whole bucket: account-level limits bind first
-        _listPool(POOL_ETH, 100, 0, 0, 5_000);
         _init(acct);
         deal(USDC, acct, 1_000_000e6);
         deal(CBBTC, acct, 10e8);
     }
 
-    function _paused(uint8 reason) internal view returns (bool) {
-        return v4.isPaused(acct) && (v4.pauseOf(acct).reasons & reason) != 0;
+    /// Spend the whole of C: the stable class (50 %), cbBTC (35 %), WETH (15 %). The stables pool's in-band depth is
+    /// about 35,000 USDC at the fork block, so its share goes in calls of at most 1/20 of it (I2).
+    function _spendC(address a) internal {
+        for (uint256 i; i < 3; i++) {
+            _swap(a, POOL_STABLE, USDC, 1_500e6);
+        }
+        _swap(a, POOL_STABLE, USDC, 500e6);
+        _swap(a, POOL_BTC, USDC, 3_500e6);
+        _swap(a, POOL_ETH, USDC, 1_500e6);
     }
 
-    function test_I5_poolShareCapsTheSubBucket() public {
-        _swap(acct, POOL_ETH, USDC, 4_000e6);
-        SwapParams memory s = _swapParams(POOL_ETH, USDC, 1_000e6 + 1);
+    function test_I5_subBucketPerAssetSharedByItsPools() public {
+        _swap(acct, POOL_ETH, USDC, 1_000e6);
+        SwapParams memory s = _swapParams(POOL_ETH, USDC, 500e6 + 1);
         _approveV4(acct, USDC, s.amountIn);
         vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BudgetExceeded.selector, POOL_ETH, s.amountIn));
-        v4.swap(s); // 4,000 + 1,000.000001 > 50 % of C
-        _swap(acct, POOL_BTC, USDC, 5_000e6); // another pool's share is separate
-    }
-
-    function test_I5_accountBucketAcrossPools() public {
-        _swap(acct, POOL_BTC, USDC, 6_000e6);
-        _swap(acct, POOL_ETH, USDC, 3_000e6);
-        SwapParams memory s = _swapParams(POOL_ETH, USDC, 1_000e6 + 1);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BudgetExceeded.selector, WETH, s.amountIn));
+        v4.swap(s); // 1,000 + 500.000001 > 15 % of C
+        // the second WETH pool shares the sub-bucket: it adds no room
+        s = _swapParams(POOL_ETH_05, USDC, 500e6 + 1);
         _approveV4(acct, USDC, s.amountIn);
         vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BudgetExceeded.selector, address(0), s.amountIn));
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BudgetExceeded.selector, WETH, s.amountIn));
         v4.swap(s);
-        // it refills C a day
-        _nextBlock(12 hours);
-        _swap(acct, POOL_BTC, USDC, 4_000e6);
+        _swap(acct, POOL_ETH_05, USDC, 500e6); // exactly the share
+        _swap(acct, POOL_BTC, USDC, 3_000e6); // another asset's sub-bucket is separate
     }
 
-    /// I5 breaker: more than C in 24 h pauses the account by itself, without executing the crossing call; only the
-    /// guardian ends it. The bucket alone would allow it (half a day refilled half of C).
-    function test_I5_breakerAtCPer24h() public {
-        _swap(acct, POOL_BTC, USDC, 6_000e6);
+    function test_I5_accountBucketRefillsByItself() public {
+        _spendC(acct);
+        SwapParams memory s = _swapParams(POOL_BTC, USDC, 1e6);
+        _approveV4(acct, USDC, 1e6);
+        vm.prank(acct);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BudgetExceeded.selector, address(0), 1e6));
+        v4.swap(s);
+        _nextBlock(25 hours); // the bucket and the 24 h window have refilled: no one had to reset anything
+        _swap(acct, POOL_BTC, USDC, 3_500e6);
+    }
+
+    /// I5 (A1): the rolling 24 h cap is C. Half a day after spending C the bucket has refilled half of C, but the 24 h
+    /// cap refuses the call (no pause: the next call after the window passes).
+    function test_I5_rolling24hCapRefuses() public {
+        _spendC(acct);
         _nextBlock(12 hours);
-        SwapParams memory s = _swapParams(POOL_BTC, USDC, 6_000e6);
+        (uint256 bucket,,, uint256 room24) = v4.budgetLeft(acct, CBBTC, 3_500);
+        assertApproxEqAbs(bucket, 5_000e6, 1e6, "the bucket refilled half of C");
+        assertEq(room24, 0, "C counted in the last 24 h");
+        SwapParams memory s = _swapParams(POOL_BTC, USDC, 1_000e6);
         _approveV4(acct, USDC, s.amountIn);
         uint256 usdc0 = IERC20T(USDC).balanceOf(acct);
         vm.prank(acct);
-        uint256 out = v4.swap(s);
-        assertEq(out, 0, "the crossing swap did not execute");
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.Cap24hExceeded.selector, uint256(C), s.amountIn));
+        v4.swap(s);
         assertEq(IERC20T(USDC).balanceOf(acct), usdc0, "nothing moved");
-        assertTrue(_paused(v4.PAUSE_BREAKER()), "breaker pause");
         vm.prank(SMART_SESSION);
-        assertEq(v4.checkAction(ID, acct, address(v4), 0, abi.encodeWithSelector(v4.swap.selector)), 1, "session refused");
-        (,,, uint256 breakerRoom,) = v4.budgetLeft(acct, POOL_BTC, 10_000);
-        assertEq(breakerRoom, 4_000e6, "6,000 of C counted in the last 24 h");
-        vm.prank(guardian);
-        v4.unpause(acct);
-        _swap(acct, POOL_BTC, USDC, 4_000e6); // exactly C in 24 h: allowed
-        s = _swapParams(POOL_BTC, USDC, 1e6);
-        _approveV4(acct, USDC, 1e6);
-        vm.prank(acct);
-        assertEq(v4.swap(s), 0, "one more unit trips it again");
-        assertTrue(_paused(v4.PAUSE_BREAKER()));
-        vm.prank(guardian);
-        v4.unpause(acct);
-        _nextBlock(25 hours); // the first spend leaves the window
-        _swap(acct, POOL_BTC, USDC, 5_000e6);
+        assertEq(v4.checkAction(ID, acct, address(v4), 0, abi.encodeWithSelector(v4.swap.selector)), 0, "the session is not paused");
+        _nextBlock(13 hours); // the first spend leaves the 25 hourly periods
+        _swap(acct, POOL_BTC, USDC, 1_000e6);
     }
 
-    /// I5: the rolling 30-day cap of 3C refuses (no pause) a spend that would pass it, whatever the bucket and the
-    /// breaker allow; it never ends the authorization: 31 days later the oldest spend has left the window.
+    /// I5: the rolling 30-day cap of 3C refuses a spend that would pass it, whatever the bucket and the 24 h cap allow;
+    /// it never ends the authorization: 31 days later the oldest spend has left the window.
     function test_I5_rolling30DayCap() public {
         for (uint256 i; i < 3; i++) {
-            _swap(acct, POOL_BTC, USDC, 9_000e6);
+            _spendC(acct);
             _nextBlock(25 hours);
         }
-        SwapParams memory s = _swapParams(POOL_BTC, USDC, 3_000e6 + 1);
+        SwapParams memory s = _swapParams(POOL_BTC, USDC, 1e6);
         _approveV4(acct, USDC, s.amountIn);
         vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.Cap30Exceeded.selector, 27_000e6, s.amountIn));
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.Cap30Exceeded.selector, 3 * uint256(C), s.amountIn));
         v4.swap(s);
-        _swap(acct, POOL_BTC, USDC, 3_000e6); // exactly 3C
-        assertFalse(v4.isPaused(acct));
         _nextBlock(29 days);
-        _swap(acct, POOL_BTC, USDC, 9_000e6); // the first 9,000 left the 31-day window
+        _swap(acct, POOL_BTC, USDC, 3_500e6); // the first C left the 31-day window
     }
 
-    /// I5 (r2 P1): a slow leak below the breaker and the 30-day cap stops at 10C: the crossing call pauses the account
-    /// until the guardian reviews it; the review resets the counter and ends that pause.
-    function test_I5_reviewThresholdAt10C() public {
+    /// A1: no lifetime total and no review threshold. A slow spend under the 24 h and 30-day caps continues with no
+    /// end in time (the owner's accepted rate, spec 010 threat model); nothing pauses on the way.
+    function test_A1_noLifetimeTotal() public {
         bool zeroForOne = true;
-        for (uint256 i; i < 20; i++) {
-            // 0.5C every 6 days: at most 3C in any 31 days, never more than C in 24 h
-            if (zeroForOne) _swap(acct, POOL_BTC, USDC, 5_000e6);
-            else _swap(acct, POOL_BTC, CBBTC, _btcWorth(5_000e6));
+        uint256 spent;
+        for (uint256 i; i < 40; i++) {
+            // 0.3C every 6 days on cbBTC: at most 1.8C in any 31 days, never more than C in 24 h
+            if (zeroForOne) _swap(acct, POOL_BTC, USDC, 3_000e6);
+            else _swap(acct, POOL_BTC, CBBTC, _btcWorth(3_000e6));
+            spent += 3_000e6;
             zeroForOne = !zeroForOne;
             _nextBlock(6 days);
         }
-        uint256 spent = v4.spentSinceReview(acct);
-        assertGt(spent, 99 * uint256(C) / 10, "about 10C spent, never paused on the way");
-        assertLe(spent, 10 * uint256(C));
-        assertFalse(v4.isPaused(acct));
-        (,,,, uint256 room) = v4.budgetLeft(acct, POOL_BTC, 10_000);
-        assertEq(room, 10 * uint256(C) - spent);
-        SwapParams memory s = _swapParams(POOL_BTC, USDC, room + 1);
-        _approveV4(acct, USDC, s.amountIn);
-        vm.prank(acct);
-        assertEq(v4.swap(s), 0, "the call past 10C did not execute");
-        assertTrue(_paused(v4.PAUSE_REVIEW()), "review pause");
-        vm.prank(attacker);
-        vm.expectRevert(MamoruActionPolicyV4.OnlyGuardian.selector);
-        v4.review(acct);
-        vm.prank(guardian);
-        v4.review(acct);
-        assertEq(v4.spentSinceReview(acct), 0);
-        assertFalse(v4.isPaused(acct), "review ends the review pause");
-        _swap(acct, POOL_BTC, USDC, 1_000e6);
+        assertGe(spent, 12 * uint256(C), "past the old 10C review threshold, never refused");
     }
 
     /// cbBTC worth `usdc` at the range edge V4 values it at (so the charge is about `usdc`).
     function _btcWorth(uint256 usdc) internal view returns (uint256) {
-        (uint256 out,) = helper.swapBounds(POOL_BTC, USDC, usdc);
+        (uint256 out,) = lens.swapBounds(POOL_BTC, USDC, usdc);
         return out * 99 / 100;
     }
 
-    // ------------------------------------------------------------ worst-case loss per day, loosest registry
+    // ------------------------------------------------------------ worst-case loss per day, at the class's parameters
 
     /**
-     * T4 / r1 P1-7: the registry at its loosest (band 500 ticks, ratio 10,000) on WETH/USDC 0.3 %, and an attacker who
-     * holds the session key and capital. Each round: push the spot to the far edge of V4's range in the account's
-     * disfavour, make the account swap at the edge price, push back (the attacker pockets the difference), then the same
-     * the other way. Everything in one block (no TWAP moves, the cheapest attack), repeated until V4 stops it. The loss
-     * is the account's USDC shortfall at the end (it ends in USDC). Bound stated by the spec: the whole permitted spend,
-     * C per 24 h per chain.
+     * T4 / r1 P1-7: WETH/USDC 0.3 % at its class (band 100 ticks, 15 % of C), and an attacker who holds the session key
+     * and capital. Each round: push the spot to the far edge of V4's range in the account's disfavour, make the account
+     * swap at the edge price, push back (the attacker pockets the difference), then the same the other way. Everything
+     * in one block (no TWAP moves, the cheapest attack), repeated until V4 stops it. The loss is the account's USDC
+     * shortfall at the end (it ends in USDC). Bound stated by the spec: the whole permitted spend, C per 24 h per chain.
      */
-    function test_worstCaseDailyLossAtLoosestRegistry() public {
-        vm.prank(admin);
-        reg.removePool(POOL_ETH);
-        _listPool(POOL_ETH, 500, 0, 0, 10_000);
+    function test_worstCaseDailyLossAtTheClass() public {
         address a = makeAddr("victim");
         _init(a);
         deal(USDC, a, uint256(C));
         uint256 start = IERC20T(USDC).balanceOf(a);
         uint256 rounds;
         uint256 charged;
-        uint256 chunk = 1_000e6;
+        uint256 chunk = 500e6;
         while (rounds < 50) {
             // 1. account buys WETH with USDC at the top edge (token1 in: worst price is hi)
-            (int24 lo, int24 hi) = helper.priceRange(POOL_ETH);
+            (, int24 hi) = lens.priceRange(POOL_ETH);
             int24 sp = _spot(POOL_ETH);
-            lo;
             _push(POOL_ETH, USDC, WETH, 3000, (hi - 1) - sp); // USDC in: WETH dearer, the tick goes up to hi
             uint256 usdcBal = IERC20T(USDC).balanceOf(a);
             uint256 amt = usdcBal < chunk ? usdcBal : chunk;
@@ -175,7 +154,7 @@ contract V4BudgetTest is V4Fixture {
             charged += amt;
             // 2. account sells the WETH back at the bottom edge (token0 in: worst price is lo)
             sp = _spot(POOL_ETH);
-            (lo, hi) = helper.priceRange(POOL_ETH);
+            (int24 lo,) = lens.priceRange(POOL_ETH);
             _push(POOL_ETH, WETH, USDC, 3000, (lo + 1) - sp);
             SwapParams memory s2 = _swapParams(POOL_ETH, WETH, weth);
             _approveV4(a, WETH, weth);
@@ -184,7 +163,6 @@ contract V4BudgetTest is V4Fixture {
             if (back == 0) break;
             charged += back; // about what V4 charged for the WETH leg
             rounds++;
-            lo;
         }
         uint256 end = IERC20T(USDC).balanceOf(a) + _wethInUsdc(IERC20T(WETH).balanceOf(a));
         uint256 loss = start > end ? start - end : 0;
@@ -192,8 +170,7 @@ contract V4BudgetTest is V4Fixture {
         console2.log("value charged to the account (USDC units)", charged);
         console2.log("account loss over the day (USDC units)", loss);
         console2.log("loss in bps of C", loss * 10_000 / C);
-        console2.log("paused by the breaker", v4.isPaused(a));
-        assertLe(charged, uint256(C), "never more than C charged in 24 h");
+        assertLe(charged, uint256(C) * 1_500 / 10_000 + chunk, "never more than WETH's share charged in a day");
         assertLe(loss, uint256(C), "the loss is inside the stated bound");
     }
 

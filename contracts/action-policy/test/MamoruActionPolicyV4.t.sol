@@ -14,9 +14,10 @@ import {
     ExactInputSingleParams,
     DecreaseLiquidityParams,
     CollectParams,
-    IncreaseLiquidityParams
+    IncreaseLiquidityParams,
+    PoolEntryV4
 } from "../src/MamoruActionPolicyV4.sol";
-import {MamoruRegistry} from "../src/MamoruRegistry.sol";
+import {DeployMamoruV4} from "../script/DeployV4.s.sol";
 import {ConfigIdV4} from "../src/SmartSessionTypes.sol";
 
 /// An ERC-4626 that takes the assets and mints worthless shares: what a "hostile vault" entry would point at.
@@ -45,17 +46,19 @@ interface IFactoryT {
 }
 
 /**
- * Spec 010 T3/T4 (otto/mamoru#292) on a Base fork: MamoruActionPolicyV4 called the way SmartSession calls it
+ * Spec 010 T3/T4 + A1 (otto/mamoru#292, #316) on a Base fork: MamoruActionPolicyV4 called the way SmartSession calls it
  * (`checkAction` from SMART_SESSION, `initializeWithMultiplexer` from SMART_SESSION) and executed from the account
  * (msg.sender = the account), as Safe7579 does after validation. The real SmartSession / EntryPoint path is in
  * test/V4UserOpFork.t.sol.
  */
 contract MamoruActionPolicyV4Test is V4Fixture {
     uint256 constant FAILED = 1;
+    address constant POOL_BTC_30 = 0xeC558e484cC9f2210714E345298fdc53B253c27D; // USDC/cbBTC 0.3 %: eligible by rule
+    address constant POOL_ETH_05 = 0xd0b53D9277642d899DF5C87A3966A349A798F224; // USDC/WETH 0.05 %: eligible by rule
+    address constant POOL_USDT_ETH = 0xd92E0767473D1E3FF11Ac036f2b1DB90aD0aE55F; // USDT/WETH 0.05 %: no class
 
     function setUp() public {
         _forkBase();
-        _listBase();
         _init(acct);
         deal(USDC, acct, 100_000e6);
         deal(CBBTC, acct, 1e8);
@@ -64,11 +67,8 @@ contract MamoruActionPolicyV4Test is V4Fixture {
 
     // ------------------------------------------------------------ deployment, pins
 
-    function test_deploymentShapeAndSizes() public view {
-        assertEq(address(v4.REGISTRY()), address(reg));
+    function test_deploymentShapeAndSizes() public {
         assertEq(address(v4.GAS_POLICY()), address(gasPol));
-        assertEq(v4.GUARDIAN(), guardian);
-        assertEq(gasPol.GUARDIAN(), guardian);
         assertEq(helper.POLICY(), address(v4));
         assertEq(helper.GAS_POLICY(), address(gasPol));
         assertEq(helper.REMOTE_INIT(), address(v4.REMOTE_INIT()));
@@ -77,7 +77,17 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         console2.log("V4 runtime bytes", address(v4).code.length);
         console2.log("helper runtime bytes", address(helper).code.length);
         console2.log("gas policy runtime bytes", address(gasPol).code.length);
-        console2.log("registry runtime bytes", address(reg).code.length);
+        // Spec 010 I7 (A1): no contract of the stack carries a guardian, pause, review, readiness-setter or registry
+        // selector, and the deploy script refuses one that does.
+        DeployMamoruV4 d = new DeployMamoruV4();
+        bytes4[] memory f = d.forbiddenSelectors();
+        address[4] memory all = [address(v4), address(gasPol), address(helper), address(v4.REMOTE_INIT())];
+        for (uint256 i; i < all.length; i++) {
+            for (uint256 k; k < f.length; k++) {
+                assertFalse(d.hasSelector(all[i].code, f[k]), "forbidden selector");
+            }
+        }
+        assertTrue(d.hasSelector(address(v4).code, v4.swap.selector), "the scan finds a real selector");
         // The pinned stables are counted 1:1 as USD units: they must all have 6 decimals.
         assertEq(IERC20T(USDC).decimals(), 6);
         assertEq(IERC20T(USDT).decimals(), 6);
@@ -160,6 +170,13 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         assertEq(_check(acct, address(v4), abi.encodeWithSelector(v4.redeem.selector)), 0);
         assertEq(_check(acct, address(v4), abi.encodeWithSelector(v4.bridge.selector)), 0);
         assertEq(_check(acct, address(v4), abi.encodeWithSelector(v4.registerRemote.selector)), 0);
+        assertEq(_check(acct, address(v4), abi.encodeCall(v4.clock, (vm.getBlockTimestamp()))), 0);
+        assertEq(_check(acct, address(v4), abi.encodeWithSelector(v4.checkExit.selector)), 0);
+        assertEq(_check(acct, address(v4), abi.encodeCall(v4.assertZero, (USDC))), 0);
+        assertEq(_check(acct, address(v4), abi.encodeWithSelector(v4.announceReady.selector)), 0);
+        // A1: the account relays a readiness message itself, and nothing else on the transmitter
+        assertEq(_check(acct, v4.MESSAGE_TRANSMITTER(), abi.encodeWithSelector(0x57ecfd28, "", "")), 0, "receiveMessage");
+        assertEq(_check(acct, v4.MESSAGE_TRANSMITTER(), abi.encodeWithSelector(0x8d3638f4)), FAILED, "sendMessage");
         // approvals: only to V4
         assertEq(_check(acct, USDC, abi.encodeCall(IERC20T.approve, (address(v4), 1e6))), 0);
         assertEq(_check(acct, CBBTC, abi.encodeCall(IERC20T.approve, (address(v4), type(uint256).max))), 0);
@@ -181,10 +198,10 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         assertEq(_check(acct, TOKEN_MESSENGER, abi.encodeWithSelector(0x8e0250ee)), FAILED, "depositForBurn");
         assertEq(_check(acct, GT_USDCP, abi.encodeWithSelector(0x6e553f65, 1e6, acct)), FAILED, "vault deposit");
         assertEq(_check(acct, USDC, abi.encodeCall(IERC20T.transfer, (attacker, 1))), FAILED, "transfer");
-        // V4's guardian functions, init, and an unknown selector
-        assertEq(_check(acct, address(v4), abi.encodeCall(v4.pause, (acct))), FAILED);
-        assertEq(_check(acct, address(v4), abi.encodeCall(v4.setReady, (acct, 15, acct))), FAILED);
+        // init, the CCTP handlers, and unknown selectors (r2's guardian functions no longer exist)
         assertEq(_check(acct, address(v4), abi.encodeWithSelector(v4.initializeWithMultiplexer.selector)), FAILED);
+        assertEq(_check(acct, address(v4), abi.encodeWithSelector(v4.handleReceiveFinalizedMessage.selector)), FAILED);
+        assertEq(_check(acct, address(v4), abi.encodeWithSignature("pause(address)", acct)), FAILED);
         // no native value, no empty call (I6: no action-free op)
         bytes memory sw = _swapCall(POOL_BTC, USDC, 1e6); // built before any prank: it reads the pool
         vm.prank(SMART_SESSION);
@@ -198,26 +215,31 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         v4.checkAction(ConfigIdV4.wrap(bytes32(uint256(9))), acct, address(v4), 0, sw);
     }
 
-    function test_I1_renewalRetiresOldBindingAndPauseStopsAll() public {
+    function test_I1_renewalRetiresOldBinding() public {
         bytes memory sw = _swapCall(POOL_BTC, USDC, 1e6);
-        SwapParams memory s = _swapParams(POOL_BTC, USDC, 1e6);
         _init(acct, ConfigIdV4.wrap(bytes32(uint256(2))), C, 2, new uint256[](0));
         assertEq(_check(acct, address(v4), sw), FAILED, "retired by a renewal");
         vm.prank(SMART_SESSION);
         assertEq(v4.checkAction(ConfigIdV4.wrap(bytes32(uint256(2))), acct, address(v4), 0, sw), 0, "the new binding");
-        vm.prank(guardian);
-        v4.pause(acct);
-        vm.prank(SMART_SESSION);
-        assertEq(v4.checkAction(ConfigIdV4.wrap(bytes32(uint256(2))), acct, address(v4), 0, sw), FAILED, "paused");
+    }
+
+    /// I6: the batch's clock is within S of the block's time; I9 / spec 009 POL-07: assertZero after a reset.
+    function test_clockAndAssertZero() public {
+        uint256 now_ = vm.getBlockTimestamp();
+        v4.clock(now_);
+        v4.clock(now_ - 300);
+        v4.clock(now_ + 300);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.ClockSkew.selector, now_ - 301));
+        v4.clock(now_ - 301);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.ClockSkew.selector, now_ + 301));
+        v4.clock(now_ + 301);
+        _approveV4(acct, USDC, 1);
         vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.AccountPaused.selector, acct));
-        v4.swap(s);
-        vm.prank(attacker);
-        vm.expectRevert(MamoruActionPolicyV4.OnlyGuardian.selector);
-        v4.unpause(acct);
-        vm.prank(guardian);
-        v4.unpause(acct);
-        assertFalse(v4.isPaused(acct));
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.AllowanceLeft.selector, USDC));
+        v4.assertZero(USDC);
+        _approveV4(acct, USDC, 0);
+        vm.prank(acct);
+        v4.assertZero(USDC);
     }
 
     /// I1: the swap goes through V4 with an exact approval, the account is the recipient, nothing stays behind.
@@ -273,8 +295,8 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.NotPinned.selector, WETH));
         v4.swap(t);
         t = _copy(s);
-        t.pool = POOL_EURC; // a real factory pool, never listed
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.NotListed.selector, POOL_EURC));
+        t.pool = POOL_EURC; // a real factory pool of a token V4 does not pin
+        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.NotPinned.selector, EURC));
         v4.swap(t);
         vm.stopPrank();
         // an account without a config
@@ -325,12 +347,16 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         (uint128 added,,) = v4.increase(IncreaseLiquidityParams(tokenId, 500e6, 0.005e8, 0, 0, vm.getBlockTimestamp()));
         assertGt(added, 0);
         liq += added;
-        // decrease at the policy's minimums, collect to the account, burn
-        (uint256 min0, uint256 min1) = helper.decreaseMins(acct, tokenId, liq);
+        // decrease at the policy's minimums, collect to the account, burn. I9: validation is static (an admitted
+        // position); the price check is `checkExit` at execution, right before the decrease (the gas policy pairs them).
+        (uint256 min0, uint256 min1) = lens.decreaseMins(acct, tokenId, liq);
         bytes memory dec = abi.encodeCall(INPMT.decreaseLiquidity, (DecreaseLiquidityParams(tokenId, liq, min0, min1, vm.getBlockTimestamp())));
         assertEq(_check(acct, NPM, dec), 0);
-        bytes memory lowMins = abi.encodeCall(INPMT.decreaseLiquidity, (DecreaseLiquidityParams(tokenId, liq, 0, 0, vm.getBlockTimestamp())));
-        assertEq(_check(acct, NPM, lowMins), FAILED, "decrease below the range minimums");
+        vm.prank(acct);
+        vm.expectRevert(MamoruActionPolicyV4.ExitBelowBand.selector);
+        v4.checkExit(tokenId, liq, 0, 0); // below the range minimums
+        vm.prank(acct);
+        v4.checkExit(tokenId, liq, min0, min1);
         vm.prank(acct);
         INPMT(NPM).decreaseLiquidity(DecreaseLiquidityParams(tokenId, liq, min0, min1, vm.getBlockTimestamp()));
         bytes memory col = abi.encodeCall(INPMT.collect, (CollectParams(tokenId, acct, type(uint128).max, type(uint128).max)));
@@ -353,11 +379,20 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         vm.prank(acct);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.NotAdmitted.selector, foreign));
         v4.increase(IncreaseLiquidityParams(foreign, 1e6, 0, 0, 0, vm.getBlockTimestamp()));
-        // a position admitted then moved out of the account is not the session's any more
-        (uint256 tokenId,) = _mintThroughV4(acct, 1_000e6, 0.01e8);
+        // a position admitted then moved out of the account is not the session's any more: validation is static (I9),
+        // so the position manager itself refuses the account (not owner), and `checkExit` refuses the decrease
+        (uint256 tokenId, uint128 liq) = _mintThroughV4(acct, 1_000e6, 0.01e8);
         vm.prank(acct);
         INPMT(NPM).transferFrom(acct, attacker, tokenId);
-        assertEq(_check(acct, NPM, abi.encodeCall(INPMT.burn, (tokenId))), FAILED);
+        vm.prank(acct);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.NotAdmitted.selector, tokenId));
+        v4.checkExit(tokenId, liq, 0, 0);
+        vm.prank(acct);
+        vm.expectRevert(); // "Not approved"
+        INPMT(NPM).burn(tokenId);
+        vm.prank(acct);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.NotAdmitted.selector, tokenId));
+        v4.increase(IncreaseLiquidityParams(tokenId, 1e6, 0, 0, 0, vm.getBlockTimestamp()));
     }
 
     /// LeftClaw M-4, ported: admission at enable, survival across renewals, explicit revocation for good.
@@ -392,7 +427,7 @@ contract MamoruActionPolicyV4Test is V4Fixture {
     /// before anything is charged (at execution now: the call reverts, the budget is untouched).
     function test_M2_mintWhoseMinimumsTheSpotBreaksRefused() public {
         MintParams memory m = _mintParams(acct, 2_000e6, 0.02e8);
-        (uint256 bucket0,,,,) = v4.budgetLeft(acct, POOL_BTC, 3_500);
+        (uint256 bucket0,,,) = v4.budgetLeft(acct, CBBTC, 3_500);
         m.amount0Min = 1_990e6; // what the engine would ask at today's spot, about 50 bps
         _approveV4(acct, USDC, 2_000e6);
         _approveV4(acct, CBBTC, 0.02e8);
@@ -400,13 +435,13 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         vm.prank(acct);
         vm.expectRevert(MamoruV4Helper.Slippage.selector);
         v4.mint(m);
-        (uint256 bucket1,,,,) = v4.budgetLeft(acct, POOL_BTC, 3_500);
+        (uint256 bucket1,,,) = v4.budgetLeft(acct, CBBTC, 3_500);
         assertEq(bucket1, bucket0, "nothing charged");
     }
 
     /// LeftClaw M-2 / T6: a third party pushes the spot out of range in the same block (neither TWAP moves): refused.
     function test_M2_spotOutsideRangeRefused() public {
-        (int24 lo,) = helper.priceRange(POOL_BTC);
+        (int24 lo,) = lens.priceRange(POOL_BTC);
         SwapParams memory s = _swapParams(POOL_BTC, USDC, 1_000e6);
         _approveV4(acct, USDC, 1_000e6);
         _push(POOL_BTC, USDC, CBBTC, 500, (lo - _spot(POOL_BTC)) - 20);
@@ -428,74 +463,105 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         vm.roll(vm.getBlockNumber() + 3_600);
         vm.warp(vm.getBlockTimestamp() + 7_200);
         vm.expectPartialRevert(MamoruV4Helper.RangeEmpty.selector);
-        helper.priceRange(POOL_STABLE);
-        (uint256 min0, uint256 min1) = helper.decreaseMins(acct, tokenId, liq);
+        lens.priceRange(POOL_STABLE);
+        (uint256 min0, uint256 min1) = lens.decreaseMins(acct, tokenId, liq);
         bytes memory dec = abi.encodeCall(INPMT.decreaseLiquidity, (DecreaseLiquidityParams(tokenId, liq, min0, min1, vm.getBlockTimestamp())));
         assertEq(_check(acct, NPM, dec), 0, "exit locked by the anchor");
+        vm.prank(acct);
+        v4.checkExit(tokenId, liq, min0, min1); // the price check at execution passes too
     }
 
-    // ------------------------------------------------------------ I8: a removed pool is exit-only
+    // ------------------------------------------------------------ A1: exits are never gated by eligibility
 
-    function test_I8_removedPoolIsExitOnly() public {
+    /// A position whose pool stops being eligible (here: the factory no longer names it) is exit-only: no swap, no
+    /// increase, but `checkExit` and the decrease, collect and burn stay allowed (spec 010 A1, LeftClaw M-6).
+    function test_A1_ineligiblePoolIsExitOnly() public {
         (uint256 tokenId, uint128 liq) = _mintThroughV4(acct, 1_000e6, 0.01e8);
         SwapParams memory s = _swapParams(POOL_BTC, USDC, 1_000e6);
-        vm.prank(admin);
-        reg.removePool(POOL_BTC); // immediate
+        (uint256 min0, uint256 min1) = lens.decreaseMins(acct, tokenId, liq);
+        vm.mockCall(FACTORY, abi.encodeWithSignature("getPool(address,address,uint24)", USDC, CBBTC, uint24(500)), abi.encode(address(0xbad)));
         _approveV4(acct, USDC, 1_000e6);
         vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.NotListed.selector, POOL_BTC));
+        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.NotAFactoryPool.selector, POOL_BTC));
         v4.swap(s);
         vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.NotListed.selector, POOL_BTC));
+        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.NotAFactoryPool.selector, POOL_BTC));
         v4.increase(IncreaseLiquidityParams(tokenId, 1e6, 0, 0, 0, vm.getBlockTimestamp()));
-        (uint256 min0, uint256 min1) = helper.decreaseMins(acct, tokenId, liq);
         bytes memory dec = abi.encodeCall(INPMT.decreaseLiquidity, (DecreaseLiquidityParams(tokenId, liq, min0, min1, vm.getBlockTimestamp())));
-        assertEq(_check(acct, NPM, dec), 0, "exit still priced by the removed entry");
+        assertEq(_check(acct, NPM, dec), 0, "the decrease validates");
+        vm.prank(acct);
+        v4.checkExit(tokenId, liq, min0, min1);
         assertEq(_check(acct, NPM, abi.encodeCall(INPMT.burn, (tokenId))), 0);
     }
 
-    // ------------------------------------------------------------ pinned tokens, router, NPM, messenger (r1 P0, r2 P1)
+    // ------------------------------------------------------------ A1: eligibility by rule (no registry)
 
-    /// A real factory pool whose other token is not pinned (EURC), listed after the full delay: refused at use.
-    function test_nonPinnedTokenPoolRefused() public {
-        _listPool(POOL_EURC, 100, 0, 0, 10_000);
+    /// Rule 2: a pool of a token V4 does not pin, and a pair of pinned tokens without a class (USDT/WETH), are refused.
+    function test_A1_rule2_pinnedTokensAndAClass() public {
         deal(EURC, acct, 1_000e6);
         _approveV4(acct, USDC, 1_000e6);
         vm.prank(acct);
         vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.NotPinned.selector, EURC));
         v4.swap(SwapParams(POOL_EURC, USDC, 1_000e6, 0, 1, vm.getBlockTimestamp()));
+        _approveV4(acct, USDT, 1_000e6);
+        vm.prank(acct);
+        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.NotEligible.selector, address(0), 2));
+        v4.swap(SwapParams(POOL_USDT_ETH, USDT, 1_000e6, 0, 1, vm.getBlockTimestamp()));
     }
 
-    /// The registry cannot change the router, the manager or the messenger: it has no entry for them, and entries
-    /// that name them as a "pool" or a "vault" are refused at use; a route to a chain outside V4's table is refused.
-    function test_registryCannotNameRouterNpmMessenger() public {
-        _execAfterDelay(MamoruRegistry.Kind.Pool, bytes32(uint256(uint160(ROUTER))), abi.encode(uint32(1800), uint32(300), uint24(100), int24(0), uint24(0), uint16(10_000)));
+    /// Rule 3: a pool of a class's pair on a fee tier outside the class's fee set (USDC/cbBTC 1 %) is refused.
+    function test_A1_rule3_feeSet() public {
+        address p = IFactoryT(FACTORY).getPool(USDC, CBBTC, 10_000);
+        _approveV4(acct, USDC, 1_000e6);
+        vm.prank(acct);
+        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.NotEligible.selector, p, 3));
+        v4.swap(SwapParams(p, USDC, 1_000e6, 0, 1, vm.getBlockTimestamp()));
+    }
+
+    /// Rule 7: a second pool of the pair (USDC/cbBTC 0.3 %) is eligible while it agrees with the reference pool; an
+    /// outsider who pushes its price more than one band from the reference's makes it refused. It shares the asset's
+    /// sub-bucket with the reference pool: a second pool adds no room.
+    function test_A1_rule7_referencePoolAndSharedSubBucket() public {
+        assertEq(_key(POOL_BTC_30), CBBTC, "cbBTC's sub-bucket");
+        assertEq(_key(POOL_BTC), CBBTC, "the same sub-bucket as the reference pool");
+        assertEq(_key(POOL_ETH_05), WETH);
+        assertEq(_key(POOL_ETH), WETH);
+        // spend most of cbBTC's sub-bucket (35 % of C) on the reference pool; the second pool cannot add to it
+        _swap(acct, POOL_BTC, USDC, 3_000e6);
+        SwapParams memory s = _swapParams(POOL_BTC_30, USDC, 600e6);
+        _approveV4(acct, USDC, 600e6);
+        vm.prank(acct);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BudgetExceeded.selector, CBBTC, 600e6));
+        v4.swap(s);
+        // an outsider pushes the second pool 300 ticks away from the reference: refused by rule 7
+        _push(POOL_BTC_30, CBBTC, USDC, 3000, 300);
+        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.NotEligible.selector, POOL_BTC_30, 7));
+        helper.priced(POOL_BTC_30);
+    }
+
+    /// Nothing outside the code's tables can be named: not a "pool" that is a router, not a vault outside the exact
+    /// list (a messenger, a position manager, a real MetaMorpho vault V4 does not list), not a chain outside the table.
+    function test_A1_nothingOutsideTheTables() public {
         _approveV4(acct, USDC, 1_000e6);
         vm.prank(acct);
         vm.expectRevert(); // the router has no token0(): not a pool at all
         v4.swap(SwapParams(ROUTER, USDC, 1_000e6, 0, 1, vm.getBlockTimestamp()));
-        _listVault(TOKEN_MESSENGER, 5_000);
-        vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.BadVault.selector, TOKEN_MESSENGER));
+        vm.startPrank(acct);
+        vm.expectRevert();
         v4.deposit(TOKEN_MESSENGER, 1_000e6);
-        _listVault(NPM, 5_000);
-        vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.BadVault.selector, NPM));
+        vm.expectRevert();
         v4.deposit(NPM, 1_000e6);
-        // V4's table pins the router, manager and messenger: nothing the registry stores is ever read as one of them
-        assertEq(v4.TOKEN_MESSENGER(), TOKEN_MESSENGER);
-        _route(3); // Arbitrum's CCTP domain: the registry takes it, V4 does not
-        vm.prank(acct);
+        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.BadVault.selector, STEAK_USDC));
+        v4.deposit(STEAK_USDC, 1_000e6);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadBridge.selector, 3));
-        v4.bridge(3, USDC, 1e6);
+        v4.bridge(3, USDC, 1e6); // Arbitrum's CCTP domain
+        vm.stopPrank();
+        assertEq(v4.TOKEN_MESSENGER(), TOKEN_MESSENGER);
     }
 
-    /// Spec 010 r1 finding 3: a vault that no pinned MetaMorpho factory created (an ERC-4626 that keeps the assets),
-    /// and Aave's static aToken (no verified membership view), are refused even after the full delay.
+    /// Spec 010 r1 finding 3: an ERC-4626 that keeps the assets, and Aave's static aToken, are not in the table.
     function test_hostileVaultRefused() public {
         HostileVault h = new HostileVault(USDC);
-        _listVault(address(h), 5_000);
-        _listVault(WA_BAS_USDC, 5_000);
         _approveV4(acct, USDC, 1_000e6);
         vm.startPrank(acct);
         vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.BadVault.selector, address(h)));
@@ -506,10 +572,9 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         assertEq(IERC20T(USDC).balanceOf(acct), 100_000e6);
     }
 
-    /// A MetaMorpho vault of a pinned stable, listed: exact deposit, shares to the account, redeem back; a removed
-    /// vault is exit-only.
+    /// The listed MetaMorpho vault (gtUSDCp, 50 % of C): exact deposit, shares to the account, the position capped at
+    /// the vault's ratio, redeem back; a vault outside the list redeems nothing through V4.
     function test_metaMorphoVaultDepositRedeem() public {
-        _listVault(GT_USDCP, 2_000);
         _approveV4(acct, USDC, 1_000e6);
         vm.prank(acct);
         uint256 g = gasleft();
@@ -518,57 +583,35 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         assertEq(IERC20T(GT_USDCP).balanceOf(acct), shares, "shares to the account");
         assertEq(IERC20T(USDC).allowance(address(v4), GT_USDCP), 0, "vault allowance back to 0");
         assertEq(IERC20T(USDC).balanceOf(address(v4)), 0);
-        // the vault's ratio caps the position: 20 % of C = 2,000 USDC held, by the vault's own accounting
-        _approveV4(acct, USDC, 1_001e6 + 1);
+        // the vault's ratio caps the position: 50 % of C = 5,000 USDC held, by the vault's own accounting
+        _approveV4(acct, USDC, 4_001e6 + 1);
         vm.prank(acct);
         vm.expectPartialRevert(MamoruActionPolicyV4.VaultExposure.selector);
-        v4.deposit(GT_USDCP, 1_001e6 + 1);
-        vm.prank(admin);
-        reg.removeVault(GT_USDCP);
-        vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.NotListed.selector, GT_USDCP));
-        v4.deposit(GT_USDCP, 1e6);
+        v4.deposit(GT_USDCP, 4_001e6 + 1);
         _approveV4(acct, GT_USDCP, shares);
         vm.prank(acct);
         uint256 assets = v4.redeem(GT_USDCP, shares);
         assertApproxEqAbs(assets, 1_000e6, 2, "assets back to the account");
         assertEq(IERC20T(GT_USDCP).balanceOf(acct), 0);
-        // never-listed vault: no redeem through V4 either
         vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.NotListed.selector, STEAK_USDC));
+        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.BadVault.selector, STEAK_USDC));
         v4.redeem(STEAK_USDC, 1);
     }
 
     // ------------------------------------------------------------ I2: depth at every priced use; a trap pool
 
-    /// I2 (r3 P1) + I8: a compromised admin queues a thin pool of pinned tokens it seeded at a bad price; after the full
-    /// 72 h the session tries to use it. The depth check (20 x the call) refuses every call of meaningful size, so the
-    /// trap yields at most dust; the deep pools are unaffected.
-    function test_trapThinPoolAfterDelayRefused() public {
+    /// I2 (r3 P1) + A1: an outsider creates a pool of a class's pair on a fee tier of the class (USDC/WETH 0.3 % is
+    /// taken, so a fresh pair would need a new tier: here the 1 % tier of USDC/cbBTC is outside the fee set and the
+    /// USDT/cbBTC pair has no class), seeds it at a bad price, and the session tries to use it. Refused at every step.
+    function test_trapPoolRefused() public {
         address pool = IFactoryT(FACTORY).getPool(CBBTC, USDT, 10_000);
         if (pool == address(0)) pool = IFactoryT(FACTORY).createPool(CBBTC, USDT, 10_000);
         (uint160 sp,,,,,,) = IUniswapV3Pool(pool).slot0();
         if (sp == 0) IUniswapV3Pool(pool).initialize(TickMath.getSqrtRatioAtTick(-80_000)); // a bad price
-        IUniswapV3Pool(pool).increaseObservationCardinalityNext(1800);
-        // the attacker seeds a little liquidity around the spot
-        (, int24 tick,,,,,) = IUniswapV3Pool(pool).slot0();
-        int24 lower = (tick / 200 - 5) * 200;
-        int24 upper = (tick / 200 + 5) * 200;
-        deal(CBBTC, attacker, 1e8);
-        deal(USDT, attacker, 1_000e6);
-        vm.startPrank(attacker);
-        IERC20T(CBBTC).approve(NPM, type(uint256).max);
-        IERC20T(USDT).approve(NPM, type(uint256).max);
-        (address t0, address t1) = CBBTC < USDT ? (CBBTC, USDT) : (USDT, CBBTC);
-        INPMT(NPM).mint(MintParams(t0, t1, 10_000, lower, upper, 0.001e8, 100e6, 0, 0, attacker, vm.getBlockTimestamp()));
-        vm.stopPrank();
-        _listPool(pool, 500, 0, 0, 10_000); // the loosest entry V4 accepts, after 72 h in public
         _approveV4(acct, USDT, 1_000e6);
-        SwapParams memory s = _swapParams(pool, USDT, 1_000e6);
         vm.prank(acct);
-        vm.expectPartialRevert(MamoruV4Helper.TooThin.selector);
-        v4.swap(s);
-        console2.log("trap pool refused for 1,000 USDT (depth < 20 x value)");
+        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.NotEligible.selector, address(0), 2));
+        v4.swap(SwapParams(pool, USDT, 1_000e6, 0, 1, vm.getBlockTimestamp()));
     }
 
     /// LeftClaw M-5 at every use: the depth V4 measures is what a swap across the band takes (the floor of both
@@ -589,18 +632,16 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         vm.stopPrank();
     }
 
-    /// I2 + stable pairs: a stables pool listed without the parity anchor (or with a moved one) is refused.
-    function test_stablePairNeedsParityAnchor() public {
-        vm.prank(admin);
-        reg.removePool(POOL_STABLE);
-        _listPool(POOL_STABLE, 10, 0, 0, 5_000); // no anchor
-        _approveV4(acct, USDC, 1_000e6);
-        vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadEntry.selector, POOL_STABLE, 5));
-        v4.swap(SwapParams(POOL_STABLE, USDC, 1_000e6, 0, 1, vm.getBlockTimestamp()));
-        _listPool(POOL_STABLE, 10, 300, 40, 5_000); // anchor away from parity
-        vm.prank(acct);
-        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadEntry.selector, POOL_STABLE, 5));
-        v4.swap(SwapParams(POOL_STABLE, USDC, 1_000e6, 0, 1, vm.getBlockTimestamp()));
+    /// I2 + stable pairs: the class carries the parity anchor (MamoruV4Classes), so the stables pool's range is
+    /// always clipped to parity +-40 ticks; a depeg past it empties the range for entries (test_M6 covers exits).
+    function test_stableClassCarriesTheParityAnchor() public view {
+        (, PoolEntryV4 memory e, address key) = helper.priced(POOL_STABLE);
+        assertEq(e.anchorBand, 40);
+        assertEq(e.anchorTick, 0);
+        assertEq(e.ratioBps, 5_000);
+        assertTrue(key != USDC && key != USDT, "the stable class's own key");
+        (int24 lo, int24 hi) = lens.priceRange(POOL_STABLE);
+        assertGe(lo, -40);
+        assertLe(hi, 40);
     }
 }
