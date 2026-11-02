@@ -14,8 +14,10 @@ type Env = Record<string, string | undefined>
  * rebalances, no more fee collection, with nothing in the journal louder than one decision line saying so.
  *
  * This module detects that drift and says so. otto/mamoru#262: the operator then refills it (reserveRefillWei,
- * operator.ts refillReserve) within sponsorship.ts's limits (RESERVE_REFILLS_PER_DAY per account, the daily
- * activation budget across all), so a drained account cannot be cycled into repeated payouts.
+ * operator.ts refillReserve) within sponsorship.ts's limits (RESERVE_REFILLS_PER_DAY per account, REFILL_BUDGET_BPS
+ * of the daily activation budget for refills across all accounts), and never for 24 h after the owner moved money out
+ * or stopped. An owner can still empty the Safe's ETH directly on chain: what that costs the relayer is bounded by those
+ * limits, not prevented.
  */
 
 /**

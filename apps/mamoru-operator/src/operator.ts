@@ -60,7 +60,7 @@ import { classifyEngineError, EngineHealthTracker, GasReserveTracker, logErr, sa
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
-import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, activationRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
+import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
 import { livePoolStats, type PoolStatsCache } from './pool-stats.ts'
@@ -4181,55 +4181,63 @@ export class Operator {
    * otto/mamoru#262: a running account whose Safe is under its gas-reserve alert threshold gets the relayer's ETH up to
    * that threshold plus the activation margin, before it reaches the floor where the engine stops acting
    * (ACCT_GAS_RESERVE_LOW: c23e94e1 held a merge and every other action on 2 Nov 2026). Only an account the engine
-   * still has money to manage for (a live position, or savings of at least MIN_DEPLOY_USDC). Bounded like an
-   * activation's top-up: RESERVE_REFILLS_PER_DAY per account, and reserved against the daily activation budget across
-   * all accounts in one synchronous step before anything is sent; the reservation goes if nothing was sent.
+   * still has money to manage for (a live position, or savings of at least MIN_DEPLOY_USDC), and not one whose owner
+   * moved money out or stopped in the last 24 h (a withdrawal may have taken the ETH; the refill would be theirs).
+   * Bounded: RESERVE_REFILLS_PER_DAY per account, REFILL_BUDGET_BPS of the daily activation budget for refills, and
+   * that budget across all accounts; checked and reserved in one synchronous step right before the send, with the
+   * account still active, and released if nothing was signed. Never throws: it runs off the review's path.
    */
   private async refillReserve(acc: AccountState, obs: Observation): Promise<void> {
     const key = acc.accountKey
-    if (this.refilling.has(key) || !acc.active) return
+    if (this.refilling.has(key)) return
+    this.refilling.add(key)
     const held = (why: string) => {
       if (this.refillHeld.get(key) === why) return
       this.refillHeld.set(key, why)
       logErr(`[gas-reserve] ${key} not refilled: ${why}`, undefined)
     }
-    const policy = this.enginePolicyOf(acc)
-    const threshold = gasReserveAlertWei(policy.gasReserveWei, this.gasReserveAlertOverride, obs.gas.maxFeePerGas, obs.gas.opGasUnits)
-    if (reserveRefillWei(obs.native, threshold, 0n) === 0n) {
-      this.refillHeld.delete(key)
-      return
-    }
-    if (!obs.positions.some((p) => p.liquidity > 0n) && (obs.balances[policy.savingsAsset] ?? 0n) < MIN_DEPLOY_USDC) return held('no money left to manage')
-    this.refilling.add(key)
     try {
-      const at = Date.now()
-      const { own, all } = this.sponsoredOf(acc, at)
-      if (own.filter((e) => e.kind === 'refill').length >= RESERVE_REFILLS_PER_DAY) return held(`${RESERVE_REFILLS_PER_DAY} refills in 24 h`)
+      if (!acc.active) return
+      const policy = this.enginePolicyOf(acc)
+      const threshold = gasReserveAlertWei(policy.gasReserveWei, this.gasReserveAlertOverride, obs.gas.maxFeePerGas, obs.gas.opGasUnits)
+      if (reserveRefillWei(obs.native, threshold, 0n) === 0n) {
+        this.refillHeld.delete(key)
+        return
+      }
+      if (!obs.positions.some((p) => p.liquidity > 0n) && (obs.balances[policy.savingsAsset] ?? 0n) < MIN_DEPLOY_USDC) return held('no money left to manage')
+      const since = Date.now() - SPONSOR_WINDOW_MS
+      if (acc.ops.some((o) => o.opId.startsWith('own-') && (o.kind === 'transfer' || o.kind === 'exit') && (Date.parse(o.updatedAt) || 0) > since)) return held('the owner moved money out or stopped in the last 24 h')
       // The balance is read again at send time: the observation may be minutes old, and an op may have spent since.
       const native = await this.client.getBalance({ address: obs.account.address })
       const value = reserveRefillWei(native, threshold, await this.topUpMarginWei())
       if (value === 0n) return
       const estimate = value + 50_000n * (await this.gasPrice())
-      // Synchronous from the check to the record, as chargeActivation: two refills never both take the last slot.
-      const no = activationRefusal(this.sponsorPolicy(), this.sponsoredOf(acc, Date.now()).all, estimate, Date.now())
+      // Synchronous from here to the record, as chargeActivation: two refills never both take the last slot, and a
+      // Stop that landed during the reads above is seen.
+      const at = Date.now()
+      if (!acc.active) return
+      const { own, all } = this.sponsoredOf(acc, at)
+      if (own.filter((e) => e.kind === 'refill').length >= RESERVE_REFILLS_PER_DAY) return held(`${RESERVE_REFILLS_PER_DAY} refills in 24 h`)
+      const no = refillRefusal(this.sponsorPolicy(), all, estimate, at)
       if (no) return held(`${no.code} until ${new Date(no.until).toISOString()}`)
       const entry: SponsorEntry = { at: new Date(at).toISOString(), wei: estimate.toString(), kind: 'refill' }
-      acc.sponsored = [...recentSponsored(acc.sponsored, Date.now()), entry]
+      acc.sponsored = [...own, entry]
       this.store.save()
-      let sent = false
+      let signed = false
       try {
         const { hash, receipt } = await this.relayer.send({ to: obs.account.address, value, gas: 50_000n }, undefined, () => {
-          sent = true
+          signed = true
         })
-        this.settleSponsor(acc, entry, receipt, value)
+        this.settleSponsor(acc, entry, receipt, receipt.status === 'success' ? value : 0n)
         this.refillHeld.delete(key)
-        console.log(`[gas-reserve] ${key} refilled +${value} wei (was ${native}, threshold ${threshold}) tx ${hash} ${receipt.status}`)
+        if (receipt.status === 'success') console.log(`[gas-reserve] ${key} refilled +${value} wei (was ${native}, threshold ${threshold}) tx ${hash}`)
+        else logErr(`[gas-reserve] ${key} refill reverted, tx ${hash}`, undefined)
       } catch (e) {
-        if (!sent) this.unchargeSponsor(acc, entry)
+        if (!signed) this.unchargeSponsor(acc, entry)
         throw e
       }
     } catch (e) {
-      logErr(`[gas-reserve] ${key} refill failed:`, (e as Error).message.split('\n')[0])
+      logErr(`[gas-reserve] ${key} refill failed:`, (e as Error).message?.split('\n')[0])
     } finally {
       this.refilling.delete(key)
     }
@@ -6672,7 +6680,7 @@ export class Operator {
             // otto/mamoru#8: this review's own balance read (no extra RPC call), against the account's alert threshold.
             safeMetrics(() => this.recordGasReserve(acc, r.observation.native, r.observation.gas))
             // otto/mamoru#262: and a low reserve is refilled, off the review's path (it never waits on the relayer).
-            void this.refillReserve(acc, r.observation)
+            void this.refillReserve(acc, r.observation).catch(() => {})
             // Only a review that reached a decision counts, from when it started (it may then wait minutes on its
             // operation): one that was held, failed to observe or threw is tried again on the next tick.
             runner.reviewedAt = startedAt

@@ -5,7 +5,7 @@ import type { Observation } from '@mamoru/decide'
 import { POLICIES } from '@mamoru/policy'
 import type { Operator } from '../src/operator.ts'
 import { reserveRefillWei } from '../src/gas-reserve.ts'
-import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, activationRefusal, sponsorRefusal, type SponsorEntry } from '../src/sponsorship.ts'
+import { DEFAULT_SPONSOR, REFILL_BUDGET_BPS, RESERVE_REFILLS_PER_DAY, activationRefusal, refillRefusal, sponsorRefusal, type SponsorEntry } from '../src/sponsorship.ts'
 import type { AccountState } from '../src/state.ts'
 import { SAFE, ctx, quiet, world } from './owner-world.ts'
 
@@ -57,6 +57,14 @@ describe('sponsorship of refills (#262)', () => {
     const refill: SponsorEntry = { at, wei: (ceiling - 10n).toString(), kind: 'refill' }
     expect(activationRefusal(DEFAULT_SPONSOR, [refill], 10n, now)).toBeNull()
     expect(activationRefusal(DEFAULT_SPONSOR, [refill], 11n, now)).toMatchObject({ code: 'SPONSOR_DAILY_BUDGET' })
+  })
+  test('review r1: refills alone take at most REFILL_BUDGET_BPS of it, so activations keep the rest', () => {
+    const slice = (DEFAULT_SPONSOR.activationWeiPerDay! * BigInt(REFILL_BUDGET_BPS)) / 10_000n
+    const refill: SponsorEntry = { at, wei: (slice - 10n).toString(), kind: 'refill' }
+    expect(refillRefusal(DEFAULT_SPONSOR, [refill], 10n, now)).toBeNull()
+    expect(refillRefusal(DEFAULT_SPONSOR, [refill], 11n, now)).toMatchObject({ code: 'SPONSOR_DAILY_BUDGET' })
+    // An activation still fits beside a full refill slice.
+    expect(activationRefusal(DEFAULT_SPONSOR, [{ ...refill, wei: slice.toString() }], DEFAULT_SPONSOR.activationWeiPerDay! - slice, now)).toBeNull()
   })
   test('and never the owner transactions\' count or budget', () => {
     const many: SponsorEntry[] = Array.from({ length: 10 }, () => ({ at, wei: DEFAULT_SPONSOR.weiPerDay.toString(), kind: 'refill' }))
@@ -131,5 +139,37 @@ describe('Operator refillReserve (#262)', () => {
     const { w, acc } = setup(1n)
     await quiet(() => Promise.all([priv(w.op).refillReserve(acc, observation(1n)), priv(w.op).refillReserve(acc, observation(1n))]).then(() => undefined))
     expect(refills(w)).toHaveLength(1)
+  })
+
+  test('review r1: no refill for 24 h after the owner moved money out or stopped', async () => {
+    for (const kind of ['transfer', 'exit'] as const) {
+      const recent = { opId: `own-1-${kind}`, kind, state: 'confirmed', updatedAt: new Date().toISOString() }
+      const { w, acc } = setup(1n, account({ ops: [recent] as never }))
+      await quiet(() => priv(w.op).refillReserve(acc, observation(1n)))
+      expect(refills(w)).toEqual([])
+    }
+    const old = { opId: 'own-1-transfer', kind: 'transfer', state: 'confirmed', updatedAt: new Date(Date.now() - 25 * 3_600_000).toISOString() }
+    const { w, acc } = setup(1n, account({ ops: [old] as never }))
+    await quiet(() => priv(w.op).refillReserve(acc, observation(1n)))
+    expect(refills(w)).toHaveLength(1)
+  })
+
+  test('review r1: an account stopped while the balance was read gets nothing', async () => {
+    const { w, acc } = setup(1n)
+    const client = (w.op as unknown as { client: { getBalance: (a: unknown) => Promise<bigint> } }).client
+    const read = client.getBalance.bind(client)
+    client.getBalance = async (a) => {
+      acc.active = false
+      return read(a)
+    }
+    await quiet(() => priv(w.op).refillReserve(acc, observation(1n)))
+    expect(refills(w)).toEqual([])
+    expect(acc.sponsored ?? []).toEqual([])
+  })
+
+  test('review r1: never throws, whatever fails inside', async () => {
+    const { w, acc } = setup(1n, account({ policyId: 'no-such-policy' }))
+    await quiet(() => priv(w.op).refillReserve(acc, observation(1n)))
+    expect(refills(w)).toEqual([])
   })
 })

@@ -29,6 +29,8 @@ export type SponsorEntryKind = SponsoredKind | 'activate' | 'activation' | 'refi
 
 /** otto/mamoru#262: relayer refills of one account's gas reserve in any 24 h. */
 export const RESERVE_REFILLS_PER_DAY = 2
+/** otto/mamoru#262 (review r1): the share of activationWeiPerDay refills may take, so activations always keep the rest. */
+export const REFILL_BUDGET_BPS = 2_500
 
 /** Entries outside the owner-transaction limits: activations and reserve refills have their own. */
 const SUBSIDY_KINDS: ReadonlySet<SponsorEntryKind> = new Set(['activate', 'activation', 'refill'])
@@ -124,6 +126,20 @@ export function activationRefusal(policy: SponsorPolicy, all: readonly SponsorEn
   if (spent + estimateWei <= ceiling) return null
   const until = Math.min(...mine.map((e) => (Date.parse(e.at) || 0) + SPONSOR_WINDOW_MS), now + SPONSOR_WINDOW_MS)
   return { code: 'SPONSOR_DAILY_BUDGET', until }
+}
+
+/**
+ * otto/mamoru#262: whether the relayer may spend about `estimateWei` more on one reserve refill: within the activation
+ * budget it shares (activationRefusal) and within REFILL_BUDGET_BPS of it for refills alone. Null: it may.
+ */
+export function refillRefusal(policy: SponsorPolicy, all: readonly SponsorEntry[], estimateWei: bigint, now: number): SponsorRefusal | null {
+  const shared = activationRefusal(policy, all, estimateWei, now)
+  if (shared) return shared
+  const refills = all.filter((e) => e.kind === 'refill')
+  const spent = refills.reduce((n, e) => n + BigInt(e.wei), 0n)
+  const ceiling = ((policy.activationWeiPerDay ?? DEFAULT_SPONSOR.activationWeiPerDay!) * BigInt(REFILL_BUDGET_BPS)) / 10_000n
+  if (spent + estimateWei <= ceiling) return null
+  return { code: 'SPONSOR_DAILY_BUDGET', until: Math.min(...refills.map((e) => (Date.parse(e.at) || 0) + SPONSOR_WINDOW_MS), now + SPONSOR_WINDOW_MS) }
 }
 
 /**
