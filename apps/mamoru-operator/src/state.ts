@@ -26,6 +26,8 @@ export type StoredOp = OpView & {
   revokes?: Hex[]
   /** otto/mamoru#293, migrate-v4: the old ids it removed (revokes: every id it revoked; OpView.migrateStep its step). */
   removes?: Hex[]
+  /** migrate-v4: the C the signed InitV4 carries (applied by a late receipt). */
+  v4CapUsd?: string
   /** Owner op: the Safe transaction hash it was signed for (ExecutionSuccess carries it) and its Safe nonce. */
   safeTxHash?: Hex
   safeNonce?: string

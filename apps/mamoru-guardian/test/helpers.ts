@@ -43,6 +43,9 @@ export function makeWorld() {
       ssInstalled: true,
       modules: [address('Safe7579', monadRegistry)] as Address[],
       guard: A(0) as Address,
+      validators: [address('SmartSession', monadRegistry)] as Address[],
+      executors: [] as Address[],
+      hook: A(0) as Address,
       deployedAt: 3n,
       handler: address('Safe7579', monadRegistry) as Address,
       permEnabled: true,
@@ -78,6 +81,9 @@ function client(w: World, side: 'home' | 'remote'): ChainClient {
         case 'getThreshold': return side === 'home' ? h.threshold : r.threshold
         case 'isModuleInstalled': return r.ssInstalled
         case 'getModulesPaginated': return [r.modules, A(1)]
+        case 'getValidatorsPaginated': return [r.validators, A(1)]
+        case 'getExecutorsPaginated': return [r.executors, A(1)]
+        case 'getActiveHook': return r.hook
         case 'isPermissionEnabled': return r.permEnabled
         case 'getPermissionIDs': return r.permIds
         default: throw new Error(`unexpected read ${functionName} ${String(args)}`)

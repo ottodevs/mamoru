@@ -27,7 +27,7 @@ export type OneAuthState = {
   capUsd?: string
   generation?: string
   /** The home's remote on Monad as V4 registered it (registerRemote), and whether the guardian marked it ready. */
-  remote?: { domain: number; address: Hex; sessionKey: Hex; ready?: boolean; registeredAt?: string; tx?: Hex; accountKey?: string }
+  remote?: { domain: number; address: Hex; sessionKey: Hex; ready?: boolean; registeredAt?: string; tx?: Hex; accountKey?: string; capUsd?: string }
   /** The account's pause from the last read: V4's (guardian, breaker or review) on V4, the V2/V3 guardian's before. */
   paused?: boolean
 }

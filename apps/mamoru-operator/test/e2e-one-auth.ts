@@ -376,6 +376,7 @@ try {
         },
       )
       log(`guardian pass: ${notes.join(' | ')}`)
+      check(notes.length === 0, 'the guardian pass reported no section error', notes.join(' | '))
       const ready = await base.client.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [ctx.address, 15] })
       check(sent.length === 1 && ready, 'the guardian read the remote back on Monad (owners, passkey, modules, the V4 session) and sent setReady', sent[0])
       await bo.tickOneAuth()
@@ -443,9 +444,22 @@ try {
     }, 5_000)
     const wn = ((await bo.funding(ctx2)) as FundingView).approval!.whatsNew!
     check(wn.policy === 'one-auth-v4' && wn.signatures === 1 && wn.steps.length === 1 && wn.steps[0]!.chain === 'base', 'approval.whatsNew offered: one signature, the Base step', wn.steps[0]!.summary.join(' | '))
-    await until('engine idle before the move', 300_000, async () => !busy(ctx2))
+    // No manual wait for an idle engine: the prepare holds the engine (intents) and refuses, typed, only while an engine
+    // operation of the account is still out (ONE_AUTH_ENGINE_BUSY); the client tries again, as the app does.
     const sigsD = ownerSignatures
-    const prep = await bo.prepareMigrateV4(ctx2, { step: 0 })
+    let prep!: OwnerTxToSign
+    let busyRefusals = 0
+    await until('the migration prepares', 300_000, async () => {
+      try {
+        prep = await bo.prepareMigrateV4(ctx2, { step: 0 })
+        return true
+      } catch (e) {
+        if ((e as { code?: string }).code !== 'ONE_AUTH_ENGINE_BUSY') throw e
+        busyRefusals++
+        return false
+      }
+    }, 2_000)
+    log(`prepare refused ONE_AUTH_ENGINE_BUSY ${busyRefusals} time(s) before it was built`)
     check(prep.step === 0 && prep.chainId === 8453 && !prep.moveTo && !!prep.safeTx && prep.safeTx.operation === 1, 'migrate-v4/prepare step 0: step, chainId 8453, the Safe tx fields, no funds moved')
     const sub = await bo.submitMigrateV4(ctx2, { ...sign2(prep), step: 0 })
     const done = await waitOp(ctx2, sub.opId, 'the migration (one owner Safe transaction)')

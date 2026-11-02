@@ -48,3 +48,36 @@ describe('one-auth-v4 with no active stables pool', () => {
     if (d.proposal?.kind === 'enter_swap') expect(d.proposal.amountIn <= (total * 3500n) / 10_000n).toBe(true)
   })
 })
+
+describe('flag off (not V4): the allocate denominator is unchanged (review of #202 r2)', () => {
+  test('a v2 policy with one bucket unobservable: targets over the executable buckets and the remote ones, as on main', () => {
+    const { conservadorLiveV2 } = require('@mamoru/policy') as typeof import('@mamoru/policy')
+    const o = {
+      chainId: 8453, block: { number: 100n, hash: `0x${'11'.repeat(32)}`, timestamp: 1_000n }, safeBlock: { number: 98n, hash: `0x${'22'.repeat(32)}` },
+      account: { address: '0x00000000000000000000000000000000000000aa', deployed: true, nonceKey: 0n, nonce: 0n },
+      sessions: conservadorLiveV2.session.grants.filter((g) => !g.perPosition).map((g, i) => ({ grant: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(2, '0').repeat(32)}` as const, validUntil: 10_000, active: true })),
+      native: 10n ** 17n, balances: { USDC: 100n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, positions: [],
+      pools: [pool('pool:USDC/USDT/100', 1), pool('pool:WETH/USDC/3000', -193_380)], // the btc-usdc bucket's pool unobserved
+      ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' }, gas: { maxFeePerGas: 2_000_000n, opGasUnits: 5_100_000n },
+      deposits: [], intents: { paused: false, exitRequested: false }, slot: null,
+    } as Observation
+    const a = allocate(o, conservadorLiveV2, false)
+    const executable = conservadorLiveV2.buckets.filter((b) => o.pools.some((p) => p.name === b.pools[0])).reduce((s, b) => s + b.preference, 0)
+    for (const b of a.buckets) {
+      const pref = conservadorLiveV2.buckets.find((x) => x.id === b.bucket)!.preference
+      expect(b.target).toBe(b.pool ? (100n * USDC * BigInt(pref)) / BigInt(executable) : 0n)
+    }
+  })
+})
+
+describe('the Monad V4 remote policy keeps a bucket (review of #202 r2, Opus 4)', () => {
+  test('withRegistryPools(oneAuthV4RemoteMonad, WMON/USDC) serves WMON/USDC from its one bucket', () => {
+    const { oneAuthV4RemoteMonad } = require('@mamoru/policy') as typeof import('@mamoru/policy')
+    const { monadRegistry } = require('@mamoru/registry') as typeof import('@mamoru/registry')
+    const wmon = { ...staticPool('pool:WMON/USDC/3000', monadRegistry), entry: { twapWindow: 600, twapShortWindow: 60, bandTicks: 100, anchorTick: 0, anchorBand: 0, ratioBps: 10_000, active: true } }
+    const r = withRegistryPools(oneAuthV4RemoteMonad, D, [wmon], monadRegistry)
+    expect(r.policy.buckets.length).toBeGreaterThanOrEqual(1)
+    expect(r.policy.buckets.flatMap((b) => b.pools)).toEqual(['pool:WMON/USDC/3000'])
+    expect(r.policy.buckets[0]!.preference).toBeGreaterThan(0)
+  })
+})

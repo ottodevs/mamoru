@@ -55,6 +55,25 @@ const KIND = ['Pool', 'Vault', 'Route']
 /** Safe's keccak256("guard_manager.guard.address"). */
 const GUARD_SLOT: Hex = '0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8'
 const SENTINEL: Address = '0x0000000000000000000000000000000000000001'
+const safe7579ViewsAbi = [
+  { type: 'function', name: 'getValidatorsPaginated', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'address[]' }, { type: 'address' }] },
+  { type: 'function', name: 'getExecutorsPaginated', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'address[]' }, { type: 'address' }] },
+  { type: 'function', name: 'getActiveHook', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+] as const satisfies Abi
+
+/** A Safe7579 sentinel-linked list read in pages of 10, through the Safe (Safe7579 is its fallback handler). Bounded. */
+async function paginated(c: ChainClient, a: Address, fn: 'getValidatorsPaginated' | 'getExecutorsPaginated'): Promise<Address[]> {
+  const out: Address[] = []
+  let start: Address = SENTINEL
+  for (let i = 0; i < 20; i++) {
+    const [page, next] = await call<readonly [readonly Address[], Address]>(c, a, safe7579ViewsAbi, fn, [start, 10n])
+    out.push(...page)
+    if (isAddressEqual(next, SENTINEL) || BigInt(next) === 0n) return out
+    start = next
+  }
+  throw new Error('too many modules')
+}
+
 const modulesAbi = [{ type: 'function', name: 'getModulesPaginated', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'address[]' }, { type: 'address' }] }] as const satisfies Abi
 
 /** The allowlist file: JSON array of safeTxHashes; absent = empty. A present but malformed file throws (fail closed: no silent muting). */
@@ -104,6 +123,9 @@ export function readsFor(cfg: WatcherConfig, home: ChainClient, remote: ChainCli
       }
       throw new Error('too many modules')
     },
+    validators7579: (a) => paginated(remote, a, 'getValidatorsPaginated'),
+    executors7579: (a) => paginated(remote, a, 'getExecutorsPaginated'),
+    hook7579: (a) => call(remote, a, safe7579ViewsAbi, 'getActiveHook'),
     guard: async (a) => {
       const w = await remote.getStorageAt({ address: a, slot: GUARD_SLOT })
       return getAddress(slice(pad(w ?? '0x', { size: 32 }), 12))
@@ -193,7 +215,17 @@ async function scanSafe(cfg: WatcherConfig, d: WatcherDeps, k: string) {
   if (w.next === '') {
     const c = d.clients[w.chainId]
     if (!c) return
-    const at = await deployBlockOf(c, w.address, await c.getBlockNumber())
+    const head = await c.getBlockNumber()
+    let at: bigint | null
+    try {
+      at = await deployBlockOf(c, w.address, head)
+    } catch {
+      // Review of #202 r2 (Opus 7): an RPC without historical state cannot find the deploy block. The Safe is watched from
+      // now (the earliest block this RPC can say anything about), and that gap is paged.
+      if (((await c.getCode({ address: w.address })) ?? '0x') === '0x') return
+      at = head
+      await alertOnce(d, `deployblock:${k}`, `Remote Safe ${w.address} (chain ${w.chainId}): deploy block unknown (RPC without history); its owner transactions are watched from block ${head} only`)
+    }
     if (at === null) return // not deployed: no owner transaction can exist yet
     w.next = at.toString()
     d.store.save()
@@ -257,7 +289,10 @@ export async function runPass(cfg: WatcherConfig, d: WatcherDeps): Promise<strin
     try {
       await f()
     } catch (e) {
-      errors.push(`${name}: ${(e as { shortMessage?: string; name?: string }).shortMessage ?? (e as Error).name}`)
+      const why = `${name}: ${(e as { shortMessage?: string; name?: string }).shortMessage ?? (e as Error).name}`
+      errors.push(why)
+      // Review of #202 r2 (Opus 7): a failing section is paged (once per realert window), never only logged.
+      await alertOnce(d, `section:${name}`, `guardian section failed: ${why}`, cfg.realertMs).catch(() => {})
     }
   }
   await section('registrations', () => scanRegistrations(cfg, d))

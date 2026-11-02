@@ -51,7 +51,7 @@ describe('P0-3: the V4 remote of a design-C account has its own key on the Monad
     const target = (w.op as unknown as { v4RemoteTarget(a: AccountState, k: Address, c: bigint): { address: Address } }).v4RemoteTarget(acc, privateKeyToAccount(KEY).address, v4CapUsdOf(100_000_000n))
     const c = priv(w.op).client
     const real = c.readContract.bind(c)
-    c.readContract = async (a) => (a.functionName === 'remoteOf' ? { remote: target.address, capUsd: v4CapUsdOf(100_000_000n), ownersHash: `0x${'00'.repeat(32)}`, sessionKey: privateKeyToAccount(KEY).address } : a.functionName === 'isReady' ? false : real(a))
+    c.readContract = async (a) => (a.functionName === 'configOf' ? { set: true, capUsd: v4CapUsdOf(100_000_000n) } : a.functionName === 'remoteOf' ? { remote: target.address, capUsd: v4CapUsdOf(100_000_000n), ownersHash: `0x${'00'.repeat(32)}`, sessionKey: privateKeyToAccount(KEY).address } : a.functionName === 'isReady' ? false : real(a))
     acc.oneAuth = { capUsd: v4CapUsdOf(100_000_000n).toString() }
     await priv(w.op).tickOneAuth()
     expect(provisioned.map((p) => p.accountKey)).toEqual([v4RemoteAccountKey('k', 143)])
@@ -176,3 +176,93 @@ describe('P1-11: C per chain from the policy split and one named multiple; the l
 
 void grantKey
 void ({} as OpView)
+
+describe('review of #202, round 2', () => {
+  const designC = { chainId: 143, address: `0x${'9'.repeat(40)}`, spec: { chainId: 143, policyId: 'live-wmon-usdc-monad-v6', sessionKey: privateKeyToAccount(KEY).address, validAfter: 1, validUntil: 2, capUsdc: '1' }, permissionIds: ['0x01'] } as never
+  const stub = (w: ReturnType<typeof world>, f: (fn: string, args?: readonly unknown[]) => unknown) => {
+    const c = priv(w.op).client
+    const real = c.readContract.bind(c)
+    c.readContract = async (a) => {
+      const v = f(a.functionName, a.args)
+      return v === undefined ? real(a) : v
+    }
+  }
+
+  test('Opus 1: C is V4\'s own (configOf), refreshed every tick; the late-receipt rebuild keeps the signed C', async () => {
+    const w = world(0n, { ...scoped, remoteRegistry: () => pinned(monadRegistry) })
+    const acc = onV4(w)
+    acc.oneAuth = { capUsd: '1' }
+    stub(w, (fn) => (fn === 'configOf' ? { set: true, capUsd: 999n } : fn === 'remoteOf' || fn === 'isReady' ? (() => { throw new Error('down') })() : undefined))
+    await priv(w.op).tickOneAuth()
+    expect(acc.oneAuth?.capUsd).toBe('999')
+    // stash keeps v4CapUsd for a receipt read later
+    const op = { opId: 'own-9-migrate-v4', kind: 'migrate-v4', state: 'proposed', updatedAt: '' }
+    ;(w.op as unknown as { stash(a: AccountState, o: unknown, p: unknown): void }).stash(acc, op, { kind: 'migrate-v4', step: 0, v4CapUsd: '170000000', safeTxHash: '0x01', tx: { nonce: 3n } })
+    expect((op as { v4CapUsd?: string }).v4CapUsd).toBe('170000000')
+  })
+
+  test('Opus 1: no Monad step before V4 registered the remote (typed, retryable)', async () => {
+    const peer = { key: async () => privateKeyToAccount(KEY).address, provision: async () => ({ state: 'pending' as const, code: 'X' }), migrateV4: async () => ({}) }
+    const w = world(0n, { ...scoped, remotePeers: { 143: peer } })
+    onV4(w, { remote: designC })
+    stub(w, (fn) => (fn === 'isPaused' ? false : fn === 'remoteOf' ? { remote: '0x0000000000000000000000000000000000000000', capUsd: 0n, ownersHash: `0x${'00'.repeat(32)}`, sessionKey: '0x0000000000000000000000000000000000000000' } : fn === 'isReady' ? false : undefined))
+    const e = await w.op.prepareMigrateV4(ctx, { step: 1 }).catch((x) => x)
+    expect((e as HttpError).code).toBe('ONE_AUTH_REMOTE_PENDING')
+  })
+
+  test('Opus 2: the engine holds while a migration is prepared or on its way; no prepare over an engine op still out', () => {
+    const w = world(0n, scoped)
+    const acc = onV4(w, { ops: [] as never })
+    const hold = (w.op as unknown as { migrationHold(a: AccountState): boolean }).migrationHold.bind(w.op)
+    expect(hold(acc)).toBe(false)
+    priv(w.op).prepared.set('m', { prepareId: 'm', accountKey: 'k', kind: 'migrate-v4', expires: Date.now() + 60_000 })
+    expect(hold(acc)).toBe(true)
+    priv(w.op).prepared.delete('m')
+    acc.ops.push({ opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: '', migrateStep: 0 } as never)
+    expect(hold(acc)).toBe(true) // an unread receipt is still on its way (relayable)
+    acc.ops = [{ opId: 'eng-1-1-op-1-enter_mint', kind: 'enter', state: 'submitted', updatedAt: '' } as never]
+    expect(() => (w.op as unknown as { assertEngineSettled(a: AccountState): void }).assertEngineSettled(acc)).toThrow('finishing an operation')
+  })
+
+  test('Opus 3: a step 1 confirmed on Monad whose submit answer was lost is confirmed here (mirror op created)', async () => {
+    const peer = { key: async () => privateKeyToAccount(KEY).address, provision: async () => ({ state: 'pending' as const, code: 'X' }), migrateV4: async (_c: AccountContext, phase: string) => (phase === 'status' ? { done: true, failed: false } : null) }
+    const w = world(0n, { ...scoped, remotePeers: { 143: peer } })
+    const acc = onV4(w, { remote: designC })
+    stub(w, (fn) => (fn === 'configOf' ? (() => { throw new Error('down') })() : undefined))
+    await priv(w.op).tickOneAuth()
+    expect(acc.ops.filter((o) => o.kind === 'migrate-v4').map((o) => [o.migrateStep, o.state])).toEqual([[0, 'confirmed'], [1, 'confirmed']])
+  })
+
+  test('Opus 6: a registered remote the current keys no longer give, and not ready: registered again', async () => {
+    const peer = { key: async () => privateKeyToAccount(KEY).address, provision: async () => ({ state: 'pending' as const, code: 'X' }) }
+    const w = world(0n, { ...scoped, remotePeers: { 143: peer }, remoteRegistry: () => pinned(monadRegistry) })
+    const acc = onV4(w)
+    const registered: string[] = []
+    ;(w.op as unknown as { registerRemoteV4: (a: AccountState, d: number, k: Address) => Promise<void> }).registerRemoteV4 = async (_a, _d, k) => void registered.push(k)
+    stub(w, (fn) => (fn === 'configOf' ? { set: true, capUsd: 170_000_000n } : fn === 'remoteOf' ? { remote: `0x${'7'.repeat(40)}`, capUsd: 170_000_000n, ownersHash: `0x${'00'.repeat(32)}`, sessionKey: privateKeyToAccount(KEY).address } : fn === 'isReady' ? false : undefined))
+    await priv(w.op).tickOneAuth()
+    expect(registered).toEqual([privateKeyToAccount(KEY).address])
+    await priv(w.op).tickOneAuth() // rate-limited
+    expect(registered.length).toBe(1)
+    void acc
+  })
+
+  test('Argon 3: on Monad a submit is checked against a step-1 prepare of this account before anything else', async () => {
+    const homeClient = { readContract: async () => { throw new Error('must not read the home before the prepare check') } }
+    const w = world(0n, { ...scoped, chainId: 143, homeClient: homeClient as never })
+    const c143 = { ...ctx, chainId: 143 }
+    priv(w.op).prepared.set('p0', { prepareId: 'p0', accountKey: 'k', kind: 'migrate-v4', step: 0, home: ctx.address, expires: Date.now() + 60_000, safeTxHash: '0x01', tx: { nonce: 0n } })
+    for (const body of [{ prepareId: 'p0', step: 1 }, { prepareId: 'nope', step: 1 }, { prepareId: 'p0' }]) {
+      const e = await w.op.submitMigrateV4(c143, { authenticatorData: '', clientDataJSON: '', signature: '', ...body } as never).catch((x) => x)
+      expect((e as HttpError).code).toBe('ONE_AUTH_STEP_MISMATCH')
+    }
+  })
+
+  test('Argon 3: on Base a submit without `step` is step 1 once step 0 is done (not ONE_AUTH_DONE)', () => {
+    const w = world(0n, scoped)
+    const acc = onV4(w)
+    const step = (w.op as unknown as { submitStep(b: unknown, a?: AccountState): number }).submitStep.bind(w.op)
+    expect(step({ prepareId: 'x' }, acc)).toBe(1)
+    expect(step({ prepareId: 'x', step: 0 }, acc)).toBe(0)
+  })
+})

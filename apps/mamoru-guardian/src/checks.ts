@@ -24,6 +24,10 @@ export type CheckReads = {
   modules(remote: Address): Promise<readonly Address[]>
   /** The Safe's guard slot on the remote (zero = no guard). */
   guard(remote: Address): Promise<Address>
+  /** Safe7579's own module registry on the remote: every validator, every executor (paginated), and the global hook. */
+  validators7579(remote: Address): Promise<readonly Address[]>
+  executors7579(remote: Address): Promise<readonly Address[]>
+  hook7579(remote: Address): Promise<Address>
   /** The Safe's fallback handler slot on the remote. */
   fallbackHandler(remote: Address): Promise<Address>
   permissionEnabled(permissionId: Hex, remote: Address): Promise<boolean>
@@ -108,6 +112,20 @@ export async function checkRemote(i: CheckInput, r: CheckReads): Promise<CheckRe
   const guard = await read('guard', () => r.guard(remote))
   if ('failed' in guard) return fail(guard.failed)
   if (BigInt(guard.v) !== 0n) return fail('guard: the remote has a transaction guard')
+
+  // Review of #202 r2 (Opus 5): Safe7579 keeps its own ERC-7579 modules. An executor can act for the Safe
+  // (executeFromExecutor) and a validator can authorise any userOp: SmartSession is the only validator, there is no
+  // executor and no hook. (7579 fallback handlers are plain CALL targets of unknown selectors, with no authority over the
+  // Safe; installing one needs the owner or a validator, both checked here.)
+  const validators = await read('validators7579', () => r.validators7579(remote))
+  if ('failed' in validators) return fail(validators.failed)
+  if (validators.v.length !== 1 || !isAddressEqual(validators.v[0]!, address('SmartSession', remoteRegistry))) return fail('validators7579: SmartSession is not the only validator')
+  const executors = await read('executors7579', () => r.executors7579(remote))
+  if ('failed' in executors) return fail(executors.failed)
+  if (executors.v.length !== 0) return fail('executors7579: the remote has an executor')
+  const hook = await read('hook7579', () => r.hook7579(remote))
+  if ('failed' in hook) return fail(hook.failed)
+  if (BigInt(hook.v) !== 0n) return fail('hook7579: the remote has a hook')
 
   const handler = await read('fallbackHandler', () => r.fallbackHandler(remote))
   if ('failed' in handler) return fail(handler.failed)

@@ -26,6 +26,9 @@ describe('setReady', () => {
     ['safe7579 not enabled', (w) => { w.remote.modules = [] }, 'safe7579Module'],
     ['an extra module beside Safe7579 (review of #202, P1-6)', (w) => { w.remote.modules = [...w.remote.modules, A(0xbad)] }, 'safe7579Module'],
     ['a transaction guard (P1-6)', (w) => { w.remote.guard = A(0xbad) }, 'guard'],
+    ['a second 7579 validator (r2, Opus 5)', (w) => { w.remote.validators = [...w.remote.validators, A(0xbad)] }, 'validators7579'],
+    ['a 7579 executor (r2, Opus 5)', (w) => { w.remote.executors = [A(0xbad)] }, 'executors7579'],
+    ['a 7579 hook (r2, Opus 5)', (w) => { w.remote.hook = A(0xbad) }, 'hook7579'],
     ['wrong fallback handler', (w) => { w.remote.handler = A(0xbad) }, 'fallbackHandler'],
     ['permission not enabled', (w) => { w.remote.permEnabled = false }, 'permissionEnabled'],
     ['extra permission', (w) => { w.remote.permIds = [...w.remote.permIds, `0x${'22'.repeat(32)}`] }, 'permissionIds'],
@@ -122,6 +125,32 @@ describe('remote Safe cursors (review of #202, P1-10)', () => {
     expect(BigInt(s.store.state.safes[k]!.next)).toBe(11n) // scanned from block 3 (deploy) to the head 10
     const { deployBlockOf } = await import('../src/watcher.ts')
     expect(await deployBlockOf(s.deps.clients[143]!, w.event.remote, 10n)).toBe(3n)
+  })
+})
+
+describe('guardian failures are paged (review of #202 r2, Opus 7)', () => {
+  test('a section that throws alerts once per window', async () => {
+    const w = makeWorld()
+    const s = setup(w)
+    s.deps.clients[8453]!.getLogs = async () => { throw new Error('https://rpc.example/KEY down') }
+    await runPass(s.cfg, s.deps)
+    await runPass(s.cfg, s.deps)
+    const paged = s.alerts.filter((a) => a.startsWith('guardian section failed'))
+    expect(paged.length).toBeGreaterThan(0)
+    expect(new Set(paged).size).toBe(paged.length) // each section once
+    expect(paged.join()).not.toContain('KEY')
+  })
+
+  test('no historical getCode: the Safe is watched from the head and that is paged', async () => {
+    const w = makeWorld(); withReg(w); w.home.ready = true
+    const s = setup(w)
+    const c = s.deps.clients[143]!
+    const plain = c.getCode
+    c.getCode = async (a) => { if (a.blockNumber !== undefined) throw new Error('missing trie node'); return plain(a) }
+    await runPass(s.cfg, s.deps)
+    const k = Object.keys(s.store.state.safes)[0]!
+    expect(BigInt(s.store.state.safes[k]!.next)).toBe(11n) // from the head 10, scanned to 10
+    expect(s.alerts.some((a) => a.includes('deploy block unknown'))).toBe(true)
   })
 })
 
