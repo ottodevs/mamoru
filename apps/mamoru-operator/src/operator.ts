@@ -32,7 +32,7 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
-import { buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type MigrateV4Input } from '@mamoru/account/one-auth'
+import { buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, smartSessionV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReturnHome } from './return-home.ts'
 import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
@@ -1273,6 +1273,9 @@ export class Operator {
   }
 
   /** The per-account cap at Start (otto/mamoru#127, #26): see capOf. */
+  /** otto/mamoru#309 (a): what the account holds at its own address on Ethereum, in USDC units (BridgeOut, set by boot). */
+  siblingHoldingsUsdc: (ctx: AccountContext) => Promise<bigint | null> = async () => null
+
   /** otto/mamoru#309: the C of the account's V4 sibling on Ethereum: the C its V4 home holds, else the one it would sign. */
   siblingCapUsd(ctx: AccountContext): bigint | null {
     const acc = this.store.state.accounts[ctx.accountKey]
@@ -2208,6 +2211,10 @@ export class Operator {
     if (kind === 'migrate-v4' && (!extra.built || extra.built.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.built.input.safeNonce !== nonce.toString() || fee.refund)) {
       throw new HttpError(409, 'ONE_AUTH_STALE', 'your Safe changed while the update was prepared: prepare it again')
     }
+    // #309 (a): a V4 activation is the builder's tx too, unless the Safe pays its own fee (a refund changes the hash).
+    if (kind === 'activate' && extra.built && !fee.refund && (extra.built.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.built.input.safeNonce !== nonce.toString())) {
+      throw new HttpError(409, 'ONE_AUTH_STALE', 'your Safe changed while the Start was prepared: prepare it again')
+    }
     const prepareId = toHex(randomBytes(16)).slice(2)
     const expires = Date.now() + PREPARE_TTL_MS
     for (const [id, p] of this.prepared) if (p.expires < Date.now()) this.prepared.delete(id)
@@ -2221,7 +2228,7 @@ export class Operator {
     // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
     const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}) }
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}), ...(kind === 'activate' && extra.built && !fee.refund ? { input: extra.built.input } : {}) }
   }
 
   /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */
@@ -3291,6 +3298,34 @@ export class Operator {
    * activation, stop or renewal of the account lands in between; the prepare carries the account's owner
    * generation, and submit and execute refuse it once that has moved (ACTIVATION_STALE).
    */
+  /**
+   * otto/mamoru#309 (a), #333: the Start of an account in the one-authorization scope that is not on V4 yet and has no
+   * Mamoru session on its Safe (never activated, or stopped with everything revoked): ONE owner Safe tx built by
+   * buildMigrateV4 (step 0, empty inventory: trust + self-attest + enableSessions + assertMigrated), held as an
+   * activation, so the activation's checks, its sponsored gas and the engine's start apply as they are. A Safe that still
+   * lists a Mamoru session goes through the migration (What's new), never through this.
+   */
+  private async planV4Activation(acc: AccountState, live: LiveAccount, r: Awaited<ReturnType<Operator['readOf']>>, cap: bigint, gen: number): Promise<OwnerTxToSign> {
+    const d = this.cfg.oneAuth!
+    if (r.deployed) {
+      const ids = (await this.client.readContract({ address: address('SmartSession', this.cfg.registry), abi: smartSessionV4Abi, functionName: 'getPermissionIDs', args: [live.safe] })) as Hex[]
+      if (ids.length) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'your Safe still holds Mamoru permissions: update it from the What\'s new screen')
+    }
+    const newKey = acc.sessionKey ? undefined : generatePrivateKey()
+    const sessionKey = privateKeyToAccount((acc.sessionKey ?? newKey)!).address
+    const v4Cap = v4CapUsdOf(cap)
+    const { nonce: safeNonce } = await readSafeNonce(this.client, live.safe)
+    const input: MigrateV4Input = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: safeNonce.toString(), step: 0, capUsdc: v4Cap.toString(), sessionKey, generation: '1', admit: [], oldPermissionIds: [], removeIds: [], noncesBefore: [], home: '0x0000000000000000000000000000000000000000', homeDomain: 0 }
+    const tx = buildMigrateV4(input, this.cfg.registry)
+    const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey, permissionId: tx.permissionId, salt: v4HomeSessionSalt(1n), deployment: d, registry: this.cfg.registry }), permissionId: tx.permissionId }
+    const remoteChain = this.v4PolicyOf(acc).remoteBuckets?.length ? 'Monad' : undefined
+    const summary = [
+      `${r.deployed ? 'Use' : 'Create'} your Safe ${live.safe} on ${this.chainName()}`,
+      ...baseStepLines({ remove: 0, revoke: 0, capUsd: v4Cap, admitted: 0, ...(remoteChain ? { remoteChain } : {}) }).slice(1),
+    ]
+    return this.hold(acc, live, 'activate', tx.calls, summary, { grants: [stored], capUsdc: cap.toString(), v4CapUsd: v4Cap.toString(), gen, ...(newKey ? { sessionKey: newKey } : {}), built: { input, safeTxHash: tx.safeTxHash } })
+  }
+
   prepareActivate(ctx: AccountContext): Promise<OwnerTxToSign> {
     return this.lock(ctx.accountKey).run(() => this.planActivate(ctx))
   }
@@ -3317,6 +3352,9 @@ export class Operator {
     const start = await this.startTotal(acc, totalOf(this.localExposure(acc, r)))
     if (start.total > cap) throw depositOverCap(start.total, cap, start.across)
     if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
+    // otto/mamoru#309 (a) / #333: an account in the one-authorization scope never gets a v1-v6 grant set: its Start IS
+    // the V4 activation (one Safe tx, the same builder the Worker rebuilds with), whatever it held before on chain.
+    if (this.cfg.oneAuth && this.inScope(acc, 'one_auth_v4')) return this.planV4Activation(acc, live, r, cap, gen)
     const policy = this.activationPolicy(acc)
     // otto/mamoru#15: a Safe holding enough USDC buys its own gas reserve in this very transaction (self-reserve.ts):
     // the relayer then sends no top-up. Any other start keeps the relayer's top-up, within the activation budget.
@@ -4255,9 +4293,13 @@ export class Operator {
       // Only a new activation or a renewal is subject to the failure budget; a proven owner's transfer or stop never is.
       this.assertBudget(acc)
       const usdc = await this.usdcOf(live.safe)
-      if (usdc === 0n) return this.armFresh(acc, p, signature)
-      // The relayer deploys a Safe only for USDC on this chain, whatever the account holds elsewhere (otto/mamoru#212).
-      if (!(await readSafeNonce(this.client, live.safe)).deployed && usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(usdc, this.chainName())
+      // The relayer deploys a Safe only for USDC on this chain, whatever the account holds elsewhere (otto/mamoru#212),
+      // with one exception (#309 a, #333): a V4 activation whose funds sit at the account's own address on Ethereum, its
+      // sibling. That USDC reaches Base only through the sibling's bridge, which needs this Safe deployed (#310): waiting
+      // for USDC here would never end. Read on chain (BridgeOut.siblingHoldingsUsdc).
+      const elsewhere = p.grants?.[0]?.grant.oneAuthV4 && usdc < MIN_DEPLOY_USDC ? ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) : 0n
+      if (usdc === 0n && elsewhere < MIN_DEPLOY_USDC) return this.armFresh(acc, p, signature)
+      if (!(await readSafeNonce(this.client, live.safe)).deployed && usdc < MIN_DEPLOY_USDC && elsewhere < MIN_DEPLOY_USDC) throw belowDeployMinimum(usdc, this.chainName())
       // otto/mamoru#212: the total across chains, and USDC on its way here from Ethereum.
       const start = await this.startTotal(acc, await this.localTotal(acc, live.safe))
       if (start.total > this.activationCap(acc, p.capUsdc)) throw depositOverCap(start.total, this.activationCap(acc, p.capUsdc), start.across)
@@ -4533,7 +4575,10 @@ export class Operator {
         if (!start) return { code: 'CAP_CHECK_UNAVAILABLE' }
         if (start.total > this.activationCap(acc, p.capUsdc)) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: start.total.toString(), capUsdc: this.activationCap(acc, p.capUsdc).toString() } }
       }
-      if (!deployed && usdc < MIN_DEPLOY_USDC) return { code: 'BELOW_DEPLOY_MINIMUM' }
+      // otto/mamoru#309 (a): a V4 activation whose funds sit at the account's own address on Ethereum (its sibling, #307)
+      // deploys on Base without USDC there yet: the USDC arrives only through the sibling's bridge home, which needs this
+      // Safe deployed (the guardian reads it back, #310). Counted from Ethereum, read on chain (siblingHoldingsUsdc).
+      if (!deployed && usdc < MIN_DEPLOY_USDC && !(p.kind === 'activate' && p.grants?.[0]?.grant.oneAuthV4 && ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) >= MIN_DEPLOY_USDC)) return { code: 'BELOW_DEPLOY_MINIMUM' }
       // otto/mamoru#140 (part2 #6): a Safe-paid transaction needs the ETH its fee was quoted at, or the relayer pays a revert (GS011).
       if (p.tx.refund && p.feeWei && (await this.client.getBalance({ address: live.safe })) < BigInt(p.feeWei)) return { code: 'SAFE_FEE_UNFUNDED' }
       let sim = await this.simulateOwner(this.client, live, deployed, data)
@@ -5325,6 +5370,8 @@ export class Operator {
       // The engine's own grants are never also in `superseded` (a renewal or stop revokes those).
       acc.superseded = unrevokedIds(acc.superseded ?? [], acc.grants.map((g) => g.permissionId))
       acc.policyId = p.grants?.[0]?.grant.policyId ?? this.cfg.policy.policyId
+      // #309 (a): an activation on V4 carries the Init's C and generation, as a migration does (afterMigration).
+      if (p.grants?.[0]?.grant.oneAuthV4) acc.oneAuth = { ...acc.oneAuth, ...(p.v4CapUsd ? { capUsd: p.v4CapUsd } : {}), generation: '1' }
       // Unknown (a late receipt of an op from before spec 006): the default, the conservative side.
       acc.signedCapUsdc = p.capUsdc ?? LIVE_CAP_USDC.toString()
       acc.managedTokenIds = []

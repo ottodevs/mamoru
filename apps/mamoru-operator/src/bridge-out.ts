@@ -1393,6 +1393,19 @@ export class BridgeOut {
     return (JSON.parse(readFileSync(this.keyFile, 'utf8')) as Record<string, Hex>)[accountKey]
   }
 
+  /**
+   * #309 (a): the account's USDC at its own address on Ethereum plus its ETH valued at Chainlink's ETH/USD (fresh answers
+   * only), in USDC units; null when the sibling is off for the account or the price cannot be read.
+   */
+  async siblingHoldingsUsdc(ctx: AccountContext): Promise<bigint | null> {
+    if (!this.enabledFor(ctx.accountKey) || !oneAuthV4Deployment(ethereumRegistry)) return null
+    const safe = this.live(ctx).safe
+    const [usdcHeld, wei, round] = await Promise.all([this.usdcAt(safe), this.l1.getBalance({ address: safe }), this.l1.readContract({ address: CHAINLINK_ETH_USD, abi: aggregatorAbi, functionName: 'latestRoundData' })])
+    const answer = round[1]
+    if (answer <= 0n || BigInt(Math.floor(this.now() / 1000)) - round[3] > BigInt(ORACLE_MAX_AGE_SEC)) return null
+    return usdcHeld + (wei * answer) / 10n ** 20n
+  }
+
   siblingView(accountKey: string): SiblingView {
     const c = this.journal.siblings?.[accountKey]
     return c ? { state: c.state, safe: c.safe, sessionKey: c.sessionKey, ...(c.l1Tx ? { l1Tx: c.l1Tx } : {}) } : { state: 'none' }

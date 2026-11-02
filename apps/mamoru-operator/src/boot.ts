@@ -852,6 +852,7 @@ export async function bootOperator(o: BootOptions) {
     operator.bridgeInFlight = (accountKey) => bo.inFlightUsdc(accountKey)
     // otto/mamoru#309: the sibling's C is the C a V4 home of the account signs on Base.
     bo.siblingCapUsd = (ctx) => operator.siblingCapUsd(ctx)
+    operator.siblingHoldingsUsdc = (ctx) => bo.siblingHoldingsUsdc(ctx)
     setInterval(() => void bo.tick(), 60_000)
     void bo.tick()
     if (aa) console.log(`[operator] bridge-out uses userOps on Ethereum: gas paid in USDC through the ${paymaster!.name} paymaster, bundled by the operator`)
