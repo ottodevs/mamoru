@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, setSystemTime, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -96,17 +96,24 @@ describe('two chains placing from stale reads never place past the cap together'
   test('what a stale read could still miss is bounded: an engine review never uses a read of the peer older than 2 s', async () => {
     // The residual window: both deposits landing and one being placed inside the age of the other's read (2 s here,
     // plus the peer's own read at most 2 s old). Outside it, the cases above hold.
-    let now = Date.now()
-    let n = 0
-    const p = peer(() => wire({ idleUsdc: String(n++) }))
-    const reader = new PeerExposure([{ chainId: 143, url: p.url }], SECRET, fetch, () => now)
-    await reader.read(SAFE, 2_000)
-    now += 1_999
-    await reader.read(SAFE, 2_000)
-    expect(p.asked).toHaveLength(1)
-    now += 2
-    await reader.read(SAFE, 2_000)
-    expect(p.asked).toHaveLength(2)
+    // The reader's clock moves 2 s ahead of the peer's, which verifies the signature minute on the wall clock (current
+    // or previous). Both start 10 s into a minute, so the reader never signs a minute the peer has not reached.
+    let now = Math.floor(Date.now() / 60_000) * 60_000 + 10_000
+    setSystemTime(new Date(now))
+    try {
+      let n = 0
+      const p = peer(() => wire({ idleUsdc: String(n++) }))
+      const reader = new PeerExposure([{ chainId: 143, url: p.url }], SECRET, fetch, () => now)
+      await reader.read(SAFE, 2_000)
+      now += 1_999
+      await reader.read(SAFE, 2_000)
+      expect(p.asked).toHaveLength(1)
+      now += 2
+      await reader.read(SAFE, 2_000)
+      expect(p.asked).toHaveLength(2)
+    } finally {
+      setSystemTime()
+    }
   })
 
   test('the peer could not be read: no new money on either side', () => {

@@ -1542,15 +1542,21 @@ describe('an activation waits for the relayer instead of failing', () => {
     await w.op.submit(ctx, 'activate', sign(tx))
     const acc = w.state.accounts.k!
     const watch = w.op as unknown as Watch
+    // park() reads the wall clock itself: frozen, so its hold starts at exactly `t` (a busy run used to move it on).
     const t = Date.now()
-    watch.armRead.set(acc.accountKey, t)
-    watch.park(acc, 10 * 60_000)
-    expect(watch.armDue(acc, t + 9 * 60_000)).toBe(false)
-    expect(watch.armDue(acc, t + 10 * 60_000 + 1)).toBe(true)
-    acc.armed!.execSent = true
-    watch.park(acc, 10 * 60_000)
-    expect(watch.armDue(acc, t + 59_000)).toBe(false)
-    expect(watch.armDue(acc, t + 61_000)).toBe(true)
+    setSystemTime(new Date(t))
+    try {
+      watch.armRead.set(acc.accountKey, t)
+      watch.park(acc, 10 * 60_000)
+      expect(watch.armDue(acc, t + 9 * 60_000)).toBe(false)
+      expect(watch.armDue(acc, t + 10 * 60_000 + 1)).toBe(true)
+      acc.armed!.execSent = true
+      watch.park(acc, 10 * 60_000)
+      expect(watch.armDue(acc, t + 59_000)).toBe(false)
+      expect(watch.armDue(acc, t + 61_000)).toBe(true)
+    } finally {
+      setSystemTime()
+    }
   })
 
   test('money gone, but an approval sent once still looks at its Safe nonce and reaches reconciliation', async () => {
