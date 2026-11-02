@@ -291,9 +291,10 @@ named is where the open part lives. Ids FR-CHN-001 to FR-CHN-003 keep the meanin
   (b) A risk exit on Monad (a spec 004 cause): the exit runs exactly as spec 004 says (its conversion
   rules and re-entry minimum); the USDC it leaves stays idle on Monad, Growth keeps its bucket and its exit state, and
   Base does not refill Growth while that state lasts; it re-enters on Monad when spec 004 allows. No bridge.
-  (c) A risk to Monad itself or to its USDC: the available USDC moves to Base at once, skipping the ceiling and wait of
+  (c) A risk to Monad itself or to its USDC, with the bridge not at risk: the available USDC moves to Base at once, skipping the ceiling and wait of
   FR-XCH-006 but never the route checks and caps (FR-XCH-004, FR-XCH-007, FR-XCH-009). Tokens spec 004 forbids
-  converting stay where they are. If the risk is the bridge itself, no move runs in either direction until it clears.
+  converting stay where they are.
+  (d) A risk to the bridge, alone or together with (a) to (c): no move runs in either direction until it clears.
   A parked amount never waits in a volatile pool. The user is not asked first; the move shows in the app like any
   other (FR-XCH-017). A pool that stops paying is not a trigger of its own: on WMON/USDC it has not happened since
   July (lowest daily APY 7.8 %); if the Lab sees it, it becomes a spec 004 cause with its own recovery condition.
