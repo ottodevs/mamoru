@@ -28,6 +28,17 @@ export const signatureCopy = {
     days: (n: number) => `Valid for ${n} days.`,
     never: 'It can never send your money to anyone but you.',
   },
+  // otto/mamoru#295 (Brais, v4): the amount and where it goes come first, right above the button; "only your passkey" is
+  // one line under them. The full signed sentence above stays behind "What you sign" (#41).
+  withdrawCard: {
+    eyebrow: 'Withdraw',
+    only: 'Only your passkey can do this.',
+    cancel: 'Cancel',
+    action: 'Withdraw with passkey',
+    details: 'What you sign',
+    to: 'to',
+    toFull: 'Sending to',
+  },
   withdraw,
   stop: "This signature ends Mamoru's permission to act, closes every position and swaps what they held to USDC, which stays in your account. Only your passkey can do this.",
   move: 'This signature moves your USDC from Ethereum to this same account on Base. Only your passkey can do this.',

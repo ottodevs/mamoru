@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { signatureCopy } from '../../src/web/lib/signature.ts'
 import { ActivateScope, Review } from '../../src/web/routes/home.tsx'
+import { WithdrawReview } from '../../src/web/components/withdraw-review.tsx'
 import { CreateAccount } from '../../src/web/routes/onboarding.tsx'
 import { count, render } from './render.ts'
 
@@ -49,6 +50,23 @@ describe('before each passkey signature', () => {
     expect(html).toContain('data-testid="sign-scope"')
     expect(html).toContain('This signature sends your USDC to the address you chose. Only your passkey can do this.')
     expect(html.indexOf('sign-scope')).toBeLessThan(html.indexOf('Confirm with passkey'))
+  })
+
+  test('the withdraw card says what is signed first, then only-the-passkey, and keeps the full text behind What you sign (#295)', () => {
+    const props = { amount: '120.00', asset: 'USDC', address: `0x7a3f${'0'.repeat(32)}91c2`, chain: 'Base', scope: signatureCopy.withdraw('USDC'), busy: null, error: null, onApprove: () => {}, onCancel: () => {} }
+    const { html, text } = render(<WithdrawReview {...props} />)
+    expect(text).toContain('120.00 USDC')
+    expect(text).toContain('to 0x7a3f…91c2 · Base')
+    expect(text).toContain('Only your passkey can do this.')
+    expect(text).toContain('Cancel')
+    expect(text).toContain('Withdraw with passkey')
+    expect(html).toMatch(/<details[^>]*data-testid="sign-details"(?![^>]*\bopen)/)
+    // The whole signed sentence and the full address are in the page, behind the disclosure (#41).
+    expect(html).toContain('This signature sends your USDC to the address you chose. Only your passkey can do this.')
+    expect(html).toContain(props.address)
+    expect(html.indexOf('120.00')).toBeLessThan(html.indexOf('Withdraw with passkey'))
+    expect(html.indexOf('data-testid="withdraw-to"')).toBeLessThan(html.indexOf('Only your passkey can do this.'))
+    expect(text).not.toMatch(/\b\d of \d\b/)
   })
 
   test('a withdrawal names every step it signs', () => {

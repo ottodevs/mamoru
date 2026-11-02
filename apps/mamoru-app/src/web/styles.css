@@ -582,6 +582,11 @@
     background: var(--color-paper);
     color: var(--color-ink);
   }
+  /* A signature card (#295): the same darker tint as the onboarding card. */
+  .xfer.xfer-card {
+    border-color: color-mix(in srgb, var(--color-ink) 22%, var(--color-wash));
+    background: color-mix(in srgb, var(--color-ink) 14%, var(--color-paper));
+  }
   .xfer::backdrop {
     background: color-mix(in srgb, var(--color-ink) 38%, transparent);
   }

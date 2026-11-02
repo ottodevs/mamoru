@@ -5,6 +5,7 @@ import { ApiRequestError, useApi } from '../api/client.ts'
 import { FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useSession, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
+import { WithdrawReview } from '../components/withdraw-review.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
 import { Brand, Modal } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
@@ -816,7 +817,7 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
   const divergence = flow.prepared?.divergence
 
   return (
-    <Modal open={open} onClose={close} title={homeCopy.withdraw}>
+    <Modal open={open} onClose={close} title={homeCopy.withdraw} plain={!done && !!flow.prepared}>
       {done ? (
         <div className="grid gap-4">
           <p className="m-0 text-[1.05rem]">Sent. It shows in your history once it settles on {chain.name}.</p>
@@ -827,20 +828,21 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
           </div>
         </div>
       ) : flow.prepared ? (
-        <Review
+        <WithdrawReview
+          amount={usdExactInput(BigInt(parseUsdc(amount) ?? '0'))}
+          asset="USDC"
+          address={dest.state === 'ok' ? dest.address : to.trim()}
+          name={dest.state === 'ok' ? dest.name : null}
+          chain={chain.name}
           scope={signatureCopy.withdraw(asset, { create: !deployed, fromPool: !!flow.prepared.reduce?.length })}
-          lines={[]}
           busy={flow.busy}
           error={error}
           onApprove={() => void flow.approve(acceptancePayload(divergence, acceptedWarning))}
-          onCancel={divergence ? close : undefined}
+          onCancel={close}
           cancelLabel={divergence ? waitLabel(locale) : undefined}
           confirmLabel={divergence ? withdrawAnywayLabel(locale) : undefined}
           confirmDisabled={transferConfirmDisabled(flow.busy, divergence, acceptedWarning)}
         >
-          <p className="m-0 text-[2rem] leading-none text-emerald tabular-nums">
-            ${usdExactInput(BigInt(parseUsdc(amount) ?? '0'))}
-          </p>
           {flow.prepared.receive && flow.prepared.receive.asset !== 'USDC' ? (
             <div className="grid gap-1" data-testid="receive">
               <p className="m-0 flex items-center gap-2 text-[1.05rem]">
@@ -848,13 +850,6 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
                 {receiveLine(flow.prepared.receive)}
               </p>
               <p className="m-0 font-mono text-[0.8rem] text-stone">{flow.prepared.receive.route}</p>
-            </div>
-          ) : null}
-          {dest.state === 'ok' ? (
-            <div className="grid gap-1">
-              <p className="kicker">To</p>
-              {dest.name ? <p className="m-0 text-[1.05rem]">{dest.name}</p> : null}
-              <p className="m-0 font-mono text-[0.82rem] break-all text-stone">{dest.address}</p>
             </div>
           ) : null}
           {divergence ? (
@@ -865,7 +860,7 @@ function WithdrawDialog({ accountKey, s, open, onClose, initialAmount = '', depl
               locale={locale}
             />
           ) : null}
-        </Review>
+        </WithdrawReview>
       ) : (
         <form className="grid gap-[0.55rem]" onSubmit={submit}>
           <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-stretch gap-2">

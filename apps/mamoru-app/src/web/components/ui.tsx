@@ -85,7 +85,8 @@ export function BasescanLink({ tx }: { tx: string }) {
  * title (otto/mamoru#176), not on its first control: the reader starts at the top, and Enter or Space confirms
  * nothing by accident; Tab reaches the close button and the actions from there.
  */
-export function Modal({ open, onClose, title, children }: { open: boolean; onClose: () => void; title: string; children: ReactNode }) {
+/** `plain` hides the visible title (it still names the dialog): the content brings its own eyebrow, as the signature cards do. */
+export function Modal({ open, onClose, title, plain = false, children }: { open: boolean; onClose: () => void; title: string; plain?: boolean; children: ReactNode }) {
   const ref = useRef<HTMLDialogElement>(null)
   const titleRef = useRef<HTMLHeadingElement>(null)
   const titleId = useId()
@@ -101,7 +102,7 @@ export function Modal({ open, onClose, title, children }: { open: boolean; onClo
   return (
     <dialog
       ref={ref}
-      className="xfer"
+      className={`xfer ${plain ? 'xfer-card' : ''}`}
       aria-labelledby={titleId}
       onClose={onClose}
       onClick={(e) => {
@@ -109,9 +110,9 @@ export function Modal({ open, onClose, title, children }: { open: boolean; onClo
       }}
     >
       {open ? (
-        <div className="px-[1.35rem] pt-5 pb-[1.4rem]">
-          <header className="mb-4 flex items-start justify-between gap-4">
-            <h2 id={titleId} ref={titleRef} tabIndex={-1} className="title heavy xfer-title">
+        <div className={`relative ${plain ? 'px-[1.6rem] pt-7 pb-[1.6rem]' : 'px-[1.35rem] pt-5 pb-[1.4rem]'}`}>
+          <header className={`flex items-start justify-between gap-4 ${plain ? 'absolute top-3 right-3 z-10' : 'mb-4'}`}>
+            <h2 id={titleId} ref={titleRef} tabIndex={-1} className={`title heavy xfer-title ${plain ? 'sr-only' : ''}`}>
               {title}
             </h2>
             <button type="button" className="xfer-close" onClick={onClose} aria-label="Close">
