@@ -31,10 +31,21 @@ the premises. What fails them is:
 | C5 | Follow the Ethereum community's CROPS values (censorship resistance, open source, privacy, security), with Liquity / Morpho Blue style immutability rather than a super-admin. |
 | C6 | No piece can be hacked for more than its own small balance. No human signatures in normal operation. No EOA whose leak matters. |
 
+**Scope of C4 and C6.** C6's "no human signatures" applies to Mamoru's side: infra and operations never wait on a
+Mamoru signer. A signature by the user over their own account (a grant, a renewal, a withdrawal) is the user exercising
+custody, not a bottleneck. C4 covers the user's account and assets. Mamoru stopping its own hosted agent is Mamoru
+withdrawing an offer, not a lock, provided the user can always grant a session to an agent of their choice (WLK-04).
+
 **Honest limit, stated once.** Every EVM transaction is signed by some key, so the system cannot have zero keys. What
 it can have is that no key outside the user's own owner credential moves more than the code allows. Mamoru's contracts
 also cannot stop censorship by a chain's block producers (Base's sequencer) or a freeze by a token issuer (Circle for
 USDC and the CCTP messenger, Coinbase for cbBTC). Those limits are documented (WLK-06) and never claimed away.
+
+**Hosted-agent aggregate exposure.** While Mamoru hosts the agent, one signing service holds many accounts' session
+keys. A compromise of that service, rather than of one key, can spend the remaining `total` of every account it
+serves. No on-chain mechanism caps a sum across independent accounts. The bound is therefore the sum of the remaining
+per-account totals: KEY-05 keeps it small, published and attested. The self-hosted agent (WLK-04) removes a user from
+that sum.
 
 ## Verified facts (round 3, 2026-11-02)
 
@@ -72,10 +83,10 @@ USDC and the CCTP messenger, Coinbase for cbBTC). Those limits are documented (W
 |---|---|---|
 | INV-1 | **Owner escape.** On every supported chain the user alone can revoke every agent permission and move every transferable asset, through a published path that no Mamoru key, hook, oracle, paymaster, bundler or service can veto. | T13 (CI walkaway on forks, Mamoru services off) |
 | INV-2 | **Closed agent authority.** Every effect a session can cause (nested calls, approvals, gas, failed ops) stays inside immutable per-period **and** total limits, an exact expiry and pinned destinations. ERC-1271 by a session is impossible. The agent cannot install, renew or widen authority. | T5, T6, T7 (Foundry fork tests + invariant fuzzing) |
-| INV-3 | **No external control of a user.** No Mamoru-side address is, or can become, owner, guardian, executor with unrestricted calls, revoker or account-wide pauser. Accounts still on a guardian-bearing grant are declared non-compliant until migrated. | T3 (registry and bytecode check), T9 (migration ledger) |
-| INV-4 | **Hermetic infra.** Every Mamoru infra contract has immutable, verified code and constructor-only configuration, no privileged state change, no upgrade, and pays only fixed recipients for fixed purposes. | T4 (bytecode and constructor check), T11 if any infra contract exists |
+| INV-3 | **No external control of a user.** No Mamoru-side address is, or can become, owner, guardian, executor with unrestricted calls, revoker or account-wide pauser. Accounts still on a guardian-bearing grant are declared non-compliant until migrated. | T9 (per-account state check: owners, threshold, guard, fallback handler, modules, executors, attesters, policy version; any Mamoru address in an authority slot fails) |
+| INV-4 | **Hermetic infra.** Every Mamoru infra contract has immutable, verified code and constructor-only configuration, no privileged state change, no upgrade, and pays only fixed recipients for fixed purposes. | T3 (inventory of every Mamoru-deployed contract on every chain: V1, V2, V3/V-next, MamoruGasPolicy, MamoruPauseGate, MamoruV3Routes, MamoruV4LiquidityPolicy; entry-point analysis of each for privileged or value-moving paths), T11 if a funded contract is built |
 | INV-5 | **Finite infra exposure.** For every reachable history (donations, reentrancy, failures, top-ups), the total value an infra version can ever pay out is at most its declared ceiling. | T11 (Halmos + invariant fuzzing), only if a funded contract is built |
-| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (ledger of every relayer send; CI fails on a non-reimbursed user send) |
+| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; each bundle's beneficiary net flow ≥ 0 within a stated tolerance) |
 
 ## Decisions
 
@@ -104,14 +115,31 @@ Every relayer send that is not reimbursed today goes away (inventory from the ro
 
 | # | Today | Where | Becomes |
 |---|---|---|---|
-| G1 | Safe deploy at activation / first transfer, relayer-paid | `operator.ts:4535-4547` | `initCode` in the account's first userOp, paid by the account |
+| G1 | Safe deploy at activation / first transfer, relayer-paid | `operator.ts:4535-4547` | `initCode` in the account's first userOp, paid by the account (see "First operation" below) |
 | G2 | Activation `execTransaction` (attesters, self-attest, enable sessions, self-reserve swap), sponsored | `operator.ts:4622` | The same first userOp, owner-signed through Safe7579, account-paid |
 | G3 | ETH top-up from the relayer to the user's Safe | `operator.ts:4558-4564` | Removed. The self-reserve swap (`docs/gas-reserve.md`) becomes mandatory |
 | G4 | Owner `execTransaction`s (transfer, Stop, renew, revoke), sponsored within `sponsorship.ts` limits | `operator.ts:4507-4528` | Always Safe-paid: an owner userOp, or a SafeTx refund to `tx.origin` |
-| G5 | CCTP `receiveMessage` mint on Base | `bridge-out.ts:1567` | Paid from the transfer (CCTP V2 fee or forwarding), or a userOp of the destination Safe. `receiveMessage` is permissionless, so the user can mint it too |
-| G6 | CCTP `receiveMessage` mint on Monad | `bridge-monad.ts:630` | Same as G5 |
-| G7 | Ethereum bridge-out relayer fallback (L1 Safe deploy + `execTransaction`) | `bridge-out.ts:520-531` | Deleted. The existing userOp path with the Pimlico ERC-20 paymaster, which the owner bounds by allowance (`paymaster.ts:10-12`), is the only path |
+| G5 | CCTP `receiveMessage` mint on Base | `bridge-out.ts:1567` | A userOp of the destination Safe, paid from its own gas reserve. Burns keep `destinationCaller = 0` (POL-07), so `receiveMessage` stays callable by anyone, including the user. The pinned zero CCTP fee stays: no fee-paid mint. Circle's forwarding service is unverified for these routes and not relied on |
+| G6 | CCTP `receiveMessage` mint on Monad | `bridge-monad.ts:630` | Same as G5. The Monad Safe keeps its own MON reserve |
+| G7 | Ethereum bridge-out relayer fallback (L1 Safe deploy + `execTransaction`) | `bridge-out.ts:520-531` | Deleted. The automated path is the existing userOp with the Pimlico ERC-20 paymaster, bounded by the owner's allowance (`paymaster.ts:10-12`). The **owner** path never depends on it (D4: backup owner EOA or SafeTx refund) |
 | G8 | `handleOps` bundles | `bundler.ts:119,137` | Unchanged: reimbursed in the same transaction to the beneficiary |
+
+**First operation.** ERC-4337 takes the prefund during validation, before any swap in the batch runs, so a Safe holding
+only USDC cannot pay for its own first userOp. The first operation is paid in one of two ways, and the app offers both:
+- **(a) Native gas in the deposit.** The user's deposit to the counterfactual address includes native gas: a small
+  ETH or MON amount the app states before the user sends.
+- **(b) Third-party ERC-20 paymaster.** The first userOp uses the Pimlico ERC-20 paymaster. The owner signs the USDC
+  allowance in the same op's callData, and the paymaster pulls it in `postOp`.
+
+(b) is a third-party service whose loss to the user is bounded by that allowance. If Pimlico refuses, (a) remains. No
+Mamoru wallet pays.
+
+**Session ops and ERC-7562.** V3's validation reads the pool oracle, the position manager and `block.timestamp`
+(`MamoruActionPolicyV3.sol:302-305`), which ERC-7562 public mempools reject. Session ops are therefore submitted by a
+direct `handleOps` call. Any EOA can make that call (Mamoru's bundler, a self-hosted agent, the user), so it needs no
+public mempool. The public-bundler fallback applies to **owner** ops (exit, revoke, renew), whose validators (owner
+signature, WebAuthn through the P-256 precompile) must stay ERC-7562 compliant. T5 tests this through a
+standards-compliant bundler.
 
 The relayer becomes a **dust bundler**:
 - It holds no authority (already true) and a float of about one bundle.
@@ -119,8 +147,8 @@ The relayer becomes a **dust bundler**:
   (`boot.ts:559,583,689`).
 - Submission is private by default, so nobody can rewrite the beneficiary. The beneficiary rotates per batch so that
   users are not clustered by one address.
-- The public Pimlico bundler (verified on all three chains), or any ERC-7562 bundler, is the fallback. Nothing a user
-  needs depends on Mamoru's bundler being up.
+- The fallbacks are any EOA calling `handleOps` directly (session ops) and the public Pimlico bundler, verified on all
+  three chains, or any ERC-7562 bundler (owner ops). Nothing a user needs depends on Mamoru's bundler being up.
 
 ### D3. No funded Mamoru infra in v1
 
@@ -146,8 +174,15 @@ bounded by the owner's allowance.
   threshold 1-of-2. Existing accounts add it with one passkey-signed `addOwnerWithThreshold`.
 - **Owner actions without the operator.** Today every withdraw, Stop and renewal is prepared, checked and sent by the
   operator (`operator.ts:4500-4640`). The app builds and signs SafeTxs and owner userOps client-side from open-source
-  code, and the user can send them through any RPC or bundler. The operator may offer to relay. Its refusal never
-  blocks.
+  code. The user sends them in either of two ways:
+  - from the backup owner EOA as `execTransaction`, paying gas from that wallet (the user's own balance);
+  - by any submitter, with a SafeTx refund (`gasPrice`, `refundReceiver = 0` so `tx.origin` is repaid by the Safe).
+
+  The operator may offer to relay. Its refusal never blocks.
+- **Existing passkey-only accounts.** Adding a backup owner needs the current passkey, which needs the domain. Those
+  accounts are therefore exposed until they enroll. T2 runs first. Once a date is published, the app refuses new
+  deposits and new grants for accounts without a backup owner (their exit stays open). Mamoru keeps the domain serving
+  the passkey signer until every live account has enrolled or exited, and `/ops` lists the accounts still exposed.
 
 ## Requirements
 
@@ -162,9 +197,11 @@ bounded by the owner's allowance.
 - **POL-03: The total is a lifetime ceiling.** A generation's `total` never refills and can only be lowered. The agent
   cannot renew, widen or reset a grant. Only an owner-signed renewal starts a new generation, and its new `total` is
   shown to the owner as the maximum loss.
-- **POL-04: Session expiry of 30 days or less.** TimeFramePolicy `validUntil` is at most 30 days. Today it is 365 days
-  (`packages/policy/src/policies.ts:51`, `policies-v4.ts:53`). Renewal is an owner signature (one tap). Consequence:
-  each user signs at least once a month.
+- **POL-04: Bounded session expiry.** TimeFramePolicy `validUntil` is bounded and shown to the owner. Today it is
+  365 days (`packages/policy/src/policies.ts:51`, `policies-v4.ts:53`). Because POL-03 makes `total` a lifetime
+  ceiling, the maximum loss does not depend on expiry; expiry only limits how long a leaked key stays usable. Default
+  30 days. **NEEDS CLARIFICATION (Ot):** the renewal cadence. Each renewal is one owner tap, so 30 days means a monthly
+  tap and a strategy that stops if the user is away longer. 90 days with a smaller `total` is the alternative.
 - **POL-05: Configuration calls refused.** The action policy refuses every call whose target is the account itself, the
   Safe7579 adapter, SmartSession or the registry. That covers `installModule`, `uninstallModule`, `setRegistry`,
   `execTransaction`, owner and threshold changes, `setFallbackHandler`, `setGuard` and `enableModule`. SmartSession
@@ -172,16 +209,27 @@ bounded by the owner's allowance.
 - **POL-06: ERC-1271 off.** `erc1271Policies` and `allowedERC7739Content` stay empty. A test proves a session-key
   `isValidSignature` returns failure.
 - **POL-07: Reviewed tokens and venues only.**
-  - Approvals are finite and only to pinned spenders.
-  - Recipients are pinned to the account.
-  - Routers, multicalls and bridges have their nested recipient, token and amount decoded and bounded, as V3 already
-    does for CCTP (`depositForBurn`: recipient = account, pinned domain and token, fee 0).
-  - Fee-on-transfer, rebasing or callback tokens, and venues behind an upgradeable proxy, stay out, unless the
-    third-party upgrade risk is listed per venue.
+  - **Approvals:** exact amount, only to pinned spenders, and only in the same batch as the call that consumes them, so
+    no allowance outlives its batch.
+  - **Recipients:** pinned to the account.
+  - **Nested calls:** routers, multicalls and bridges have their nested recipient, token and amount decoded and
+    bounded, as V3 already does for CCTP (`depositForBurn`: recipient = account, pinned domain and token, fee 0).
+    `destinationCaller = 0` is pinned explicitly so that anyone can complete the mint.
+  - **Tokens:** fee-on-transfer, rebasing and callback tokens stay out.
+  - **Upgradeable venues:** a venue or spender behind an upgradeable proxy is admitted only with a per-venue position
+    cap inside the account's `total`, so a hostile upgrade loses at most that cap. An issuer whose own token is
+    upgradeable (USDC, the CCTP messenger) is an issuer risk (WLK-06), not a venue.
 - **POL-08: Accounting under failure.** Budget spent at validation by an op that reverts later is strictly bounded by
   the same per-period and total limits. It never blocks owner exit.
-- **POL-09: Same address on Base, Monad and Ethereum.** CREATE2 with a pinned compiler and `bytecode_hash = none`.
-  Per-chain constants live in a `chainid` table in code, and an unknown chain refuses.
+- **POL-09: Same address on every chain with a session grant.** That is Base and Monad today. Ethereum carries no
+  session grant (its bridge-out is an owner/paymaster userOp), and gets V-next only when a grant there is added.
+  CREATE2 with a pinned compiler and `bytecode_hash = none`. Per-chain constants live in a `chainid` table in code, and
+  an unknown chain refuses.
+- **POL-11: Gas ceiling per generation.** `MamoruGasPolicy` per-op caps (`maxFeePerGas` × the sum of gas limits) times
+  the UsageLimitPolicy op count is the most a generation can spend on gas, including ops that revert. Today's counts
+  (`manageAny 32,000`, `policies-v6.ts:11`) make that figure meaningless. The count is sized so the figure fits a
+  stated gas ceiling, which is added to the maximum loss shown to the owner. A leaked key can burn at most that ceiling
+  and never more than the Safe's native balance.
 - **POL-10: No global operator approval.** `MamoruV4Executor` as designed is not deployed: it needs a global
   `setApprovalForAll` (`contracts/v4-policy/src/MamoruV4Executor.sol:41-50`), so one bug could reach every account's
   positions. v4 ships through `MamoruV4LiquidityPolicy` with per-account calls.
@@ -194,8 +242,11 @@ bounded by the owner's allowance.
   account's automation, including its exits (`MamoruActionPolicyV2.sol:388,530,560,600-613`).
 - **GRD-02: Remove the copy.** Every UI and grant text that promises a guardian pause is removed
   (`operator.ts:2151,2155,2306`, `home.tsx:118,123,1042`).
-- **GRD-03: Per-account migration.** Each account moves to V-next at its next owner-signed renewal; the generation jump
-  already exists. A ledger lists every account and the policy it runs.
+- **GRD-03: Per-account migration with a cutoff.** Each account moves to V-next with an owner-signed renewal; the
+  generation jump already exists. The app asks every V2 account to renew now rather than at expiry. Destroying the key
+  cannot be proven, so it does not count as removing the power. What removes the power in practice is the cutoff: from
+  a published date the operator stops signing V2 grants. After that a guardian pause can only stop automation that no
+  longer runs, while the owner path was never gated. A ledger lists every account and the policy it runs.
 - **GRD-04: Non-compliant until migrated.** While an account runs V2 or uses `MamoruPauseGate`, that account is declared
   non-compliant with C4 on `/ops` and in the walkaway docs. No claim of "no one can pause you" is made while any live
   account runs V2.
@@ -208,13 +259,23 @@ bounded by the owner's allowance.
   generation's `total`, until its expiry.
 - **KEY-03: Bundler keys.** One key per chain in a KMS, no authority (INV-3), and dust only.
 - **KEY-04: One-off deployers.** Infra deployments use a throwaway key whose only power is the deployment itself.
+- **KEY-05: Aggregate exposure.**
+  - **Published sum.** The signing service publishes on `/ops` the sum of remaining `total` + gas ceiling across the
+    accounts it serves, with an alert when it grows past a stated figure.
+  - **Isolation.** Per-account keys sit under separate key policies, so one IAM grant cannot reach all of them.
+  - **Attested signer.** The signer runs in an attested TEE that re-checks the V-next rules before signing, as defence
+    in depth. It is not a substitute for the on-chain bound.
 
 ### Registry and attesters (REG)
 
 - **REG-01: Self-attest every module a grant uses.** That includes SmartSession and UniActionPolicy, which today only
-  Rhinestone attests (`packages/account/sessions/index.ts:364-391`). Once every module is self-attested, a revocation
-  by Rhinestone cannot block new sessions or renewals. Already true regardless: a registry change never stops an
-  enabled session or an owner action, because the registry is checked at enable and install only.
+  Rhinestone attests (`packages/account/sessions/index.ts:364-391`).
+  - **Requires trusting itself.** Self-attestation works only if the account trusts itself as an attester. Activation
+    already sets `trustAttesters(1, [RhinestoneAttester, account])` (`sessions/index.ts:374-379`). T9 checks every
+    live account's attester set and threshold, and an account missing itself gets an owner `trustAttesters` call.
+  - **Effect.** Once that holds, a revocation by Rhinestone cannot block new sessions or renewals.
+  - **Already true regardless.** A registry change never stops an enabled session or an owner action, because the
+    registry is checked at enable and install only.
 - **REG-02: Deployment availability.** The deploy path (Safe7579 launchpad) also checks the registry at module install
   (`V3SetupFork.t.sol:1163`). If Rhinestone revokes a module, new Safe deployments that install it fail. That is an
   availability risk for new users, not a custody or exit risk. T3 records which modules the launchpad installs and
@@ -225,14 +286,17 @@ bounded by the owner's allowance.
 - **WLK-01: Full coverage.** `walkawayCalls` (`packages/account/owner/index.ts:40`) and `docs/walkaway.md` cover every
   chain, asset and position a policy can create. Today they cover Base with USDC and cbBTC only. Missing: USDT, WETH,
   EURC/JPYT, ERC-4626 vault shares, the Monad sleeve (Safe on chain 143, WMON/USDC LP), CCTP burns in flight (the
-  permissionless `receiveMessage` step) and ETH left on L1.
+  permissionless `receiveMessage` step) and ETH left on L1. The exit also enumerates every non-zero allowance the Safe
+  has granted and revokes it (`approve(spender, 0)`) in the same transaction.
 - **WLK-02: Static frontend.** An open-source static frontend on IPFS with an ENS name builds and signs the exit with
   the backup owner (D4). It needs no Mamoru backend.
 - **WLK-03: Tested with Mamoru off.** In CI, on a fork of each chain: Mamoru's operator, relayer, bundler, Worker and
   domain are unreachable, and the user revokes every session and withdraws every asset through a public RPC and a
   public bundler or a plain `execTransaction`.
-- **WLK-04: Self-hosted agent (later).** An open-source agent a user can run with their own session key, so that
-  Mamoru refusing service stops only Mamoru's offer, never the strategy.
+- **WLK-04: Agent of the user's choice.** The owner can always grant a V-next session to a key they choose. That is an
+  owner power no Mamoru component can veto, and the app exposes it from the static frontend. An open-source agent that
+  a user can run with that key is shipped, so that Mamoru refusing service stops only Mamoru's offer, never the
+  strategy.
 - **WLK-05: Verifiable builds.** Verified source on every chain, reproducible CREATE2 bytecode, code hashes pinned in
   `packages/registry/*.json` (including the `MamoruGasPolicy` Base address, today env-only, `boot.ts:108,126`).
 - **WLK-06: What Mamoru cannot guarantee.** The docs state it:
@@ -270,10 +334,12 @@ bounded by the owner's allowance.
 | Threat | Today | After v3 | Residual |
 |---|---|---|---|
 | Guardian key leaked or abused | Freezes any V2 account's automation, including exits | No guardian in V-next; key destroyed; V2 accounts flagged until migrated | Unmigrated accounts until renewal |
-| Session key leaked | Acts within the grant for 365 days | Per-period + total limits on every family, ≤30 days, per-account key in KMS/TEE | Up to the remaining `total` of one generation |
+| Session key leaked | Acts within the grant for 365 days | Per-period + total limits on every family, bounded expiry (default 30 days), per-account key in KMS/TEE | Up to the remaining `total` of one generation |
 | Session escapes policy (self-call, module install, ERC-1271, nested router call) | Self-calls not blocked by SmartSession; ERC-1271 empty | POL-05/06/07 with tests | Bugs in V-next (audit, fuzzing) |
 | Relayer key leaked | Float on three chains, one key | Dust per chain, KMS, no authority | One bundle's float |
-| Mamoru refuses or disappears | No owner signature off-domain; owner actions go through the operator | Backup owner, client-built owner txs, static exit frontend, CI test with Mamoru off | Users who skip the backup owner (blocked from live funds) |
+| Mamoru refuses or disappears | No owner signature off-domain; owner actions go through the operator | Backup owner, client-built owner txs from the user's wallet or with SafeTx refund, static exit frontend, user-chosen agent, CI test with Mamoru off | Passkey-only accounts until they enroll (listed on `/ops`) |
+| Hosted signer service compromised | Every served account's session key | Per-account key policies, attested TEE, published aggregate exposure (KEY-05) | Sum of remaining totals + gas ceilings of served accounts |
+| Session burns gas | 32,000 ops × per-op cap | Gas ceiling per generation (POL-11) | That ceiling |
 | Rhinestone revokes an attestation | Blocks new enables and renewals of Rhinestone-only modules | Every module self-attested | New Safe deploys through the launchpad (availability) |
 | Bug in an infra contract with no admin | n/a (no funded infra) | None funded in v1; conditional `GasTreasury` bounded by lifetime ceiling | Its ceiling |
 | Wrong constructor parameters | n/a | Fork test of exact init calldata; bytecode and code-hash check per chain; unknown chain pays nothing | A wrong value stays until the next version |
@@ -294,43 +360,57 @@ bounded by the owner's allowance.
 - **T1: Retire the guardian.** Do GRD-01/02: destroy the key, publish the retirement, remove the copy.
 - **T2: Backup owner.** Do FR-ONB-004 (signed challenge) and make the backup owner mandatory for live funds, plus the
   one-signature add for existing accounts.
-- **T3: Inventory checks.** Make the self-reserve swap mandatory and delete the ETH top-up (G3). Script the bytecode
-  and registry checks: no pause selector in V-next, the module and attestation inventory for REG-02, and the pinned
-  code hashes.
+- **T3: Inventory checks.**
+  - Make the self-reserve swap mandatory and delete the ETH top-up (G3).
+  - Inventory every Mamoru-deployed contract on every chain with an entry-point analysis (INV-4).
+  - Script the bytecode and registry checks: no pause selector in V-next, the launchpad module and attestation
+    inventory for REG-02, and the pinned code hashes.
 
 **P1, one redeploy**
-- **T4: V-next.** Implement POL-01..10 from V3, with no pause code and with limits on the vault and bridge families.
-  Deploy with CREATE2 to the same address on Base and Monad, and pin it in the registry.
-- **T5: Fork tests for the session surface.** Self-calls (each selector in POL-05) are refused. ERC-1271 by a session
-  fails. Delegatecall and executor modes are refused. Nested router recipients are bounded.
+- **T4: V-next.** Implement POL-01..11 from V3, with no pause code, limits on the vault and bridge families, and the
+  gas ceiling. Deploy with CREATE2 to the same address on every chain with a session grant (Base and Monad today), and
+  pin it in the registry.
+- **T5: Fork tests for the session surface.**
+  - Self-calls (each selector in POL-05) are refused.
+  - ERC-1271 by a session fails.
+  - Delegatecall and executor modes are refused.
+  - Nested router recipients are bounded.
+  - No allowance survives a batch.
+  - `destinationCaller` is 0.
+  - Owner ops are admitted by a standards-compliant ERC-7562 bundler.
 - **T6: Invariant fuzzing.** The per-period and total limits hold under batching, nonce races, reverting ops and
   re-enable. POL-03: no path raises a generation's `total`.
-- **T7: Renewal.** The renewal flow moves accounts off V2 and `MamoruPauseGate` (GRD-03) and sets expiry ≤30 days
+- **T7: Renewal.** The renewal flow moves accounts off V2 and `MamoruPauseGate` (GRD-03) and sets the POL-04 expiry
   (POL-04).
 - **T8: Self-attestation.** Self-attest SmartSession and UniActionPolicy (REG-01).
-- **T9: Migration ledger.** The ledger of accounts and the policies they run, plus the GRD-04 flag on `/ops`.
+- **T9: Per-account state check.** For every live Safe: owners, threshold, guard, fallback handler, modules, executors,
+  trusted attesters and policy version (INV-3, REG-01), plus the GRD-03 cutoff and the GRD-04 flag on `/ops`.
 
 **P2, user-paid execution**
-- **T10: Account-paid sends.** Turn G1, G2 and G4 into account-paid userOps, G5 and G6 into transfer-paid or
-  destination-userOp mints, and delete G7. Add a CI ledger check: any relayer send that is not a `handleOps` bundle
-  fails the build (INV-6).
+- **T10: Account-paid sends.**
+  - Turn G1, G2 and G4 into account-paid userOps, with the first-operation options (a) and (b).
+  - Turn G5 and G6 into destination-Safe userOp mints.
+  - Delete G7.
+  - Add the INV-6 payer trace in CI and on `/ops`.
 - **T11: Bundler.** Relayer keys per chain in KMS, private submission with a public-bundler fallback, rotating
   beneficiary. Build `GasTreasury` (TRS-01..07, with Halmos and fuzzing for INV-5) only if D3's condition holds.
 
 **P3, keys and exit**
-- **T12: Session keys.** Session keys in KMS/TEE, per account. Delete the plaintext state copies and the standby VPS
-  key bundles.
+- **T12: Session keys.** Session keys in KMS/TEE, per account, with KEY-05 (isolation, published aggregate exposure,
+  attested signer). Delete the plaintext state copies and the standby VPS key bundles.
 - **T13: Walkaway.** Do WLK-01..03 and WLK-05: full coverage, IPFS/ENS frontend, CI on forks of all three chains with
   Mamoru off.
-- **T14: Self-hosted agent.** WLK-04 (later).
+- **T14: Agent of the user's choice.** WLK-04: owner-granted session to a user-chosen key from the static frontend, and
+  the open-source agent.
 
 ## Scenarios
 
 - **S1: Leaked session key.** A leaked session key drains as fast as it can. Loss is at most the remaining `total` of
   the generation, never more after expiry, and only to pinned destinations.
 - **S2: Mamoru disappears.** Domain, Worker, operator and bundler are all gone. The user opens the IPFS frontend, signs
-  with the backup owner, revokes every session and withdraws every asset on Base, Monad and Ethereum through public
-  infrastructure.
+  with the backup owner, revokes every session and allowance, and withdraws every asset on Base, Monad and Ethereum.
+  They send it as `execTransaction` from their own wallet or through a public bundler. The burns still in flight are
+  minted by the user.
 - **S3: Leaked guardian key.** Someone holds the retired guardian key. No V-next account can be paused. V2 accounts are
   listed as non-compliant until renewed.
 - **S4: Policy surface.** A session tries `installModule`, `setRegistry`, `execTransaction`, ERC-1271 and a router call
