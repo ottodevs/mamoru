@@ -11,7 +11,8 @@
     "./recovery": "./recovery/index.ts",
     "./live": "./live/index.ts",
     "./userop": "./userop/index.ts",
-    "./remote": "./remote/index.ts"
+    "./remote": "./remote/index.ts",
+    "./one-auth": "./one-auth/index.ts"
   },
   "dependencies": {
     "@mamoru/domain": "workspace:*",

@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto'
-import { decodeErrorResult, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, baseRegistry, entry, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
+import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type WhatsNew, type FundingView, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LAB_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, type OneAuthV4Deployment, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -31,13 +31,16 @@ import {
   type SafeTx,
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
-import { baseKeyOf, remoteAccountKey, remoteInput, remoteSafe } from '@mamoru/account/remote'
+import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteFromSpec } from '@mamoru/account/remote'
+import { inventoryOf, mamoruActionPolicyV4Abi, migrationTx, readSessionState, sessionCreatedIds, v4HomeSession, v4Session, V4_REMOTE_SESSION_SALT } from '@mamoru/account/one-auth'
+import { BundlerClient } from '@mamoru/erc4337'
+import { baseStepLines, monadStepLines, readRegistryPools, readV4Paused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
-import { permissionIdOf, revocationCalls, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
+import { draftUserOp, executeCallData, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
-import { Engine, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
+import { Engine, engineGas, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
 import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
 import type { GuardReadsState } from './guard-reads-state.ts'
@@ -490,10 +493,63 @@ export type OperatorConfig = {
    * (remote-peer.ts), by chain id. A v6 approval asks the remote one for its session key, commits to the Safe that gives,
    * and once it lands asks it to provision that Safe. Absent for a chain: no v6 approval is built for it.
    */
-  remotePeers?: Partial<Record<number, Pick<RemotePeer, 'key' | 'provision'>>>
+  remotePeers?: Partial<Record<number, Pick<RemotePeer, 'key' | 'provision'> & Partial<Pick<RemotePeer, 'migrateV4'>>>>
   /** otto/mamoru#251: the registry a remote Safe is derived against, by chain. Absent: the pinned one (`registryFor`). */
   remoteRegistry?: (chainId: number) => Registry
+  /**
+   * otto/mamoru#293 (spec 010): the V4 stack of this chain (MamoruRegistry, MamoruActionPolicyV4, MamoruGasPolicyV2,
+   * MamoruMigrationCheck), from the chain's registry file (boot.ts `oneAuthV4Deployment`). Absent while any of the four is
+   * undeployed: nothing of V4 is offered or run, whatever the `one_auth_v4` flag says.
+   */
+  oneAuth?: OneAuthV4Deployment
+  /** otto/mamoru#293: blocks per SessionCreated page of the migration inventory. Default 2,000. */
+  oneAuthLogPage?: bigint
+  /** otto/mamoru#293, Monad side: a read-only client of the home chain (Base), to check a home's V4 config before step 1. */
+  homeClient?: PublicClient
 }
+
+/** otto/mamoru#293: the policies whose accounts the move to V4 is offered to (v2-v6). */
+const V4_MIGRATES_FROM_ONE_AUTH = new Set(['conservador-live-v2', 'conservador-live-v3', 'conservador-live-v4', 'conservador-live-v5', 'conservador-live-v6', 'conservador-lab-v4', 'conservador-lab-v5', 'conservador-lab-v6'])
+
+/** otto/mamoru#293: the Monad operator's typed refusal of a step 1, as the same code here, with this side's fixed text. */
+const PEER_REFUSALS: Record<string, string> = {
+  ONE_AUTH_STEP_ORDER: 'the Base step of the update must be confirmed first',
+  ONE_AUTH_PAUSED: 'Mamoru is paused on your Safe: the update waits until the pause ends',
+  ONE_AUTH_DONE: 'your Safe on Monad is already updated',
+  ONE_AUTH_NOT_OFFERED: 'the update is not available on Monad yet',
+  ONE_AUTH_INVENTORY_MISMATCH: 'Mamoru could not account for every permission on your Safe on Monad: nothing was prepared, and the team was alerted',
+  REMOTE_SAFE_MISMATCH: 'the destination is not your new Safe on Monad: nothing was prepared',
+  PREPARE_UNKNOWN: 'no such prepared transaction for this account',
+  PREPARE_EXPIRED: 'the prepared transaction expired, prepare again',
+  BAD_SIGNATURE: 'the signature could not be verified',
+}
+function peerRefusal(e: unknown): never {
+  const code = (e as { code?: unknown })?.code
+  const status = (e as { status?: unknown })?.status
+  if (typeof code === 'string' && PEER_REFUSALS[code]) throw new HttpError(typeof status === 'number' && status >= 400 && status < 600 ? status : 409, code, PEER_REFUSALS[code])
+  logErr('[v4] Monad operator:', e)
+  throw new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru on Monad is not reachable right now: nothing was changed, try again in a few minutes')
+}
+
+/**
+ * otto/mamoru#293: the one Safe a migration's calls send tokens to (ERC-20 `transfer` recipients), read from the calls
+ * themselves; undefined when none moves funds. Throws on two different recipients (never built: one destination).
+ */
+export function movedTo(calls: readonly { data: Hex }[]): Address | undefined {
+  const to = new Set<string>()
+  for (const c of calls) {
+    if (!c.data.startsWith('0xa9059cbb')) continue
+    try {
+      const d = decodeFunctionData({ abi: erc20Abi, data: c.data })
+      if (d.functionName === 'transfer') to.add(getAddress(d.args[0] as Address))
+    } catch {}
+  }
+  if (to.size > 1) throw new Error(`a migration sends funds to ${to.size} different Safes`)
+  return [...to][0] as Address | undefined
+}
+
+/** POST migrate-v4/prepare of a step 1, as the Base operator sends it to the Monad operator. */
+type MigrateV4Body = { step?: unknown; home?: unknown; capUsdc?: unknown; moveTo?: unknown }
 
 /** Spec 007 T7: the live policies whose accounts the renew row moves to v4 (same three pools and weights). */
 const V4_MIGRATES_FROM = new Set(['conservador-live-v2', 'conservador-live-v3'])
@@ -553,7 +609,7 @@ function isV4(policy: PolicyVersion): boolean {
   return policy.session.grants.some((g) => g.requiresActionPolicy)
 }
 
-type OwnerKind = 'activate' | 'transfer' | 'stop' | 'renew'
+type OwnerKind = 'activate' | 'transfer' | 'stop' | 'renew' | 'migrate-v4'
 
 type Prepared = {
   prepareId: string
@@ -613,6 +669,10 @@ type Prepared = {
   pausedWarned?: boolean
   /** activate/renew (otto/mamoru#251): the account's own Safe on another chain this approval provisions (its bridge-out mints only there). */
   remote?: RemoteSafeRecord
+  /** migrate-v4 (otto/mamoru#293): the step, the old ids it removes (`revokes`: every id it revokes), and on Monad the home account. */
+  step?: 0 | 1
+  removes?: Hex[]
+  home?: Address
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** otto/mamoru#223: out-of-range positions the last decision does not re-range, with the re-range code. */ rangeHolds?: { tokenId: string; code: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -1301,6 +1361,11 @@ export class Operator {
    * Grants are always built from `policyOf`: depth sizing changes how much an entry places, never what a session allows.
    */
   enginePolicyOf(acc: AccountState): PolicyVersion {
+    // otto/mamoru#293: a V4 account's pools are MamoruRegistry's, read on chain (v4Engine), never the static template's.
+    if (this.onV4(acc) && this.cfg.oneAuth && acc.grants[0]?.grant.oneAuthV4) {
+      const v = this.v4Engine(acc).policy
+      return this.cfg.settings ? withEngineSettings(v, this.cfg.settings.forAccount(acc.accountKey).settings) : v
+    }
     const p = this.withAccountBudgets(acc, this.policyOf(acc))
     if (this.cfg.settings) {
       // Spec 006: depth sizing and the guard come from the account's engine settings. Memoized per settings, so an
@@ -1328,6 +1393,8 @@ export class Operator {
   /** The policy the account was activated with; accounts activated before policy ids were stored run conservador-live-v1. */
   policyOf(acc: AccountState): PolicyVersion {
     if (!acc.policyId) return acc.active || acc.grants.length ? (POLICIES[LEGACY_POLICY] ?? this.cfg.policy) : this.cfg.policy
+    // otto/mamoru#293: an account on V4 runs on its registry-resolved twin (enginePolicyOf); this is its static template.
+    if (isOneAuthV4(acc.policyId)) return this.v4PolicyOf(acc)
     const p = POLICIES[acc.policyId]
     if (p) return p
     // Spec 007 T7: a v4 account resolves only to the deployed v4 policy this operator was configured with.
@@ -1350,7 +1417,7 @@ export class Operator {
    * field counts: null = everyone (and the boolean agrees); a list = only those accounts (key or Safe address);
    * malformed reached us as [] = nobody; missing (an older Worker) = nobody.
    */
-  private inScope(acc: AccountState, flag: 'multichain_v6' | 'multichain_v6_new'): boolean {
+  private inScope(acc: AccountState, flag: 'multichain_v6' | 'multichain_v6_new' | 'one_auth_v4'): boolean {
     const scope = this.cfg.opsScopedFlags?.()[flag]
     if (scope === null) return this.cfg.opsFlags?.()[flag] === true
     return Array.isArray(scope) && (scope.includes(acc.accountKey.toLowerCase()) || scope.includes(String(acc.ctx.address).toLowerCase()))
@@ -1396,13 +1463,13 @@ export class Operator {
    */
   private withAccountBudgets(acc: AccountState, p: PolicyVersion): PolicyVersion {
     const ap = p.actionPolicy
-    if (!ap || !isV4(p)) return p
+    if (!ap || !isV4(p) || isOneAuthV4(p)) return p
     const cap = this.signedCapOf(acc)
     const key = `${p.policyId}@${p.version} ${ap.address} ${cap}`
     let sized = this.v4Sized.get(key)
     if (!sized) {
       const pools = v4PoolsOn(p.sourceChainId).filter((v) => p.buckets.some((b) => b.pools.includes(v.pool)))
-      sized = withActionPolicy(p, ap.address, pools, { caps: v4BudgetCaps(p, cap), ...(ap.gasPolicy ? { gasPolicy: ap.gasPolicy } : {}), ...(ap.bandFactorBps !== undefined ? { bandFactorBps: ap.bandFactorBps } : {}), ...(ap.twapShortWindowSeconds !== undefined ? { twapShortWindowSeconds: ap.twapShortWindowSeconds } : {}), ...(ap.contractVersion ? { contractVersion: ap.contractVersion } : {}), ...(ap.pauseGate ? { pauseGate: ap.pauseGate } : {}) })
+      sized = withActionPolicy(p, ap.address, pools, { caps: v4BudgetCaps(p, cap), ...(ap.gasPolicy ? { gasPolicy: ap.gasPolicy } : {}), ...(ap.bandFactorBps !== undefined ? { bandFactorBps: ap.bandFactorBps } : {}), ...(ap.twapShortWindowSeconds !== undefined ? { twapShortWindowSeconds: ap.twapShortWindowSeconds } : {}), ...(ap.contractVersion ? { contractVersion: ap.contractVersion as 2 | 3 } : {}), ...(ap.pauseGate ? { pauseGate: ap.pauseGate } : {}) })
       this.v4Sized.set(key, sized)
     }
     return sized
@@ -1418,6 +1485,11 @@ export class Operator {
    */
   private approvalView(acc: AccountState): FundingView['approval'] {
     if (!acc.active) return null
+    // otto/mamoru#293: an account on V4 has nothing to renew; its approval row carries only a step left on Monad, if any.
+    if (this.onV4(acc)) {
+      const w = this.whatsNewView(acc)
+      return { validUntil: 0, renewDue: false, expired: false, policyId: acc.policyId, ...(acc.oneAuth?.paused ? { paused: true } : {}), ...(w ? { whatsNew: w } : {}) }
+    }
     const untils = acc.grants.map((g) => g.grant.userOp.validUntil).filter((v) => v > 0)
     if (!untils.length) return null
     const validUntil = Math.min(...untils)
@@ -1432,7 +1504,9 @@ export class Operator {
     const cap = this.capFor(acc)
     const signed = this.signedCapOf(acc)
     const capRaise = cap > signed ? { capUsdc: cap.toString(), signedUsdc: signed.toString() } : null
-    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, policyId: this.policyOf(acc).policyId, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade, upgradePolicy: target.policyId } : {}), ...(split ? { upgradeSplit: split } : {}), ...(paused ? { paused } : {}), ...(capRaise ? { capRaise } : {}) }
+    // otto/mamoru#293: only for an account the move is offered to (flag scope, V4 pinned, not paused, clean inventory).
+    const whatsNew = this.whatsNewView(acc)
+    return { validUntil, renewDue: left <= this.policyOf(acc).session.renewalWindowSeconds, expired: left <= 0, policyId: this.policyOf(acc).policyId, ...(missing ? { missing } : {}), ...(usage ? { usage } : {}), ...(upgrade ? { upgrade, upgradePolicy: target.policyId } : {}), ...(split ? { upgradeSplit: split } : {}), ...(paused ? { paused } : {}), ...(capRaise ? { capRaise } : {}), ...(whatsNew ? { whatsNew } : {}) }
   }
 
   /**
@@ -1504,6 +1578,8 @@ export class Operator {
    */
   private async refreshChainUsage(acc: AccountState): Promise<void> {
     if (!acc.active || !acc.grants.length) return
+    // otto/mamoru#293: a V4 session has no usage limit or expiry to count: no usage refresh (its pause is read by refreshOneAuth).
+    if (this.onV4(acc)) return
     const ids = acc.grants.map((g) => g.permissionId.toLowerCase()).join(',')
     const had = this.chainUsage.get(acc.accountKey)
     if (had && had.grants === ids && Date.now() - had.at < CHAIN_USAGE_TTL_MS) return
@@ -1562,6 +1638,8 @@ export class Operator {
     const { acc, live } = this.account(ctx, { readOnly: true })
     // In the background: the row follows on the next poll, and a slow read never holds the balance up.
     void this.refreshChainUsage(acc).catch((e) => logErr(`[usage] ${acc.accountKey}`, e))
+    // otto/mamoru#293: the migration inventory and V4's pause, in the background (only where V4 is pinned and in scope).
+    if (this.cfg.oneAuth) void this.refreshOneAuth(acc).catch((e) => logErr(`[v4] ${acc.accountKey} inventory:`, e))
     // The app is open on this account: an armed activation is watched at full pace again.
     if (acc.armed) this.armSeen.set(acc.accountKey, Date.now())
     const [r, peers] = await Promise.all([this.readSafeCached(acc, live.safe, fresh), this.peerRead(acc, PEER_FUNDING_MAX_AGE_MS)])
@@ -1791,7 +1869,7 @@ export class Operator {
     // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
     const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}) }
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' && extra.step !== undefined ? { step: extra.step } : {}), ...(kind === 'migrate-v4' && movedTo(calls) ? { moveTo: movedTo(calls)! } : {}) }
   }
 
   /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */
@@ -2174,6 +2252,8 @@ export class Operator {
    */
   /** Planned under the account lock: nothing else of the account (an engine review, another owner action) runs in between. */
   prepareRenew(ctx: AccountContext): Promise<OwnerTxToSign> {
+    // otto/mamoru#293: an account on V4 never renews, extends or upgrades (its one session has no end).
+    if (this.onV4(this.account(ctx, { readOnly: true }).acc)) return Promise.reject(new HttpError(409, 'ONE_AUTH_NO_RENEWAL', 'this account runs on one approval that does not expire: there is nothing to renew'))
     return this.lock(ctx.accountKey).run(() => this.planRenew(ctx))
   }
 
@@ -3695,6 +3775,14 @@ export class Operator {
     }
     // otto/mamoru#151 (GPT-6 review P1): the renewal signed is the one the row offers now. A move prepared for one policy
     // (v4) after which the offer changed (the v5 flag on) is not sent: the owner prepares again and reads the new summary.
+    // otto/mamoru#293: a migrate-v4 submit names the step it signs; another step than the prepared one is refused.
+    if (kind === 'migrate-v4' && (body as { step?: unknown }).step !== undefined && (body as { step?: unknown }).step !== (p.step ?? 0)) {
+      throw new HttpError(409, 'ONE_AUTH_STEP_MISMATCH', 'this signature is for another step of the update: prepare that step again')
+    }
+    if (kind === 'renew' && this.onV4(acc)) {
+      this.prepared.delete(p.prepareId)
+      throw new HttpError(409, 'ONE_AUTH_NO_RENEWAL', 'this account runs on one approval that does not expire: there is nothing to renew')
+    }
     if (kind === 'renew' && p.policyId !== undefined && p.policyId !== this.renewTarget(acc)) {
       this.prepared.delete(p.prepareId)
       throw new HttpError(409, 'APPROVAL_TARGET_CHANGED', 'what this approval would move your Safe to changed since it was prepared: prepare it again')
@@ -4470,6 +4558,15 @@ export class Operator {
     if ((p.kind === 'activate' || p.kind === 'renew') && p.capUsdc) o.capUsdc = p.capUsdc
     if ((p.kind === 'stop' || p.kind === 'renew') && p.revokes) o.revokes = p.revokes
     if (p.kind === 'renew' && p.extend) o.extend = true
+    // otto/mamoru#293: what a late receipt of a migration needs to apply it.
+    if (p.kind === 'migrate-v4') {
+      if (p.grants) o.ownerGrants = p.grants
+      if (p.revokes) o.revokes = p.revokes
+      if (p.removes) o.removes = p.removes
+      if (p.capUsdc) o.capUsdc = p.capUsdc
+      o.migrateStep = p.step ?? 0
+      o.step = p.step ?? 0
+    }
     o.safeTxHash = p.safeTxHash
     o.safeNonce = p.tx.nonce.toString()
     // otto/mamoru#15: past this time (at a final block, Safe nonce unspent) the activation can never run (settleByNonce).
@@ -4491,7 +4588,7 @@ export class Operator {
   }
 
   private async execute(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView): Promise<void> {
-    this.setBusy(acc, p.kind === 'activate' || p.kind === 'renew' ? 'activating' : p.kind === 'stop' ? 'closing' : 'withdrawing')
+    this.setBusy(acc, p.kind === 'activate' || p.kind === 'renew' || p.kind === 'migrate-v4' ? 'activating' : p.kind === 'stop' ? 'closing' : 'withdrawing')
     try {
       await this.executeOwner(acc, live, p, signature, op)
     } finally {
@@ -4800,6 +4897,8 @@ export class Operator {
       acc.grants = []
       acc.managedTokenIds = []
       this.store.save()
+    } else if (p.kind === 'migrate-v4') {
+      this.afterMigration(acc, p, receipt)
     } else if (p.kind === 'renew') {
       const gone = new Set((p.revokes ?? []).map((id) => id.toLowerCase()))
       const kept = (ids: Hex[]) => ids.filter((id) => !gone.has(id.toLowerCase()))
@@ -4960,6 +5059,10 @@ export class Operator {
           this.store.save()
         }
       }
+      else if (op.kind === 'migrate-v4' && op.ownerGrants && !later('exit')) {
+        // otto/mamoru#293: a migration whose receipt was not read when it ran: applied now, as afterOwner would have.
+        this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'migrate-v4', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, removes: op.removes, step: op.migrateStep ?? 0, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
+      }
       else if (op.kind === 'renew' && op.ownerGrants && later('exit')) {
         // It landed, and a stop came after it: whatever that stop did not revoke of its grants is still enabled.
         const revokedNow = new Set(acc.revoked.map((id) => id.toLowerCase()))
@@ -5088,6 +5191,16 @@ export class Operator {
     if (!bridge || !(policy.remoteBuckets ?? []).some((b) => b.chainId === BRIDGE_MONAD_CHAIN_ID)) return {}
     // Every remote bucket must be one this leg serves: a bucket on another chain would be counted as nothing.
     if ((policy.remoteBuckets ?? []).some((b) => b.chainId !== BRIDGE_MONAD_CHAIN_ID)) return {}
+    // otto/mamoru#293: a V4 home bridges only to the remote V4 registered and the guardian marked ready, with no end (no
+    // REMOTE_BRIDGE_STOP: the remote's session does not expire). Not ready yet: no remote (the bucket waits).
+    if (this.onV4(acc)) {
+      const v = acc.oneAuth?.remote
+      if (!v?.ready) return {}
+      const remotePermission = this.v4RemoteTarget(acc, v.sessionKey as Address, BigInt(acc.oneAuth?.capUsd ?? this.signedCapOf(acc).toString()))
+      if (!remotePermission) return {}
+      const ids = [v4RemoteFromSpec(acc.ctx, remotePermission.spec, this.remoteRegistryOf(BRIDGE_MONAD_CHAIN_ID)).permissionId]
+      return { remote: (block: bigint) => bridge.remote(acc.accountKey, v.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, ids) }
+    }
     // otto/mamoru#251: the account's own Safe there, fixed by its approval; none yet: no remote (the bucket waits).
     const rs = acc.remote
     if (!rs || rs.chainId !== BRIDGE_MONAD_CHAIN_ID) return {}
@@ -5101,6 +5214,522 @@ export class Operator {
         return bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, open ? rs.permissionIds : [])
       },
     }
+  }
+
+  // ---- one authorization: MamoruActionPolicyV4 (otto/mamoru#293, spec 010) ----------------------------------
+
+  private v4PoolsCache: RegistryPoolsCache | null = null
+  private readonly inventoryRunning = new Set<string>()
+  /** The registry pool key each V4 account's engine was started on: a change restarts the loop on the new pools. */
+  private readonly v4LoopKey = new Map<string, string>()
+
+  /** MamoruRegistry's active pools on this chain, one read per minute for every V4 account; null without the V4 stack. */
+  private v4Pools(): RegistryPoolsCache | null {
+    const d = this.cfg.oneAuth
+    if (!d) return null
+    return (this.v4PoolsCache ??= new RegistryPoolsCache(() => readRegistryPools(this.client, d.registry)))
+  }
+
+  /** The account runs on MamoruActionPolicyV4 (home or remote). */
+  private onV4(acc: Pick<AccountState, 'policyId'>): boolean {
+    return isOneAuthV4(acc.policyId)
+  }
+
+  /** The V4 policy an account on V4 resolves to on this operator (home on Base or a fork, remote on Monad). */
+  private v4PolicyOf(acc: Pick<AccountState, 'policyId'>): PolicyVersion {
+    if (acc.policyId === ONE_AUTH_V4_REMOTE) return oneAuthV4RemoteMonad
+    return this.cfg.policy.chain === 'fork' ? oneAuthV4Lab : oneAuthV4Live
+  }
+
+  /**
+   * The engine's V4 policy, registry and sessions: the account's buckets served by MamoruRegistry's active pools (the
+   * last read; before the first, none: the engine idles until the tick reads them and restarts the loop), and one engine
+   * session per pool template, all the account's one V4 permission.
+   */
+  private readonly v4EngineMemo = new Map<string, { policy: PolicyVersion; registry: Registry; sessions: EngineSession[]; key: string }>()
+
+  private v4Engine(acc: AccountState): { policy: PolicyVersion; registry: Registry; sessions: EngineSession[]; key: string } {
+    const memoKey = `${acc.accountKey}|${acc.grants[0]?.permissionId}|${acc.policyId}|${this.v4Pools()?.peek()?.key ?? ''}`
+    const hit = this.v4EngineMemo.get(memoKey)
+    if (hit) return hit
+    const built = this.v4EngineBuild(acc)
+    this.v4EngineMemo.set(memoKey, built)
+    return built
+  }
+
+  private v4EngineBuild(acc: AccountState): { policy: PolicyVersion; registry: Registry; sessions: EngineSession[]; key: string } {
+    const d = this.cfg.oneAuth
+    if (!d) throw new ReasonError('CHAIN_UNSUPPORTED', `${acc.accountKey} runs on V4 but this operator has no V4 deployment`)
+    const read = this.v4Pools()?.peek() ?? { pools: [], key: '' }
+    const r = withRegistryPools(this.v4PolicyOf(acc), d, read.pools, this.cfg.registry)
+    const g = acc.grants[0]
+    if (!g?.grant.oneAuthV4) throw new Error(`${acc.accountKey}: a V4 account holds its V4 session`)
+    const sessions: EngineSession[] = r.policy.session.grants.map((t) => ({ name: grantKey(t), grant: { ...g.grant, ...(t.pool ? { pool: t.pool } : {}) }, permissionId: g.permissionId, ...(g.admit?.length ? { admit: g.admit.map(BigInt) } : {}) }))
+    // Positions and balances of every V4 account are read against the registry's pools too (readSafe, funding, exits).
+    if (r.registry.entries.length > this.cfg.registry.entries.length) this.cfg.registry = r.registry
+    return { policy: r.policy, registry: r.registry, sessions, key: read.key }
+  }
+
+  /** The V4 stack, the flag scope and the account's policy allow offering the move (no reads: approvalView is sync). */
+  private v4Eligible(acc: AccountState): boolean {
+    if (!this.cfg.oneAuth || !acc.active || this.onV4(acc) || !this.inScope(acc, 'one_auth_v4')) return false
+    let cur: PolicyVersion
+    try {
+      cur = this.policyOf(acc)
+    } catch {
+      return false
+    }
+    return V4_MIGRATES_FROM_ONE_AUTH.has(cur.policyId) && cur.chain === this.cfg.policy.chain
+  }
+
+  /** Paused now (the V2/V3 guardian on a v5/v6 account, V4's guardian, breaker or review on a V4 one), from the last read. */
+  private pausedNow(acc: AccountState): boolean {
+    return this.chainUsage.get(acc.accountKey)?.paused === true || acc.oneAuth?.paused === true
+  }
+
+  /** The design-C Safe on Monad an account still has to migrate (step 1), or undefined. */
+  private designC(acc: AccountState): RemoteSafeRecord | undefined {
+    return acc.remote && !isOneAuthV4(acc.remote.spec.policyId) ? acc.remote : undefined
+  }
+
+  /** The confirmed migrate-v4 steps of the account. */
+  private v4StepsDone(acc: AccountState): Set<number> {
+    return new Set(acc.ops.filter((o) => o.kind === 'migrate-v4' && o.state === 'confirmed').map((o) => (o as StoredOp).migrateStep ?? 0))
+  }
+
+  /** The V4 Safe on Monad an account's migration moves its design-C funds to: V4's derivation over the account's keys. */
+  private v4RemoteTarget(acc: AccountState, sessionKey: Address, capUsd: bigint): { address: Address; spec: RemoteSpec } | null {
+    const reg = this.remoteRegistryOf(BRIDGE_MONAD_CHAIN_ID)
+    const spec: RemoteSpec = { chainId: BRIDGE_MONAD_CHAIN_ID, policyId: ONE_AUTH_V4_REMOTE, sessionKey, validAfter: 0, validUntil: 0, capUsdc: capUsd.toString(), home: acc.ctx.address as Address, homeDomain: V4_DOMAIN_BY_CHAIN[BASE_CHAIN_ID]! }
+    try {
+      return { address: v4RemoteFromSpec(acc.ctx, spec, reg).address, spec }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * otto/mamoru#293: approval.whatsNew of an account the move is offered to, or null: in the flag's scope, on a v2-v6
+   * policy, the V4 stack pinned, never while paused, and only once the permission inventory read back clean (fail
+   * closed). For a V4 account with a design-C Safe on Monad still to move: step 1 (`currentStep` 1).
+   */
+  private whatsNewView(acc: AccountState): WhatsNew | null {
+    if (!this.cfg.oneAuth || this.pausedNow(acc)) return null
+    const done = this.v4StepsDone(acc)
+    const c = this.designC(acc)
+    const cap = BigInt(acc.oneAuth?.capUsd ?? this.signedCapOf(acc).toString())
+    const monad = c
+      ? (() => {
+          const moveTo = acc.oneAuth?.remote?.address ?? this.v4RemoteTarget(acc, c.spec.sessionKey as Address, cap)?.address
+          return { summary: monadStepLines({ remove: c.permissionIds.length, revoke: c.permissionIds.length, moveTo: moveTo ?? 'your new Safe on Monad', tokens: ['USDC', 'WMON'], positions: 0 }), ...(moveTo ? { moveTo } : {}) }
+        })()
+      : undefined
+    if (this.onV4(acc)) {
+      if (!c || done.has(1) || !done.has(0)) return null
+      return whatsNewOf({ base: [], monad, currentStep: 1 })
+    }
+    if (!this.v4Eligible(acc)) return null
+    const inv = acc.oneAuth?.inventory
+    if (!inv?.ok || !inv.remove || !inv.revoke) return null
+    const base = baseStepLines({ remove: inv.remove.length, revoke: inv.revoke.length, capUsd: cap, admitted: (acc.admittedTokenIds ?? []).length, ...(this.v4PolicyOf(acc).remoteBuckets?.length ? { remoteChain: 'Monad' } : {}) })
+    return whatsNewOf({ base, monad, currentStep: done.has(0) ? 1 : 0 })
+  }
+
+  /**
+   * POST one-auth-key (otto/mamoru#293): the session key and cap of an account to be created on V4 (setup mode), for an
+   * account in the flag's scope where V4 is pinned. Generated once per account and kept (0600 state): the Safe's address
+   * commits to it, so it never changes afterwards.
+   */
+  oneAuthKey(ctx: AccountContext): { sessionKey: Address; capUsdc: string } {
+    if (!this.cfg.oneAuth || this.cfg.chainId !== BASE_CHAIN_ID && this.cfg.policy.chain !== 'fork') this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'accounts on one approval are not offered here')
+    const view = this.store.state.accounts[ctx.accountKey] ?? ({ accountKey: ctx.accountKey, ctx } as AccountState)
+    if (!this.inScope(view, 'one_auth_v4')) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'accounts on one approval are not offered for this account')
+    const keys = (this.store.state.oneAuthKeys ??= {})
+    if (!keys[ctx.accountKey]) {
+      keys[ctx.accountKey] = generatePrivateKey()
+      this.store.save()
+    }
+    return { sessionKey: privateKeyToAccount(keys[ctx.accountKey]!).address, capUsdc: this.capFor(view).toString() }
+  }
+
+  /**
+   * POST one-auth-start (otto/mamoru#293): an account created on V4 starts with no owner signature (creating its Safe was
+   * the authorization): the relayer deploys the Safe once its USDC is there, the V4 session and its Init are read back
+   * on chain, the gas reserve is topped up and the engine runs. Idempotent.
+   */
+  startOneAuth(ctx: AccountContext): Promise<{ state: 'active' | 'waiting'; code?: string }> {
+    return this.lock(ctx.accountKey).run(() => this.startOneAuthNow(ctx))
+  }
+
+  private async startOneAuthNow(ctx: AccountContext): Promise<{ state: 'active' | 'waiting'; code?: string }> {
+    this.assertLive()
+    const d = this.cfg.oneAuth
+    if (!d || !ctx.oneAuth) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'this account is not an account on one approval')
+    const { acc, live } = this.account(ctx, { readOnly: true })
+    if (acc.active) return { state: 'active' }
+    if (!this.inScope(acc, 'one_auth_v4')) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'accounts on one approval are not offered for this account')
+    const priv = this.store.state.oneAuthKeys?.[ctx.accountKey]
+    if (!priv || privateKeyToAccount(priv).address.toLowerCase() !== ctx.oneAuth.sessionKey.toLowerCase()) throw new HttpError(409, 'REMOTE_KEY_UNKNOWN', 'this Safe names a session key this operator did not give')
+    const cap = BigInt(ctx.oneAuth.capUsdc)
+    const refusal = this.writeRefusal()
+    if (refusal) throw new HttpError(503, 'CHAIN_UNSUPPORTED', refusal)
+    const { deployed } = await readSafeNonce(this.client, live.safe)
+    const usdc = await this.usdcOf(live.safe)
+    if (!deployed && usdc < MIN_DEPLOY_USDC) return { state: 'waiting', code: 'BELOW_DEPLOY_MINIMUM' }
+    if (usdc > cap) return { state: 'waiting', code: 'DEPOSIT_OVER_CAP' }
+    if (!deployed) {
+      const { hash, receipt } = await this.relayer.send(deployCall(live))
+      console.log(`[v4] deploy ${live.safe} tx ${hash} ${receipt.status}`)
+      if (receipt.status !== 'success') throw new HttpError(502, 'DEPLOY_FAILED', 'the Safe could not be created just now: it is retried')
+    }
+    const session = v4HomeSession({ sessionKey: ctx.oneAuth.sessionKey as Address, deployment: d, capUsd: cap, generation: 1n, admit: [], registry: this.cfg.registry })
+    const pid = permissionIdOf(session)
+    const block = await this.client.getBlockNumber()
+    const [on, cfg] = await Promise.all([
+      this.client.readContract({ address: address('SmartSession', this.cfg.registry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [pid, live.safe], blockNumber: block }),
+      this.client.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'configOf', args: [live.safe], blockNumber: block }),
+    ])
+    if (!on || !cfg.set || cfg.capUsd !== cap || cfg.generation !== 1n || BigInt(cfg.home) !== 0n) {
+      logErr(`[v4] ${ctx.accountKey} ${live.safe} does not check out (session ${on}, config ${cfg.set} ${cfg.capUsd} ${cfg.generation})`, undefined)
+      throw new HttpError(409, 'REMOTE_SAFE_UNVERIFIED', 'the Safe on chain is not the one its creation committed to: nothing runs on it')
+    }
+    const eth = await this.client.getBalance({ address: live.safe })
+    const target = this.v4PolicyOf({ policyId: ONE_AUTH_V4 }).gasReserveWei + (await this.topUpMarginWei())
+    if (eth < target) {
+      const { receipt } = await this.relayer.send({ to: live.safe, value: target - eth, gas: 50_000n })
+      if (receipt.status !== 'success') throw new HttpError(502, 'GAS_TOPUP_FAILED', 'the Safe could not be funded for gas just now: it is retried')
+    }
+    const real = this.persist(acc)
+    const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey: ctx.oneAuth.sessionKey as Address, permissionId: pid, salt: session.salt, deployment: d, registry: this.cfg.registry, policyId: this.v4PolicyOf({ policyId: ONE_AUTH_V4 }).policyId }), permissionId: pid }
+    Object.assign(real, { trusted: true, active: true, deactivated: undefined, sessionKey: priv, grants: [stored], policyId: stored.grant.policyId, signedCapUsdc: cap.toString(), managedTokenIds: [], admittedTokenIds: real.admittedTokenIds ?? [], depositsAfter: block.toString(), historyFromBlock: block.toString(), epoch: real.epoch + 1, gen: (real.gen ?? 0) + 1, oneAuth: { ...real.oneAuth, capUsd: cap.toString(), generation: '1' } })
+    this.store.save()
+    this.startLoop(real)
+    console.log(`[v4] ${ctx.accountKey} ${live.safe} created on V4 and running`)
+    queueMicrotask(() => void this.lock(real.accountKey).run(() => this.oneAuthRemote(real)).catch((e) => logErr(`[v4] ${real.accountKey} remote:`, e)))
+    return { state: 'active' }
+  }
+
+  /** The ids the operator's state has for the account: grants, revoked, superseded, and every owner op's. */
+  private knownIds(acc: AccountState): Hex[] {
+    return [...new Set([...acc.grants.map((g) => g.permissionId), ...acc.revoked, ...(acc.superseded ?? []), ...acc.ops.flatMap((o) => [...((o as StoredOp).ownerGrants ?? []).map((g) => g.permissionId), ...((o as StoredOp).revokes ?? [])])].map((x) => x.toLowerCase() as Hex))]
+  }
+
+  /**
+   * The migration inventory (spec 010 r1 finding 4): SmartSession's SessionCreated for the Safe from the account's first
+   * block (incremental from the last checkpoint), its enumeration now, and the operator's records. A mismatch is an ops
+   * alert and no offer. In the background from funding; once more, at the head, by the prepare itself.
+   */
+  private async refreshInventory(acc: AccountState): Promise<NonNullable<OneAuthState['inventory']>> {
+    const head = await this.client.getBlockNumber()
+    const had = acc.oneAuth?.inventory
+    const first = BigInt(acc.ops.find((o) => o.opId.startsWith('own-') && o.block !== undefined)?.block ?? acc.historyFromBlock)
+    const from = had && BigInt(had.scannedFrom) <= first ? BigInt(had.scannedTo) + 1n : first > 50n ? first - 50n : 0n
+    const fresh = from <= head ? await sessionCreatedIds(this.client, this.cfg.registry, acc.ctx.address as Address, from, head, this.cfg.oneAuthLogPage ?? 2_000n) : []
+    const events = [...new Set([...(had && BigInt(had.scannedFrom) <= first ? had.events : []), ...fresh])] as Hex[]
+    const { enabled } = await readSessionState(this.client, this.cfg.registry, acc.ctx.address as Address, [], head)
+    const inv = inventoryOf({ events, enabled, stored: this.knownIds(acc) })
+    const out = { at: now(), scannedFrom: (had && BigInt(had.scannedFrom) <= first ? BigInt(had.scannedFrom) : from).toString(), scannedTo: head.toString(), events, ok: inv.ok, ...(inv.ok ? { remove: inv.remove, revoke: inv.revoke } : { code: inv.code, detail: inv.detail, unknown: inv.unknown }) }
+    if (!inv.ok && had?.ok !== false) logErr(`[alert] ${acc.accountKey} ONE_AUTH_INVENTORY_MISMATCH: ${inv.detail}; the move to V4 is not offered (${inv.unknown.join(',')})`, undefined)
+    acc.oneAuth = { ...acc.oneAuth, inventory: out }
+    this.store.save()
+    return out
+  }
+
+  /** From funding, in the background: the account's pause, and the inventory of an eligible one (at most every 10 minutes). */
+  private async refreshOneAuth(acc: AccountState): Promise<void> {
+    if (!this.cfg.oneAuth || this.inventoryRunning.has(acc.accountKey)) return
+    if (!this.onV4(acc) && !this.v4Eligible(acc)) return
+    this.inventoryRunning.add(acc.accountKey)
+    try {
+      const p = await this.pauseRead(acc)
+      if (p !== null && p !== (acc.oneAuth?.paused === true)) {
+        acc.oneAuth = { ...acc.oneAuth, paused: p }
+        this.store.save()
+      }
+      if (this.onV4(acc)) return
+      const last = acc.oneAuth?.inventory?.at
+      if (last && Date.now() - Date.parse(last) < 600_000) return
+      await this.lock(acc.accountKey).run(() => this.refreshInventory(acc))
+    } finally {
+      this.inventoryRunning.delete(acc.accountKey)
+    }
+  }
+
+  /** The account's pause now: V4's on a V4 account; MamoruActionPolicyV2/V3's guardian on a v5/v6 one; false before; null unreadable. */
+  private async pauseRead(acc: AccountState): Promise<boolean | null> {
+    if (this.onV4(acc)) return readV4Paused(this.client, this.cfg.oneAuth!.policy, acc.ctx.address as Address)
+    let ap: PolicyVersion['actionPolicy']
+    try {
+      ap = this.policyOf(acc).actionPolicy
+    } catch {
+      return null
+    }
+    if (!ap || (ap.contractVersion !== 2 && ap.contractVersion !== 3)) return false
+    return readV4Paused(this.client, ap.address, acc.ctx.address as Address)
+  }
+
+  /** Typed refusals of the move (never the generic "try again"). */
+  private refuseMigrate(code: 'ONE_AUTH_NOT_OFFERED' | 'ONE_AUTH_PAUSED' | 'ONE_AUTH_STEP_ORDER' | 'ONE_AUTH_INVENTORY_MISMATCH' | 'ONE_AUTH_DONE', message: string): never {
+    throw new HttpError(409, code, message)
+  }
+
+  /**
+   * POST migrate-v4/prepare {step}: the owner transaction of one step of the move to V4.
+   * - step 0, Base: ONE Safe tx (results section 7): removeSession every enabled old id, revokeEnableSignature every
+   *   known old id, trust + self-attest V4 and MamoruGasPolicyV2, enable the V4 session (the account's positions admitted),
+   *   MamoruMigrationCheck.assertMigrated last.
+   * - step 1, a design-C Safe on Monad: asked of the Monad operator (it holds that Safe), only once step 0 is confirmed.
+   * Refused while the account is paused, and when the inventory does not read back clean.
+   */
+  prepareMigrateV4(ctx: AccountContext, body: unknown): Promise<OwnerTxToSign> {
+    const step = (body as { step?: unknown } | null)?.step
+    if (step !== 0 && step !== 1) throw new HttpError(400, 'BAD_REQUEST', 'step is 0 or 1')
+    return this.lock(ctx.accountKey).run(() => (this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? this.planRemoteMigration(ctx, body as MigrateV4Body) : step === 0 ? this.planMigration(ctx) : this.planMonadStep(ctx)))
+  }
+
+  /** Refused while paused (typed), and while the pause cannot be read (retryable 503); the read is kept for the view. */
+  private async assertNotPaused(acc: AccountState): Promise<void> {
+    const p = await this.pauseRead(acc)
+    if (p === null) throw new HttpError(503, 'PAUSE_STATE_UNAVAILABLE', 'whether Mamoru is paused on your Safe could not be read just now: nothing was changed, try again in a minute')
+    if (p !== (acc.oneAuth?.paused === true) && this.store.state.accounts[acc.accountKey]) {
+      acc.oneAuth = { ...acc.oneAuth, paused: p }
+      this.store.save()
+    }
+    if (p) this.refuseMigrate('ONE_AUTH_PAUSED', 'Mamoru is paused on your Safe: the update waits until the pause ends')
+  }
+
+  private async planMigration(ctx: AccountContext): Promise<OwnerTxToSign> {
+    this.assertLive()
+    const { acc, live } = this.account(ctx, { readOnly: true })
+    if (this.v4StepsDone(acc).has(0) || this.onV4(acc)) this.refuseMigrate('ONE_AUTH_DONE', 'this account already runs on the new approval')
+    if (!this.v4Eligible(acc)) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'the update is not offered for this account')
+    await this.assertNotPaused(acc)
+    if (!acc.sessionKey) throw new Error(`${acc.accountKey} has no session key`)
+    const inv = await this.refreshInventory(acc)
+    if (!inv.ok || !inv.remove || !inv.revoke) this.refuseMigrate('ONE_AUTH_INVENTORY_MISMATCH', 'Mamoru could not account for every permission on your Safe: nothing was prepared, and the team was alerted')
+    const d = this.cfg.oneAuth!
+    const r = await readSafe(this.client, live.safe, this.cfg.registry)
+    const admit = this.sizingPositions(acc, r).map((p) => p.tokenId).slice(0, V4_MAX_ADMIT)
+    const cap = this.signedCapOf(acc)
+    const session = v4HomeSession({ sessionKey: privateKeyToAccount(acc.sessionKey).address, deployment: d, capUsd: cap, generation: 1n, admit, registry: this.cfg.registry })
+    const { nonces } = await readSessionState(this.client, this.cfg.registry, live.safe, inv.revoke, r.block)
+    const attestData = keccak256(toHex(`mamoru.v4.attest:${acc.accountKey}:${randomBytes(8).toString('hex')}`))
+    const tx = migrationTx({ account: live.safe, remove: inv.remove, revoke: inv.revoke, noncesBefore: nonces, session, deployment: d, attestData, registry: this.cfg.registry })
+    const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey: privateKeyToAccount(acc.sessionKey).address, permissionId: tx.permissionId, salt: session.salt, deployment: d, registry: this.cfg.registry }), permissionId: tx.permissionId, ...(admit.length ? { admit: admit.map(String) } : {}) }
+    const summary = baseStepLines({ remove: inv.remove.length, revoke: inv.revoke.length, capUsd: cap, admitted: admit.length, ...(this.v4PolicyOf(acc).remoteBuckets?.length ? { remoteChain: 'Monad' } : {}) })
+    return this.hold(acc, live, 'migrate-v4', tx.calls, summary, { step: 0, grants: [stored], revokes: inv.revoke, removes: inv.remove, capUsdc: cap.toString() })
+  }
+
+  /** Base side of step 1: refused before step 0 is confirmed; the Monad operator builds it on the design-C Safe. */
+  private async planMonadStep(ctx: AccountContext): Promise<OwnerTxToSign> {
+    this.assertLive()
+    const { acc } = this.account(ctx, { readOnly: true })
+    const done = this.v4StepsDone(acc)
+    if (!done.has(0) || !this.onV4(acc)) this.refuseMigrate('ONE_AUTH_STEP_ORDER', 'the Base step of the update must be confirmed first')
+    if (done.has(1)) this.refuseMigrate('ONE_AUTH_DONE', 'your Safe on Monad is already updated')
+    const c = this.designC(acc)
+    if (!c) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'this account has no Safe on Monad to update')
+    await this.assertNotPaused(acc)
+    const peer = this.cfg.remotePeers?.[c.chainId]
+    if (!peer?.migrateV4) throw new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru on Monad is not reachable right now: nothing was changed, try again in a few minutes')
+    const target = this.v4RemoteTarget(acc, c.spec.sessionKey as Address, BigInt(acc.oneAuth?.capUsd ?? this.signedCapOf(acc).toString()))
+    if (!target) throw new HttpError(503, 'REMOTE_UNAVAILABLE', 'your new Safe on Monad could not be worked out just now: nothing was changed')
+    const tx = (await peer.migrateV4(this.remoteContext(acc, c), 'prepare', { step: 1, home: acc.ctx.address as Address, capUsdc: target.spec.capUsdc, moveTo: target.address }).catch(peerRefusal)) as OwnerTxToSign
+    if (!tx || typeof tx.safeTxHash !== 'string' || tx.chainId !== c.chainId || tx.safe.toLowerCase() !== c.address.toLowerCase()) throw new HttpError(502, 'REMOTE_UNAVAILABLE', 'Mamoru on Monad answered with something else: nothing was signed')
+    // The destination the Monad operator read from its built calls must be the one the account's keys give (or none moves).
+    if (tx.moveTo && tx.moveTo.toLowerCase() !== target.address.toLowerCase()) throw new HttpError(409, 'REMOTE_SAFE_MISMATCH', 'the destination is not your new Safe on Monad: nothing was prepared')
+    return { ...tx, step: 1, ...(tx.moveTo ? { moveTo: tx.moveTo, remote: { chainId: c.chainId, address: tx.moveTo, spec: target.spec } } : {}) }
+  }
+
+  /**
+   * Monad side of step 1, on the design-C Safe itself: home migrated on Base (read there: V4's config of the home is
+   * set), `moveTo` V4's own derivation of the account's new Safe here (the twin over the keys, this operator's session
+   * key, the home's C, and V4's registration on Base when there is one). One Safe tx: remove and revoke this Safe's old
+   * sessions, trust + attest, enable a V4 session (home = the Base account: it may only manage its positions here and
+   * send funds home), move its idle USDC and WMON to `moveTo`, assertMigrated.
+   */
+  private async planRemoteMigration(ctx: AccountContext, body: MigrateV4Body): Promise<OwnerTxToSign> {
+    this.assertLive()
+    const { acc, live } = this.account(ctx, { readOnly: true })
+    const spec = ctx.remote
+    const baseKey = baseKeyOf(ctx.accountKey, this.cfg.chainId)
+    if (!spec || !baseKey || isOneAuthV4(spec.policyId) || body?.step !== 1) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'this Safe has no update to make')
+    if (this.onV4(acc)) this.refuseMigrate('ONE_AUTH_DONE', 'your Safe on Monad is already updated')
+    const d = this.cfg.oneAuth
+    if (!d || !this.cfg.homeClient) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'the update is not available on Monad yet')
+    const home = getAddress(String(body.home)) as Address
+    const homeCfg = await this.cfg.homeClient.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'configOf', args: [home] }).catch(() => null)
+    if (!homeCfg) throw new HttpError(503, 'HOME_UNAVAILABLE', 'your Safe on Base could not be read just now: nothing was changed, try again in a minute')
+    if (!homeCfg.set) this.refuseMigrate('ONE_AUTH_STEP_ORDER', 'the Base step of the update must be confirmed first')
+    if (await readV4Paused(this.cfg.homeClient, d.policy, home)) this.refuseMigrate('ONE_AUTH_PAUSED', 'Mamoru is paused on your Safe: the update waits until the pause ends')
+    const priv = this.store.state.remoteKeys?.[baseKey]
+    if (!priv) throw new HttpError(409, 'REMOTE_KEY_UNKNOWN', 'this Safe names a session key this operator did not give')
+    const sessionKey = privateKeyToAccount(priv).address
+    const v4spec: RemoteSpec = { chainId: this.cfg.chainId, policyId: ONE_AUTH_V4_REMOTE, sessionKey, validAfter: 0, validUntil: 0, capUsdc: homeCfg.capUsd.toString(), home, homeDomain: V4_DOMAIN_BY_CHAIN[BASE_CHAIN_ID]! }
+    const target = v4RemoteFromSpec({ address: home, owners: ctx.owners, passkey: ctx.passkey }, v4spec, this.cfg.registry)
+    if (target.address.toLowerCase() !== String(body.moveTo).toLowerCase()) throw new HttpError(409, 'REMOTE_SAFE_MISMATCH', 'the destination is not your new Safe on Monad: nothing was prepared')
+    const registered = await this.cfg.homeClient.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'remoteOf', args: [home, V4_DOMAIN_BY_CHAIN[this.cfg.chainId]!] }).catch(() => null)
+    if (registered && BigInt(registered.remote) !== 0n && registered.remote.toLowerCase() !== target.address.toLowerCase()) throw new HttpError(409, 'REMOTE_SAFE_MISMATCH', 'V4 on Base registered another Safe here: nothing was prepared')
+    const head = await this.client.getBlockNumber()
+    const from = BigInt(acc.historyFromBlock) > 10_000n ? BigInt(acc.historyFromBlock) - 10_000n : 0n
+    const events = await sessionCreatedIds(this.client, this.cfg.registry, live.safe, from, head, this.cfg.oneAuthLogPage ?? 2_000n)
+    const { enabled } = await readSessionState(this.client, this.cfg.registry, live.safe, [], head)
+    const inv = inventoryOf({ events, enabled, stored: this.knownIds(acc) })
+    if (!inv.ok) {
+      logErr(`[alert] ${acc.accountKey} ONE_AUTH_INVENTORY_MISMATCH (Monad): ${inv.detail}`, undefined)
+      this.refuseMigrate('ONE_AUTH_INVENTORY_MISMATCH', 'Mamoru could not account for every permission on your Safe on Monad: nothing was prepared, and the team was alerted')
+    }
+    const r = await readSafe(this.client, live.safe, this.cfg.registry)
+    const admit = this.sizingPositions(acc, r).map((p) => p.tokenId).slice(0, V4_MAX_ADMIT)
+    const session = v4Session({ sessionKey, deployment: d, init: { capUsd: homeCfg.capUsd, generation: 1n, home, homeDomain: V4_DOMAIN_BY_CHAIN[BASE_CHAIN_ID]!, admit }, salt: V4_REMOTE_SESSION_SALT, registry: this.cfg.registry })
+    const { nonces } = await readSessionState(this.client, this.cfg.registry, live.safe, inv.revoke, r.block)
+    const moves = (['USDC', 'WMON'] as const).filter((t) => isDeployed(t, this.cfg.registry) && (r.tokens[t] ?? 0n) > 0n).map((t) => ({ to: address(t, this.cfg.registry), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [target.address, r.tokens[t]!] }) }))
+    const attestData = keccak256(toHex(`mamoru.v4.attest:${acc.accountKey}:${randomBytes(8).toString('hex')}`))
+    const tx = migrationTx({ account: live.safe, remove: inv.remove, revoke: inv.revoke, noncesBefore: nonces, session, deployment: d, attestData, extra: moves, registry: this.cfg.registry })
+    const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey, permissionId: tx.permissionId, salt: session.salt, deployment: d, registry: this.cfg.registry, policyId: ONE_AUTH_V4_REMOTE }), permissionId: tx.permissionId, ...(admit.length ? { admit: admit.map(String) } : {}) }
+    const summary = monadStepLines({ remove: inv.remove.length, revoke: inv.revoke.length, moveTo: target.address, tokens: (['USDC', 'WMON'] as const).filter((t) => (r.tokens[t] ?? 0n) > 0n).map((t) => `${fmtUnits(r.tokens[t]!, entry(t, this.cfg.registry).decimals ?? 18)} ${t}`), positions: admit.length })
+    return this.hold(acc, live, 'migrate-v4', tx.calls, summary, { step: 1, grants: [stored], revokes: inv.revoke, removes: inv.remove, capUsdc: homeCfg.capUsd.toString(), home })
+  }
+
+  /** Monad side (`POST migrate-v4/status`, from the Base operator): whether step 1 is confirmed on this Safe. */
+  migrateV4Status(ctx: AccountContext): { done: boolean } {
+    const acc = this.store.state.accounts[ctx.accountKey]
+    return { done: !!acc && this.v4StepsDone(acc).has(1) }
+  }
+
+  /** The step a migrate-v4 submit names (a body without one is step 0). */
+  private submitStep(body: unknown): 0 | 1 {
+    return (body as { step?: unknown } | null)?.step === 1 ? 1 : 0
+  }
+
+  /**
+   * POST migrate-v4 on Base: step 0 through the ordinary owner path (submit), with the pause and the order checked again
+   * right before; step 1 forwarded to the Monad operator, mirrored here as an op that the tick settles from its status.
+   */
+  async submitMigrateV4(ctx: AccountContext, body: OwnerSignature & { step?: unknown }): Promise<OpView> {
+    const step = this.submitStep(body)
+    const { acc } = this.account(ctx, { readOnly: true })
+    if (this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID) {
+      if (!this.onV4(acc) && !(await this.homeMigrated(ctx, body))) this.refuseMigrate('ONE_AUTH_STEP_ORDER', 'the Base step of the update must be confirmed first')
+      return this.submit(ctx, 'migrate-v4', body)
+    }
+    if (step === 1 && !this.v4StepsDone(acc).has(0)) this.refuseMigrate('ONE_AUTH_STEP_ORDER', 'the Base step of the update must be confirmed first')
+    await this.assertNotPaused(acc)
+    if (step === 0) return this.submit(ctx, 'migrate-v4', body)
+    const c = this.designC(acc)
+    const peer = c ? this.cfg.remotePeers?.[c.chainId] : undefined
+    if (!c || !peer?.migrateV4) throw new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru on Monad is not reachable right now: nothing was changed, try again in a few minutes')
+    const res = (await peer.migrateV4(this.remoteContext(acc, c), 'submit', { ...body, step: 1 }).catch(peerRefusal)) as OpView
+    const real = this.persist(acc)
+    const op = this.newOp(real, 'migrate-v4')
+    ;(op as StoredOp).migrateStep = 1
+    op.step = 1
+    this.patchOp(real, op.opId, { state: res?.state === 'confirmed' ? 'confirmed' : res?.state === 'failed' ? 'failed' : 'submitted', ...(res?.code ? { code: res.code } : {}), ...(res?.txHash ? { txHash: res.txHash } : {}) })
+    return { ...real.ops.find((o) => o.opId === op.opId)! }
+  }
+
+  /** Monad side: the prepared step 1's home account has its V4 config set on Base (step 0 confirmed there). */
+  private async homeMigrated(ctx: AccountContext, body: { prepareId?: unknown }): Promise<boolean> {
+    const d = this.cfg.oneAuth
+    const p = typeof body?.prepareId === 'string' ? this.prepared.get(body.prepareId) : undefined
+    if (!d || !this.cfg.homeClient || !p || p.accountKey !== ctx.accountKey || !p.home) return false
+    const c = await this.cfg.homeClient.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'configOf', args: [p.home] }).catch(() => null)
+    return c?.set === true
+  }
+
+  /**
+   * Base side, on a timer: a V4 home with a remote bucket registers its remote on Monad (a session userOp,
+   * V4.registerRemote, lane 1), asks the Monad operator to deploy and run it, and follows V4's readiness (the guardian's);
+   * a step 1 forwarded to Monad is settled from its status there.
+   */
+  async tickOneAuth(): Promise<void> {
+    for (const acc of Object.values(this.store.state.accounts)) {
+      if (!acc.active || !this.onV4(acc) || acc.policyId === ONE_AUTH_V4_REMOTE) continue
+      await this.lock(acc.accountKey)
+        .run(() => this.oneAuthRemote(acc))
+        .catch((e) => logErr(`[v4] ${acc.accountKey} remote:`, e))
+    }
+  }
+
+  private async oneAuthRemote(acc: AccountState): Promise<void> {
+    const d = this.cfg.oneAuth
+    if (!d || !this.v4PolicyOf(acc).remoteBuckets?.length) return
+    const domain = V4_DOMAIN_BY_CHAIN[BRIDGE_MONAD_CHAIN_ID]!
+    const peer = this.cfg.remotePeers?.[BRIDGE_MONAD_CHAIN_ID]
+    // A step 1 out on Monad: its status there settles it.
+    const pending = acc.ops.find((o) => o.kind === 'migrate-v4' && (o as StoredOp).migrateStep === 1 && o.state === 'submitted')
+    const c = this.designC(acc)
+    if (pending && c && peer?.migrateV4) {
+      const s = (await peer.migrateV4(this.remoteContext(acc, c), 'status', {}).catch(() => null)) as { done?: boolean } | null
+      if (s?.done) this.patchOp(acc, pending.opId, { state: 'confirmed', code: 'EXEC_OK' })
+    }
+    const now0 = await readV4Remote(this.client, d.policy, acc.ctx.address as Address, domain)
+    if (!now0) return
+    const cap = BigInt(acc.oneAuth?.capUsd ?? this.signedCapOf(acc).toString())
+    if (BigInt(now0.remote) === 0n) {
+      if (!peer) return
+      const sessionKey = await peer.key(acc.ctx)
+      await this.registerRemoteV4(acc, domain, sessionKey)
+      return
+    }
+    const target = this.v4RemoteTarget(acc, now0.sessionKey, cap)
+    if (!target || target.address.toLowerCase() !== now0.remote.toLowerCase()) {
+      logErr(`[alert] ${acc.accountKey} V4 registered remote ${now0.remote}, the account's keys give ${target?.address ?? 'nothing'}: nothing is bridged`, undefined)
+      return
+    }
+    const rec = acc.oneAuth?.remote
+    if (!rec || rec.address.toLowerCase() !== now0.remote.toLowerCase() || rec.ready !== now0.ready) {
+      acc.oneAuth = { ...acc.oneAuth, remote: { domain, address: now0.remote, sessionKey: now0.sessionKey, ready: now0.ready, registeredAt: rec?.registeredAt ?? now() } }
+      this.store.save()
+    }
+    if (!now0.ready && peer) {
+      const res = await peer.provision({ accountKey: remoteAccountKey(acc.accountKey, BRIDGE_MONAD_CHAIN_ID), chainId: BRIDGE_MONAD_CHAIN_ID, address: now0.remote, owners: acc.ctx.owners, saltNonce: acc.ctx.saltNonce, passkey: acc.ctx.passkey, remote: target.spec })
+      if (res.state !== 'active') logErr(`[v4] ${acc.accountKey} remote ${now0.remote} not provisioned yet:`, res.code)
+    }
+  }
+
+  /** V4.registerRemote(domain, sessionKey) as a session userOp of the account's V4 session (nonce lane 1, beside the engine's 0). */
+  private async registerRemoteV4(acc: AccountState, domain: number, sessionKey: Address): Promise<void> {
+    const d = this.cfg.oneAuth!
+    const g = acc.grants[0]
+    if (!g?.grant.oneAuthV4 || !acc.sessionKey) return
+    const account = acc.ctx.address as Address
+    const callData = executeCallData([{ target: d.policy, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'registerRemote', args: [domain, sessionKey] }) }])
+    const key = sessionNonceKey(1, address('SmartSession', this.cfg.registry))
+    const nonce = (await this.client.readContract({ address: address('EntryPointV07', this.cfg.registry), abi: entryPointV07Abi, functionName: 'getNonce', args: [account, key] })) as bigint
+    const block = await this.client.getBlock()
+    const gas = engineGas(block.baseFeePerGas ?? 0n, GAS_CAPS_V2_BY_CHAIN[this.cfg.chainId])
+    if (!gas) return
+    const op = await signSessionUserOp(draftUserOp(account, nonce, callData, gas), this.cfg.chainId, g.permissionId, privateKeyToAccount(acc.sessionKey), this.cfg.registry)
+    const bundler = new BundlerClient({ url: this.cfg.bundlerUrl, mode: 'live', chainId: this.cfg.chainId, signingChainIds: [this.cfg.chainId], registry: this.cfg.registry })
+    const hash = await bundler.sendUserOperation(op)
+    console.log(`[v4] ${acc.accountKey} registerRemote(${domain}) userOp ${hash}`)
+  }
+
+  /**
+   * A confirmed migration step: the account's grants are its one V4 session from here on (home on Base; on Monad the
+   * design-C Safe becomes a V4 Safe whose home is the Base account), every old id is revoked, the engine restarts on V4.
+   */
+  private afterMigration(acc: AccountState, p: Prepared, receipt: TransactionReceipt): void {
+    const g = p.grants?.[0]
+    if (!g?.grant.oneAuthV4) {
+      logErr(`[v4] ${acc.accountKey} migration confirmed without its V4 session kept: left as is`, undefined)
+      return
+    }
+    const revoked = new Set(acc.revoked.map((x) => x.toLowerCase()))
+    acc.revoked.push(...(p.revokes ?? []).filter((x) => !revoked.has(x.toLowerCase())))
+    acc.superseded = []
+    acc.oneAuth = { ...acc.oneAuth, from: acc.policyId, capUsd: p.capUsdc ?? this.signedCapOf(acc).toString(), generation: '1' }
+    acc.policyId = g.grant.policyId
+    acc.grants = [g]
+    acc.managedTokenIds = []
+    if (g.admit?.length) acc.admittedTokenIds = [...new Set([...(acc.admittedTokenIds ?? []), ...g.admit])]
+    acc.grantsFromBlock = receipt.blockNumber.toString()
+    acc.epoch++
+    console.log(`[v4] ${acc.accountKey} moved from ${acc.oneAuth.from ?? LEGACY_POLICY} to ${acc.policyId} (step ${p.step ?? 0})`)
+    this.store.save()
+    if (acc.active) this.startLoop(acc)
+    if (this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID) queueMicrotask(() => void this.lock(acc.accountKey).run(() => this.oneAuthRemote(acc)).catch((e) => logErr(`[v4] ${acc.accountKey} remote:`, e)))
   }
 
   // ---- the account's own Safe on another chain (otto/mamoru#251) ----------------------------------------
@@ -5240,20 +5869,24 @@ export class Operator {
     if (acc.active) return { state: 'active', address: live.safe }
     const refusal = this.writeRefusal()
     if (refusal) throw new HttpError(503, 'CHAIN_UNSUPPORTED', refusal)
-    const r = remoteSafe(remoteInput(ctx, spec, this.cfg.registry))
-    if (r.address.toLowerCase() !== live.safe.toLowerCase()) throw safeHttpError(400, 'ACCOUNT_MISMATCH')
+    // otto/mamoru#293: a V4 remote is V4's own derivation over the home's keys (its session committed in MamoruRemoteInit's setup).
+    const v4 = isV4RemoteSpec(spec)
+    if (v4 && !this.cfg.oneAuth) throw new HttpError(503, 'CHAIN_UNSUPPORTED', 'the V4 stack is not pinned on this chain')
+    const r = v4 ? null : remoteSafe(remoteInput(ctx, spec, this.cfg.registry))
+    const r4 = v4 ? v4RemoteFromSpec({ address: spec.home ?? '0x', owners: ctx.owners, passkey: ctx.passkey }, spec, this.cfg.registry) : null
+    if ((r?.address ?? r4!.address).toLowerCase() !== live.safe.toLowerCase()) throw safeHttpError(400, 'ACCOUNT_MISMATCH')
     if (!(await readSafeNonce(this.client, live.safe)).deployed) {
       const { hash, receipt } = await this.relayer.send(deployCall(live))
       console.log(`[remote] deploy ${live.safe} tx ${hash} ${receipt.status}`)
       if (receipt.status !== 'success') throw new HttpError(502, 'DEPLOY_FAILED', 'the Safe could not be created just now: it is retried')
     }
     const block = await this.client.getBlockNumber()
-    const checked = await this.remoteChecks(live.safe, ctx.owners as Address[], r.permissionIds, block)
+    const checked = await this.remoteChecks(live.safe, ctx.owners as Address[], r ? r.permissionIds : [r4!.permissionId], block)
     if (checked) {
       logErr(`[remote] ${ctx.accountKey} ${live.safe} does not check out:`, checked)
       throw new HttpError(409, 'REMOTE_SAFE_UNVERIFIED', 'the Safe on chain is not the one the approval committed to: nothing runs on it')
     }
-    const policy = this.policyOf({ ...acc, policyId: spec.policyId })
+    const policy = v4 ? oneAuthV4RemoteMonad : this.policyOf({ ...acc, policyId: spec.policyId })
     const eth = await this.client.getBalance({ address: live.safe })
     const target = policy.gasReserveWei + (await this.topUpMarginWei())
     if (eth < target) {
@@ -5262,7 +5895,9 @@ export class Operator {
       // GPT-6 r2 P1 3: a Safe without its gas reserve cannot pay its userOps; it is not reported running (retried).
       if (receipt.status !== 'success') throw new HttpError(502, 'GAS_TOPUP_FAILED', 'the Safe could not be funded for gas just now: it is retried')
     }
-    const stored: StoredGrant[] = r.grants.map((g, i) => ({ name: r.keys[i]!, grant: g, permissionId: r.permissionIds[i]! }))
+    const stored: StoredGrant[] = r
+      ? r.grants.map((g, i) => ({ name: r.keys[i]!, grant: g, permissionId: r.permissionIds[i]! }))
+      : [{ name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey: spec.sessionKey as Address, permissionId: r4!.permissionId, salt: V4_REMOTE_SESSION_SALT, deployment: this.cfg.oneAuth!, registry: this.cfg.registry, policyId: ONE_AUTH_V4_REMOTE }), permissionId: r4!.permissionId }]
     Object.assign(acc, {
       trusted: true,
       active: true,
@@ -5318,7 +5953,10 @@ export class Operator {
     if (!acc.sessionKey) throw new Error(`${acc.accountKey} has no session key`)
     acc.runs = (acc.runs ?? 0) + 1
     this.store.save()
-    const sessions: EngineSession[] = [...acc.grants.map((g) => ({ name: g.name, grant: g.grant, permissionId: g.permissionId, ...(g.admit?.length ? { admit: g.admit.map(BigInt) } : {}) })), ...(isV4(this.policyOf(acc)) ? [] : acc.managedTokenIds.map((id) => this.manageSession(acc, BigInt(id))))]
+    // otto/mamoru#293: a V4 account's one session serves every pool of MamoruRegistry (one engine session per template).
+    const v4 = this.onV4(acc) ? this.v4Engine(acc) : null
+    if (v4) this.v4LoopKey.set(acc.accountKey, v4.key)
+    const sessions: EngineSession[] = v4 ? v4.sessions : [...acc.grants.map((g) => ({ name: g.name, grant: g.grant, permissionId: g.permissionId, ...(g.admit?.length ? { admit: g.admit.map(BigInt) } : {}) })), ...(isV4(this.policyOf(acc)) ? [] : acc.managedTokenIds.map((id) => this.manageSession(acc, BigInt(id))))]
     const priorIncluded = priorIncludedOf(acc.ops, sessions)
     const engine = new Engine(
       {
@@ -5342,6 +5980,9 @@ export class Operator {
         // otto/mamoru#61: off Base the engine reads the chain's registry, prices gas on its native pool and, where the
         // chain charges the gas limit, sizes each userOp from its simulation. On Base none of these is set (as before).
         ...(this.offBase() ? { registry: this.cfg.registry, nativePricePool: nativePricePool(this.cfg.registry), gasModel: chainOf(this.cfg.registry.chainId).gasModel } : {}),
+        // otto/mamoru#293: the registry the V4 policy's pools resolve in (the chain's, plus MamoruRegistry's pools), and the
+        // remote V4 mints to once the guardian marked it ready (the bridge's only recipient).
+        ...(v4 ? { registry: v4.registry, v4BridgeRecipient: () => (acc.oneAuth?.remote?.ready ? (acc.oneAuth.remote.address as Address) : undefined) } : {}),
         // The only owner intent the operator has today: a stop on its way pauses the engine (US6).
         intents: () => ({ paused: this.stopInFlight(acc), exitRequested: false }),
         peerPositions: () => this.peerPositionsOf(acc.accountKey),
@@ -5456,6 +6097,21 @@ export class Operator {
           // otto/mamoru#212: the other chains as this review counts them (a failed read: nothing new is placed).
           if (this.readsElsewhere(acc)) this.enginePeers.set(acc.accountKey, await this.peerRead(acc, PEER_ENGINE_MAX_AGE_MS))
           if (runner.stopped || !acc.active) return
+          // otto/mamoru#293: MamoruRegistry listed, removed or re-parametrized a pool since this loop started: it restarts on them.
+          if (this.onV4(acc)) {
+            const pools = await this.v4Pools()?.get().catch((e) => logErr(`[v4] registry pools unreadable:`, e))
+            if (pools && pools.key !== this.v4LoopKey.get(acc.accountKey)) {
+              console.log(`[v4] ${acc.accountKey} MamoruRegistry pools changed: engine restarts on them`)
+              queueMicrotask(() => {
+                try {
+                  if (acc.active) this.startLoop(acc)
+                } catch (e) {
+                  logErr(`[v4] ${acc.accountKey} restart:`, e)
+                }
+              })
+              return
+            }
+          }
           const startedAt = Date.now()
           const r = await engine.review()
           this.revokeManage(engine)

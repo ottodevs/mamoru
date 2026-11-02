@@ -48,6 +48,9 @@ export function opLine(op: OpView): string {
       }
       if (failed) return 'Renewal needs another approval'
       return done ? 'Approval renewed' : 'Renewing approval'
+    case 'migrate-v4':
+      if (failed) return 'Update needs another approval'
+      return done ? 'Mamoru updated to one approval' : 'Updating Mamoru'
     case 'transfer':
       if (failed) return 'Withdrawal needs another approval'
       return withdrewLine(op, done)

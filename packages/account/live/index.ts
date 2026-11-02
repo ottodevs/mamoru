@@ -16,7 +16,9 @@ import {
   type WebAuthnSigner,
 } from '../safe/index.ts'
 import { accountSetup, counterfactualAddress } from '../recovery/index.ts'
-import { remoteInput, remoteSafe } from '../remote/index.ts'
+import { isV4RemoteSpec, remoteInput, remoteSafe, v4RemoteFromSpec } from '../remote/index.ts'
+import { v4CreateSetup, v4HomeSession } from '../one-auth/index.ts'
+import { oneAuthV4Deployment } from '@mamoru/policy'
 import { activationCall, registryTrustCalls, revocationCalls, selfAttestCall, selfRevokeAttestationCall, type SessionPolicies } from '../sessions/index.ts'
 
 /** Owner-authorized cap for the live happy path on Base: 100 USDC per account (6 decimals). */
@@ -38,6 +40,8 @@ export type LiveAccount = {
   registry?: Registry
   /** otto/mamoru#251: a Safe whose setup carries sessions (`AccountContext.remote`): that setup, which `deployCall` sends. */
   setup?: SafeSetup
+  /** otto/mamoru#293: a V4 remote Safe (MamoruRemoteInit setup): the factory call `deployCall` sends. */
+  create?: { to: Address; data: Hex }
 }
 
 const regOf = (a: { registry?: Registry }): Registry => a.registry ?? baseRegistry
@@ -56,6 +60,21 @@ export function liveAccountFromContext(ctx: AccountContext, registry?: Registry)
   const owners = ctx.owners as Address[]
   const saltNonce = BigInt(ctx.saltNonce)
   const webauthn = webAuthnSigner(hexToBigInt(ctx.passkey.x), hexToBigInt(ctx.passkey.y), reg)
+  // otto/mamoru#293: a V4 remote Safe is MamoruActionPolicyV4's own derivation over the home account's keys.
+  if (ctx.remote && isV4RemoteSpec(ctx.remote)) {
+    const r = v4RemoteFromSpec({ address: ctx.remote.home ?? '0x', owners, passkey: ctx.passkey }, ctx.remote, reg)
+    if (r.address.toLowerCase() !== ctx.address.toLowerCase()) throw new Error(`V4 remote address ${r.address} does not match context ${ctx.address}`)
+    return { safe: r.address, chainId: ctx.chainId, owners, saltNonce, webauthn, ...(registry ? { registry } : {}), create: r.createCall }
+  }
+  // otto/mamoru#293: a home account created on V4: its setup enables the V4 session (setup mode).
+  if (ctx.oneAuth) {
+    const d = oneAuthV4Deployment(reg)
+    if (!d) throw new Error(`a V4 account on ${reg.chain}, where the V4 stack is not pinned`)
+    const session = v4HomeSession({ sessionKey: ctx.oneAuth.sessionKey as Address, deployment: d, capUsd: BigInt(ctx.oneAuth.capUsdc), generation: 1n, admit: [], registry: reg })
+    const created = v4CreateSetup(owners, saltNonce, webauthn, session, reg)
+    if (created.address.toLowerCase() !== ctx.address.toLowerCase()) throw new Error(`V4 setup address ${created.address} does not match context ${ctx.address}`)
+    return { safe: created.address, chainId: ctx.chainId, owners, saltNonce, webauthn, ...(registry ? { registry } : {}), setup: created.setup }
+  }
   // otto/mamoru#251: the account's own Safe on a remote chain is rebuilt with its sessions, from the same keys.
   const setup = ctx.remote ? remoteSafe(remoteInput(ctx, ctx.remote, reg)).setup : accountSetup(owners, saltNonce, webauthn, reg)
   const safe = counterfactualAddress(setup, reg)
@@ -65,6 +84,7 @@ export function liveAccountFromContext(ctx: AccountContext, registry?: Registry)
 
 /** SafeProxyFactory.createProxyWithNonce for the account. Any EOA can send it. */
 export function deployCall(a: LiveAccount): { to: Address; data: Hex } {
+  if (a.create) return a.create
   const reg = regOf(a)
   return createProxyCall(a.setup ?? accountSetup(a.owners, a.saltNonce, a.webauthn, reg), reg)
 }

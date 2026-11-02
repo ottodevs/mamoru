@@ -1,6 +1,6 @@
 import { ReasonError, type AccountContext, type Address, type Hex0x, type RemoteSpec } from '@mamoru/domain'
 import { registryFor, type Registry } from '@mamoru/registry'
-import { assertRemoteSafe, remoteAccountKey, remoteInput } from '@mamoru/account/remote'
+import { assertRemoteSafe, isV4RemoteSpec, remoteAccountKey, remoteInput, v4RemoteFromSpec } from '@mamoru/account/remote'
 import type { Db } from './env.ts'
 import { BASE } from './sleeves.ts'
 import type { AccountRow } from './accounts/store.ts'
@@ -22,9 +22,16 @@ export type RemoteRegistry = (chainId: number) => Registry
 export const defaultRemoteRegistry: RemoteRegistry = registryFor
 
 /** The offer is the remote Safe of `base`'s keys, on a chain the Worker knows. Throws (ReasonError REMOTE_SAFE_MISMATCH or any) when it is not. */
-export function verifyRemote(base: Pick<AccountContext, 'owners' | 'saltNonce' | 'passkey'>, offer: RemoteOffer, registryOf: RemoteRegistry = defaultRemoteRegistry): void {
+export function verifyRemote(base: Pick<AccountContext, 'address' | 'owners' | 'saltNonce' | 'passkey'>, offer: RemoteOffer, registryOf: RemoteRegistry = defaultRemoteRegistry): void {
   const spec = offer?.spec
   if (!spec || !REMOTE_CHAINS.includes(offer.chainId) || spec.chainId !== offer.chainId) throw new ReasonError('REMOTE_SAFE_MISMATCH', `remote Safe on chain ${offer?.chainId}: not a chain Mamoru provisions`)
+  // otto/mamoru#293: a V4 remote (the new Safe of a migrated account, or a migration step's destination): MamoruActionPolicyV4's
+  // own derivation over the row's keys, home = this very account.
+  if (isV4RemoteSpec(spec)) {
+    const r = v4RemoteFromSpec(base, spec, registryOf(offer.chainId))
+    if (r.address.toLowerCase() !== String(offer.address).toLowerCase()) throw new ReasonError('REMOTE_SAFE_MISMATCH', `V4 remote Safe ${offer.address} is not the one these keys give (${r.address})`)
+    return
+  }
   assertRemoteSafe(remoteInput(base, spec, registryOf(offer.chainId)), offer.address as Address)
 }
 

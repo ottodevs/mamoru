@@ -1,6 +1,6 @@
 # ops/systemd
 
-Two independent, unrelated proposals live in this directory. Neither installs anything by itself —
+Independent proposals live in this directory. Neither installs anything by itself —
 a human (or the coordinator) applies each one explicitly.
 
 1. [Beta auto-deploy watcher](#beta-auto-deploy-watcher-proposed) (`mamoru-beta-deploy.*`,
@@ -124,3 +124,12 @@ systemctl --user is-enabled mamoru-operatord.service                          # 
 systemctl --user show mamoru-operatord.service -p Transient -p FragmentPath   # Transient=no, a real file path
 curl -s http://127.0.0.1:8787/health                                          # {"ok":true,"chainId":8453,"live":true,...}
 ```
+
+## Guardian watcher unit (`mamoru-guardian.service`)
+
+Template only (otto/mamoru#293 item 6, spec 010): the user unit for `apps/mamoru-guardian`, the separate process that
+reads remote Safes back before `setReady` and alerts on registry `Queued` events and unprepared remote owner txs. It
+reads `~/.config/mamoru-guardian/env` (names in `apps/mamoru-guardian/README.md`; the key itself stays in its own 0600
+file, never in that env file) and writes only `~/.local/state/mamoru-guardian`. It holds the guardian key, which the
+operator never does. Nothing installs or starts it; to apply: copy or symlink to `~/.config/systemd/user/`, then
+`systemctl --user daemon-reload && systemctl --user enable --now mamoru-guardian` (try `--dry-run` first).

@@ -124,8 +124,23 @@ export const CCTP_DOMAIN_BY_CHAIN: Readonly<Record<number, number>> = { 143: 15 
  * exit range without the anchor), so whatever the engine does for V2 it does for V3.
  */
 function atLeastV2(ap: PolicyVersion['actionPolicy'] | undefined): ap is NonNullable<PolicyVersion['actionPolicy']> {
-  return ap?.contractVersion === 2 || ap?.contractVersion === 3
+  return ap?.contractVersion === 2 || ap?.contractVersion === 3 || ap?.contractVersion === 4
 }
+
+/**
+ * otto/mamoru#293 (spec 010): MamoruActionPolicyV4. Its price checks, pause, admission, mint through the policy and
+ * increase are V3's (so every atLeastV2 path holds), but I1 sends every spending action through V4 itself: a swap is
+ * `approve(V4) + V4.swap(.., deadline)` (no router call, no `multicall(deadline)`), a bridge `approve(V4) + V4.bridge`.
+ */
+function isV4Policy(ap: PolicyVersion['actionPolicy'] | undefined): ap is NonNullable<PolicyVersion['actionPolicy']> {
+  return ap?.contractVersion === 4
+}
+
+const v4SwapAbi = parseAbi([
+  'struct SwapParams { address pool; address tokenIn; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; uint256 deadline; }',
+  'function swap(SwapParams s) returns (uint256 amountOut)',
+  'function bridge(uint32 domain, address token, uint256 amount)',
+])
 
 /** CCTP V2 Standard finality: attested at finality, no fee. The only threshold the bridge-out grant allows (>= 2000). */
 export const CCTP_STANDARD_FINALITY = 2000
@@ -259,6 +274,12 @@ export type EngineConfig = {
    * not yet landed there is still in the local balances read at it, and is not counted in flight a second time.
    */
   remote?: (block: bigint) => Promise<NonNullable<Observation['remote']>>
+  /**
+   * otto/mamoru#293: under MamoruActionPolicyV4 the bridge-out recipient is not in any session rule: V4 mints only to the
+   * remote it registered and the guardian marked ready. The operator passes that address (read from V4) so the engine
+   * checks the simulated burn against it. Absent under V4: no bridge-out is ever prepared.
+   */
+  v4BridgeRecipient?: () => Address | undefined
   /**
    * otto/mamoru#218: this account's confirmed re-ranges from before this engine started (block timestamp and pool),
    * for the weekly cap and the cooldown across a restart. The newest also seeds `lastRerangeAt`. Absent: none.
@@ -1207,7 +1228,7 @@ export class Engine {
     const { twapWindowSeconds, maxTwapDeviationTicks } = this.cfg.policy.execution
     const [[, tick], oracle] = await Promise.all([
       this.client.readContract({ address: e.address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
-      this.poolOracle(pool, twapWindowSeconds, shortWindowSeconds, blockNumber),
+      this.poolOracle(pool, this.longWindow(pool, twapWindowSeconds), shortWindowSeconds, blockNumber),
     ])
     if (diverges(tick, oracle.twapLong, maxTwapDeviationTicks)) throw new ReasonError('EHG_PRICE_DIVERGENCE', `${pool}: tick ${tick} at block ${blockNumber}, TWAP ${oracle.twapLong}`)
     return oracle
@@ -1262,6 +1283,11 @@ export class Engine {
    * `priceGuard` above also calls: one code path. A v4-covered pool reads `poolOracle`/`priceGuardV4` instead (both
    * TWAPs in one `observe`).
    */
+  /** otto/mamoru#293: the pool's long TWAP window as MamoruRegistry lists it for V4 (`actionPolicy.twapByPool`), else `fallback`. */
+  private longWindow(pool: RegistryName, fallback: number): number {
+    return this.cfg.policy.actionPolicy?.twapByPool?.[pool]?.long ?? fallback
+  }
+
   private async poolTwapTick(pool: RegistryName, windowSeconds: number, blockNumber: bigint): Promise<number> {
     return twapTickAt(this.client, entry(pool, this.registry).address as Address, windowSeconds, blockNumber)
   }
@@ -1324,7 +1350,7 @@ export class Engine {
     if (!ap || bandTicks === undefined) return undefined
     const factor = ap.bandFactorBps ?? DEFAULT_BAND_FACTOR_BPS
     const anchor = ap.anchorByPool?.[pool]
-    return { address: ap.address, bandTicks: Math.floor((bandTicks * factor) / 10_000), ...(anchor ? { anchor } : {}), twapShortSeconds: ap.twapShortWindowSeconds ?? TWAP_SHORT_WINDOW_SECONDS }
+    return { address: ap.address, bandTicks: Math.floor((bandTicks * factor) / 10_000), ...(anchor ? { anchor } : {}), twapShortSeconds: ap.twapByPool?.[pool]?.short ?? ap.twapShortWindowSeconds ?? TWAP_SHORT_WINDOW_SECONDS }
   }
 
   /**
@@ -1422,6 +1448,9 @@ export class Engine {
         // otto/mamoru#140: never under today's TWAP floors either (the max of the minimums, the tighter limit).
         let amountOutMinimum = await this.swapMin({ ...p, amountIn }, q.amountOut, blockNumber, oracle.twapLong)
         if (bound.minOut > amountOutMinimum) amountOutMinimum = bound.minOut
+        if (isV4Policy(this.cfg.policy.actionPolicy)) {
+          return { quote: { amountIn, amountOut: q.amountOut, amountOutMinimum }, calls: this.v4SwapCalls(p.pool, p.tokenIn, amountIn, amountOutMinimum, bound.sqrtPriceLimitX96, deadline), expiresAt: deadline }
+        }
         const expiry = this.swapExpiry(session, deadline)
         return {
           quote: { amountIn, amountOut: q.amountOut, amountOutMinimum },
@@ -1479,6 +1508,12 @@ export class Engine {
    * would refuse, and never falls back to this account's address.
    */
   private bridgeRecipient(): Address {
+    if (isV4Policy(this.cfg.policy.actionPolicy)) {
+      const to = this.cfg.v4BridgeRecipient?.()
+      if (!to || BigInt(to) === 0n) throw new ReasonError('POLICY_DENIED_RECIPIENT', 'bridge_out: V4 has no remote marked ready for this account')
+      if (isAddressEqual(to, this.cfg.account)) throw new ReasonError('POLICY_DENIED_RECIPIENT', 'bridge_out: the mint recipient is this account itself, not its Safe on the other chain')
+      return getAddress(to)
+    }
     const s = this.session('bridge-out')
     const rule = s?.grant.actions.find((a) => a.signature.startsWith('depositForBurn'))?.params.find((r) => r.field === 'mintRecipient' && r.condition === 'EQUAL')
     if (!rule || rule.ref === 0n || rule.ref >= 1n << 160n) throw new ReasonError('POLICY_DENIED_RECIPIENT', 'bridge_out: no bridge-out session names a mint recipient')
@@ -1494,6 +1529,36 @@ export class Engine {
    * on-chain expiry (CCTP has none): a late landing is a real burn, which the operator's bridge journal counts in flight
    * from before signing until the chain settles it.
    */
+  /** otto/mamoru#293: a V4 swap: approve V4 for exactly `amountIn`, then V4.swap (recipient the account, deadline on chain). */
+  private v4SwapCalls(pool: RegistryName, tokenIn: RegistryName, amountIn: bigint, amountOutMinimum: bigint, sqrtPriceLimitX96: bigint, deadline: bigint): Execution[] {
+    const v4 = this.cfg.policy.actionPolicy!.address
+    const token = address(tokenIn, this.registry)
+    return [
+      { target: token, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [v4, amountIn] }) },
+      { target: v4, value: 0n, callData: encodeFunctionData({ abi: v4SwapAbi, functionName: 'swap', args: [{ pool: entry(pool, this.registry).address, tokenIn: token, amountIn, amountOutMinimum, sqrtPriceLimitX96, deadline }] }) },
+    ]
+  }
+
+  /**
+   * otto/mamoru#293: a V4 bridge-out: approve V4 for exactly `amount` of the savings token, then V4.bridge(domain, token,
+   * amount). V4 mints only to the remote the guardian marked ready; the engine needs that address to check the burn.
+   */
+  private prepareBridgeOutV4(p: Extract<Proposal, { kind: 'bridge_out' }>): Prepared {
+    const domain = CCTP_DOMAIN_BY_CHAIN[p.chainId]
+    if (domain === undefined) throw new ReasonError('POLICY_DENIED_TARGET', `bridge_out to chain ${p.chainId}: no CCTP domain known for it`)
+    if (p.amount <= 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `bridge_out of ${p.amount}`)
+    this.bridgeRecipient() // refuses when V4 has no ready remote
+    const v4 = this.cfg.policy.actionPolicy!.address
+    const token = address(this.cfg.policy.savingsAsset, this.registry)
+    return {
+      expiresAt: null,
+      calls: [
+        { target: token, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [v4, p.amount] }) },
+        { target: v4, value: 0n, callData: encodeFunctionData({ abi: v4SwapAbi, functionName: 'bridge', args: [domain, token, p.amount] }) },
+      ],
+    }
+  }
+
   private prepareBridgeOut(p: Extract<Proposal, { kind: 'bridge_out' }>): Prepared {
     const domain = CCTP_DOMAIN_BY_CHAIN[p.chainId]
     if (domain === undefined) throw new ReasonError('POLICY_DENIED_TARGET', `bridge_out to chain ${p.chainId}: no CCTP domain known for it`)
@@ -1522,10 +1587,11 @@ export class Engine {
     // Every priced call of the batch expires on chain at the same time (NonfungiblePositionManager and SwapRouter02).
     const deadline = timestamp + BigInt(this.cfg.policy.execution.observationTtlSeconds)
     await this.refuseWhilePaused(blockNumber)
-    if (p.kind === 'bridge_out') return this.prepareBridgeOut(p)
+    if (p.kind === 'bridge_out') return isV4Policy(this.cfg.policy.actionPolicy) ? this.prepareBridgeOutV4(p) : this.prepareBridgeOut(p)
     // MamoruActionPolicyV2 accounts (v5) quote their swaps with the price limit; the deployed V1's (v4) keep the path below.
     const v4Swap = p.kind === 'enter_swap' && atLeastV2(this.cfg.policy.actionPolicy) ? this.v4PoolConfig(p.pool) : undefined
     if (p.kind === 'enter_swap' && v4Swap) return this.prepareV4Swap(p, blockNumber, session, deadline, v4Swap)
+    if (p.kind === 'enter_swap' && isV4Policy(this.cfg.policy.actionPolicy)) throw new ReasonError('SESSION_MISSING', `${p.pool}: MamoruRegistry lists no parameters V4 could price it with`)
     if (p.kind === 'enter_swap') {
       const amountOut = await this.v3.quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn, this.registry), tokenOut: address(p.tokenOut, this.registry), fee: p.fee, amountIn: p.amountIn, blockNumber })
       const v4 = this.v4PoolConfig(p.pool)
@@ -1626,7 +1692,7 @@ export class Engine {
         if (v4) {
           // Spec 007 T3: decrease minimums from the same math as MamoruActionPolicy._decreaseMins, at the narrower
           // band; never below the usual slippage minimum either (take the max, same reasoning as the swap floor).
-          const oracle = await this.poolOracle(p.pool, this.cfg.policy.execution.twapWindowSeconds, v4.twapShortSeconds, blockNumber)
+          const oracle = await this.poolOracle(p.pool, this.longWindow(p.pool, this.cfg.policy.execution.twapWindowSeconds), v4.twapShortSeconds, blockNumber)
           // LeftClaw M-6: MamoruActionPolicyV2 prices a decrease off the TWAP range alone, so a depeg past the anchor
           // does not lock the exit; V1 still clips it to the anchor.
           const exitRange = atLeastV2(this.cfg.policy.actionPolicy) ? { bandTicks: v4.bandTicks } : v4
@@ -1677,7 +1743,8 @@ export class Engine {
     const a = burns[0]!.args
     const ok =
       isAddressEqual(a.burnToken, address(savings, this.registry)) &&
-      isAddressEqual(a.depositor, this.cfg.account) &&
+      // otto/mamoru#293: under V4 the burn is V4's own call (it pulled the amount from the account first).
+      isAddressEqual(a.depositor, isV4Policy(this.cfg.policy.actionPolicy) ? this.cfg.policy.actionPolicy.address : this.cfg.account) &&
       a.amount === p.amount &&
       a.mintRecipient.toLowerCase() === pad(this.bridgeRecipient(), { size: 32 }).toLowerCase() &&
       a.destinationDomain === CCTP_DOMAIN_BY_CHAIN[p.chainId] &&

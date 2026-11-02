@@ -23,14 +23,15 @@ export class RemotePeer {
     private readonly timeoutMs = 30_000,
   ) {}
 
-  private async post(ctx: AccountContext, route: string): Promise<{ status: number; body: unknown }> {
+  private async post(ctx: AccountContext, route: string, payload: unknown = {}): Promise<{ status: number; body: unknown }> {
     const path = `/api/accounts/${encodeURIComponent(ctx.accountKey)}/${route}`
+    const json = JSON.stringify(payload)
     const header = Buffer.from(JSON.stringify(ctx), 'utf8').toString('base64url')
     const ts = String(Math.floor(this.now() / 1000))
     const res = await this.fetchFn(this.url + path, {
       method: 'POST',
-      headers: { 'x-mamoru-account': header, 'x-mamoru-ts': ts, 'x-mamoru-sig': operatorSignature(this.secret, 'POST', path, header, '{}', ts), 'content-type': 'application/json' },
-      body: '{}',
+      headers: { 'x-mamoru-account': header, 'x-mamoru-ts': ts, 'x-mamoru-sig': operatorSignature(this.secret, 'POST', path, header, json, ts), 'content-type': 'application/json' },
+      body: json,
       signal: AbortSignal.timeout(this.timeoutMs),
     })
     return { status: res.status, body: await res.json().catch(() => null) }
@@ -50,5 +51,20 @@ export class RemotePeer {
     const b = body as { state?: unknown; address?: unknown; code?: unknown } | null
     if (status === 200 && b?.state === 'active' && typeof b.address === 'string') return { state: 'active', address: getAddress(b.address) }
     return { state: 'pending', code: typeof b?.code === 'string' ? b.code : `HTTP_${status}` }
+  }
+
+  /**
+   * otto/mamoru#293: step 1 of the move to V4, on the design-C Safe this peer runs: `prepare` (body: the home account,
+   * its C and the new Safe the funds move to, which the peer derives again itself), `submit` (the owner's signature), or
+   * `status` ({ done }). An HTTP error is thrown as one with its code, so the app shows it and never retries blindly.
+   */
+  async migrateV4(remote: AccountContext, phase: 'prepare' | 'submit' | 'status', body: unknown): Promise<unknown> {
+    const route = phase === 'prepare' ? 'migrate-v4/prepare' : phase === 'submit' ? 'migrate-v4' : 'migrate-v4/status'
+    const { status, body: res } = await this.post(remote, route, body)
+    if (status !== 200) {
+      const b = res as { code?: unknown; error?: unknown } | null
+      throw Object.assign(new Error(`remote operator of chain ${this.chainId}: ${status}`), { status, code: typeof b?.code === 'string' ? b.code : `HTTP_${status}`, error: typeof b?.error === 'string' ? b.error : '' })
+    }
+    return res
   }
 }

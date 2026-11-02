@@ -6,7 +6,7 @@ import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, chainWritesOptIn, isChainId, type Address } from '@mamoru/domain'
 import { address as registryAddress, baseRegistry, entry, isDeployed, messageTransmitterV2Abi, monadRegistry, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, liveWmonUsdcMonadV6, MONAD_LAB_POLICIES, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V6_POOLS, type PolicyVersion } from '@mamoru/policy'
+import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, liveWmonUsdcMonadV6, MONAD_LAB_POLICIES, oneAuthV4Deployment, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V6_POOLS, type PolicyVersion } from '@mamoru/policy'
 import { monadV6Deployed } from '@mamoru/account/remote'
 import { RemotePeer } from './remote-peer.ts'
 import { rpcBudget } from './budget.ts'
@@ -616,8 +616,14 @@ export async function bootOperator(o: BootOptions) {
   const peerList = parsePeerOperators(o.peerOperators, chainId)
   const peers = peerList.length ? new PeerExposure(peerList, o.secret) : null
   // otto/mamoru#251: the operators of v6's remote chains provision each account's own Safe there (Base only, v6 offered).
+  // otto/mamoru#293: the V4 stack of this chain, only when its registry file pins all four contracts (none of V4 otherwise).
+  const oneAuth = oneAuthV4Deployment(registry) ?? undefined
+  if (oneAuth) console.log(`[operator] one authorization (V4) pinned: MamoruActionPolicyV4 ${oneAuth.policy}, offered per account by the one_auth_v4 flag`)
+  // otto/mamoru#293, Monad side: the home chain read before a design-C Safe's step 1 (its home migrated on Base).
+  const homeRpcUrl = process.env.MAMORU_HOME_RPC_URL
+  const homeClient = oneAuth && chainId !== BASE_CHAIN_ID && homeRpcUrl ? createPublicClient({ transport: http(homeRpcUrl, { timeout: 15_000 }) }) : undefined
   const remotePeers = Object.fromEntries(
-    chainId === BASE_CHAIN_ID && v6Policy ? peerList.filter((p) => (v6Policy.remoteBuckets ?? []).some((b) => b.chainId === p.chainId)).map((p) => [p.chainId, new RemotePeer(p.chainId, p.url, o.secret)]) : [],
+    chainId === BASE_CHAIN_ID && (v6Policy || oneAuth) ? peerList.filter((p) => (v6Policy?.remoteBuckets ?? []).some((b) => b.chainId === p.chainId) || (oneAuth && p.chainId === 143)).map((p) => [p.chainId, new RemotePeer(p.chainId, p.url, o.secret)]) : [],
   )
   if (v6Policy && chainId === BASE_CHAIN_ID) {
     const missing = (v6Policy.remoteBuckets ?? []).filter((b) => !remotePeers[b.chainId])
@@ -667,6 +673,8 @@ export async function bootOperator(o: BootOptions) {
       ...(peers ? { peers } : {}),
       ...(bridgeMonad ? { bridgeMonad } : {}),
       ...(Object.keys(remotePeers).length ? { remotePeers } : {}),
+      ...(oneAuth ? { oneAuth } : {}),
+      ...(homeClient ? { homeClient } : {}),
     },
     client,
     relayer,
@@ -675,6 +683,8 @@ export async function bootOperator(o: BootOptions) {
   // otto/mamoru#251: an account's own Safe on a remote chain is provisioned when its approval lands, and again every
   // minute until its operator reports it running (a deploy that failed, a peer that was down).
   if (Object.keys(remotePeers).length) setInterval(() => void operator.tickRemotes(), 60_000).unref?.()
+  // otto/mamoru#293: V4 homes register, provision and follow the readiness of their remote every minute.
+  if (oneAuth && chainId === BASE_CHAIN_ID) setInterval(() => void operator.tickOneAuth(), 60_000).unref?.()
   // otto/mamoru#136 phase 1 + otto/mamoru#129: one read of every served Safe and its pools, with the yield-ledger
   // hold-value baseline always folded in, served on GET /snapshot. Always built when the chain supports it;
   // started and stopped by the `yield_ledger` ops flag (D1, set from /ops), not MAMORU_SNAPSHOT / MAMORU_YIELD_LEDGER

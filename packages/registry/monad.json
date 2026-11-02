@@ -219,5 +219,10 @@
       "codeHash": "0xeda33ac759687545901552fcd408d9f592fdef9edb1693ad26971fcfcf4a053a"
     }
   ],
-  "undeployed": []
+  "undeployed": [
+    { "name": "MamoruRegistry", "address": null },
+    { "name": "MamoruActionPolicyV4", "address": null },
+    { "name": "MamoruGasPolicyV2", "address": null },
+    { "name": "MamoruMigrationCheck", "address": null }
+  ]
 }

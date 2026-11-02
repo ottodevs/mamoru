@@ -153,10 +153,12 @@ describe('MamoruActionPolicyV2 (spec 007, otto/mamoru#151)', () => {
   test('is deployed on Base at the address and code hash read on chain; the guardian is an EOA, not an entry', () => {
     // otto/mamoru#213: MamoruPauseGate is named before its deployment (contracts/action-policy/script/DeployPauseGate.s.sol).
     // otto/mamoru#251: MamoruPauseGate re-deployed bound to V3 on Base 2026-11-01 (DeployPauseGate.s.sol, nonce 5) and pinned.
-    expect(baseRegistry.undeployed).toEqual([])
+    // otto/mamoru#293: the four contracts of spec 010 are named before T7 deploys them (fail closed: nothing targets them).
+    const v4 = ['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck']
+    expect(baseRegistry.undeployed).toEqual(v4)
     expect(address('MamoruPauseGate', baseRegistry)).toBe('0xf939c0FF7F095BA2ED7DDaaCD2D75da9A8cdF4e7')
     // otto/mamoru#214: deployed on Monad 2026-10-27 (DeployMonad.s.sol) and pinned.
-    expect(monadRegistry.undeployed).toEqual([])
+    expect(monadRegistry.undeployed).toEqual(v4)
     expect(isDeployed('MamoruGasPolicy', monadRegistry)).toBe(true)
     expect(address('MamoruGasPolicy', monadRegistry)).toBe('0xD62ab993c37A0b48E4593d83aF6C3555fc1B34fe')
     expect(address('MamoruActionPolicyV2', monadRegistry)).toBe('0xc50408916C253B9E9EeBC0308813eD6B470466Ac')

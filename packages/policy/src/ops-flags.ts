@@ -62,6 +62,17 @@ export const OPS_FLAGS = {
     label: 'Multichain for new accounts (v6 on Start)',
     description: 'A Start activates the account directly on conservadorLiveV6 (Base + its own Safe on Monad, growth 15 %) instead of the default policy (otto/mamoru#231). Scope it to test accounts until #259, #272 and #278 are done.',
   },
+  /**
+   * otto/mamoru#293 (spec 010, one authorization), default off, scoped like multichain_v6: an account in scope on a v2-v6
+   * policy is offered the move to MamoruActionPolicyV4 (the "What's new" screen: one owner Safe transaction on Base, a
+   * second on Monad for a design-C remote Safe), and its renewals stop once it runs on V4. Honoured only where the
+   * chain's registry pins MamoruRegistry, MamoruActionPolicyV4, MamoruGasPolicyV2 and MamoruMigrationCheck: with any of
+   * them unset the operator offers nobody V4, whatever the flag says. Accounts already on V4 stay on it.
+   */
+  one_auth_v4: {
+    label: 'One authorization (V4)',
+    description: 'Offers accounts in scope the move to MamoruActionPolicyV4: the owner signs once, no renewals, new pools and chains from the timelocked MamoruRegistry (otto/mamoru#293, spec 010). Inert until the four V4 contracts are pinned in the registry.',
+  },
 } as const
 
 export type OpsFlagName = keyof typeof OPS_FLAGS

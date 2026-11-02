@@ -143,7 +143,7 @@ export const homeCopy = {
   overCapAct: (o: OverCap) => `Withdraw ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC`,
 }
 
-const KIND: Record<OpView['kind'], string> = { activate: 'Start', enter: 'Position', reduce: 'Position', transfer: 'Withdraw', exit: 'Stop', renew: 'Approval' }
+const KIND: Record<OpView['kind'], string> = { activate: 'Start', enter: 'Position', reduce: 'Position', transfer: 'Withdraw', exit: 'Stop', renew: 'Approval', 'migrate-v4': 'Approval' }
 
 function plural(n: number, one: string, many: string) {
   return `${n} ${n === 1 ? one : many}`

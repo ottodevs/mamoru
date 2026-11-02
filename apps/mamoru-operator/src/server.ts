@@ -60,7 +60,7 @@ function decodeContext(header: string): AccountContext {
 }
 
 // bridge-out and eth-convert (#133, #211): answered by BridgeOut, 404 when the operator has no Ethereum RPC.
-const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop|renew\/prepare|renew|bridge-out\/prepare|bridge-out|eth-convert\/prepare|eth-convert|remote-key|provision)$/
+const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop|renew\/prepare|renew|bridge-out\/prepare|bridge-out|eth-convert\/prepare|eth-convert|remote-key|provision|migrate-v4\/prepare|migrate-v4\/status|migrate-v4|one-auth-key|one-auth-start)$/
 
 // Amounts are base-unit strings on the wire; a bigint that slips into a view is sent as its decimal string.
 const wire = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)
@@ -283,6 +283,18 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
           return json(200, await op.prepareRenew(ctx))
         case 'POST renew':
           return json(200, await op.submit(ctx, 'renew', parse()))
+        // otto/mamoru#293: the move to MamoruActionPolicyV4, one step at a time (0 Base, 1 the design-C Safe on Monad).
+        case 'POST migrate-v4/prepare':
+          return json(200, await op.prepareMigrateV4(ctx, parse()))
+        case 'POST migrate-v4':
+          return json(200, await op.submitMigrateV4(ctx, parse()))
+        case 'POST migrate-v4/status':
+          return json(200, op.migrateV4Status(ctx))
+        // otto/mamoru#293: an account created on V4 (setup mode): its session key before it exists, then its start.
+        case 'POST one-auth-key':
+          return json(200, op.oneAuthKey(ctx))
+        case 'POST one-auth-start':
+          return json(200, await op.startOneAuth(ctx))
         case 'POST bridge-out/prepare':
           return json(200, await bridge().prepare(ctx))
         case 'POST bridge-out':

@@ -7,6 +7,7 @@ import type { Execution } from '@mamoru/account/safe'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { SponsorEntry } from './sponsorship.ts'
 import type { OpFacts } from './yield-receipts.ts'
+import type { OneAuthState } from './one-auth.ts'
 
 /** An op as GET /ops serves it, plus what the operator keeps: repeat count of an identical failure, and for a confirmed engine op the session and calls it used (ledger replay on restart). */
 export type StoredOp = OpView & {
@@ -23,6 +24,9 @@ export type StoredOp = OpView & {
   capUsdc?: string
   /** Owner stop: the permissionIds its tx revokes. */
   revokes?: Hex[]
+  /** otto/mamoru#293, migrate-v4: the step (0 Base, 1 Monad) and the old ids it removed (revokes: every id it revoked). */
+  migrateStep?: 0 | 1
+  removes?: Hex[]
   /** Owner op: the Safe transaction hash it was signed for (ExecutionSuccess carries it) and its Safe nonce. */
   safeTxHash?: Hex
   safeNonce?: string
@@ -175,6 +179,8 @@ export type AccountState = {
    * bridge checks on chain before it sends anything. `ready`: the remote operator reported it deployed, checked and running.
    */
   remote?: RemoteSafeRecord
+  /** otto/mamoru#293: the account's move to MamoruActionPolicyV4 (inventory, the remote V4 registered). Absent: never offered. */
+  oneAuth?: OneAuthState
 }
 
 export type RemoteSafeRecord = { chainId: number; address: Hex; spec: RemoteSpec; permissionIds: Hex[]; ready?: boolean; lastCode?: string; checkedAt?: string }
@@ -187,6 +193,8 @@ export type OperatorState = {
    * address. Private, 0600 state file only, never logged.
    */
   remoteKeys?: Record<string, Hex>
+  /** otto/mamoru#293: the session key of each account created on V4 (setup mode), given before its address exists. 0600 only, never logged. */
+  oneAuthKeys?: Record<string, Hex>
 }
 
 const BIG = '$big'

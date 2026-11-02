@@ -53,6 +53,17 @@
         "wrangler": "4.139.0",
       },
     },
+    "apps/mamoru-guardian": {
+      "name": "@mamoru/guardian",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mamoru/account": "workspace:*",
+        "@mamoru/domain": "workspace:*",
+        "@mamoru/policy": "workspace:*",
+        "@mamoru/registry": "workspace:*",
+        "viem": "2.56.9",
+      },
+    },
     "apps/mamoru-lab-runner": {
       "name": "@mamoru/lab-runner",
       "version": "0.0.0",
@@ -401,6 +412,8 @@
     "@mamoru/engine": ["@mamoru/engine@workspace:apps/mamoru-engine"],
 
     "@mamoru/erc4337": ["@mamoru/erc4337@workspace:packages/erc4337"],
+
+    "@mamoru/guardian": ["@mamoru/guardian@workspace:apps/mamoru-guardian"],
 
     "@mamoru/journal": ["@mamoru/journal@workspace:packages/journal"],
 

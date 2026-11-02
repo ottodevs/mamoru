@@ -251,7 +251,12 @@ export type PolicyVersion = {
      * pause, the swap deadline): the engine reads `isPaused` before it prepares an op and waits (POLICY_PAUSED) instead
      * of sending one the policy refuses. Absent: the deployed V1, which has no pause.
      */
-    contractVersion?: 2 | 3
+    contractVersion?: 2 | 3 | 4
+    /**
+     * otto/mamoru#293 (contractVersion 4): each pool's TWAP windows as MamoruRegistry states them (V4 reads them per pool
+     * at every use). Absent for a pool: `execution.twapWindowSeconds` and `twapShortWindowSeconds`, as before.
+     */
+    twapByPool?: Partial<Record<RegistryName, { long: number; short: number }>>
     /**
      * otto/mamoru#213: the deployed MamoruPauseGate (bound to this `address`, MamoruActionPolicyV2), the second action
      * policy of every `requiresPauseGate` grant. Never a registry entry or a constant (same discipline as `address`).
@@ -422,4 +427,10 @@ export type SessionGrant = {
   requiresPauseGate?: true
   /** See `GrantTemplate.actionPolicyOnly`. */
   actionPolicyOnly?: true
+  /**
+   * otto/mamoru#293: the engine's view of the account's ONE MamoruActionPolicyV4 session (a fallback action, V4 its only
+   * action policy). `actions` is empty: precheck mirrors V4's `checkAction` instead (calls to V4's entry points, approvals
+   * to V4, the position manager's exits). Never encoded into a SmartSession by `toSmartSession`.
+   */
+  oneAuthV4?: { policy: Address; npm: Address }
 }

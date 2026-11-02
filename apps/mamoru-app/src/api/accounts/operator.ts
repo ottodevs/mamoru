@@ -189,7 +189,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
   routes.get('/:accountKey/ops', forward)
   routes.get('/:accountKey/withdraw-assets', forward)
   routes.get('/:accountKey/bridge-out', forward)
-  for (const action of ['activate', 'transfer', 'stop', 'renew', 'bridge-out', 'eth-convert']) {
+  for (const action of ['activate', 'transfer', 'stop', 'renew', 'bridge-out', 'eth-convert', 'migrate-v4']) {
     routes.post(`/:accountKey/${action}/prepare`, forward)
     routes.post(`/:accountKey/${action}`, forward)
   }

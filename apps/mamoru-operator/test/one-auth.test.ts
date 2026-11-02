@@ -1,0 +1,232 @@
+// otto/mamoru#293 (spec 010): the operator side of one authorization behind `one_auth_v4`. Flag off (or the V4 stack not
+// pinned) is byte-identical to today for a v6 account; on, a clean inventory offers approval.whatsNew in the shape #295
+// builds against; never while paused; a V4 account never renews; step 1 waits for step 0.
+import { describe, expect, test } from 'bun:test'
+import type { Hex } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
+import { baseRegistry } from '@mamoru/registry'
+import { grantKey, ONE_AUTH_V4, oneAuthV4Live, staticPool, withRegistryPools, type OneAuthV4Deployment } from '@mamoru/policy'
+import { resolveV4Policy, resolveV5Policy, resolveV6Policy } from '../src/boot.ts'
+import { encodeFunctionData, erc20Abi } from 'viem'
+import { HttpError, movedTo, type Operator } from '../src/operator.ts'
+import { v4StoredGrant, WHATS_NEW_POINTS, RegistryPoolsCache } from '../src/one-auth.ts'
+import type { AccountState } from '../src/state.ts'
+import { withPinnedV6Base } from '../../../packages/account/remote/fixture.ts'
+import { ctx, world } from './owner-world.ts'
+
+const D: OneAuthV4Deployment = { registry: '0x00000000000000000000000000000000000000A1', policy: '0x00000000000000000000000000000000000000A2', gasPolicy: '0x00000000000000000000000000000000000000A3', migrationCheck: '0x00000000000000000000000000000000000000A4' }
+const env = { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: `0x${'11'.repeat(20)}`, MAMORU_ACTION_POLICY_V2_ADDRESS: `0x${'33'.repeat(20)}`, MAMORU_GAS_POLICY_ADDRESS: `0x${'22'.repeat(20)}` }
+const reg6 = withPinnedV6Base()
+const v4 = resolveV4Policy('base', env)!
+const v5 = resolveV5Policy('base', env)!
+const v6 = resolveV6Policy('base', env, reg6)!
+const KEY = `0x${'5'.repeat(64)}` as Hex
+
+type Priv = { approvalView(a: AccountState): unknown; client: { readContract: (a: { functionName: string; args?: readonly unknown[] }) => Promise<unknown> } }
+const priv = (op: Operator) => op as unknown as Priv
+
+function running(w: ReturnType<typeof world>): AccountState {
+  const grants = v6.session.grants.filter((g) => !g.perPosition).map((g, i) => ({ name: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(64, '0')}` as Hex, grant: { policyId: v6.policyId, userOp: { validUntil: 2_000_000_000, validAfter: 0, usageLimit: 1 } } }))
+  const acc = { accountKey: 'k', ctx, active: true, trusted: true, policyId: v6.policyId, sessionKey: KEY, signedCapUsdc: '1500000000', grants, ops: [], revoked: [], managedTokenIds: [], admittedTokenIds: ['7'], depositsAfter: '1', historyFromBlock: '1', epoch: 1, seq: 0 } as unknown as AccountState
+  w.state.accounts.k = acc
+  return acc
+}
+
+const clean = (acc: AccountState) => {
+  const ids = acc.grants.map((g) => g.permissionId)
+  acc.oneAuth = { inventory: { ok: true, at: new Date().toISOString(), scannedFrom: '0', scannedTo: '100', events: ids, remove: ids, revoke: ids } }
+}
+
+const base = { registry: reg6, v4Policy: v4, v5Policy: v5, v6Policy: v6 }
+const on = { ...base, oneAuth: D, opsFlags: () => ({ one_auth_v4: false }), opsScopedFlags: () => ({ one_auth_v4: ['k'] }) }
+
+describe('flag off: byte-identical to today (otto/mamoru#293)', () => {
+  test("a v6 account's approval row is the same with the flag off, with V4 unpinned, and with neither", () => {
+    const views = [
+      world(0n, base),
+      world(0n, { ...base, oneAuth: D }),
+      world(0n, { ...base, oneAuth: D, opsFlags: () => ({ one_auth_v4: false }), opsScopedFlags: () => ({}) }),
+      world(0n, { ...base, opsFlags: () => ({ one_auth_v4: true }), opsScopedFlags: () => ({ one_auth_v4: null }) }),
+    ].map((w) => {
+      const acc = running(w)
+      clean(acc)
+      return JSON.stringify(priv(w.op).approvalView(acc))
+    })
+    expect(new Set(views).size).toBe(1)
+    expect(JSON.parse(views[0]!)).toEqual({ validUntil: 2_000_000_000, renewDue: false, expired: false, policyId: 'conservador-live-v6' })
+  })
+})
+
+describe('approval.whatsNew (the contract #295 builds against)', () => {
+  test('in scope, V4 pinned, clean inventory: the exact shape, one signature, step 0', () => {
+    const w = world(0n, on)
+    const acc = running(w)
+    clean(acc)
+    const v = priv(w.op).approvalView(acc) as { whatsNew: unknown }
+    expect(v.whatsNew).toEqual({ policy: 'one-auth-v4', points: [...WHATS_NEW_POINTS], signatures: 1, currentStep: 0, steps: [{ chain: 'base', summary: expect.any(Array) }] })
+    const w2 = v.whatsNew as { points: string[]; steps: { summary: string[] }[] }
+    expect(w2.points.length).toBeGreaterThanOrEqual(1)
+    expect(w2.points.length).toBeLessThanOrEqual(4)
+    expect(w2.steps[0]!.summary.every((l) => typeof l === 'string' && l.length > 0)).toBe(true)
+    expect(Object.keys(v).sort()).toEqual(['expired', 'policyId', 'renewDue', 'validUntil', 'whatsNew'])
+  })
+
+  test('a design-C Safe on Monad: two signatures, the Monad step names where the funds move', () => {
+    const w = world(0n, on)
+    const acc = running(w)
+    clean(acc)
+    acc.remote = { chainId: 143, address: `0x${'9'.repeat(40)}`, spec: { chainId: 143, policyId: 'live-wmon-usdc-monad-v6', sessionKey: privateKeyToAccount(KEY).address, validAfter: 1, validUntil: 2, capUsdc: '1' }, permissionIds: ['0x01'] }
+    const v = (priv(w.op).approvalView(acc) as { whatsNew: { signatures: number; steps: { chain: string; moveTo?: string }[] } }).whatsNew
+    expect(v.signatures).toBe(2)
+    expect(v.steps.map((s) => s.chain)).toEqual(['base', 'monad'])
+  })
+
+  test('never offered while paused, nor without a clean inventory (fail closed), nor out of scope', () => {
+    const w = world(0n, on)
+    const acc = running(w)
+    clean(acc)
+    acc.oneAuth!.paused = true
+    expect((priv(w.op).approvalView(acc) as { whatsNew?: unknown }).whatsNew).toBeUndefined()
+    acc.oneAuth = { inventory: { ok: false, at: new Date().toISOString(), scannedFrom: '0', scannedTo: '1', events: [], code: 'INVENTORY_MISMATCH', detail: 'x', unknown: ['0x01'] } }
+    expect((priv(w.op).approvalView(acc) as { whatsNew?: unknown }).whatsNew).toBeUndefined()
+    const out = world(0n, { ...on, opsScopedFlags: () => ({ one_auth_v4: ['someone-else'] }) })
+    const a2 = running(out)
+    clean(a2)
+    expect((priv(out.op).approvalView(a2) as { whatsNew?: unknown }).whatsNew).toBeUndefined()
+  })
+})
+
+describe('migrate-v4 refusals are typed', () => {
+  test('step 1 before step 0 is confirmed: ONE_AUTH_STEP_ORDER', async () => {
+    const w = world(0n, on)
+    running(w)
+    const e = await w.op.prepareMigrateV4(ctx, { step: 1 }).catch((x) => x)
+    expect(e).toBeInstanceOf(HttpError)
+    expect((e as HttpError).code).toBe('ONE_AUTH_STEP_ORDER')
+    const s = await w.op.submitMigrateV4(ctx, { prepareId: 'x', authenticatorData: '', clientDataJSON: '', signature: '', step: 1 }).catch((x) => x)
+    expect((s as HttpError).code).toBe('ONE_AUTH_STEP_ORDER')
+  })
+
+  test('paused (the V3 guardian of a v6 account): ONE_AUTH_PAUSED, prepare and submit', async () => {
+    const w = world(0n, on)
+    running(w)
+    const client = priv(w.op).client
+    const real = client.readContract.bind(client)
+    client.readContract = async (a) => (a.functionName === 'isPaused' ? true : real(a))
+    const e = await w.op.prepareMigrateV4(ctx, { step: 0 }).catch((x) => x)
+    expect((e as HttpError).code).toBe('ONE_AUTH_PAUSED')
+    const s = await w.op.submitMigrateV4(ctx, { prepareId: 'x', authenticatorData: '', clientDataJSON: '', signature: '', step: 0 }).catch((x) => x)
+    expect((s as HttpError).code).toBe('ONE_AUTH_PAUSED')
+  })
+
+  test('not offered (flag off): ONE_AUTH_NOT_OFFERED; a bad step: 400', async () => {
+    const w = world(0n, { ...base, oneAuth: D })
+    running(w)
+    expect(((await w.op.prepareMigrateV4(ctx, { step: 0 }).catch((x) => x)) as HttpError).code).toBe('ONE_AUTH_NOT_OFFERED')
+    expect((() => w.op.prepareMigrateV4(ctx, { step: 2 }))).toThrow()
+  })
+})
+
+describe('a V4 account stops renewing', () => {
+  function onV4(w: ReturnType<typeof world>): AccountState {
+    const acc = running(w)
+    const g = v4StoredGrant({ account: ctx.address, chainId: 8453, sessionKey: privateKeyToAccount(KEY).address, permissionId: `0x${'ee'.repeat(32)}`, salt: `0x${'00'.repeat(32)}`, deployment: D, registry: baseRegistry })
+    acc.policyId = ONE_AUTH_V4
+    acc.grants = [{ name: 'one-auth-v4', grant: g, permissionId: `0x${'ee'.repeat(32)}` }]
+    acc.ops = [{ opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'confirmed', updatedAt: '', migrateStep: 0 } as never]
+    return acc
+  }
+
+  test('no renew, extend or upgrade: refused, typed; the row carries no renewal fields', async () => {
+    const w = world(0n, on)
+    const acc = onV4(w)
+    const e = await w.op.prepareRenew(ctx).catch((x) => x)
+    expect((e as HttpError).code).toBe('ONE_AUTH_NO_RENEWAL')
+    expect(priv(w.op).approvalView(acc)).toEqual({ validUntil: 0, renewDue: false, expired: false, policyId: 'one-auth-v4' })
+    expect(w.op.usageView(acc)).toBeNull()
+  })
+
+  test('a design-C account on V4 is offered step 1 only (currentStep 1)', () => {
+    const w = world(0n, on)
+    const acc = onV4(w)
+    acc.remote = { chainId: 143, address: `0x${'9'.repeat(40)}`, spec: { chainId: 143, policyId: 'live-wmon-usdc-monad-v6', sessionKey: privateKeyToAccount(KEY).address, validAfter: 1, validUntil: 2, capUsdc: '1' }, permissionIds: ['0x01'] }
+    const v = (priv(w.op).approvalView(acc) as { whatsNew: { currentStep: number; signatures: number } }).whatsNew
+    expect(v.currentStep).toBe(1)
+    expect(v.signatures).toBe(2)
+  })
+})
+
+describe('engine pools from MamoruRegistry', () => {
+  const pool = (name: string, ratioBps = 5000) => ({ ...staticPool(name, baseRegistry), entry: { twapWindow: 1800, twapShortWindow: 300, bandTicks: 100, anchorTick: 0, anchorBand: name.includes('USDT') ? 40 : 0, ratioBps, active: true } })
+
+  test('stable pairs to stables, the rest to Balance; a pool listed after creation joins with no signature', () => {
+    const before = withRegistryPools(oneAuthV4Live, D, [pool('pool:USDC/USDT/100'), pool('pool:WETH/USDC/3000')], baseRegistry)
+    expect(before.policy.buckets.map((b) => [b.id, b.pools])).toEqual([['stables', ['pool:USDC/USDT/100']], ['risk', ['pool:WETH/USDC/3000']]])
+    const after = withRegistryPools(oneAuthV4Live, D, [pool('pool:USDC/USDT/100'), pool('pool:WETH/USDC/3000'), pool('pool:USDC/cbBTC/500')], baseRegistry)
+    expect(after.policy.buckets[1]!.pools).toEqual(['pool:WETH/USDC/3000', 'pool:USDC/cbBTC/500'])
+    expect(after.policy.actionPolicy).toMatchObject({ address: D.policy, contractVersion: 4, bandTicksByPool: { 'pool:USDC/cbBTC/500': 100 }, twapByPool: { 'pool:USDC/cbBTC/500': { long: 1800, short: 300 } } })
+    expect(after.policy.actionPolicy!.anchorByPool).toEqual({ 'pool:USDC/USDT/100': { tick: 0, band: 40 } })
+    expect(after.policy.session.grants.map(grantKey)).toEqual(['manage-any:pool:USDC/USDT/100', 'manage-any:pool:WETH/USDC/3000', 'manage-any:pool:USDC/cbBTC/500', 'bridge-out'])
+  })
+
+  test('a removed (inactive) pool, or one of an unpinned token, is not entered', () => {
+    const eurc = { ...pool('pool:WETH/USDC/3000'), address: '0x00000000000000000000000000000000000E0C00' as const, token0: '0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42' as const }
+    const r = withRegistryPools(oneAuthV4Live, D, [{ ...pool('pool:USDC/USDT/100'), entry: { ...pool('pool:USDC/USDT/100').entry, active: false } }, eurc], baseRegistry)
+    expect(r.pools).toEqual([])
+  })
+
+  test('the cache reads once per TTL and keeps the last good read', async () => {
+    let n = 0
+    let fail = false
+    let t = 0
+    const c = new RegistryPoolsCache(async () => {
+      n++
+      if (fail) throw new Error('down')
+      return [pool('pool:USDC/USDT/100')]
+    }, 1000, () => t)
+    await c.get()
+    await c.get()
+    expect(n).toBe(1)
+    t = 2000
+    fail = true
+    expect((await c.get()).pools).toHaveLength(1)
+    expect(n).toBe(2)
+  })
+})
+
+describe('the migrate-v4 contract of #201 (currentStep, OpView.step, prepare fields)', () => {
+  test('currentStep advances only on a confirmed step 0, never on a submitted one', () => {
+    const w = world(0n, on)
+    const acc = running(w)
+    clean(acc)
+    acc.ops = [{ opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'submitted', updatedAt: '', migrateStep: 0, step: 0 } as never]
+    expect((priv(w.op).approvalView(acc) as { whatsNew: { currentStep: number } }).whatsNew.currentStep).toBe(0)
+    acc.ops = [{ opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'confirmed', updatedAt: '', migrateStep: 0, step: 0 } as never]
+    expect((priv(w.op).approvalView(acc) as { whatsNew: { currentStep: number } }).whatsNew.currentStep).toBe(1)
+  })
+
+  test('a migrate-v4 op carries its step in the OpView', () => {
+    const w = world(0n, on)
+    const acc = running(w)
+    const op = { opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'proposed', updatedAt: '' }
+    ;(w.op as unknown as { stash(a: AccountState, o: unknown, p: unknown): void }).stash(acc, op, { kind: 'migrate-v4', step: 0, safeTxHash: '0x01', tx: { nonce: 3n } })
+    expect((op as { step?: number }).step).toBe(0)
+  })
+
+  test('moveTo is read from the built calls: the one transfer recipient, or none', () => {
+    const to = '0x000000000000000000000000000000000000dEaD'
+    const t = (a: string) => ({ data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [a as never, 5n] }) })
+    expect(movedTo([{ data: '0x1234' }, t(to), t(to)])).toBe(to)
+    expect(movedTo([{ data: '0x1234' }])).toBeUndefined()
+    expect(() => movedTo([t(to), t('0x000000000000000000000000000000000000bEEF')])).toThrow()
+  })
+
+  test('submit refuses a step other than the prepared one (ONE_AUTH_STEP_MISMATCH)', async () => {
+    const w = world(0n, on)
+    running(w)
+    const prepared = (w.op as unknown as { prepared: Map<string, unknown> }).prepared
+    prepared.set('p1', { prepareId: 'p1', accountKey: 'k', kind: 'migrate-v4', step: 1, expires: Date.now() + 60_000, safeTxHash: '0x01', tx: { nonce: 0n } })
+    const e = await w.op.submit(ctx, 'migrate-v4', { prepareId: 'p1', authenticatorData: '', clientDataJSON: '', signature: '', step: 0 } as never).catch((x) => x)
+    expect((e as HttpError).code).toBe('ONE_AUTH_STEP_MISMATCH')
+  })
+})

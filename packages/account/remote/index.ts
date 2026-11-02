@@ -6,7 +6,8 @@
 import { encodePacked, hexToBigInt, isAddressEqual, keccak256, zeroAddress } from 'viem'
 import { ReasonError, type AccountContext, type Address, type Hex, type RemoteSpec } from '@mamoru/domain'
 import { address, monadRegistry, type Registry } from '@mamoru/registry'
-import { computeCaps, grantKey, instantiateGrant, MONAD_GAS_CAPS, policyHash, policyRegistry, retargetToPolicy, V4_POOLS_MONAD, v4BudgetCaps, withActionPolicy, liveWmonUsdcMonadV6, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { computeCaps, grantKey, instantiateGrant, MONAD_GAS_CAPS, ONE_AUTH_V4_REMOTE, oneAuthV4Deployment, policyHash, policyRegistry, retargetToPolicy, V4_CHAIN_BY_DOMAIN, V4_DOMAIN_BY_CHAIN, V4_POOLS_MONAD, v4BudgetCaps, withActionPolicy, liveWmonUsdcMonadV6, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { ownerStateOf, v4Remote, type V4Remote } from '../one-auth/index.ts'
 import { accountSetup, counterfactualAddress } from '../recovery/index.ts'
 import { webAuthnSigner, type SafeSetup, type WebAuthnSigner } from '../safe/index.ts'
 import { permissionIdOf, toSmartSession, v4DeploymentOf, v4PoliciesFor, type SmartSessionStruct } from '../sessions/index.ts'
@@ -131,4 +132,30 @@ export function remoteInput(ctx: Pick<AccountContext, 'owners' | 'saltNonce' | '
     validUntil: spec.validUntil,
     capUsdc,
   }
+}
+
+/** otto/mamoru#293: a V4 remote Safe's spec (spec 010 I4): its address is MamoruActionPolicyV4's own derivation. */
+export function isV4RemoteSpec(spec: Pick<RemoteSpec, 'policyId'> | undefined): boolean {
+  return spec?.policyId === ONE_AUTH_V4_REMOTE
+}
+
+/**
+ * otto/mamoru#293: the V4 remote Safe a spec names, rebuilt from the home account's own keys (the Worker's D1 row, or the
+ * operator's verified context): MamoruV4Helper.remote's twin over those owners and passkey, the spec's session key and
+ * C, home = the account itself. Refused (REMOTE_SAFE_MISMATCH) when the spec names another home, a domain or validity
+ * V4 does not use, or when the remote chain's registry does not pin the V4 stack.
+ */
+export function v4RemoteFromSpec(base: Pick<AccountContext, 'address' | 'owners' | 'passkey'>, spec: RemoteSpec, registry: Registry, homeChainId = 8453): V4Remote {
+  if (!isV4RemoteSpec(spec)) throw new ReasonError('REMOTE_SAFE_MISMATCH', `${spec.policyId} is not a V4 remote`)
+  if (!spec.home || spec.home.toLowerCase() !== String(base.address).toLowerCase()) throw new ReasonError('REMOTE_SAFE_MISMATCH', `V4 remote of ${spec.home}, not of this account`)
+  const homeDomain = V4_DOMAIN_BY_CHAIN[homeChainId]
+  const domain = V4_DOMAIN_BY_CHAIN[spec.chainId]
+  if (!homeDomain || !domain || spec.homeDomain !== homeDomain || V4_CHAIN_BY_DOMAIN[domain] !== registry.chainId) throw new ReasonError('REMOTE_SAFE_MISMATCH', `V4 remote on chain ${spec.chainId} from domain ${spec.homeDomain}: not a route V4 pins`)
+  if (spec.validAfter !== 0 || spec.validUntil !== 0) throw new ReasonError('REMOTE_SAFE_MISMATCH', 'a V4 remote session has no validity window')
+  const deployment = oneAuthV4Deployment(registry)
+  if (!deployment) throw new ReasonError('REMOTE_SAFE_MISMATCH', `the V4 stack is not pinned on chain ${registry.chainId}`)
+  const shared = address('SafeWebAuthnSharedSigner', registry)
+  const withPasskey = base.owners.some((o) => o.toLowerCase() === shared.toLowerCase())
+  const webauthn = withPasskey ? webAuthnSigner(hexToBigInt(base.passkey.x), hexToBigInt(base.passkey.y), registry) : null
+  return v4Remote({ home: base.address as Address, owners: ownerStateOf(base.owners as Address[], webauthn, registry), domain, homeDomain, sessionKey: spec.sessionKey as Address, capUsd: BigInt(spec.capUsdc), deployment, registry })
 }

@@ -124,6 +124,7 @@ export type FundingView = {
     validUntil: number; renewDue: boolean; expired: boolean; missing?: number; upgrade?: boolean; upgradePolicy?: string; upgradeSplit?: { from: { bucket: string; bps: number }[]; to: { bucket: string; chainId: number; bps: number }[] }; paused?: boolean; policyId?: string
     capRaise?: { capUsdc: string; signedUsdc: string }
     usage?: { action: 'collect' | 'rerange' | 'enter'; pool: string | null; usedBps: number; spent: boolean }
+    whatsNew?: WhatsNew
   } | null
   positions: {
     tokenId: string; pool: string; liquidity: string; inRange: boolean; amountUsdc: string; amountCbbtc: string
@@ -341,6 +342,10 @@ export type OwnerTxToSign = {
   // otto/mamoru#251: this approval also provisions the account's own Safe on another chain, at `address`, whose setup
   // carries `spec`'s sessions; the bridge-out grant it signs mints only there. The Worker recomputes the address.
   remote?: { chainId: number; address: Hex0x; spec: RemoteSpec }
+  // otto/mamoru#293, migrate-v4: the step (0 Base, 1 Monad; `chainId` above is the chain of the Safe tx signed) and,
+  // when the prepared calls move funds, the Safe they send them to (read from the built calls). Submit refuses another step.
+  step?: 0 | 1
+  moveTo?: Hex0x
 }
 // WebAuthn assertion for SafeWebAuthnSharedSigner (base64url fields as returned by the browser).
 export type OwnerSignature = {
@@ -360,7 +365,7 @@ export type OwnerSignature = {
 }
 export type OpView = {
   opId: string
-  kind: 'activate' | 'enter' | 'reduce' | 'transfer' | 'exit' | 'renew'
+  kind: 'activate' | 'enter' | 'reduce' | 'transfer' | 'exit' | 'renew' | 'migrate-v4'
   state: 'proposed' | 'submitted' | 'confirmed' | 'failed'
   code?: string
   txHash?: Hex0x
@@ -392,7 +397,8 @@ export type OpView = {
    * otto/mamoru#219, engine ops only, absent on rows stored before it: the engine's own op kind (`kind` folds a
    * range move, a trim and a harvest into 'reduce'), the decision's reason code, and for a range move why it moved.
    */
-  step?: 'enter_swap' | 'enter_mint' | 'increase_liquidity' | 'harvest' | 'convert' | 'rerange' | 'reduce' | 'close_position' | 'bridge_out'
+  // otto/mamoru#293: on a migrate-v4 op, the step it ran (0 Base, 1 Monad) instead of an engine step.
+  step?: 'enter_swap' | 'enter_mint' | 'increase_liquidity' | 'harvest' | 'convert' | 'rerange' | 'reduce' | 'close_position' | 'bridge_out' | 0 | 1
   cause?: string
   why?: 'out' | 'edge' | 'widen'
   /** The position acted on (rerange/reduce/harvest/increase) or minted (enter_mint), and its range. */
@@ -424,6 +430,12 @@ export type AccountContext = {
   passkey: { credentialId: string; x: Hex0x; y: Hex0x }
   /** otto/mamoru#251: the Safe's setup carries these sessions (the account's own Safe on a remote bucket's chain). */
   remote?: RemoteSpec
+  /**
+   * otto/mamoru#293 (spec 010): a new account created on V4 (setup mode): its Safe's setup enables the one V4 session of
+   * this session key with InitV4 {capUsdc, generation 1}. The operator gives the key (POST one-auth-key) and recomputes
+   * the address from it; creating the Safe is the owner's whole authorization.
+   */
+  oneAuth?: { sessionKey: Hex0x; capUsdc: string }
 }
 
 /**
@@ -431,7 +443,27 @@ export type AccountContext = {
  * the remote policy, the remote operator's session key, the validity and the cap its sessions are sized at (raw USDC).
  * `remoteSafe` (packages/account/remote) turns keys + spec into the setup and the address; the Base approval commits to it.
  */
-export type RemoteSpec = { chainId: number; policyId: string; sessionKey: Hex0x; validAfter: number; validUntil: number; capUsdc: string }
+export type RemoteSpec = {
+  chainId: number; policyId: string; sessionKey: Hex0x; validAfter: number; validUntil: number; capUsdc: string
+  // otto/mamoru#293: a V4 remote Safe (policyId one-auth-v4-remote) names its home account and the home's CCTP domain:
+  // both are in its session's Init and its address. `capUsdc` is then the home's C. validAfter/validUntil are 0 (no end).
+  home?: Hex0x; homeDomain?: number
+}
+
+// otto/mamoru#293 (spec 010, #295): the move of a running account to MamoruActionPolicyV4, for the "What's new" screen.
+// `points`: 1-4 one-line reasons. `signatures`: owner signatures in all (2 when the account has a design-C Safe on Monad).
+// `currentStep`: the next step still pending (0-based); advances only after the previous step's owner op is confirmed on
+// chain (a submitted op does not move it), so a reload resumes.
+// `steps[i].summary`: every line the owner signs in that step, plain language; `moveTo`: the full destination Safe when
+// the step moves funds (the Monad step: the account's new V4 Safe there). Prepared and submitted through
+// POST migrate-v4/prepare {step} and POST migrate-v4 {step, ...signature}. Absent: not offered.
+export type WhatsNew = {
+  policy: 'one-auth-v4'
+  points: string[]
+  signatures: 1 | 2
+  currentStep: number
+  steps: { chain: 'base' | 'monad'; summary: string[]; moveTo?: string }[]
+}
 
 // One current and one monthly APY for the account (public, no session). Until positions earn
 // fees: the plan's pools' APYs weighted by the policy bucket weights. `pool` = the plan's policyId.
