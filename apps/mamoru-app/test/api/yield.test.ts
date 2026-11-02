@@ -13,7 +13,7 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
 
   test('every field is null before the cron has ever pulled a snapshot for this account', async () => {
     const view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
-    expect(view).toEqual({ asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null, lastBalance: null, earnedDaily: null })
+    expect(view).toEqual({ asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null, lastBalance: null, earnedDaily: null, worked: null })
   })
 
   test('accruedUsd and earnedSoFarUsd come from account_snapshot_latest once it has a row, collected folded in as 0 when none is known', async () => {

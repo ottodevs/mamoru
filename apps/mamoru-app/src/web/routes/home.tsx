@@ -1,4 +1,4 @@
-import type { ApyView, FundingView, Hex0x, OpView, OverCap, PriceDivergenceWarning, WithdrawAsset } from '@mamoru/domain'
+import type { ApyView, FundingView, WorkedView, Hex0x, OpView, OverCap, PriceDivergenceWarning, WithdrawAsset } from '@mamoru/domain'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
@@ -18,7 +18,7 @@ import { detailHead, MoveDetail, OpDetail, Sheet } from '../components/activity-
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { pairLabel, poolAddress, poolTokens, positionAmounts, progressLine, vaultAddress } from '../lib/positions.ts'
 import { activateLine, signatureCopy } from '../lib/signature.ts'
-import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
+import { DAY_S, idleReason, monthlyRate, MONTH_S, positionRates, sourceName, workedRate, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel } from '../lib/price-divergence.ts'
 import { localTime } from '../lib/time.ts'
 import { explorerAddress, explorerTx, useChain } from '../lib/chain.tsx'
@@ -52,7 +52,7 @@ export const homeCopy = {
   current: 'Current rate',
   earnedSoFar: 'earned so far',
   monthlyWhat: '30-day avg',
-  // Brais's label, literal (otto/mamoru#198, 23-oct): the figure is the whole balance's last 24 h.
+  // Brais's label, literal (otto/mamoru#198, 23-oct). Brais, 2 Nov: the figure is the last 24 h of the capital that worked.
   currentWhat: '24h avg',
   sources: 'Rate sources',
   monthlySource: 'Monthly',
@@ -271,16 +271,18 @@ function RateSub({ name, what, tail, info = null }: { name: string; what: string
  * otto/mamoru#198 (was #193's three indicators): Monthly rate and Current rate, one row under the balance, the
  * figure over its label. The sources sit behind (i). A figure that is not known says n/a and why, never a guess.
  */
-export function Indicators({ f, apy, price, noRead = false }: { f: FundingView | undefined; apy: ApyView | undefined; price: bigint | null; noRead?: boolean }) {
-  const rows = f ? positionRates(f, apy, price) : []
+export function Indicators({ f, apy, price, worked = null, noRead = false }: { f: FundingView | undefined; apy: ApyView | undefined; price: bigint | null; worked?: WorkedView | null; noRead?: boolean }) {
   const waiting = noRead ? ('no-read' as const) : ('loading' as const)
-  const monthly = f ? monthlyRate(rows, apy) : { pct: null, gap: waiting, covered: 0, of: 0, plan: false }
-  const current = f ? currentRate(rows, apy, split(f, price)) : { pct: null, gap: waiting, covered: 0, of: 0 }
-  const partial = (r: AccountRate) => (r.pct !== null && r.covered < r.of ? `${r.covered} of ${r.of} positions with a rate` : null)
+  // Brais, 2 Nov: both figures count only the capital that worked in the window, never idle money. Before anything
+  // has worked, the 30-day figure is the plan pools' mean (`monthlyRate` with no positions).
+  const nothingWorked = !!f && f.positions.length === 0 && !worked?.month.length
+  const monthly = !f ? { pct: null, gap: waiting, covered: 0, of: 0, plan: false } : nothingWorked ? monthlyRate([], apy) : { ...workedRate(f, worked?.month, apy, 'monthlyPct', MONTH_S, price), plan: false }
+  const current = f ? workedRate(f, worked?.day, apy, 'currentPct', DAY_S, price) : { pct: null, gap: waiting, covered: 0, of: 0 }
+  const partial = (r: AccountRate) => (r.pct !== null && r.covered < r.of ? `${r.covered} of ${r.of} pools with a rate` : null)
   const monthlySrc = sourceName(apy?.monthlySource)
   const currentSrc = sourceName(apy?.currentSource)
   const monthlyTail = monthly.gap ? homeCopy.gap[monthly.gap] : [monthly.plan ? homeCopy.planPools : null, partial(monthly)].filter(Boolean).join(' · ') || null
-  // otto/mamoru#198: the current rate is the whole balance's (paused and idle at 0%), so it needs no scope words.
+  // Brais, 2 Nov: the 24 h figure is the working capital's, so it needs no scope words.
   const currentTail = current.gap ? homeCopy.gap[current.gap] : partial(current)
   // Brais, 23-oct: the (i) sits right after the label it explains, not floating at the end of the row.
   const info =
@@ -1384,7 +1386,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         down={liveDown}
         chain={fromChain ? (f?.chainRead ?? { positions: 'unknown', listedAt: null }) : null}
       />
-      <Indicators f={noPositions ? undefined : f} apy={apy.data} price={price} noRead={(!f && liveDown) || noPositions} />
+      <Indicators f={noPositions ? undefined : f} apy={apy.data} price={price} worked={yieldLedger.data?.worked} noRead={(!f && liveDown) || noPositions} />
       <WrongNetwork accountKey={accountKey} />
       {past ? (
         <section className="card" data-testid="past-notice" role="status">

@@ -5,6 +5,7 @@
 import type { YieldLedgerView } from '@mamoru/domain'
 import type { Db } from '../env.ts'
 import { feeReadinessUsd } from '../yield-ledger.ts'
+import { loadWorked } from './worked.ts'
 
 type LatestRow = { fees_usdc: number; total_usdc: number; read_at: string; positions_json: string; updated_at: string }
 type DailyRow = { day: string; collected_usdc: number | null; gas_paid_wei: string | null; updated_at: string }
@@ -58,7 +59,7 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     // an account_daily row for that day (an account stopped right after an op has none).
     db.prepare('SELECT day, collected_usdc, gas_paid_wei, updated_at FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
   ])
-  const earned = await earnedDaily(db, chainId, accountKey, daily.results, now.toISOString().slice(0, 10))
+  const [earned, worked] = await Promise.all([earnedDaily(db, chainId, accountKey, daily.results, now.toISOString().slice(0, 10)), loadWorked(db, chainId, accountKey)])
 
   let collected = 0n
   let anyCollected = false
@@ -106,5 +107,6 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     // Not withheld when `stale`: that is about fees a receipt may already have collected, not about the total.
     lastBalance: latest ? { totalUsd: BigInt(latest.total_usdc).toString(), readAt: latest.read_at } : null,
     earnedDaily: earned,
+    worked,
   }
 }

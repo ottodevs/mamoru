@@ -175,7 +175,13 @@ export type YieldLedgerView = {
   // days (account_daily: that day's accrued fees plus everything collected up to it). For the line by "earned so
   // far". Null until the cron has written a day for this account.
   earnedDaily?: { day: string; earnedUsd: string }[] | null
+  // Brais, 2 Nov: the capital that worked in each pool over the last 24 h and 30 days, for the APY figures (idle
+  // money does not count). Base LP positions only, as far as the ledger covers. Null until a snapshot exists.
+  worked?: WorkedView | null
 }
+
+/** USDC base units x seconds that worked in each pool, per window, up to the ledger's latest snapshot (`asOf`). */
+export type WorkedView = { asOf: string; day: { pool: string; usdSeconds: number }[]; month: { pool: string; usdSeconds: number }[] }
 
 // GET /api/accounts/:accountKey/other-chains -> OtherChainsView
 // What sits at the account's address on a chain Mamoru does not run on (a transfer sent on the wrong network).
