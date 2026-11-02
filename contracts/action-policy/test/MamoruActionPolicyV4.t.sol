@@ -522,6 +522,10 @@ contract MamoruActionPolicyV4Test is V4Fixture {
     /// outsider who pushes its price more than one band from the reference's makes it refused. It shares the asset's
     /// sub-bucket with the reference pool: a second pool adds no room.
     function test_A1_rule7_referencePoolAndSharedSubBucket() public {
+        // rule 4 first: USDC/cbBTC 0.3 %'s ring holds 300 observations, under the class's 1,800 s window
+        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.NotEligible.selector, POOL_BTC_30, 4));
+        helper.priced(POOL_BTC_30);
+        IUniswapV3Pool(POOL_BTC_30).increaseObservationCardinalityNext(1800); // anyone may raise it
         assertEq(_key(POOL_BTC_30), CBBTC, "cbBTC's sub-bucket");
         assertEq(_key(POOL_BTC), CBBTC, "the same sub-bucket as the reference pool");
         assertEq(_key(POOL_ETH_05), WETH);

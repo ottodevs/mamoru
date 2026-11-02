@@ -77,6 +77,7 @@ contract V4EthereumSiblingForkTest is V4Fixture {
     uint256 baseFork;
     address safe;
     address baseHome;
+    bytes32 homePid;
     Session sibling;
     bytes32 pid;
 
@@ -84,12 +85,12 @@ contract V4EthereumSiblingForkTest is V4Fixture {
         baseFork = vm.createFork(vm.envOr("BASE_FORK_RPC_URL", string("https://mainnet.base.org")), BASE_BLOCK);
         ethFork = vm.createFork(vm.envOr("ETHEREUM_FORK_RPC_URL", string("https://eth.drpc.org")), ETH_BLOCK);
         vm.selectFork(baseFork);
-        _deployStack();
+        _deployStackViaModuleRegistry(); // V4 with a module record: the home's owner enables it (trust + attest)
         address baseV4 = address(v4);
         baseHome = _newSafe(117); // the home account, running V4 on Base (A1: it proves itself ready from there)
-        _init(baseHome);
+        (homePid,) = _enableV4(baseHome, _v4Session(C, 1, new uint256[](0), _baseCaps(), bytes32(uint256(0x4))));
         vm.selectFork(ethFork);
-        _deployStack();
+        _deployStackViaModuleRegistry();
         assertEq(address(v4), baseV4, "V4 at the same address on Ethereum and Base");
         // The L1 reference pool's ring holds 723 observations: Ethereum's class uses a 720 s window (180 s short).
         safe = _newSafe(117);
@@ -191,7 +192,7 @@ contract V4EthereumSiblingForkTest is V4Fixture {
     function _provenReady() internal {
         vm.selectFork(baseFork);
         vm.recordLogs();
-        v4.announceReady(baseHome, DOMAIN_ETHEREUM, address(0));
+        v4.announceReady(baseHome, DOMAIN_ETHEREUM, address(0), homePid);
         bytes memory m = _sentMessage(vm.getRecordedLogs());
         vm.selectFork(ethFork);
         (bool ok,) = _deliver(m, 2000);

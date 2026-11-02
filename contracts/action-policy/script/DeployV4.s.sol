@@ -45,14 +45,14 @@ contract DeployMamoruV4 is Script {
 
     /// The addresses `predict()` gives for this source and compiler (identical on Base, Monad and Ethereum). A source
     /// or compiler change moves them: `run()` then refuses, and re-pinning is a deliberate commit.
-    address public constant EXPECTED_TABLE = 0x73D526C33Df9102bf6Ce468644DafD4650886be0;
-    address public constant EXPECTED_GAS_POLICY = 0xC9492e5424ea15b61c9451e0ab748E2266aE048d;
-    address public constant EXPECTED_POLICY = 0x5524493A374408d0149CC92545ddF470bB063697;
+    address public constant EXPECTED_TABLE = 0xEbC30bC42631f2c8C2B0b03F6B91aD52d70b402C;
+    address public constant EXPECTED_GAS_POLICY = 0xB13ca2e96a0ae2387AAF547285E928CE3A2C942b;
+    address public constant EXPECTED_POLICY = 0xa5312681D0fa9550C0A4c6Db6f8e1DFC1487f9A0;
     address public constant EXPECTED_CHECK = 0xc04046b4649471875372FA9e800143491cD4fB31;
 
     /// Selectors no V4 contract may carry (spec 010 I7, spec 009 POL-01): guardian, pause, review, readiness setter.
     function forbiddenSelectors() public pure returns (bytes4[] memory f) {
-        f = new bytes4[](9);
+        f = new bytes4[](10);
         f[0] = bytes4(keccak256("GUARDIAN()"));
         f[1] = bytes4(keccak256("pause(address)"));
         f[2] = bytes4(keccak256("unpause(address)"));
@@ -62,6 +62,7 @@ contract DeployMamoruV4 is Script {
         f[6] = bytes4(keccak256("isPaused(address)"));
         f[7] = bytes4(keccak256("REGISTRY()"));
         f[8] = bytes4(keccak256("cancel(uint8,bytes32,bytes,uint256)"));
+        f[9] = bytes4(keccak256("cancel(bytes32)")); // MamoruRegistry r2's cancel
     }
 
     /// True when `code` holds `PUSH4 sel` (how a dispatcher compares a selector): a forbidden function is present.
@@ -171,6 +172,8 @@ contract DeployMamoruV4 is Script {
                 abi.encodeWithSignature("getPool(address,address,uint24)", a, b, abi.decode(r, (uint24)))
             );
             require(ok2 && abi.decode(got, (address)) == c.ref, "table: reference pool not the factory's");
+            require(MamoruV4Classes.feeBit(abi.decode(r, (uint24))) & c.feeMask != 0, "table: reference pool's fee outside the set");
+            p.HELPER().priced(c.ref); // the reference pool itself is eligible here now: ring, window, class
         }
         address[] memory vaults = t.vaultsOf(block.chainid);
         for (uint256 i; i < vaults.length; i++) {
@@ -191,7 +194,7 @@ contract DeployMamoruV4 is Script {
         require(IMamoruV4Table(s.table).chain(block.chainid).chainId == block.chainid, "this chain is in the table");
         p.HELPER().checkStack(); // the pinned Safe stack and CCTP have the expected code on this chain
         require(s.check.code.length != 0, "migration check");
-        address[5] memory all = [s.policy, s.gasPolicy, address(p.HELPER()), address(p.REMOTE_INIT()), s.table];
+        address[6] memory all = [s.policy, s.gasPolicy, address(p.HELPER()), address(p.REMOTE_INIT()), s.table, s.check];
         bytes4[] memory f = forbiddenSelectors();
         for (uint256 i; i < all.length; i++) {
             require(all[i].code.length != 0, "no code");

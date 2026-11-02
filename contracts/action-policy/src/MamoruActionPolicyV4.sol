@@ -181,6 +181,10 @@ interface ISafeOwnersV4 {
     function getStorageAt(uint256 offset, uint256 length) external view returns (bytes memory);
 }
 
+interface ISmartSessionV4 {
+    function isPermissionEnabled(bytes32 permissionId, address account) external view returns (bool);
+}
+
 interface IERC7579AccountV4 {
     function isModuleInstalled(uint256 moduleTypeId, address module, bytes calldata additionalContext)
         external
@@ -389,11 +393,11 @@ contract MamoruV4Helper {
     /**
      * Spec 010 A1 "Eligibility rules" for an ENTRY (swap, mint, increase): (1) a pool of the chain's pinned factory,
      * (2) both tokens pinned with a pinned stable as the budget side (`poolInfo`), the pair has a class, (3) its fee is
-     * in the class's fee set, (7) it agrees with the pair's reference pool: its long TWAP within the class's band of the
-     * reference's long TWAP over the same window, and its spot within the band of the reference's spot. Rule (4), an
-     * observation ring that serves the window, holds because `observe` reverts otherwise (here and in every price
-     * check); (5) depth and (6) the parity anchor are checked by the price checks at the priced use. Returns the pool's
-     * identity, its class entry and its sub-bucket key.
+     * in the class's fee set, (4) its observation ring holds at least the class's long window (`observe` must also serve
+     * it, or every price check reverts), (7) it agrees with the pair's reference pool: its long TWAP within the class's
+     * band of the reference's long TWAP over the same window, and its spot within the band of the reference's spot. (5)
+     * depth and (6) the parity anchor are checked by the price checks at the priced use. Returns the pool's identity,
+     * its class entry and its sub-bucket key.
      */
     function priced(address pool) external view returns (PoolInfoV4 memory p, PoolEntryV4 memory e, address key) {
         p = this.poolInfo(pool);
@@ -401,6 +405,10 @@ contract MamoruV4Helper {
         uint8 mask;
         (e, key, ref, mask) = classEntry(p.token0, p.token1);
         if (MamoruV4Classes.feeBit(p.fee) & mask == 0) revert NotEligible(pool, 3);
+        // Rule 4 (T6 L-4, kept from V3): an observation ring at least the long window's length, so the window is served
+        // at block granularity, not interpolated across a sparse ring (review r1 of #228).
+        (,,,, uint16 next,,) = IUniswapV3Pool(pool).slot0();
+        if (next < e.twapWindow) revert NotEligible(pool, 4);
         if (pool != ref) {
             int24 band = int24(e.bandTicks);
             int24 d = _longTwap(pool, e.twapWindow) - _longTwap(ref, e.twapWindow);
@@ -788,6 +796,8 @@ contract MamoruActionPolicyV4 {
     bytes4 internal constant UNWRAP = 0x2e1a7d4d; // withdraw(uint256) on the chain's wrapped native (#307)
     /// MessageTransmitterV2.receiveMessage(bytes,bytes): the account relays a readiness message itself (I4, A1).
     bytes4 internal constant RECEIVE_MESSAGE = 0x57ecfd28;
+    /// SmartSession's ActionId of the fallback action: keccak(FALLBACK_TARGET_FLAG ‖ FALLBACK_TARGET_SELECTOR_FLAG).
+    bytes32 internal constant FALLBACK_ACTION_ID = keccak256(abi.encodePacked(address(1), bytes4(0x00000001)));
 
     address public constant SMART_SESSION = 0x00000000002B0eCfbD0496EE71e01257dA0E37DE;
     /// CCTP V2 TokenMessengerV2, the same proxy (same code hash) on every chain Circle supports; checked on Base and
@@ -1302,11 +1312,21 @@ contract MamoruActionPolicyV4 {
      *    another initializer cannot announce);
      *  - a home Safe announces to a sibling, on any other chain of the table;
      *  - a sibling announces nothing (it has no remotes).
-     * Moves nothing. What it costs is the caller's gas.
+     * `permissionId` names the Safe's V4 session, which must be enabled and bound at the current generation. Moves
+     * nothing. What it costs is the caller's gas.
      */
-    function announceReady(address safe, uint32 toDomain, address sessionKey) external nonReentrant {
+    function announceReady(address safe, uint32 toDomain, address sessionKey, bytes32 permissionId) external nonReentrant {
         Config memory c = _config[safe];
         if (!c.set || c.generation != generationOf[safe]) revert NoConfig(safe);
+        // A V4 session bound for `safe` NOW (review r1 of #228): `permissionId` is enabled in SmartSession, and its
+        // fallback action's config is bound to this V4 at the current generation (SmartSession IdLib: ConfigId =
+        // keccak(account ‖ keccak(permissionId ‖ keccak(FALLBACK_TARGET ‖ FALLBACK_SELECTOR)))). A Stop removes the
+        // session, so a stopped Safe cannot be announced.
+        bytes32 actionPolicyId = keccak256(abi.encodePacked(permissionId, FALLBACK_ACTION_ID));
+        ConfigIdV4 cfg = ConfigIdV4.wrap(keccak256(abi.encodePacked(safe, actionPolicyId)));
+        if (_binding[cfg][safe] != c.generation + 1 || !ISmartSessionV4(SMART_SESSION).isPermissionEnabled(permissionId, safe)) {
+            revert BadAnnounce(5);
+        }
         bytes32 oh = HELPER.readBack(safe);
         uint32 local = _chain().domain;
         address home = safe;
@@ -1348,7 +1368,9 @@ contract MamoruActionPolicyV4 {
         (address home, address safe, bytes32 oh) = abi.decode(body, (address, address, bytes32));
         if (home == safe) {
             Config memory c = _config[home];
-            if (!c.set || c.home != home || c.homeDomain != sourceDomain) revert BadMessage(4);
+            if (!c.set || c.generation != generationOf[home] || c.home != home || c.homeDomain != sourceDomain) {
+                revert BadMessage(4);
+            }
         } else {
             Remote memory r = _remote[sourceDomain][home];
             if (r.remote == address(0) || r.remote != safe || r.ownersHash != oh) revert BadMessage(5);
