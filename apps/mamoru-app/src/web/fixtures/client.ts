@@ -170,6 +170,46 @@ const chainView = (): FundingView => {
 }
 let fundingReads = 0
 const upgradeApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 1000) + 300 * 86_400, renewDue: false, expired: false, policyId: 'conservador-live-v5', upgrade: true, upgradePolicy: 'conservador-live-v6' } })
+// ?whatsnew / ?whatsnew2 (dev only, otto/mamoru#295): a running account offered the one-authorization contracts, with one
+// signature or two (an older Monad Safe: Base, then Monad). ?whatsnewerror: the first signature attempt fails.
+const whatsNewOn = param('whatsnew') || param('whatsnew2') || param('whatsnew2step2') || param('whatsnewerror')
+const whatsNewTwo = param('whatsnew2') || param('whatsnew2step2')
+// ?whatsnew2step2: Base is confirmed already, the operator offers step 2 (a reload or a Review resumes there).
+let whatsNewStep = param('whatsnew2step2') ? 1 : 0
+const FIXTURE_NEW_MONAD_SAFE: Hex0x = '0x9C1bE4d0aF53A8e6B27c1d0F4a3E85b7D6c92A10'
+let whatsNewFailOnce = param('whatsnewerror')
+const whatsNewOffer = (): NonNullable<NonNullable<FundingView['approval']>['whatsNew']> => ({
+  policy: 'one-auth-v4',
+  points: ['Growth also works on Monad', 'Safer price limits', 'Emergency pause. It never moves money.'],
+  signatures: whatsNewTwo ? 2 : 1,
+  currentStep: whatsNewStep,
+  steps: [
+    {
+      chain: 'base',
+      summary: [
+        `Replace Mamoru's approvals on your Safe ${FIXTURE_ADDRESS} with one approval that does not end`,
+        'Mamoru may keep working only in pools the registry lists, at most 3x your cap in 30 days and your cap in 24 hours, on Base',
+        'Every approval it replaces is revoked in the same transaction, and a last check reverts if any is left',
+        'Nothing is moved: your positions stay as they are',
+        'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
+      ],
+    },
+    ...(whatsNewTwo
+      ? [
+          {
+            chain: 'monad' as const,
+            moveTo: FIXTURE_NEW_MONAD_SAFE,
+            summary: [
+              `Replace Mamoru's approvals on your Safe on Monad ${FIXTURE_MONAD_SAFE} with the same one approval`,
+              'Move the funds there to the Monad Safe the new approval uses, if it is another address. Both Safes are yours',
+              'Every approval it replaces is revoked in the same transaction',
+            ],
+          },
+        ]
+      : []),
+  ],
+})
+const whatsNewApproval = (): Partial<FundingView> => ({ ...placedThree(), active: true, approval: { validUntil: Math.floor(Date.now() / 1000) + 200 * 86_400, renewDue: false, expired: false, policyId: 'conservador-live-v6', whatsNew: whatsNewOffer() } })
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
 // ?history (dev only, otto/mamoru#235): a running account with events in each state, and one more landing 4 s in.
 const historyOn = param('history')
@@ -193,7 +233,7 @@ const movedRange = (): OpView[] => {
   ] as OpView[]
 }
 const liveState = {
-  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}), ...(monadUpgrade ? upgradeApproval() : {}), ...(dashboard ? placedThree() : {}) } as FundingView,
+  funding: { ...structuredClone(fixtureFunding), ...(fresh ? { usdc: '0' } : {}), ...(overcap ? capState(OVER_CAP_USDC) : {}), ...(placing ? midEntry() : {}), ...(renewdue ? dueApproval() : {}), ...(monadUpgrade ? upgradeApproval() : {}), ...(whatsNewOn ? whatsNewApproval() : {}), ...(dashboard ? placedThree() : {}) } as FundingView,
   ops: (overcap
     ? [{ opId: 'own-1-activate', kind: 'activate', state: 'failed', code: 'DEPOSIT_OVER_CAP', amountUsdc: OVER_CAP_USDC, capUsdc: fixtureFunding.capUsdc, updatedAt: new Date().toISOString() }]
     : historyOn
@@ -210,6 +250,9 @@ const liveState = {
   owner: !fresh,
   transferUsdc: 0n,
 }
+
+// ?whatsnew2step2: Base was signed and confirmed before this load.
+if (param('whatsnew2step2')) liveState.ops.push({ opId: 'own-wn-0', kind: 'migrate-v4', state: 'confirmed', migrateStep: 0, txHash: `0x${'5'.repeat(64)}`, updatedAt: new Date(Date.now() - 600_000).toISOString() } as OpView)
 
 if (historyOn)
   setTimeout(() => {
@@ -348,6 +391,7 @@ export const fixtureClient: ApiClient = {
       lastBalance: { totalUsd: '24873120', readAt: new Date(Date.now() - (operatorDown ? 3 * 60 : 1) * 60_000).toISOString() },
     }),
   ops: (k) => delay({ ops: isMonad(k) ? monadState.ops : liveState.ops }),
+  migrateOps: (k) => delay({ ops: (isMonad(k) ? monadState.ops : liveState.ops).filter((o) => o.kind === 'migrate-v4') }),
   activatePrepare: (k) =>
     delay(
       fixtureTx(
@@ -481,6 +525,26 @@ export const fixtureClient: ApiClient = {
         'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else',
       ]),
     ),
+  migratePrepare: (_k, step) => {
+    const announced = whatsNewOffer().steps[step]
+    const tx = fixtureTx(announced?.summary ?? [])
+    return delay(step === 1 ? { ...tx, chainId: 143, moveTo: announced?.moveTo as Hex0x | undefined } : tx)
+  },
+  migrate: (_k, _sig, step) => {
+    if (whatsNewFailOnce) {
+      whatsNewFailOnce = false
+      return new Promise((_, reject) => setTimeout(() => reject(new ApiRequestError(503, { error: 'The operator is not reachable. Nothing was sent. Try again.', code: 'OPERATOR_UNAVAILABLE' })), 150))
+    }
+    const op = fixtureOp('migrate-v4', () => {
+        if (step + 1 >= whatsNewOffer().signatures) liveState.funding.approval = { validUntil: Math.floor(Date.now() / 1000) + 365 * 86_400, renewDue: false, expired: false, policyId: 'conservador-live-v6' }
+        else {
+          whatsNewStep = step + 1
+          liveState.funding.approval = whatsNewApproval().approval
+        }
+    })
+    op.migrateStep = step
+    return delay(op)
+  },
   renew: () =>
     delay(
       fixtureOp('renew', () => {

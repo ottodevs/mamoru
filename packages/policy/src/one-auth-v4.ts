@@ -85,6 +85,12 @@ export function v4CapUsdOf(accountCapUsdc: bigint, policy: Pick<PolicyVersion, '
 /** V4's rolling 30-day cap: CAP30_MULTIPLE x C (contract constant). */
 export const V4_CAP30_MULTIPLE = 3n
 
+/**
+ * InitV4.capUsd of the retired design-C Monad Safe's one V4 session (step 1 of the migration): 1 unit, so it can move no value.
+ * The operator signs it and the Worker's migrate check expects it.
+ */
+export const V4_RETIRED_SAFE_CAP_USD = 1n
+
 /** one-auth-v4's split (Base 50 + 35, Monad 15), for v4CapUsdOf's default. */
 const oneAuthV4LiveSplit = { buckets: [{ preference: 5000 }, { preference: 3500 }], remoteBuckets: [{ preference: 1500, chainId: 143 }] } as unknown as Pick<PolicyVersion, 'buckets' | 'remoteBuckets'>
 

@@ -32,17 +32,20 @@ export function errorText(e: unknown): string {
   return e instanceof Error && e.message ? e.message : flowCopy.apiFailed
 }
 
-export type OwnerKind = 'activate' | 'transfer' | 'stop' | 'renew'
-type Prepared = { tx: OwnerTxToSign; reduce?: TransferPlan['reduce']; receive?: TransferPlan['receive']; divergence?: TransferPlan['divergence'] }
+export type OwnerKind = 'activate' | 'transfer' | 'stop' | 'renew' | 'migrate-v4'
+/** `step`: the migrate-v4 step this was prepared for (0 for every other kind); what is submitted is this, never a later argument. */
+type Prepared = { step: number; tx: OwnerTxToSign; reduce?: TransferPlan['reduce']; receive?: TransferPlan['receive']; divergence?: TransferPlan['divergence'] }
 
-const SUBMIT: Record<OwnerKind, (api: ApiClient) => ApiClient['activate']> = {
-  activate: (api) => api.activate,
-  transfer: (api) => api.transfer,
-  stop: (api) => api.stop,
-  renew: (api) => api.renew,
+// Explicit per kind: only migrate-v4 takes the step; activate, transfer, stop and renew are called with exactly (accountKey, sig).
+export const SUBMIT: Record<OwnerKind, (api: ApiClient) => (accountKey: string, sig: OwnerSignature, step: number) => Promise<OpView>> = {
+  activate: (api) => (k, sig) => api.activate(k, sig),
+  transfer: (api) => (k, sig) => api.transfer(k, sig),
+  stop: (api) => (k, sig) => api.stop(k, sig),
+  renew: (api) => (k, sig) => api.renew(k, sig),
+  'migrate-v4': (api) => (k, sig, step) => api.migrate(k, sig, step),
 }
 
-const toPrepared = (plan: TransferPlan): Prepared => ({ tx: plan.ownerTx, reduce: plan.reduce, receive: plan.receive, divergence: plan.divergence })
+const toPrepared = (plan: TransferPlan): Prepared => ({ step: 0, tx: plan.ownerTx, reduce: plan.reduce, receive: plan.receive, divergence: plan.divergence })
 
 /**
  * otto/mamoru#155 (security review on 1c54819): the only thing ever allowed out of `accept` and into the submit
@@ -85,7 +88,7 @@ export async function recoverFromStaleDivergence(
  * One owner action: the API prepares a Safe transaction, the passkey signs its safeTxHash, the API submits it.
  * Preparing and signing are two taps, so the passkey prompt always runs inside a user gesture.
  */
-export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) {
+export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind, step = 0) {
   const api = useApi()
   const qc = useQueryClient()
   const [prepared, setPrepared] = useState<Prepared | null>(null)
@@ -112,7 +115,7 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
           lastTransferBody.current = body
           p = toPrepared(await api.transferPrepare(accountKey, body))
         } else {
-          p = { tx: kind === 'activate' ? await api.activatePrepare(accountKey) : kind === 'renew' ? await api.renewPrepare(accountKey) : await api.stopPrepare(accountKey) }
+          p = { step, tx: kind === 'activate' ? await api.activatePrepare(accountKey) : kind === 'renew' ? await api.renewPrepare(accountKey) : kind === 'migrate-v4' ? await api.migratePrepare(accountKey, step) : await api.stopPrepare(accountKey) }
         }
         setPrepared(p)
         return p
@@ -123,7 +126,7 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
         setBusy(null)
       }
     },
-    [accountKey, api, kind],
+    [accountKey, api, kind, step],
   )
 
   /** `accept`: PriceDivergenceWarning.acceptDivergence, present only when the owner ticked the warning box. */
@@ -139,7 +142,7 @@ export function useOwnerAction(accountKey: string | undefined, kind: OwnerKind) 
       setBusy('signing')
       try {
         const sig = await signOwnerTx(prepared.tx, storedCredential(accountKey))
-        const op = await SUBMIT[kind](api)(accountKey, withAcceptance(sig, accept))
+        const op = await SUBMIT[kind](api)(accountKey, withAcceptance(sig, accept), prepared.step)
         setPrepared(null)
         setResult(op)
         await Promise.all([

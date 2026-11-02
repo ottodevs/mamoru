@@ -170,6 +170,17 @@ export function useOps(accountKey: string | undefined, enabled: boolean) {
   })
 }
 
+/** otto/mamoru#295: the account's migrate-v4 ops, all of them. Under the `ops` key, so every invalidation of the ops reaches it. */
+export function useMigrateOps(accountKey: string | undefined, enabled: boolean) {
+  const api = useApi()
+  return useQuery({
+    queryKey: [...queryKeys.ops(accountKey ?? ''), 'migrate-v4'] as const,
+    queryFn: () => api.migrateOps(accountKey as string),
+    enabled: enabled && accountKey !== undefined,
+    refetchInterval: (q) => (q.state.data?.ops.some((op) => !TERMINAL.has(op.state)) ? 4_000 : false),
+  })
+}
+
 /** Which assets a withdraw can pay out in. A failure is not retried: the dialog falls back to a static list. */
 export function useWithdrawAssets(accountKey: string | undefined, enabled: boolean) {
   const api = useApi()

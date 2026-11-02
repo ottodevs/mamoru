@@ -52,6 +52,8 @@ export type ApiClient = {
   /** otto/mamoru#129: uncollected fees, collected, gas Mamoru paid and value vs hold, from the yield ledger. */
   yieldLedger(accountKey: string): Promise<YieldLedgerView>
   ops(accountKey: string): Promise<{ ops: OpView[] }>
+  /** otto/mamoru#295: every migrate-v4 op of the account, unwindowed (`GET /ops?kind=migrate-v4`, operator #293), so a step-1 gate never depends on a recent-ops window. */
+  migrateOps(accountKey: string): Promise<{ ops: OpView[] }>
   activatePrepare(accountKey: string): Promise<OwnerTxToSign>
   activate(accountKey: string, sig: OwnerSignature): Promise<OpView>
   withdrawAssets(accountKey: string): Promise<{ assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }>
@@ -61,6 +63,9 @@ export type ApiClient = {
   stop(accountKey: string, sig: OwnerSignature): Promise<OpView>
   renewPrepare(accountKey: string): Promise<OwnerTxToSign>
   renew(accountKey: string, sig: OwnerSignature): Promise<OpView>
+  /** otto/mamoru#295: What's new. `step` 0 is Base, 1 the older Monad Safe (only when whatsNew.signatures is 2). */
+  migratePrepare(accountKey: string, step: number): Promise<OwnerTxToSign>
+  migrate(accountKey: string, sig: OwnerSignature, step: number): Promise<OpView>
   /** #133: move the USDC found on Ethereum to this account on Base. */
   bridgeOutPrepare(accountKey: string): Promise<BridgeOutToSign>
   bridgeOut(accountKey: string, sig: OwnerSignature): Promise<BridgeOutView>
@@ -139,6 +144,7 @@ export const httpClient: ApiClient = {
   otherChains: (k) => request<OtherChainsView>(acct(k, 'other-chains')),
   yieldLedger: (k) => request<YieldLedgerView>(acct(k, 'yield')),
   ops: (k) => request<{ ops: OpView[] }>(acct(k, 'ops')),
+  migrateOps: (k) => request<{ ops: OpView[] }>(acct(k, 'ops') + '?kind=migrate-v4'),
   activatePrepare: (k) => post<OwnerTxToSign>(acct(k, 'activate/prepare')),
   activate: (k, sig) => post<OpView>(acct(k, 'activate'), sig),
   withdrawAssets: (k) => request<{ assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }>(acct(k, 'withdraw-assets')),
@@ -148,6 +154,8 @@ export const httpClient: ApiClient = {
   stop: (k, sig) => post<OpView>(acct(k, 'stop'), sig),
   renewPrepare: (k) => post<OwnerTxToSign>(acct(k, 'renew/prepare')),
   renew: (k, sig) => post<OpView>(acct(k, 'renew'), sig),
+  migratePrepare: (k, step) => post<OwnerTxToSign>(acct(k, 'migrate-v4/prepare'), { step }),
+  migrate: (k, sig, step) => post<OpView>(acct(k, 'migrate-v4'), { ...sig, step }),
   bridgeOutPrepare: (k) => post<BridgeOutToSign>(acct(k, 'bridge-out/prepare')),
   bridgeOut: (k, sig) => post<BridgeOutView>(acct(k, 'bridge-out'), sig),
   bridgeOutStatus: (k) => request<BridgeOutView>(acct(k, 'bridge-out')),
