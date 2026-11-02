@@ -6,7 +6,7 @@ import { decodeGasCapsV2, decodeInitV4, GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deploymen
 import { permissionIdOf } from '../sessions/index.ts'
 import { webAuthnSigner } from '../safe/index.ts'
 import { FIXTURE_PATH, fixtureJson } from './fixture.ts'
-import { FALLBACK_SELECTOR, FALLBACK_TARGET, inventoryOf, migrationCalls, migrationCheckAbi, migrationTx, ownerStateOf, smartSessionV4Abi, v4Children, v4CreateSetup, v4HomeSession, V4_REMOTE_SESSION_SALT } from './index.ts'
+import { buildMigrateV4, FALLBACK_SELECTOR, FALLBACK_TARGET, inventoryOf, migrationCalls, migrationCheckAbi, migrationTx, ownerStateOf, smartSessionV4Abi, v4Children, v4CreateSetup, v4HomeSession, V4_REMOTE_SESSION_SALT } from './index.ts'
 
 const D = { registry: '0x00000000000000000000000000000000000000a1', policy: '0x00000000000000000000000000000000000000a2', gasPolicy: '0x00000000000000000000000000000000000000a3', migrationCheck: '0x00000000000000000000000000000000000000a4' } as const
 const KEY = '0x00000000000000000000000000000000005e55e5' as const
@@ -113,5 +113,26 @@ describe('inventory (spec 010 r1 finding 4)', () => {
 
   test('fails closed when the V4 session is already enabled', () => {
     expect(inventoryOf({ events: [id(1)], enabled: [id(1)], stored: [id(1)], v4Id: id(1) }).ok).toBe(false)
+  })
+})
+
+describe('buildMigrateV4 (the builder the operator prepares with and the Worker rebuilds with)', () => {
+  const pinnedBase = { ...baseRegistry, undeployed: [], entries: [...baseRegistry.entries, ...(['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'] as const).map((name, i) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: [D.registry, D.policy, D.gasPolicy, D.migrationCheck][i]!, codeHash: null }) as never)] }
+  const input = { chainId: 8453, safe: SAFE, safeNonce: '4', step: 0 as const, capUsdc: '300000000', sessionKey: KEY, generation: '1', admit: ['7'], oldPermissionIds: [id(1), id(2)], removeIds: [id(1)], noncesBefore: ['0', '3'], home: zeroAddress, homeDomain: 0 }
+
+  test('deterministic, refund fields zero, the hash is the SafeTx EIP-712 hash of its fields', () => {
+    const a = buildMigrateV4(input, pinnedBase)
+    const b = buildMigrateV4(JSON.parse(JSON.stringify(input)), pinnedBase)
+    expect(a.safeTxHash).toBe(b.safeTxHash)
+    expect(a.safeTx).toMatchObject({ value: '0', operation: 1, safeTxGas: '0', baseGas: '0', gasPrice: '0', gasToken: zeroAddress, refundReceiver: zeroAddress, nonce: '4', to: address('MultiSendCallOnly_141', baseRegistry) })
+    expect(buildMigrateV4({ ...input, safeNonce: '5' }, pinnedBase).safeTxHash).not.toBe(a.safeTxHash)
+  })
+
+  test('refuses what the operator never prepares', () => {
+    expect(() => buildMigrateV4(input, baseRegistry)).toThrow() // V4 not pinned
+    expect(() => buildMigrateV4({ ...input, moveTo: SAFE, transfers: [] }, pinnedBase)).toThrow() // step 0 moves nothing
+    expect(() => buildMigrateV4({ ...input, noncesBefore: ['0'] }, pinnedBase)).toThrow()
+    expect(() => buildMigrateV4({ ...input, step: 1 }, pinnedBase)).toThrow() // step 1 names a home
+    expect(() => buildMigrateV4({ ...input, safeNonce: '0x4' }, pinnedBase)).toThrow()
   })
 })

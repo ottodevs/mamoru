@@ -1,5 +1,5 @@
 import type { ReasonCode } from '@mamoru/domain'
-import { grantKeyFor, hasIncrease, hasManageAny, type PolicyVersion } from '@mamoru/policy'
+import { grantKeyFor, hasIncrease, hasManageAny, preferenceTotal, type PolicyVersion } from '@mamoru/policy'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { safeSavings } from '../enter/index.ts'
 import { convertKey } from '../rerange/index.ts'
@@ -163,8 +163,11 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   const executable = rows.filter((r) => r.pool)
   const total = free + executable.reduce((s, r) => s + r.value, 0n) + (obs.remote?.value ?? 0n)
   // otto/mamoru#213: a bucket on another chain keeps its share of the account; here it waits as savings until bridged.
-  const remote = (policy.remoteBuckets ?? []).reduce((s, b) => s + b.preference, 0)
-  const prefTotal = BigInt(executable.reduce((s, r) => s + r.b.preference, 0) + remote)
+  // otto/mamoru#293: the denominator is every bucket's preference, local and remote (preferenceTotal), the same total the
+  // reduce side (rerange, weights) uses: a bucket with no executable pool keeps its weight and its share waits as savings.
+  // Leaving it out here grew the other buckets past their preference while the reduce side held them to it: a
+  // reduce/increase churn (fork e2e of one-auth-v4 with one bucket's registry pool not listed yet).
+  const prefTotal = BigInt(preferenceTotal(policy))
 
   const buckets: BucketValue[] = rows.map((r) => {
     const target = r.pool && prefTotal > 0n ? (total * BigInt(r.b.preference)) / prefTotal : 0n
