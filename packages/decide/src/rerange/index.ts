@@ -157,8 +157,8 @@ function liveSession(obs: Observation, grant: string): boolean {
 
 /**
  * otto/mamoru#220: merges per pool in 24 h, a guard only. A merge's money goes back into the position that stays
- * (`reusablePosition` takes any in-range admitted one, and the entry never mints beside one), so a merge cannot be
- * followed by a new NFT. The week this was counted over left b54dda3a with two NFTs for 7 days after the 2 Nov loop.
+ * (`reusablePosition` takes any in-range admitted one), so a merge is followed by a new NFT only if the keeper leaves
+ * its range before the entry. The week this was counted over left b54dda3a with two NFTs for 7 days after the 2 Nov loop.
  */
 export const MERGES_PER_DAY = 2
 const DAY = 86_400n
