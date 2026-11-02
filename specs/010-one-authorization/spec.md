@@ -249,8 +249,10 @@ re-parameterize an entry.
    - **Bound:** at most `G` per `W`, plus a burst of `G` (and `S / W` of `G` for the slack), including ops that
      revert, and never more than the Safe's native balance plus its EntryPoint deposit. An idle account comes back with
      at most that burst, and needs no reset.
-   - No action-free userOp: V4 refuses an empty batch, a batch without the leading `clock`, and a call it cannot
-     classify, through the fallback action.
+   - No action-free userOp: `MamoruGasPolicyV2` refuses an empty batch and a batch without the leading `clock`; V4's
+     fallback action refuses a call it cannot classify. The gas policy reads V4's address, the NPM and the
+     `AllowanceCheck` targets from the same code-pinned `MamoruV4Chains` table (pure code reads, ERC-7562-safe), never
+     from a second copy.
    - SmartSession intersects the validation data that every policy returns, userOp policies included
      (`PolicyLib.check`, `PolicyLib.sol:73-76` in the smartsessions source). T1c confirms it on the deployed v1.0.0
      build and that a standards-compliant bundler admits these ops; V4 is not deployed until it does.
@@ -363,7 +365,7 @@ admin and a guardian are gone.
 |---|---|---|
 | Leaked session key | V3's attacks within the band and the bucket, on any eligible pool or listed vault, and bridges to the user's own ready remotes | **Conservative bound, the owner's accepted risk:** the whole permitted spend is loss, i.e. C per 24 h and 3C per 30 days per chain, × the chains where the account holds funds, with **no end in time** until the owner stops the session on every chain (A1 removed the lifetime total). Add, once per position, the band-edge loss of decreasing a position the account already holds (decreases are not charged; `checkExit` bounds their minimums by the band). Funds only ever reach the user's own Safes (I1), so the channel is trades at a bad price; the **expected** loss is far lower (spec 007 measured 6.6 % of cap per day per pool at today's parameters), and T4 derives the band-limited figure, including the two-TWAP tolerance and price impact, without it ever replacing the conservative bound. Key-free mitigations: per-account non-exportable session keys before any V4 grant (Decision), ops alerts that ask the owner to stop, and the 24 h and 30-day multiples sized from the engine's real spend (open question 4). |
 | Leaked session key, gas | Repeated no-op or tiny userOps paid by the Safe | `MamoruGasPolicyV2`'s rate: at most G per W plus a burst of about G; never more than the Safe's native balance and EntryPoint deposit. G is sized at about twice the account's normal use (open question 5). The empty batch and a batch without `clock` are refused. |
-| Hostile pool of pinned tokens | Someone creates a thin pool of pinned tokens on the official factory | The depth check at every priced use, the two-TWAP band, the anchor for stable pairs, and the per-pair sub-bucket. The pool can only be used for the pair's ratio of C, at band slippage. |
+| Hostile pool of pinned tokens | Someone creates a pool of pinned tokens on the official factory and holds its price | Rule 7: it must agree within one band with the pair's pinned reference pool; plus the depth check at every priced use, the two-TWAP band, the anchor for stable pairs, and the per-asset sub-bucket. It can only be used for the asset's ratio of C, at a price within a band of the market. |
 | Listed vault's curator | Reallocates the vault within Morpho's rules | The vault's ratio of C (`held + assets ≤ C × ratio`), as spec 009 POL-07 caps an upgradeable venue. |
 | Compromised operator / Worker | Pick bad pools among the eligible ones, refuse service | Within I1–I6. Withdrawal stays owner-only. Refusal stops Mamoru's offer, not the user (spec 009 WLK-04). |
 | Circle (CCTP issuer) | Withhold or forge attestations, freeze USDC | Withholding stops bridges and readiness, never funds at rest. A forged readiness makes V4 burn to the user's own deterministic `remoteOf`, which anyone can deploy (I4). Issuer risk, documented (spec 009 WLK-06). |
@@ -440,9 +442,11 @@ guardian or the registry, A1 replaces it:
 2. Is a pure-Solidity reconstruction of the canonical initializer (`packages/account/remote`) feasible in
    `registerRemote`, at under ~1M gas? Otherwise V4 takes the initializer as calldata and checks it piece by piece
    against the constants.
-3. The class parameters: per-pair ratios (the v6 mix 50/35/15, or a flat maximum), fee sets, and windows per asset.
+3. The class parameters: per-asset ratios (the v6 mix 50/35/15, or a flat maximum), fee sets, and windows per asset.
 4. The 24 h cap (C) and the 30-day multiple (3): measure them against the engine's real spend from D1 so that they
-   never refuse a normal operation, and lower them where they can be lower.
+   never refuse a normal operation, and lower them where they can be lower. Exit swaps draw on the same caps and
+   per-asset sub-bucket as entries, so in a crash automation de-risks at most C per day per chain and the rest waits
+   for the owner; the sizing and the app copy say so.
 5. `G` and `W` per chain for the gas rate, from the engine's real gas use (about 0.01 ETH per month on Base today).
 
 ## Tasks
@@ -459,7 +463,7 @@ guardian or the registry, A1 replaces it:
 - **T3** contract changes to the merged code (#200, #209), A1:
   - `MamoruActionPolicyV4.sol`: remove `GUARDIAN`, `pause`, `unpause`, `review`, `setReady`, the pause state and
     `PAUSE_*`, `REVIEW_MULTIPLE`, `spentSinceReview`; the breaker refuses instead of tripping; read classes, vaults and
-    chains from `MamoruV4Chains` instead of `REGISTRY`; per-pair sub-bucket; `announceReady` and
+    chains from `MamoruV4Chains` instead of `REGISTRY`; reference pools (rule 7); per-asset sub-bucket; `announceReady` and
     `handleReceiveFinalizedMessage`; `checkExit` and a static `checkAction`.
   - `MamoruGasPolicyV2.sol`: remove `GUARDIAN`, `review`, `GAS_REVIEW` and the `block.timestamp` bucket; GCRA `tat`
     on the claimed time, with the returned time range. V4 gains `clock(T)`.

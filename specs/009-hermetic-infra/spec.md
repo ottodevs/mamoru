@@ -299,7 +299,7 @@ bounded by the owner's allowance.
 - **POL-01: No pause.** The deploy script refuses any source that contains a guardian or pause path, and the deployed
   bytecode has no `pause`/`unpause` selector (T3).
 - **POL-02: Limits on every family.** Each family (Uniswap, vault, bridge) is charged to the account's value bucket
-  (refilled at C per day) with a per-pair or per-vault share, a rolling 24 h cap of C and a rolling 30-day cap of 3C
+  (refilled at C per day) with a per-asset or per-vault share, a rolling 24 h cap of C and a rolling 30-day cap of 3C
   per chain (spec 010 I5). Today only the Uniswap families have an amount limit: the vault and bridge families add none
   (`MamoruActionPolicyV3.sol:243-244`), so V3 alone would drop the bridge caps that UniActionPolicy holds today.
 - **POL-03: Rolling caps, no lifetime total** (spec 010 A1). There is no per-generation `total` and nothing that ends
@@ -405,7 +405,7 @@ bounded by the owner's allowance.
   `removeSession` for every Mamoru permission id, enable V4, then `MamoruMigrationCheck.assertNone`, so the removal of
   the V2/V3 sessions is provable on chain. V4 has no guardian, so the migration ends the guardian's power over that
   account. `MamoruPauseGate` is a session action policy, so it goes with the session it belongs to (T9 confirms no
-  account carries it anywhere else). The app asks every V2/V3 account to migrate now (the "What's new" screen) rather than at expiry. From a published cutoff date
+  account carries it anywhere else). From T7 on, the app asks every V2/V3 account to migrate (the "What's new" screen) rather than wait for expiry. From a published cutoff date
   the operator stops signing V2 grants and deletes its V2 session keys. Neither deletion can be proven on chain.
   **Accounts that ignore the migration:** until V2's own `validUntil`, two things remain possible:
   - a copied V2 session key can still act within V2's on-chain bounds: caps, pinned recipients, and its TWAP-band
@@ -444,14 +444,14 @@ bounded by the owner's allowance.
   Because V4 sessions do not expire, **no V4 grant is issued before this holds** (spec 010 Decision): T12 precedes the
   first V4 grant.
 - **KEY-02: Rotation.** V4 sessions do not expire (POL-04), so a session key is replaced only by an owner-signed
-  re-grant (for example when the signing service moves to per-account KMS keys, T12). Until then a leaked key is worth
-  at most the rolling caps (POL-03) and the gas rate (POL-11), for as long as it stays enabled; the owner can remove it
-  at any time.
+  re-grant. A leaked key is worth at most the rolling caps (POL-03) and the gas rate (POL-11), for as long as it stays
+  enabled; the owner can remove it at any time, on every chain.
 - **KEY-03: Bundler keys.** One key per chain in a KMS, no authority (INV-3), and dust only.
 - **KEY-04: One-off deployers.** Infra deployments use a throwaway key whose only power is the deployment itself.
 - **KEY-05: Published exposure.**
   - **Per account and in aggregate.** The signing service publishes each account's maximum exposure over a 30-day
-    horizon (3C per chain where it holds funds + 30 days of gas rate) and the sum across the accounts it serves. It shows the per-account figure to its owner and
+    horizon (3C per chain where it holds funds, plus the one-time band-edge loss on positions it already holds, plus 30
+    days of gas rate) and the sum across the accounts it serves. It shows the per-account figure to its owner and
     the aggregate on `/ops`, with an alert when the aggregate grows past a stated figure.
   - **Isolation.** Per-account keys sit under separate key policies, so one IAM grant cannot reach all of them.
   - **Attested signer.** The signer runs in an attested TEE that re-checks the V-next rules before signing, as defence
