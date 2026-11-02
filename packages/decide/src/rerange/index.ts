@@ -87,6 +87,19 @@ export function lazyBufferTicks(lazy: LazyRerange, width: number): number {
 }
 
 /**
+ * Whether the price sits inside `p`'s range but within the eager re-range trigger's edge band (EDGE_BPS of the width;
+ * Lab geometry #101: a skewed placement's own smaller threshold on that edge), where `rerangeOf` moves it. Never under
+ * a lazy policy, whose only trigger is out of range. otto/mamoru#220: an entry does not add to such a position, the
+ * re-range would take the new money straight back out.
+ */
+export function inEdgeBand(policy: PolicyVersion, pool: PoolObs, p: Pick<PositionObs, 'tickLower' | 'tickUpper'>): boolean {
+  if (policy.range.lazy || policy.range.adjust !== 'on_out_of_range') return false
+  const width = p.tickUpper - p.tickLower
+  const edgeBps = policy.geometry ? edgeBpsOf(policy, pool, EDGE_BPS) : { lower: EDGE_BPS, upper: EDGE_BPS }
+  return (pool.tick - p.tickLower) * 10_000 < width * edgeBps.lower || (p.tickUpper - pool.tick) * 10_000 < width * edgeBps.upper
+}
+
+/**
  * Re-range (policy.range.adjust = on_out_of_range, live grant manage-any):
  * the price left the range, or sits within 10% of the width from an edge,
  * and the cooldown since the last re-range passed. The op takes the whole
@@ -124,9 +137,7 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   }
   const width = p.tickUpper - p.tickLower
   const outside = pool.tick < p.tickLower || pool.tick >= p.tickUpper
-  // Lab geometry (#101): a skewed placement sits near one edge on purpose, so that edge's threshold is smaller.
-  const edgeBps = policy.geometry ? edgeBpsOf(policy, pool, EDGE_BPS) : { lower: EDGE_BPS, upper: EDGE_BPS }
-  const near = !outside && ((pool.tick - p.tickLower) * 10_000 < width * edgeBps.lower || (p.tickUpper - pool.tick) * 10_000 < width * edgeBps.upper)
+  const near = !outside && inEdgeBand(policy, pool, p)
   // Lab geometry: volatility spiking widens a narrow range before the price leaves it.
   const widen = !outside && !near && policy.geometry !== undefined && widenEarly(obs, policy, pool, width)
   if (!outside && !near && !widen) return { code: null, proposal: null }

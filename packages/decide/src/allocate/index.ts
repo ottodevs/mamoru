@@ -2,7 +2,7 @@ import type { ChainId, ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasIncrease, hasManageAny, preferenceTotal, type PolicyVersion } from '@mamoru/policy'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { safeSavings } from '../enter/index.ts'
-import { convertKey } from '../rerange/index.ts'
+import { convertKey, inEdgeBand } from '../rerange/index.ts'
 import { depthOf } from '../depth/index.ts'
 import { rangeFor, widthFor, widthOf } from '../geometry/index.ts'
 import { purgaIdentity, registryOf } from '../gates/index.ts'
@@ -93,10 +93,11 @@ function liveSession(obs: Observation, grant: string): boolean {
  * one, so after a restart every older position read unmanaged and each top-up minted a second NFT beside it
  * (otto/mamoru#220: b54dda3a, 2 Nov 2026). Under manage-any every position of a policy pool is managed (isManaged). The position must have liquidity and the price strictly
  * inside its range (both amounts positive, as the grant's minimums need). One NFT per pool by design (otto/mamoru#220,
- * Ot 2 Nov 2026): such a position takes the entry however far its edges are from `range` (what a mint would get now);
- * the re-range rules move it when they would move any position. `range.increaseToleranceBps` no longer excludes one
- * (a held position 340 ticks off took a second NFT on c23e94e1, 2 Nov): the nearest wins, lowest tokenId on ties. The
- * engine re-reads admission and ownership before it builds the call.
+ * Ot 2 Nov 2026): such a position takes the entry however far its edges are from `range` (what a mint would get now),
+ * unless the price sits in its re-range edge band (`inEdgeBand`), where the re-range would take the new money straight
+ * back out; then the entry mints the fresh position and the re-range closes the old one into it. `range.increaseToleranceBps`
+ * no longer excludes one (a held position 340 ticks off took a second NFT on c23e94e1, 2 Nov): the nearest wins, lowest
+ * tokenId on ties. The engine re-reads admission and ownership before it builds the call.
  */
 export function reusablePosition(obs: Observation, policy: PolicyVersion, pool: PoolObs, range: { tickLower: number; tickUpper: number }): PositionObs | null {
   if (!hasIncrease(policy, pool.name)) return null
@@ -105,7 +106,7 @@ export function reusablePosition(obs: Observation, policy: PolicyVersion, pool: 
   let bestDistance = 0
   for (const p of obs.positions) {
     if (p.pool !== pool.name || p.liquidity <= 0n || p.admitted !== true) continue
-    if (!(p.tickLower < pool.tick && pool.tick < p.tickUpper)) continue
+    if (!(p.tickLower < pool.tick && pool.tick < p.tickUpper) || inEdgeBand(policy, pool, p)) continue
     const distance = Math.abs(p.tickLower - range.tickLower) + Math.abs(p.tickUpper - range.tickUpper)
     if (!best || distance < bestDistance || (distance === bestDistance && p.tokenId < best.tokenId)) {
       best = p
@@ -260,17 +261,12 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     // position close enough to it takes the entry instead, and the split follows that position's range.
     const fresh = rangeFor(obs, policy, pool)
     const reuse = reusablePosition(obs, policy, pool, fresh)
-    // otto/mamoru#220, one NFT per pool: an admitted position the price has left is never joined by a second NFT. The
-    // re-range rules close it (and the entry then mints the one fresh position) or hold it; the money waits as savings.
-    if (!reuse && hasIncrease(policy, pool.name) && obs.positions.some((p) => p.pool === pool.name && p.liquidity > 0n && p.admitted === true)) {
-      if (row) row.code = 'OBS_POSITION_OUT_OF_RANGE'
-      continue
-    }
     const range = reuse ? { tickLower: reuse.tickLower, tickUpper: reuse.tickUpper } : fresh
     const volShare = volatileShareBps(pool, policy, range)
     // otto/mamoru#127: no more than the pool can take at its depth; the rest waits as savings, with its reason. The
     // swap toward the mint sells at most the volatile share of that size, so it stays within the allowed impact too.
-    const depth = depthOf(obs, policy, pool, widthFor(obs, policy, pool))
+    // Sized on the range the money goes into: a held position's own width when it takes the entry (#220).
+    const depth = depthOf(obs, policy, pool, reuse ? reuse.tickUpper - reuse.tickLower : widthFor(obs, policy, pool))
     if (depth) {
       const bySwap = volShare > 0n ? (depth.swapRoom * 10_000n) / volShare : size
       const room = depth.shareRoom < bySwap ? depth.shareRoom : bySwap

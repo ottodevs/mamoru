@@ -134,14 +134,15 @@ describe('increase instead of a second mint (otto/mamoru#171)', () => {
     expect(decide(obs([held(3n, 60)], pairSessions(LAB)), exact).proposal).toMatchObject({ kind: 'increase_liquidity', tokenId: 3n })
   })
 
-  test('#220: an admitted position the price has left gets no second NFT beside it; the entry waits', () => {
+  test('#220: a position whose price sits in its re-range edge band takes no entry (the re-range would take it back out)', () => {
     const sessions = pairSessions(LAB)
-    const out = held(3n, 0, { tickLower: fresh.tickUpper + 600, tickUpper: fresh.tickUpper + 2_580 })
-    const d = decide(obs([out], sessions), LAB)
-    expect(d.proposal?.kind === 'enter_mint' || d.proposal?.kind === 'increase_liquidity').toBe(false)
-    expect(d.buckets.find((b) => b.bucket === 'risk')?.code).toBe('OBS_POSITION_OUT_OF_RANGE')
-    // A position the policy never admitted cannot be added to or closed by it: the entry still mints (as before).
-    expect(decide(obs([{ ...out, admitted: false }], sessions), LAB).proposal?.kind).not.toBe('increase_liquidity')
+    // 1980 wide, the price 90 ticks from the upper edge: inside the 10 % (198-tick) band.
+    expect(reusablePosition(obs([held(3n, -900)], sessions), LAB, riskPool, fresh)).toBeNull()
+    // Just past the band it does.
+    expect(reusablePosition(obs([held(3n, -780)], sessions), LAB, riskPool, fresh)?.tokenId).toBe(3n)
+    // A lazy policy has no edge trigger: any in-range position takes the entry.
+    const lazy: PolicyVersion = { ...LAB, range: { ...LAB.range, lazy: { maxWaitSeconds: 3_600 } as never } }
+    expect(reusablePosition(obs([held(3n, -900)], sessions), lazy, riskPool, fresh)?.tokenId).toBe(3n)
   })
 
   test('an empty position, or one the price is not strictly inside, is not reused', () => {
