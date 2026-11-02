@@ -13,7 +13,7 @@
 import { concat, encodeAbiParameters, encodeFunctionData, encodePacked, getAddress, getContractAddress, hashTypedData, isAddressEqual, keccak256, pad, parseAbi, parseAbiItem, size, toHex, zeroAddress, type Hex, type PublicClient } from 'viem'
 import type { Address, MigrateV4Input } from '@mamoru/domain'
 import { address, moduleRegistryAbi, multiSendCallOnlyAbi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi, smartSessionAbi, type Registry } from '@mamoru/registry'
-import { encodeGasCapsV2, encodeInitV4, GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment, V4_CHAIN_BY_DOMAIN, type GasCapsV2, type InitV4, type OneAuthV4Deployment } from '@mamoru/policy'
+import { encodeGasCapsV2, encodeInitV4, GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment, V4_CHAIN_BY_DOMAIN, V4_HOME_CHAINS, type GasCapsV2, type InitV4, type OneAuthV4Deployment } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress, SAFE_PROXY_141_CREATION_CODE } from '../recovery/index.ts'
 import { multiSendCallOnly, OPERATION_DELEGATECALL, safeTxTypedData, type MultiSendCall, type SafeSetup, type WebAuthnSigner } from '../safe/index.ts'
 import { ATTESTATION_SCHEMA_UID, ownableValidatorInitData, permissionIdOf, type SmartSessionStruct } from '../sessions/index.ts'
@@ -394,7 +394,7 @@ export function buildMigrateV4(input: MigrateV4Input, registry: Registry): { saf
   if (!deployment) throw new Error(`buildMigrateV4: the V4 stack is not pinned on chain ${input.chainId}`)
   const remote = BigInt(input.home) !== 0n
   if (input.step === 0 && (remote || input.homeDomain !== 0 || input.moveTo || input.transfers?.length)) throw new Error('buildMigrateV4: step 0 is the home account: no home, no funds moved')
-  if (input.step === 1 && (!remote || !V4_CHAIN_BY_DOMAIN[input.homeDomain] || V4_CHAIN_BY_DOMAIN[input.homeDomain] === input.chainId)) throw new Error('buildMigrateV4: step 1 names its home on another chain')
+  if (input.step === 1 && (!remote || !V4_HOME_CHAINS.includes(V4_CHAIN_BY_DOMAIN[input.homeDomain]!) || V4_CHAIN_BY_DOMAIN[input.homeDomain] === input.chainId)) throw new Error('buildMigrateV4: step 1 names its home on another chain')
   if (!!input.transfers?.length !== !!input.moveTo) throw new Error('buildMigrateV4: transfers and moveTo go together')
   if (input.oldPermissionIds.length !== input.noncesBefore.length) throw new Error('buildMigrateV4: one nonce per old id')
   const safe = getAddress(input.safe)

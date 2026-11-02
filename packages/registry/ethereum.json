@@ -153,7 +153,7 @@
     {
       "name": "TokenMessengerV2",
       "kind": "cctp",
-      "role": "Circle CCTP V2, proxy (implementación 0x555E272506C06e7E559d57418563742AFE363ec8 al añadirlo): bridge del bucket growth a la misma Safe en Monad (dominio 15), grant bridge-out de conservador-live-v6 (otto/mamoru#213); codeHash del proxy leído en el último bloque el 2026-10-27, no en el bloque del pin",
+      "role": "Circle CCTP V2, proxy (mismo código en Base, Monad y Ethereum): burn del USDC del hermano de Ethereum hacia la misma dirección en Base (#307); codeHash leído en el bloque del pin",
       "address": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
       "codeHash": "0xd2c8d48075d832fb7d07f6db5545a1bee37fdf886325c441a8dd1cef4c9dae99"
     }

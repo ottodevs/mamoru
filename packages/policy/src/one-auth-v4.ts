@@ -103,6 +103,8 @@ export function encodeInitV4(i: InitV4): Hex {
   const hasHome = BigInt(i.home) !== 0n
   if (!hasHome && i.homeDomain !== 0) throw new Error('InitV4: a home account names no home domain')
   if (hasHome && V4_CHAIN_BY_DOMAIN[i.homeDomain] === undefined) throw new Error(`InitV4: home domain ${i.homeDomain} is not a chain of V4's table`)
+  // V4 would accept a home on Ethereum; Mamoru does not put one there (Ethereum hosts siblings only, never a home).
+  if (hasHome && !V4_HOME_CHAINS.includes(V4_CHAIN_BY_DOMAIN[i.homeDomain]!)) throw new Error(`InitV4: home domain ${i.homeDomain} is not an engine chain (${V4_HOME_CHAINS.join(', ')})`)
   return encodeAbiParameters(INIT_V4_TUPLE, [{ capUsd: i.capUsd, generation: i.generation, home: getAddress(i.home), homeDomain: i.homeDomain, admit: [...i.admit] }])
 }
 
@@ -178,6 +180,9 @@ export const GAS_CAPS_V2_BY_CHAIN: Readonly<Record<number, GasCapsV2>> = {
  * (`=== undefined`), never 0: CCTP domain 0 is Ethereum (#307).
  */
 export const V4_DOMAIN_BY_CHAIN: Readonly<Record<number, number>> = { 8453: 6, 143: 15, 1: 0 }
+/** The chains a Mamoru account's home (the account the engine runs) may be on. Ethereum is in V4's table for siblings
+ * only (#307): a V4 sibling or remote names one of these as its home, never Ethereum. */
+export const V4_HOME_CHAINS: readonly number[] = [8453, 143]
 export const V4_CHAIN_BY_DOMAIN: Readonly<Record<number, number>> = { 6: 8453, 15: 143, 0: 1 }
 
 /** MamoruV4Chains, per chain: the pinned stables (the budget unit, 6 decimals) and assets, by registry name. */

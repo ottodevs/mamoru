@@ -94,6 +94,9 @@ describe('config errors exit 78 (EX_CONFIG); transient ones exit 1', () => {
       ['MAMORU_GUARDIAN_V4_ADDRESS: not an address', { ...baseEnv(), MAMORU_GUARDIAN_V4_ADDRESS: '0xnope' }],
       // Ethereum (1) is a V4 chain since #307: Arbitrum stands for a chain outside the table
       ['is not a V4 chain', { ...baseEnv(), MAMORU_GUARDIAN_HOME_CHAIN_ID: '42161' }],
+      // ...and an Ethereum instance is intended (#310: it marks V4 siblings ready on Ethereum): it passes the chain
+      // check, and its RPC must then answer chain id 1 (the fake one here answers Base's)
+      ['RPC for chain 1 answers another chain id', { ...baseEnv(), MAMORU_GUARDIAN_HOME_CHAIN_ID: '1', MAMORU_GUARDIAN_FROM_BLOCK_1: '1' }],
       ['MAMORU_GUARDIAN_INTERVAL_SECONDS: not a non-negative integer', { ...baseEnv(), MAMORU_GUARDIAN_INTERVAL_SECONDS: 'soon' }],
       ['MAMORU_GUARDIAN_FROM_BLOCK_8453: not a block number', { ...baseEnv(), MAMORU_GUARDIAN_FROM_BLOCK_8453: '-4' }],
       ['MAMORU_GUARDIAN_FROM_BLOCK_8453 is required on first start', { ...baseEnv(), MAMORU_GUARDIAN_FROM_BLOCK_8453: undefined }],

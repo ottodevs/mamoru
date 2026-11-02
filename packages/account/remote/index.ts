@@ -6,7 +6,7 @@
 import { encodePacked, hexToBigInt, isAddressEqual, keccak256, zeroAddress } from 'viem'
 import { ReasonError, type AccountContext, type Address, type Hex, type RemoteSpec } from '@mamoru/domain'
 import { address, monadRegistry, type Registry } from '@mamoru/registry'
-import { computeCaps, grantKey, instantiateGrant, MONAD_GAS_CAPS, ONE_AUTH_V4_REMOTE, oneAuthV4Deployment, policyHash, policyRegistry, retargetToPolicy, V4_CHAIN_BY_DOMAIN, V4_DOMAIN_BY_CHAIN, V4_POOLS_MONAD, v4BudgetCaps, withActionPolicy, liveWmonUsdcMonadV6, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { computeCaps, grantKey, instantiateGrant, MONAD_GAS_CAPS, ONE_AUTH_V4_REMOTE, oneAuthV4Deployment, policyHash, policyRegistry, retargetToPolicy, V4_CHAIN_BY_DOMAIN, V4_DOMAIN_BY_CHAIN, V4_HOME_CHAINS, V4_POOLS_MONAD, v4BudgetCaps, withActionPolicy, liveWmonUsdcMonadV6, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import { ownerStateOf, v4Remote, type V4Remote } from '../one-auth/index.ts'
 import { accountSetup, counterfactualAddress } from '../recovery/index.ts'
 import { webAuthnSigner, type SafeSetup, type WebAuthnSigner } from '../safe/index.ts'
@@ -159,6 +159,7 @@ export function isV4RemoteSpec(spec: Pick<RemoteSpec, 'policyId'> | undefined): 
 export function v4RemoteFromSpec(base: Pick<AccountContext, 'address' | 'owners' | 'passkey'>, spec: RemoteSpec, registry: Registry, homeChainId = 8453): V4Remote {
   if (!isV4RemoteSpec(spec)) throw new ReasonError('REMOTE_SAFE_MISMATCH', `${spec.policyId} is not a V4 remote`)
   if (!spec.home || spec.home.toLowerCase() !== String(base.address).toLowerCase()) throw new ReasonError('REMOTE_SAFE_MISMATCH', `V4 remote of ${spec.home}, not of this account`)
+  if (!V4_HOME_CHAINS.includes(homeChainId)) throw new ReasonError('REMOTE_SAFE_MISMATCH', `V4 remote with its home on chain ${homeChainId}: not an engine chain`)
   const homeDomain = V4_DOMAIN_BY_CHAIN[homeChainId]
   const domain = V4_DOMAIN_BY_CHAIN[spec.chainId]
   if (homeDomain === undefined || domain === undefined || spec.homeDomain !== homeDomain || V4_CHAIN_BY_DOMAIN[domain] !== registry.chainId) throw new ReasonError('REMOTE_SAFE_MISMATCH', `V4 remote on chain ${spec.chainId} from domain ${spec.homeDomain}: not a route V4 pins`)

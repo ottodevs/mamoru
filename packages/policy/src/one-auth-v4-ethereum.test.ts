@@ -2,10 +2,17 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { zeroAddress } from 'viem'
 import { address, ethereumRegistry, registryFor } from '@mamoru/registry'
-import { decodeInitV4, encodeInitV4, GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment, V4_CHAIN_BY_DOMAIN, V4_DOMAIN_BY_CHAIN, V4_PINNED } from './index.ts'
+import { decodeInitV4, encodeInitV4, GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment, V4_CHAIN_BY_DOMAIN, V4_DOMAIN_BY_CHAIN, V4_HOME_CHAINS, V4_PINNED } from './index.ts'
 
 const CHAINS_SOL = readFileSync(new URL('../../../contracts/action-policy/src/MamoruV4Chains.sol', import.meta.url), 'utf8')
 const HOME = '0x000000000000000000000000000000000000cafe' as const
+/** The body of `chainId == ETHEREUM` in MamoruV4Chains.byChainId, up to the end of that branch (review r1 of #220). */
+const ETH_BLOCK = (() => {
+  const start = CHAINS_SOL.indexOf('} else if (chainId == ETHEREUM) {')
+  const end = CHAINS_SOL.indexOf('\n        }\n    }', start)
+  if (start < 0 || end < 0) throw new Error('MamoruV4Chains.sol: Ethereum branch not found')
+  return CHAINS_SOL.slice(start, end)
+})()
 
 describe('Ethereum in the V4 tables (otto/mamoru#307, #308)', () => {
   test('domain 0 is Ethereum both ways, and an unpinned chain or domain is absent, never 0', () => {
@@ -14,24 +21,36 @@ describe('Ethereum in the V4 tables (otto/mamoru#307, #308)', () => {
     expect(V4_DOMAIN_BY_CHAIN[42161]).toBeUndefined()
     expect(V4_CHAIN_BY_DOMAIN[3]).toBeUndefined()
     for (const [chain, domain] of Object.entries(V4_DOMAIN_BY_CHAIN)) expect(V4_CHAIN_BY_DOMAIN[domain]).toBe(Number(chain))
+    for (const [domain, chain] of Object.entries(V4_CHAIN_BY_DOMAIN)) expect(V4_DOMAIN_BY_CHAIN[chain]).toBe(Number(domain))
+    // and they are MamoruV4Chains.chainOf, the Solidity's only domain -> chain map
+    expect(CHAINS_SOL).toContain('return domain == 6 ? BASE : domain == 15 ? MONAD : domain == 0 ? ETHEREUM : 0;')
+    expect(Object.keys(V4_CHAIN_BY_DOMAIN).map(Number).sort((a, b) => a - b)).toEqual([0, 6, 15])
   })
 
   test('the pinned tokens and the Uniswap periphery match MamoruV4Chains.sol, from the ethereum registry', () => {
-    const block = CHAINS_SOL.slice(CHAINS_SOL.indexOf('chainId == ETHEREUM'))
+    const block = ETH_BLOCK
     for (const name of [...V4_PINNED[1]!.stables, ...V4_PINNED[1]!.assets, 'UniswapV3Factory', 'NonfungiblePositionManager', 'SwapRouter02']) {
       expect(block.toLowerCase()).toContain(address(name, ethereumRegistry).toLowerCase())
     }
     expect(block).toContain('c.domain = 0;')
-    expect(V4_PINNED[1]!.stables).toEqual(['USDC']) // USDT left out: CCTP burn limit 0 on Ethereum
+    // exactly the Solidity's stable and asset slots: USDC alone (USDT left out, CCTP burn limit 0), WETH alone
+    expect(block).toContain(`c.stables = [${address('USDC', ethereumRegistry)}, address(0)];`)
+    expect(block).toContain(`c.assets = [${address('WETH', ethereumRegistry)}, address(0)];`)
+    expect(V4_PINNED[1]).toEqual({ stables: ['USDC'], assets: ['WETH'] })
   })
 
   test("the L1 gas caps are MamoruV4Chains' remoteCaps for Ethereum, under its GAS_REVIEW", () => {
     const c = GAS_CAPS_V2_BY_CHAIN[1]!
-    expect(CHAINS_SOL).toContain('GasCaps(100_000_000, 3_000_000, 2_000_000, 200_000, 5_000_000_000, 0, 0.01 ether, 1 days)')
+    const m = ETH_BLOCK.match(/GasCaps\(([^)]*)\)/)
+    expect(m).not.toBeNull()
+    const [prio, verif, call, pre, maxFee, pm, perWindow, window] = m![1]!.split(',').map((x) => x.trim().replaceAll('_', ''))
+    expect([BigInt(prio!), BigInt(verif!), BigInt(call!), BigInt(pre!), BigInt(maxFee!), BigInt(pm!)]).toEqual([c.maxPriorityFeePerGas, c.maxVerificationGasLimit, c.maxCallGasLimit, c.maxPreVerificationGas, c.maxFeePerGas, c.maxPaymasterGas])
+    expect([perWindow, window]).toEqual(['0.01 ether', '1 days'])
     expect([c.maxPriorityFeePerGas, c.maxVerificationGasLimit, c.maxCallGasLimit, c.maxPreVerificationGas, c.maxFeePerGas, c.maxPaymasterGas]).toEqual([100_000_000n, 3_000_000n, 2_000_000n, 200_000n, 5_000_000_000n, 0n])
     expect(c.perWindow).toBe(10n ** 16n)
     expect(c.window).toBe(86_400)
-    expect(CHAINS_SOL).toContain('c.gasReview = 0.02 ether;')
+    expect(ETH_BLOCK).toContain('c.gasReview = 0.02 ether;')
+    expect(c.perWindow).toBeLessThanOrEqual(2n * 10n ** 16n) // the policy refuses a bucket above GAS_REVIEW
   })
 
   test('the ethereum registry resolves, and V4 is not pinned there until T7 deploys it', () => {
@@ -51,8 +70,13 @@ describe('encodeInitV4 follows V4 BadInit(4) with domain 0 (#307)', () => {
     expect(() => encodeInitV4(init(zeroAddress, 6))).toThrow('names no home domain')
   })
 
-  test('a remote or a sibling whose home is on Ethereum (domain 0) is accepted', () => {
-    expect(decodeInitV4(encodeInitV4(init(HOME, 0))).homeDomain).toBe(0)
+  test('a home on Ethereum (domain 0) is refused: Ethereum hosts siblings, never a home (V4 would accept it)', () => {
+    expect(V4_HOME_CHAINS).not.toContain(1)
+    expect(() => encodeInitV4(init(HOME, 0))).toThrow('not an engine chain')
+  })
+
+  test('a remote whose home is Monad (domain 15) is accepted', () => {
+    expect(decodeInitV4(encodeInitV4(init(HOME, 15))).homeDomain).toBe(15)
   })
 
   test('a sibling on Ethereum whose home is Base (domain 6) is accepted', () => {
