@@ -145,6 +145,16 @@ export class ReturnHome {
    * Asks the remote Safe to send `amount` home: the entry is on disk before the peer is asked, so a lost answer is
    * asked again with the same id (the same request there). One open return per account: refused while one is.
    */
+  /** The peer's latest release is none or cancelled (nothing open or sending there); unknown counts as not. */
+  private async nothingOpen(remote: AccountContext, peer: ReturnPeer): Promise<boolean> {
+    try {
+      const v = await peer.releaseStatus(remote)
+      return v.state === 'none' || v.state === 'cancelled'
+    } catch {
+      return false
+    }
+  }
+
   async request(accountKey: string, home: Address, remote: AccountContext, peer: ReturnPeer, amount: bigint, floor: bigint): Promise<ReturnEntry> {
     if (amount <= 0n) throw new Error(`return of ${amount}`)
     if (this.open(accountKey)) throw new Error(`${accountKey}: a return is already open`)
@@ -162,8 +172,8 @@ export class ReturnHome {
   }
 
   /**
-   * POST release for this entry. A refusal that proves the peer holds nothing for it (400 BAD_REQUEST, 404
-   * NOT_A_REMOTE) cancels it here, so it never holds the account. Anything else keeps it and holds the account, logged:
+   * POST release for this entry. A refusal that proves the peer holds nothing for it (400 BAD_REQUEST; 404 NOT_A_REMOTE
+   * with the peer's latest release none or cancelled) cancels it here, so it never holds the account. Anything else keeps it and holds the account, logged:
    * no answer (asked again on the next tick), or another release open there this journal does not know (409).
    */
   private async ask(e: ReturnEntry, remote: AccountContext, peer: ReturnPeer): Promise<void> {
@@ -172,7 +182,9 @@ export class ReturnHome {
     } catch (err) {
       const status = (err as { status?: unknown }).status
       const code = (err as { code?: unknown }).code
-      if ((status === 400 && code === 'BAD_REQUEST') || (status === 404 && code === 'NOT_A_REMOTE')) {
+      // A stopped Safe also answers 404 to a new request: only with nothing open or sending there is it nothing held.
+      const nothingThere = status === 404 && code === 'NOT_A_REMOTE' && (await this.nothingOpen(remote, peer))
+      if ((status === 400 && code === 'BAD_REQUEST') || nothingThere) {
         this.update(e, { state: 'cancelled', note: `refused by the peer: ${status} ${typeof code === 'string' ? code : ''}`.trim() })
         console.error(`[return] ${e.accountKey} ${e.id}: refused by the peer (${status} ${String(code ?? '')}); cancelled`)
         return

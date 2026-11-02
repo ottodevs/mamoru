@@ -234,8 +234,24 @@ describe('return home (otto/mamoru#278, Base side)', () => {
     expect(later.j().returns[l.id]!.state).toBe('cancelled')
   })
 
+  test('security review: a 404 from a stopped Safe that still has a release open or sending keeps the return holding', async () => {
+    const s = setup()
+    const stopped: ReturnPeer = {
+      release: async () => Promise.reject(Object.assign(new Error('stopped'), { status: 404, code: 'NOT_A_REMOTE' })),
+      releaseStatus: async () => ({ id: 'older', amount: '1', chainId: 8453, state: 'sending' }),
+    }
+    const e = await s.r.request('acc-1', HOME, REMOTE, stopped, AMOUNT, FLOOR)
+    expect(s.j().returns[e.id]!.state).toBe('requested')
+    expect(s.r.busy('acc-1')).toBe(true)
+    // Status unreadable: kept too.
+    const t = setup()
+    const blind: ReturnPeer = { ...stopped, releaseStatus: async () => Promise.reject(new Error('timeout')) }
+    const b = await t.r.request('acc-1', HOME, REMOTE, blind, AMOUNT, FLOOR)
+    expect(t.j().returns[b.id]!.state).toBe('requested')
+  })
+
   test('review r2: the real RemotePeer throws a refusal with the status and code ReturnHome reads', async () => {
-    const fetchFn = async () => new Response(JSON.stringify({ code: 'NOT_A_REMOTE', error: 'no' }), { status: 404 })
+    const fetchFn = async (url: string) => (url.endsWith('/release/status') ? new Response(JSON.stringify({ state: 'none' })) : new Response(JSON.stringify({ code: 'NOT_A_REMOTE', error: 'no' }), { status: 404 }))
     const peer = new RemotePeer(143, 'http://peer', 'secret', fetchFn as never)
     const s = setup()
     const e = await s.r.request('acc-1', HOME, REMOTE, peer, AMOUNT, FLOOR)
