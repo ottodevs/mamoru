@@ -851,7 +851,7 @@ export class BridgeOut {
   /** #180: hands the signed userOp to the bundler, then follows it by its hash. Nothing is spent by Mamoru. */
   private async sendUserOp(ctx: AccountContext, p: Prepared, u: PreparedOp, signature: Hex, aa: AccountAbstraction): Promise<BridgeOutView> {
     if (await this.blocking(this.journal.routes[ctx.accountKey])) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
-    if (this.convertBlocking(ctx.accountKey)) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    if (this.convertBlocking(ctx.accountKey) || this.siblingInFlight(ctx.accountKey)) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     // Nothing changed on Ethereum since the prepare: same balance, same deploy state, same EntryPoint nonce.
     const [balance, code, nonce, head] = await Promise.all([
       this.usdcAt(p.live.safe),
@@ -1137,7 +1137,7 @@ export class BridgeOut {
 
   private async send(ctx: AccountContext, p: Prepared, signature: Hex): Promise<BridgeOutView> {
     if (await this.blocking(this.journal.routes[ctx.accountKey])) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
-    if (this.convertBlocking(ctx.accountKey)) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    if (this.convertBlocking(ctx.accountKey) || this.siblingInFlight(ctx.accountKey)) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     // Nothing changed on Ethereum since the prepare: same balance, same deploy state and nonce.
     const [amount, state, head] = await Promise.all([this.usdcAt(p.live.safe), readSafeNonce(this.l1, p.live.safe), this.l1.getBlockNumber({ cacheTime: 0 })])
     if (amount !== p.deposit.amount || state.deployed !== p.deployed || state.nonce !== p.tx.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'the balance on Ethereum changed, tap again')
@@ -1299,7 +1299,7 @@ export class BridgeOut {
   }
 
   private async sendConvert(ctx: AccountContext, p: PreparedConvert, signature: Hex): Promise<BridgeOutView> {
-    if (this.convertBlocking(ctx.accountKey) || (await this.blocking(this.journal.routes[ctx.accountKey]))) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
+    if (this.convertBlocking(ctx.accountKey) || this.siblingInFlight(ctx.accountKey) || (await this.blocking(this.journal.routes[ctx.accountKey]))) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     // Nothing changed on Ethereum since the prepare: same ETH, same deploy state and Safe nonce.
     const [amount, state, head] = await Promise.all([this.l1.getBalance({ address: p.live.safe }), readSafeNonce(this.l1, p.live.safe), this.l1.getBlockNumber({ cacheTime: 0 })])
     if (amount !== p.amountIn || state.deployed !== p.deployed || state.nonce !== p.tx.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'the balance on Ethereum changed, tap again')
@@ -1482,12 +1482,14 @@ export class BridgeOut {
 
   private async sendSibling(ctx: AccountContext, p: PreparedSibling, signature: Hex): Promise<SiblingView> {
     if (this.siblingBlocking(ctx.accountKey)) throw new HttpError(409, 'SIBLING_IN_PROGRESS', 'your Safe on Ethereum is already set up or being set up')
+    // The same gates as the prepare, again under the lock, before any row is written (security review of #227).
+    if (this.convertBlocking(ctx.accountKey) || (await this.blocking(this.journal.routes[ctx.accountKey]))) throw new HttpError(409, 'BRIDGE_IN_PROGRESS', 'a move from Ethereum is already under way')
     const [state, head] = await Promise.all([readSafeNonce(this.l1, p.live.safe), this.l1.getBlockNumber({ cacheTime: 0 })])
     if (state.deployed !== p.deployed || state.nonce !== p.tx.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'your Safe on Ethereum changed, tap again')
     const exec = execTransactionData(p.tx, signature)
     if (p.deployed) await this.simulate(p.live.safe, exec)
     const c: StoredSibling = { id: p.prepareId, safe: p.live.safe, safeNonce: p.tx.nonce.toString(), safeTxHash: p.safeTxHash, permissionId: p.permissionId, sessionKey: p.sessionKey, capUsdc: p.capUsdc.toString(), fromBlock: head.toString(), state: 'sending', sentAt: new Date(this.now()).toISOString(), execData: exec, resends: 0, signedIds: [...new Set([...(this.journal.siblings?.[ctx.accountKey]?.signedIds ?? []), p.permissionId])], at: '' }
-    this.writeSibling(ctx.accountKey, c)
+    this.installSibling(ctx.accountKey, c)
     try {
       if (!p.deployed) {
         const d = deployCall(p.live)
@@ -1646,8 +1648,20 @@ export class BridgeOut {
     }).catch((e) => logErr(`[bridge-out] sibling resend ${accountKey.slice(0, 8)}:`, e))
   }
 
+  /**
+   * A new enable becomes the account's row: only a submit does this, under the lock, after siblingBlocking said no live
+   * row exists (none, or a 'failed' one). The old row's signed ids carry over (in c.signedIds).
+   */
+  private installSibling(accountKey: string, c: StoredSibling): void {
+    const cur = this.journal.siblings?.[accountKey]
+    if (cur && cur.state !== 'failed' && cur.id !== c.id) throw new Error('sibling: a live row is already installed')
+    c.at = new Date(this.now()).toISOString()
+    this.journal.siblings = { ...(this.journal.siblings ?? {}), [accountKey]: c }
+    this.save()
+  }
+
   private writeSibling(accountKey: string, c: StoredSibling): void {
-    // A late write of an older row never replaces a newer one (review r2 of #227).
+    // Updates of the installed row only: a late write of an older row never replaces a newer one (review r2 of #227).
     const cur = this.journal.siblings?.[accountKey]
     if (cur && cur.id !== c.id) return
     c.at = new Date(this.now()).toISOString()
