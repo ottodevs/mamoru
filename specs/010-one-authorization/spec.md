@@ -54,9 +54,16 @@ policy on Base can reason about what lives at an address on Monad. Constants:
   Base and Monad in T1). The burn token is
   not a constant. V4 accepts a token only if the canonical messenger's own `localMinter()` accepts it as burnable
   (non-zero burn limit). The token is therefore Circle's, whatever the registry says.
-- **Uniswap:** the registry gives the chain's v3 factory, NPM and router, and V4 checks that the factory appears in
-  a constant list of canonical v3 factory addresses (Base, Monad, Ethereum). Every pool must be
-  `factory.getPool(t0, t1, fee) == pool`, as in V3.
+- **Per-chain tuple, keyed by `block.chainid`:**
+  - The tuple: Uniswap v3 factory, NPM, SwapRouter02, the stable tokens (native USDC, USDT) and the assets (WETH,
+    cbBTC, WMON...).
+  - Chains: Base, Monad and Ethereum, plus the chains Mamoru may plausibly add (Arbitrum, Optimism, Unichain),
+    each checked against the official deployments.
+  - The registry never supplies any of it (r2 P1). A chain or an asset outside the table means a new V4: the
+    optional signature.
+- **Assets:** every pool is `factory.getPool(t0, t1, fee) == pool`, as in V3, with one side a pinned stable (the
+  budget token) and the other a pinned stable or a pinned asset. The registry chooses *which* of these pools, and
+  their parameters. It cannot list a token (r2 P1: no "stable" chosen by the admin).
 - **Hard bounds on everything the registry may set:**
   - The band, window and anchor limits of V3.
   - `ratioBps ≤ 10,000`.
@@ -74,20 +81,32 @@ policy on Base can reason about what lives at an address on Monad. Constants:
    V4 clamps to V3's hard bounds.
 3. **Positions.** As V3: only positions minted through V4, or admitted at migration, that the account still owns.
 4. **Remote Safe.** `remoteOf(account, domain)` is computed **inside V4** from:
-   - the owner's commitment in the signed Init: passkey (x, y), owners, saltNonce. V4 checks at enable that the
-     commitment reproduces `account` itself, so it cannot name someone else's passkey.
-   - **V4's own canonical initializer**: the pinned singleton, factory, launchpad, signer and SmartSession, V4 as
-     the only action policy, and the session key given by `registerRemote`.
+   - **The account's current owners**, read on chain at `registerRemote`: `Safe.getOwners()`, the threshold, and
+     `SafeWebAuthnSharedSigner`'s current (x, y) configuration for the account. These are never the original
+     initializer, so a rotated or removed key is not carried over (r2 P0).
+   - **A salt** of `keccak(account, domain, ownersHash)`.
+   - **V4's own canonical initializer.** It is a plain Safe setup (owners, threshold, the shared-signer
+     `configure`) plus the 7579 adapter and the SmartSession, installed **with no ERC-7484 registry and no
+     attesters**. Deployment therefore depends on no external state that can change after a mint: anyone can
+     deploy the address at any time through the permissionless factory, and the result is always the user's Safe
+     (r2 P0). T1 verifies that the launchpad accepts an empty registry. If it does not, the session is enabled by
+     a second relayed call after deployment, and the Safe owns the funds either way.
 
-   The result is a Safe with the same code as every Mamoru Safe, owned by the user's passkey only. Its one
-   session is bound by the same V4. The registry has no say in it. `registerRemote(domain, sessionKey)` is only
-   callable through the account's own session.
+   V4 stores `ownersHash` with the remote and refuses every burn while the account's current owners hash differs.
+   `registerRemote` may then compute a new remote. The old remote's own V4 sends its funds back only to the home
+   account, its fixed `homeOf`. The result is a Safe with the same code as every Mamoru Safe, owned by the user's
+   current keys. Its one session is bound by the same V4, and the registry has no say in it.
+   `registerRemote(domain, sessionKey)` is only callable through the account's own session.
 5. **Budget.** Per chain, one value bucket for the account, in USD-stable units, refilled each window, with:
    - **Per pool and per vault:** at most `ratioBps` of the bucket.
    - **A rolling 30-day cap** of `3 x capUsd` per chain on spend (it replaces the per-approval lifetime `total`:
      it bounds loss in any 30 days and never ends the authorization).
    - **An on-chain circuit breaker:** if spend in 24 h exceeds `capUsd x 1.0`, V4 pauses the account by itself
      until the guardian unpauses.
+   - **A cumulative review threshold** (r2 P1): spend since the guardian's last `review(account)` is counted. At
+     `10 x capUsd` per chain, V4 pauses the account until the guardian reviews it, checks the ledger and resets
+     the counter. A slow leak below the 24 h breaker therefore stops after at most 10C per chain, and in normal
+     operation this costs the user nothing (ops reviews it; it never asks the owner).
 6. **Gas.** `MamoruGasPolicyV2` (userOp policy) keeps the per-op cap and adds a per-account **gas bucket per
    window**. No action-free userOp: V4 refuses an empty batch and a call it cannot classify, through the
    fallback action.
@@ -104,14 +123,14 @@ policy on Base can reason about what lives at an address on Monad. Constants:
   - The admin is a team Safe (2 of 2, Ot and Brais, signed offline): `queue`, `execute` and `cancel`.
   - The guardian: `cancel` only.
 - **Entries:**
-  - `pools[pool]`: twapWindow, shortWindow, band, anchor, budgetToken, ratioBps.
+  - `pools[pool]`: twapWindow, shortWindow, band, anchor, ratioBps. The tokens must be pinned (above). The budget
+    token is the pinned stable side.
   - `vaults[vault]`: ratioBps.
-  - `stables[token]`.
-  - `routes[domain]`: an on/off flag only (the messenger and the remote stack are V4 constants), with `domain` ≠
-    local and ≤ `MAX_CHAINS` routes.
-  - `chain`: factory, NPM, router, checked by V4 against the canonical list.
+  - `routes[domain]`: an on/off flag only (the messenger, the tuple of the destination chain and the remote stack
+    are V4 constants), with `domain` ≠ local, the destination chain present in V4's table, and at most
+    `MAX_CHAINS` routes.
 - **Vaults** (r1 finding 3):
-  - A vault qualifies only if its `asset()` is a registered stable **and** it is created by a factory from a
+  - A vault qualifies only if its `asset()` is a pinned stable **and** it is created by a factory from a
     constant list in V4: the MetaMorpho factory's `isMetaMorpho(vault)`, and Aave's wrapper factory (its membership
     view, to be verified in T2; until then, Aave vaults are not admissible).
   - Deposits are charged to the bucket and capped by the vault's ratio.
@@ -124,7 +143,8 @@ policy on Base can reason about what lives at an address on Monad. Constants:
     fixes.
   - `initializeWithMultiplexer` only from `SMART_SESSION`.
   - The setup mode for new accounts.
-- **Init (owner-signed, account-wide):** `{ capUsd, passkeyX, passkeyY, owners[], saltNonce, admit[], generation }`.
+- **Init (owner-signed, account-wide):** `{ capUsd, admit[], generation }`. Owners come from the account's state
+  on chain, never from the Init.
 - **The pause check runs inside V4** (no PauseGate). The circuit breaker writes the same pause.
 - **One session per account and chain:**
   - A single fallback action whose only policy is V4.
@@ -174,7 +194,7 @@ Worst case per chain, with V4's hard bounds and `capUsd = C`:
 |---|---|---|
 | Leaked session key | V3's attacks within the band and the bucket, on any listed pool or vault | Per window: the bucket share of the pool; 24 h: at most C before the breaker pauses; 30 days: at most 3C spent, of which the loss is the band slippage share. Spec 007's measured loss (6.6 % of cap per day) holds per pool at today's parameters. Under V4's maximum band (500 ticks) the per-day loss bound is T4's job to state on a fork, before #292 merges. |
 | Leaked session key, gas | Repeated no-op or tiny userOps paid by the Safe | The gas bucket per window (`MamoruGasPolicyV2`); the empty batch is refused. |
-| Leaked registry admin (both keys) | Queue a trap pool (a factory pool with thin liquidity), a hostile vault, or looser parameters | Each waits 72 h in public; the guardian (a separate key) and either team member can see and cancel it. After the delay: one pool's ratio of the bucket per window, inside the breaker and the 30-day cap. It **cannot** change the messenger, the burn token, the Safe stack or the remote account. Those are V4 constants (r1 P0s). |
+| Leaked registry admin (both keys) | Queue a thin pool of pinned tokens, a factory-verified vault, looser parameters within V4's bounds | Each waits 72 h in public, and the guardian (a separate key) can cancel it. After the delay: one pool's share of the bucket per window, at band slippage on pinned assets, inside the breaker, the 30-day cap and the 10C review threshold. It **cannot** list a token, a router, an NPM, a messenger, a Safe stack or a remote account: all of those are V4 constants (r1 P0, r2 P1). |
 | Leaked registry admin + session key | The row above, at once | Same bounds: the session key adds nothing past the bucket. |
 | Compromised operator / Worker | Pick bad pools within the registry, refuse service | Within I1–I6. Withdrawal stays owner-only. |
 | A new chain | Admin enables a route to a domain | Funds mint only at `remoteOf`, a canonical Mamoru Safe owned by the user's passkey, bound by the same V4. A chain without the canonical deployer, or with different CREATE2 semantics, cannot host V4 at the pinned address, so its route cannot work. The risk is a non-EVM-equivalent chain where the same address runs different code: the route list is therefore capped (`MAX_CHAINS`) and every addition is timelocked. |
@@ -194,6 +214,16 @@ bounds that do not end the authorization.
 | P1-5 | A design-C remote Safe is not migrated | A second prompt on Monad for those accounts; the bridge stop stays until then; no new design-C Safes. |
 | P1-6 | A gas-only userOp policy allows unbounded gas spend | `MamoruGasPolicyV2` with a gas bucket per window; empty or unclassifiable calls refused. |
 | P1-7 | No justification for dropping the lifetime cap | A rolling 30-day cap (3C) and an on-chain breaker (C in 24 h), per chain; `MAX_CHAINS = 4`; the worst-case loss under maximum registry parameters is a T4 deliverable; guardian cancel is mandatory. |
+
+## Review r2 (GPT-6 Sol, PR #196, NO-GO) → r3
+
+| # | Finding | r3 |
+|---|---|---|
+| P0-1 | Funds can be minted to a remote Safe that cannot be deployed: the ERC-7484 attestation is checked at setup | The canonical initializer has no ERC-7484 registry and no attesters, so deployment depends on nothing external; T1 verifies this (I4). |
+| P0-2 | Rebuilding the address from the original keys can restore a revoked owner | The owners and the passkey are read from the account's *current* state; burns stop when they change; the old remote returns funds home (I4). |
+| P1-3 | A registry-chosen router or NPM can take approved assets | A per-chain tuple pinned in V4: factory, NPM, router, stables, assets. |
+| P1-4 | An admin-chosen "stable" makes the loss bound meaningless | Tokens are pinned in V4; the registry chooses pools only among them. |
+| P1-5 | A slow leak repeats with no end | A 10C cumulative review threshold per chain pauses until the guardian reviews. |
 
 ## Open questions
 
