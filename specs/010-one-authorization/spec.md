@@ -227,8 +227,16 @@ bounds that do not end the authorization.
 
 ## Open questions
 
-1. T1: does the deployed SmartSession support a fallback action, and a session whose only userOp policy is the gas
-   policy?
+1. ~~T1~~ **Answered** (`results/t1-smartsession-probe-2026-11-02.md`, Base and Monad forks, 13/13):
+   - **Fallback action:** supported (`FALLBACK_TARGET_FLAG`). A forbidden target, selector or batch item is refused.
+   - **userOp policies:** a gas-policy-only session enables and validates. If a TimeFrame is ever kept, it needs
+     `validUntil = 0` with `validAfter ≠ 0`; `(0, 0)` bricks the session.
+   - **Migration gas:** remove 3 sessions and enable 1 is 1.23M, against the 14.5M target.
+   - **The enable flow** runs `trustAttesters` + a self-attestation by the Safe (764k, once). The remote
+     initializer must use the same self-attestation inside its setup: the attester is the remote Safe itself, so
+     no third party can revoke it before deployment (r2 P0-1).
+   - **ERC-7562:** the registry read at validation breaks unstaked-entity storage rules. Mamoru bundles its own
+     userOps, as spec 007 already accepts. V4 keys its own state by account where it can.
 2. Is a pure-Solidity reconstruction of the canonical initializer (`packages/account/remote`) feasible in
    `registerRemote`, at under ~1M gas? Otherwise V4 takes the initializer as calldata and checks it piece by piece
    against the constants.
