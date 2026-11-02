@@ -3350,11 +3350,14 @@ export class Operator {
     const cap = this.capFor(acc)
     // otto/mamoru#212: what the account holds here and on every other chain, idle and placed.
     const start = await this.startTotal(acc, totalOf(this.localExposure(acc, r)))
-    if (start.total > cap) throw depositOverCap(start.total, cap, start.across)
-    if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
     // otto/mamoru#309 (a) / #333: an account in the one-authorization scope never gets a v1-v6 grant set: its Start IS
-    // the V4 activation (one Safe tx, the same builder the Worker rebuilds with), whatever it held before on chain.
-    if (this.cfg.oneAuth && this.inScope(acc, 'one_auth_v4')) return this.planV4Activation(acc, live, r, cap, gen)
+    // the V4 activation. What it holds at its own address on Ethereum (its sibling, still to come home) counts toward the
+    // cap and toward the deploy minimum (review r1 of #235).
+    const v4 = !!this.cfg.oneAuth && this.inScope(acc, 'one_auth_v4')
+    const elsewhere = v4 ? ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) : 0n
+    if (start.total + elsewhere > cap) throw depositOverCap(start.total + elsewhere, cap, start.across)
+    if (!r.deployed && r.usdc > 0n && r.usdc < MIN_DEPLOY_USDC && elsewhere < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
+    if (v4) return this.planV4Activation(acc, live, r, cap, gen)
     const policy = this.activationPolicy(acc)
     // otto/mamoru#15: a Safe holding enough USDC buys its own gas reserve in this very transaction (self-reserve.ts):
     // the relayer then sends no top-up. Any other start keeps the relayer's top-up, within the activation budget.
@@ -4302,7 +4305,9 @@ export class Operator {
       if (!(await readSafeNonce(this.client, live.safe)).deployed && usdc < MIN_DEPLOY_USDC && elsewhere < MIN_DEPLOY_USDC) throw belowDeployMinimum(usdc, this.chainName())
       // otto/mamoru#212: the total across chains, and USDC on its way here from Ethereum.
       const start = await this.startTotal(acc, await this.localTotal(acc, live.safe))
-      if (start.total > this.activationCap(acc, p.capUsdc)) throw depositOverCap(start.total, this.activationCap(acc, p.capUsdc), start.across)
+      // #309 (a), review r1 of #235: a V4 activation counts the account's funds at its own address on Ethereum too.
+      const there = p.grants?.[0]?.grant.oneAuthV4 ? ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) : 0n
+      if (start.total + there > this.activationCap(acc, p.capUsdc)) throw depositOverCap(start.total + there, this.activationCap(acc, p.capUsdc), start.across)
       // The relayer cannot pay for it now: the signature waits armed and the watcher runs it once the relayer is funded.
       // A batch that buys its own gas reserve needs no top-up from it (otto/mamoru#15).
       if (!(await this.relayerCanActivate(acc, BigInt(p.reserveWei ?? 0) > 0n))) return this.armFresh(acc, p, signature)
@@ -4573,7 +4578,8 @@ export class Operator {
         // otto/mamoru#212: the total across chains; a peer that cannot be read keeps it from running now.
         const start = await this.localTotal(acc, live.safe).then((local) => this.startTotal(acc, local)).catch(() => null)
         if (!start) return { code: 'CAP_CHECK_UNAVAILABLE' }
-        if (start.total > this.activationCap(acc, p.capUsdc)) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: start.total.toString(), capUsdc: this.activationCap(acc, p.capUsdc).toString() } }
+        const there = p.grants?.[0]?.grant.oneAuthV4 ? ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) : 0n
+        if (start.total + there > this.activationCap(acc, p.capUsdc)) return { code: 'DEPOSIT_OVER_CAP', detail: { amountUsdc: (start.total + there).toString(), capUsdc: this.activationCap(acc, p.capUsdc).toString() } }
       }
       // otto/mamoru#309 (a): a V4 activation whose funds sit at the account's own address on Ethereum (its sibling, #307)
       // deploys on Base without USDC there yet: the USDC arrives only through the sibling's bridge home, which needs this

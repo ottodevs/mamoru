@@ -49,7 +49,7 @@ describe('V4 activation of a never-activated account (#309 a)', () => {
     const t1 = await w.op.prepareActivate(ctx)
     const r1 = (await quiet(() => w.op.submit(ctx, 'activate', sign(t1)))).out
     expect(r1.code).toBe('ARMED')
-    w.op.siblingHoldingsUsdc = async () => 125_000_000n // 0.0554 ETH at ~2,270 USD
+    w.op.siblingHoldingsUsdc = async () => 50_000_000n // above the deploy minimum, under the test cap
     const t2 = await w.op.prepareActivate(ctx)
     const r2 = (await quiet(() => w.op.submit(ctx, 'activate', sign(t2)))).out
     expect(r2.code).not.toBe('ARMED')
@@ -69,4 +69,21 @@ describe('V4 activation of a never-activated account (#309 a)', () => {
       expect(acc.oneAuth?.capUsd).toBeDefined()
     }
   })
+
+  test('review r1 of #235: funds on Ethereum count toward the cap (no deploy for an over-cap account)', async () => {
+    const w = world(0n, scoped)
+    inactive(w)
+    w.op.siblingHoldingsUsdc = async () => 10n ** 15n // far above any cap
+    const err = await w.op.prepareActivate(ctx).then(() => null, (e) => e as { code?: string })
+    expect(err?.code).toBe('DEPOSIT_OVER_CAP')
+  })
+
+  test('review r1 of #235: dust on Base does not stop a V4 activation backed by funds on Ethereum', async () => {
+    const w = world(500_000n, scoped) // 0.5 USDC on Base, under the deploy minimum
+    inactive(w)
+    w.op.siblingHoldingsUsdc = async () => 50_000_000n
+    const t = await w.op.prepareActivate(ctx)
+    expect((t as unknown as { input?: unknown }).input).toBeDefined()
+  })
 })
+
