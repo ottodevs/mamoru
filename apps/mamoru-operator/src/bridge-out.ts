@@ -290,6 +290,8 @@ export type StoredSibling = {
   deployTx?: Hex
   l1Tx?: Hex
   execStarted?: boolean
+  /** When the send began (never rewritten): the give-up clock of a send that never landed (review r1 of #227). */
+  sentAt?: string
   at: string
 }
 
@@ -1447,7 +1449,7 @@ export class BridgeOut {
     if (state.deployed !== p.deployed || state.nonce !== p.tx.nonce) throw new HttpError(409, 'BRIDGE_STALE', 'your Safe on Ethereum changed, tap again')
     const exec = execTransactionData(p.tx, signature)
     if (p.deployed) await this.simulate(p.live.safe, exec)
-    const c: StoredSibling = { id: p.prepareId, safe: p.live.safe, safeNonce: p.tx.nonce.toString(), safeTxHash: p.safeTxHash, permissionId: p.permissionId, sessionKey: p.sessionKey, capUsdc: p.capUsdc.toString(), fromBlock: head.toString(), state: 'sending', at: '' }
+    const c: StoredSibling = { id: p.prepareId, safe: p.live.safe, safeNonce: p.tx.nonce.toString(), safeTxHash: p.safeTxHash, permissionId: p.permissionId, sessionKey: p.sessionKey, capUsdc: p.capUsdc.toString(), fromBlock: head.toString(), state: 'sending', sentAt: new Date(this.now()).toISOString(), at: '' }
     this.writeSibling(ctx.accountKey, c)
     try {
       if (!p.deployed) {
@@ -1498,21 +1500,37 @@ export class BridgeOut {
     return (await this.l1.readContract({ address: address('SmartSession', ethereumRegistry), abi: smartSessionV4Abi, functionName: 'isPermissionEnabled', args: [c.permissionId, c.safe] })) as boolean
   }
 
-  /** An unconfirmed enable from the chain: the session enabled is done; the signed nonce spent without it, failed. */
+  /**
+   * A 'sending' or 'unconfirmed' enable, from the chain (review r1 of #227: never left stuck):
+   * - the V4 session listed: done;
+   * - the Safe's ExecutionFailure for the hash, or the sent tx's receipt reverted: failed;
+   * - the sent tx's receipt successful: settled from its logs;
+   * - the signed Safe nonce spent by something else: failed;
+   * - no receipt (dropped, or never sent) and the nonce unspent past UNCONFIRMED_GIVEUP_MS from `sentAt`: failed. A
+   *   dropped tx that lands later enables the same session (same key, same input), and this read then says done.
+   * Written only when the state changes, so the give-up clock is never reset.
+   */
   private async reconcileSibling(accountKey: string): Promise<void> {
     const c = this.journal.siblings?.[accountKey]
     if (!c || (c.state !== 'unconfirmed' && c.state !== 'sending')) return
+    const before = c.state
     if (await this.siblingEnabled(c)) c.state = 'done'
     else {
       const exec = await this.findExecution(c.safe, c.safeTxHash, BigInt(c.fromBlock))
       if (exec && !exec.success) c.state = 'failed'
       else if (!exec) {
-        const { nonce } = await readSafeNonce(this.l1, c.safe)
-        if (nonce > BigInt(c.safeNonce)) c.state = 'failed' // the signed nonce went to something else
-        else if (!c.l1Tx && this.now() - Date.parse(c.at) > UNCONFIRMED_GIVEUP_MS) c.state = 'failed' // never broadcast
+        const receipt = c.l1Tx ? await this.l1.getTransactionReceipt({ hash: c.l1Tx }).catch(() => null) : null
+        if (receipt?.status === 'reverted') c.state = 'failed'
+        else if (receipt?.status === 'success') await this.settleSibling(c, receipt)
+        else {
+          const { nonce } = await readSafeNonce(this.l1, c.safe)
+          const since = Date.parse(c.sentAt ?? c.at)
+          if (nonce > BigInt(c.safeNonce)) c.state = 'failed' // the signed nonce went to something else
+          else if (this.now() - since > UNCONFIRMED_GIVEUP_MS) c.state = 'failed' // dropped or never sent
+        }
       }
     }
-    this.writeSibling(accountKey, c)
+    if (c.state !== before) this.writeSibling(accountKey, c)
   }
 
   private writeSibling(accountKey: string, c: StoredSibling): void {
