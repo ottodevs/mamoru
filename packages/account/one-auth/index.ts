@@ -59,6 +59,7 @@ export const mamoruActionPolicyV4Abi = parseAbi([
   'function bridge(uint32 domain, address token, uint256 amount)',
   'function registerRemote(uint32 domain, address sessionKey) returns (address remote)',
   'function setReady(address account, uint32 domain, address remote)',
+  'function clearReady(address account, uint32 domain)',
   'function remoteOf(address account, uint32 domain) view returns (Remote)',
   'function readyOf(address account, uint32 domain) view returns (Ready)',
   'function isReady(address account, uint32 domain) view returns (bool)',

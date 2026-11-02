@@ -24,13 +24,21 @@ const SMART = address('SmartSession', baseRegistry)
 function world() {
   return {
     logs: [{ args: { id: `0x${'00'.repeat(32)}`, multiplexer: A(0x55), account: ACCOUNT } }] as { args: Record<string, unknown> }[],
-    sibling: { set: true, home: ACCOUNT as Address, homeDomain: 6, ownersHash: HASH as Hex, ready: false },
+    sibling: { set: true, home: ACCOUNT as Address, homeDomain: 6, ownersHash: HASH as Hex, ready: false, capUsd: 1_000n },
+    // review r2 (P0-1): the home's history and its current grants
+    approvals: [] as { token: Address; spender: Address }[],
+    allowance: {} as Record<string, bigint>,
+    approvalForAll: [] as Address[],
+    approvedForAll: true,
+    signMsgs: 0,
+    head: 10n,
     sibCode: PROXY as Hex | undefined,
     home: {
       code: PROXY as Hex | undefined,
       singleton: address('SafeL2_141', baseRegistry) as Address,
       set: true,
       home: A(0) as Address,
+      capUsd: 1_000n,
       ownersHash: HASH as Hex,
       modules: [SAFE7579] as Address[],
       guard: A(0) as Address,
@@ -47,15 +55,25 @@ type W = ReturnType<typeof world>
 
 function client(w: W, side: 'sibling' | 'home'): ChainClient {
   return {
-    getBlockNumber: async () => 10n,
+    getBlockNumber: async () => (side === 'home' ? w.head : 10n),
     getCode: async () => (side === 'home' ? w.home.code : w.sibCode),
     getStorageAt: async ({ slot }) => pad(slot.startsWith('0x4a204f62') ? w.home.guard : slot.startsWith('0x6c9a6c4a') ? w.home.handler : w.home.singleton, { size: 32 }),
-    getLogs: async ({ event }) => ((event as { name: string }).name === 'PolicySet' && side === 'sibling' ? w.logs : []),
-    readContract: async ({ functionName }: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[] }) => {
+    getLogs: async ({ event, address: at }) => {
+      const name = (event as { name: string }).name
+      if (name === 'PolicySet') return side === 'sibling' ? w.logs : []
+      if (side !== 'home') return []
+      if (name === 'Approval') return w.approvals.filter((x) => x.token.toLowerCase() === at.toLowerCase()).map((x) => ({ args: { owner: ACCOUNT, spender: x.spender } }))
+      if (name === 'ApprovalForAll') return w.approvalForAll.map((o) => ({ args: { owner: ACCOUNT, operator: o } }))
+      if (name === 'SignMsg') return Array.from({ length: w.signMsgs }, () => ({ args: {} }))
+      return []
+    },
+    readContract: async ({ functionName, args }: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[] }) => {
       const s = side === 'sibling'
       switch (functionName) {
         case 'HELPER': return HELPER
-        case 'configOf': return s ? { capUsd: 1n, generation: 1n, homeDomain: w.sibling.homeDomain, set: w.sibling.set, home: w.sibling.home, initHash: HASH } : { capUsd: 1n, generation: 1n, homeDomain: 0, set: w.home.set, home: w.home.home, initHash: HASH }
+        case 'configOf': return s ? { capUsd: w.sibling.capUsd, generation: 1n, homeDomain: w.sibling.homeDomain, set: w.sibling.set, home: w.sibling.home, initHash: HASH } : { capUsd: w.home.capUsd, generation: 1n, homeDomain: 0, set: w.home.set, home: w.home.home, initHash: HASH }
+        case 'allowance': return w.allowance[String(args?.[1]).toLowerCase()] ?? 1n
+        case 'isApprovedForAll': return w.approvedForAll
         case 'ownersHashOf': return s ? w.sibling.ownersHash : w.home.ownersHash
         case 'isReady': return w.sibling.ready
         case 'getModulesPaginated': return [w.home.modules, A(1)]
@@ -78,17 +96,19 @@ function setup(w: W, over: Partial<WatcherConfig> = {}) {
   const store = new StateStore(mkdtempSync(join(tmpdir(), 'guardian-sib-')))
   const alerts: string[] = []
   const sent: { account: Address; domain: number; remote: Address }[] = []
+  const cleared: { account: Address; domain: number }[] = []
   const alerter: Alerter = { alert: async (t) => (alerts.push(t), { delivered: true }) }
   const cfg: WatcherConfig = { homeChainId: ETH, v4: V4, gasPolicy: GAS_POLICY, registryAt: { [ETH]: REGISTRY }, fromBlock: { [ETH]: 1n, [BASE]: 1n }, logPage: 4n, maxPagesPerStream: 50, dryRun: false, realertMs: 1000, ...over }
   const deps: WatcherDeps = {
     clients: { [ETH]: client(w, 'sibling'), [BASE]: client(w, 'home') },
     send: async (a) => { sent.push(a); w.sibling.ready = true; return '0x01' },
+    clear: async (a) => { cleared.push(a); w.sibling.ready = false; return '0x02' },
     alerter,
     store,
     allowlist: () => new Set(),
     now: () => 1_000,
   }
-  return { cfg, deps, alerts, sent, store }
+  return { cfg, deps, alerts, sent, cleared, store }
 }
 
 describe('V4 sibling readiness (#310)', () => {
@@ -167,6 +187,11 @@ describe('V4 sibling readiness (#310)', () => {
     ['a session without the gas policy', (w) => { w.home.session.userOpPolicies = [] }, 'homePermissions'],
     ['a session that can sign (ERC-1271 policy)', (w) => { w.home.session.erc1271Policies = [A(0xbad)] }, 'homePermissions'],
     ['a session with another validator', (w) => { w.home.session.validator = A(0xbad) }, 'homePermissions'],
+    // review r2 (P0-1): authority an old owner left behind, surviving the owner swap
+    ['a token allowance to someone else, still live', (w) => { w.approvals = [{ token: address('USDC', baseRegistry), spender: A(0xbad) }] }, 'homeAllowance'],
+    ['an operator approved for all positions', (w) => { w.approvalForAll = [A(0xbad)] }, 'homeApprovedForAll'],
+    ['a stored signed message', (w) => { w.signMsgs = 1 }, 'homeSignedMessages'],
+    ["the home's C above the sibling's", (w) => { w.home.capUsd = 10_000n }, 'homeConfig'],
     // review r1 (P1-2): code that is not a SafeProxy, on either side
     ['the home is not a SafeProxy', (w) => { w.home.code = '0x6080' }, 'codeHash'],
     ['the sibling is not a SafeProxy', (w) => { w.sibCode = '0x6080' }, 'codeHash'],
@@ -206,5 +231,41 @@ describe('V4 sibling readiness (#310)', () => {
     await runPass(s.cfg, s.deps)
     expect(s.sent).toEqual([])
     expect(s.alerts.some((a) => a.includes('[dry-run] all checks passed, would setReady: sibling'))).toBe(true)
+  })
+})
+
+describe("the home's history (review r2 of #223, P0-1)", () => {
+  test('allowances to pinned contracts (the router) or reset to 0 are fine', async () => {
+    const w = world()
+    w.approvals = [{ token: address('USDC', baseRegistry), spender: address('SwapRouter02', baseRegistry) }, { token: address('USDC', baseRegistry), spender: A(0xbad) }]
+    w.allowance[A(0xbad).toLowerCase()] = 0n
+    const s = setup(w)
+    await runPass(s.cfg, s.deps)
+    expect(s.sent.length).toBe(1)
+  })
+
+  test('a long history is read over several passes: not ready until it reached the head', async () => {
+    const w = world(); w.head = 10_000n
+    const s = setup(w, { logPage: 100n, maxPagesPerStream: 10 })
+    await runPass(s.cfg, s.deps)
+    expect(s.sent).toEqual([])
+    expect(s.alerts.some((a) => a.includes('homeHistory:'))).toBe(true)
+    for (let i = 0; i < 12; i++) await runPass(s.cfg, s.deps)
+    expect(s.sent.length).toBe(1)
+  })
+
+  test('a ready sibling whose home gains a foreign allowance is cleared (P1-c), not only alerted', async () => {
+    const w = world()
+    let now = 1_000
+    const s = setup(w)
+    s.deps.now = () => now
+    await runPass(s.cfg, s.deps)
+    expect(s.sent.length).toBe(1)
+    w.approvals = [{ token: address('USDC', baseRegistry), spender: A(0xbad) }]
+    s.store.state.siblings[ACCOUNT]!.hist = undefined // re-read the history from the deploy block
+    now += 2_000
+    await runPass(s.cfg, s.deps)
+    expect(s.cleared).toEqual([{ account: ACCOUNT, domain: 6 }])
+    expect(s.alerts.some((a) => a.includes('clearReady sent'))).toBe(true)
   })
 })

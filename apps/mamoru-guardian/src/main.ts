@@ -159,6 +159,7 @@ export async function run(env: Env, alerter: Alerter, makeClient: MakeClient = (
 
   const home = publicClients[homeChainId]!
   let send: (a: { account: Address; domain: number; remote: Address }) => Promise<Hex>
+  let clear: ((a: { account: Address; domain: number }) => Promise<Hex>) | undefined
   const keyFile = env.MAMORU_GUARDIAN_KEY_FILE
   if (!keyFile && !dryRun) throw new ConfigError('MAMORU_GUARDIAN_KEY_FILE is required (or run with --dry-run)')
   if (keyFile) {
@@ -172,6 +173,12 @@ export async function run(env: Env, alerter: Alerter, makeClient: MakeClient = (
     const guardian = (await home.readContract({ address: v4, abi: mamoruActionPolicyV4Abi, functionName: 'GUARDIAN' })) as Address
     if (guardian.toLowerCase() !== account.address.toLowerCase()) throw new ConfigError('the guardian key is not V4.GUARDIAN')
     const wallet = createWalletClient({ account, transport: http(urls[homeChainId]) })
+    clear = async ({ account: acct, domain }) => {
+      const hash = await wallet.writeContract({ chain: null, address: v4, abi: mamoruActionPolicyV4Abi, functionName: 'clearReady', args: [acct, domain] })
+      const rc = await home.waitForTransactionReceipt({ hash })
+      if (rc.status !== 'success') throw new Error('clearReady reverted')
+      return hash
+    }
     send = async ({ account: acct, domain, remote }) => {
       const hash = await wallet.writeContract({ chain: null, address: v4, abi: mamoruActionPolicyV4Abi, functionName: 'setReady', args: [acct, domain, remote] })
       const rc = await home.waitForTransactionReceipt({ hash })
@@ -195,7 +202,7 @@ export async function run(env: Env, alerter: Alerter, makeClient: MakeClient = (
     dryRun,
     realertMs: int('MAMORU_GUARDIAN_REALERT_SECONDS', 6 * 3600) * 1000,
   }
-  const deps = { clients, send, alerter, store, allowlist: readAllowlist(env.MAMORU_GUARDIAN_ALLOWLIST_FILE), now: () => Date.now() }
+  const deps = { clients, send, ...(clear ? { clear } : {}), alerter, store, allowlist: readAllowlist(env.MAMORU_GUARDIAN_ALLOWLIST_FILE), now: () => Date.now() }
   const interval = int('MAMORU_GUARDIAN_INTERVAL_SECONDS', 30) * 1000
   clearStartupStamps(env)
   console.log(`guardian up: home chain ${homeChainId}, chains [${Object.keys(clients).join(',')}], ${dryRun ? 'DRY-RUN' : 'live'}`)

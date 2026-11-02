@@ -7,8 +7,8 @@ import { mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi } from '@
 import { V4_CHAIN_BY_DOMAIN, type OneAuthV4Deployment } from '@mamoru/policy'
 import { address, registryFor, safe7579Abi, safeAbi, safeWebAuthnSharedSignerAbi } from '@mamoru/registry'
 import type { Alerter } from './alerts.ts'
-import { checkRemote, checkSibling, FALLBACK_ACTION_ID, type CheckReads, type Side, type SiblingReads, type V4Config } from './checks.ts'
-import type { StateStore } from './state.ts'
+import { checkRemote, checkSibling, FALLBACK_ACTION_ID, type CheckReads, type HomeHistory, type Side, type SiblingReads, type V4Config } from './checks.ts'
+import type { Sibling, StateStore } from './state.ts'
 
 /** The slice of a viem PublicClient the guardian uses (a real client is cast to it in main.ts). */
 export type ChainClient = {
@@ -16,10 +16,12 @@ export type ChainClient = {
   getCode(a: { address: Address; blockNumber?: bigint }): Promise<Hex | undefined>
   getStorageAt(a: { address: Address; slot: Hex }): Promise<Hex | undefined>
   readContract(a: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[] }): Promise<unknown>
-  getLogs(a: { address: Address; event: unknown; fromBlock: bigint; toBlock: bigint }): Promise<{ args: Record<string, unknown> }[]>
+  getLogs(a: { address: Address; event: unknown; args?: Record<string, unknown>; fromBlock: bigint; toBlock: bigint }): Promise<{ args: Record<string, unknown> }[]>
 }
 
 export type SetReady = (a: { account: Address; domain: number; remote: Address }) => Promise<Hex>
+/** V4.clearReady (revoke-only). */
+export type ClearReady = (a: { account: Address; domain: number }) => Promise<Hex>
 
 export type WatcherConfig = {
   homeChainId: number
@@ -39,6 +41,8 @@ export type WatcherConfig = {
 export type WatcherDeps = {
   clients: Readonly<Record<number, ChainClient>>
   send: SetReady
+  /** Review r2 of #223 (P1-c): a ready sibling whose home stops passing the checks is cleared, not only alerted. */
+  clear?: ClearReady
   alerter: Alerter
   store: StateStore
   /** safeTxHashes Mamoru prepared (lower-case). */
@@ -215,8 +219,60 @@ async function scanSiblings(cfg: WatcherConfig, d: WatcherDeps) {
 }
 
 function configOf(raw: unknown): V4Config {
-  const c = raw as { set: boolean; home: Address; homeDomain: number | bigint; generation: bigint }
-  return { set: c.set, home: getAddress(c.home), homeDomain: Number(c.homeDomain), generation: BigInt(c.generation) }
+  const c = raw as { set: boolean; home: Address; homeDomain: number | bigint; generation: bigint; capUsd?: bigint }
+  return { set: c.set, home: getAddress(c.home), homeDomain: Number(c.homeDomain), generation: BigInt(c.generation), capUsd: BigInt(c.capUsd ?? 0n) }
+}
+
+const approvalEvent = parseAbiItem('event Approval(address indexed owner, address indexed spender, uint256 value)')
+const approvalForAllEvent = parseAbiItem('event ApprovalForAll(address indexed owner, address indexed operator, bool approved)')
+const signMsgEvent = parseAbiItem('event SignMsg(bytes32 indexed msgHash)')
+const allowanceViewAbi = [
+  { type: 'function', name: 'allowance', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'address' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'isApprovedForAll', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'address' }], outputs: [{ type: 'bool' }] },
+] as const satisfies Abi
+
+/**
+ * Review r2 of #223 (P0-1): reads the home's logs from its deploy block on, in bounded pages per pass (the cursor lives
+ * on the sibling's state): Approval(owner = home) on every token of the home registry, ApprovalForAll(owner = home) on
+ * the position manager, SignMsg on the home. Then the CURRENT allowance of every (token, spender) seen and whether each
+ * operator is still approved. `complete` only once the scan reached the head.
+ */
+async function homeHistoryOf(cfg: WatcherConfig, d: WatcherDeps, s: Sibling, home: ChainClient, homeChainId: number): Promise<HomeHistory> {
+  const reg = registryFor(homeChainId)
+  const head = await home.getBlockNumber()
+  const h = (s.hist ??= { next: '', spenders: {}, operators: [], signed: 0 })
+  if (h.next === '') {
+    const at = await deployBlockOf(home, s.account, head)
+    if (at === null) return { complete: false, allowances: [], approvedForAll: [], signedMessages: 0 }
+    h.next = at.toString()
+  }
+  const tokens = reg.entries.filter((e) => e.kind === 'token').map((e) => e.address)
+  const npm = reg.entries.find((e) => e.name === 'NonfungiblePositionManager')?.address
+  let next = BigInt(h.next)
+  for (let page = 0; page < cfg.maxPagesPerStream && next <= head; page++) {
+    const to = next + cfg.logPage - 1n < head ? next + cfg.logPage - 1n : head
+    for (const t of tokens) {
+      for (const l of await home.getLogs({ address: t, event: approvalEvent, args: { owner: s.account }, fromBlock: next, toBlock: to })) {
+        const k = getAddress(t)
+        h.spenders[k] = [...new Set([...(h.spenders[k] ?? []), getAddress(String(l.args.spender))])]
+      }
+    }
+    if (npm) for (const l of await home.getLogs({ address: npm, event: approvalForAllEvent, args: { owner: s.account }, fromBlock: next, toBlock: to })) h.operators = [...new Set([...h.operators, getAddress(String(l.args.operator))])]
+    h.signed += (await home.getLogs({ address: s.account, event: signMsgEvent, fromBlock: next, toBlock: to })).length
+    next = to + 1n
+    h.next = next.toString()
+    d.store.save()
+  }
+  const complete = next > head
+  const allowances: { token: Address; spender: Address }[] = []
+  for (const [token, spenders] of Object.entries(h.spenders)) {
+    for (const spender of spenders) {
+      if ((await call<bigint>(home, token as Address, allowanceViewAbi, 'allowance', [s.account, spender])) > 0n) allowances.push({ token: token as Address, spender })
+    }
+  }
+  const approvedForAll: Address[] = []
+  if (npm) for (const op of h.operators) if (await call<boolean>(home, npm, allowanceViewAbi, 'isApprovedForAll', [s.account, op])) approvedForAll.push(op)
+  return { complete, allowances, approvedForAll, signedMessages: h.signed }
 }
 
 /** Safe proxy storage slot 0: its singleton. */
@@ -233,7 +289,7 @@ const sessionViewsAbi = [
 ] as const satisfies Abi
 
 /** The reads of checkSibling over the sibling's chain and its home chain. */
-export function siblingReadsFor(cfg: WatcherConfig, sibChain: ChainClient, homeClient: ChainClient, homeChainId: number, helper: Address): SiblingReads {
+export function siblingReadsFor(cfg: WatcherConfig, sibChain: ChainClient, homeClient: ChainClient, homeChainId: number, helper: Address, history: (a: Address) => Promise<HomeHistory>): SiblingReads {
   const on = (side: 'sibling' | 'home') => (side === 'sibling' ? sibChain : homeClient)
   const homeReg = registryFor(homeChainId)
   const smart = address('SmartSession', homeReg)
@@ -272,6 +328,7 @@ export function siblingReadsFor(cfg: WatcherConfig, sibChain: ChainClient, homeC
       ])
       return { actions, fallbackPolicies, userOpPolicies, erc1271Policies, validator }
     },
+    homeHistory: history,
   }
 }
 
@@ -308,11 +365,17 @@ async function processSiblings(cfg: WatcherConfig, d: WatcherDeps): Promise<stri
         await alertOnce(d, `sib:${k}:rpc`, `Sibling not marked ready, ${where}: no RPC configured for its home chain`, cfg.realertMs)
         continue
       }
-      const res = await checkSibling({ account: s.account, homeDomain: s.domain, homeRegistry: registryFor(homeChainId), deployment: { policy: cfg.v4, gasPolicy: cfg.gasPolicy } }, siblingReadsFor(cfg, sibChain, homeClient, homeChainId, helper))
+      const res = await checkSibling({ account: s.account, homeDomain: s.domain, homeRegistry: registryFor(homeChainId), deployment: { policy: cfg.v4, gasPolicy: cfg.gasPolicy } }, siblingReadsFor(cfg, sibChain, homeClient, homeChainId, helper, () => homeHistoryOf(cfg, d, s, homeClient, homeChainId)))
       if (ready) {
         s.checkedAt = now
         d.store.save()
-        if (!res.ok) await alertOnce(d, `sib:changed:${k}:${res.failed}`, `Ready sibling's home changed, ${where}: ${res.failed}. Consider V4.clearReady`, cfg.realertMs)
+        if (!res.ok) {
+          // Review r2 of #223 (P1-c): the guardian clears it (revoke-only) instead of letting the bridge continue.
+          if (!cfg.dryRun && d.clear) {
+            const tx = await d.clear({ account: s.account, domain: s.domain }).catch(() => null)
+            await alertOnce(d, `sib:changed:${k}:${res.failed}`, `Ready sibling's home changed, ${where}: ${res.failed}. ${tx ? `clearReady sent tx=${tx}` : 'clearReady FAILED to send: clear it by hand'}`, cfg.realertMs)
+          } else await alertOnce(d, `sib:changed:${k}:${res.failed}`, `Ready sibling's home changed, ${where}: ${res.failed}. Clear it with V4.clearReady`, cfg.realertMs)
+        }
         continue
       }
       if (!res.ok) {
@@ -323,9 +386,12 @@ async function processSiblings(cfg: WatcherConfig, d: WatcherDeps): Promise<stri
         await alertOnce(d, `sib:dry:${k}`, `[dry-run] all checks passed, would setReady: ${where}`, cfg.realertMs)
         continue
       }
+      // Review r2 of #223 (P2-a): the send is recorded BEFORE it is attempted, so a receipt that times out after the
+      // broadcast never leads to a second setReady on the next pass.
+      s.sentAt = now
+      d.store.save()
       try {
         const tx = await d.send({ account: s.account, domain: s.domain, remote: s.account })
-        s.sentAt = now
         s.checkedAt = now
         d.store.save()
         await alertOnce(d, `sib:ready:${k}:${tx}`, `setReady sent: ${where} tx=${tx}`)

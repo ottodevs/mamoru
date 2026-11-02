@@ -156,7 +156,7 @@ export async function checkRemote(i: CheckInput, r: CheckReads): Promise<CheckRe
 // ---------------------------------------------------------------- #310: a V4 sibling's home, read back
 
 /** A V4 Config, as `configOf` returns it. */
-export type V4Config = { set: boolean; home: Address; homeDomain: number; generation: bigint }
+export type V4Config = { set: boolean; home: Address; homeDomain: number; generation: bigint; capUsd: bigint }
 
 /** SafeProxy 1.4.1's runtime code hash (the same proxy on Base, Monad and Ethereum; read on chain 2 Nov). */
 export const SAFE_PROXY_CODEHASH: Hex = '0xd7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c'
@@ -185,7 +185,16 @@ export type SiblingReads = {
   /** Every SmartSession permission enabled for the home, and each one's shape. */
   permissionIds(account: Address): Promise<readonly Hex[]>
   session(account: Address, permissionId: Hex): Promise<SessionShape>
+  /**
+   * Review r2 of #223 (P0-1): the home's persistent grants of authority since its deploy, read from its logs by the
+   * watcher (a cursor per sibling; `complete` false until the scan reached the head): every (token, spender) with an
+   * allowance granted by the home and still non-zero, every operator still approved for all of its positions, and
+   * whether the home ever stored a signed message (SignMsg: an ERC-1271 approval of any hash, forever).
+   */
+  homeHistory(account: Address): Promise<HomeHistory>
 }
+
+export type HomeHistory = { complete: boolean; allowances: readonly { token: Address; spender: Address }[]; approvedForAll: readonly Address[]; signedMessages: number }
 
 const ZERO: Address = '0x0000000000000000000000000000000000000000'
 
@@ -258,5 +267,20 @@ export async function checkSibling(
       && s.v.erc1271Policies.length === 0 && isAddressEqual(s.v.validator, ownable)
     if (!v4Bound) return fail(`homePermissions: permission ${id} is not a V4 session`)
   }
+  // P0-1 (review r2 of #223): an owner the attacker once was can leave authority that survives the owner swap: a token
+  // allowance, an operator over the positions, a stored signed message (Safe7579.isValidSignature accepts an empty
+  // signature for it). Every spender must be a contract of the pinned registry or V4 itself; nothing approved for all;
+  // no stored message. (Safe7579 pre-validation hooks, P1-b: the pinned Safe7579 has no getPrevalidationHook, read on
+  // Base 2 Nov: not installable there.)
+  const hist = await read('homeHistory', () => r.homeHistory(i.account))
+  if ('failed' in hist) return fail(hist.failed)
+  if (!hist.v.complete) return fail("homeHistory: the home's history is still being read")
+  const allowed = new Set([...i.homeRegistry.entries.map((e) => e.address.toLowerCase()), i.deployment.policy.toLowerCase(), i.deployment.gasPolicy.toLowerCase()])
+  const foreign = hist.v.allowances.find((x) => !allowed.has(x.spender.toLowerCase()))
+  if (foreign) return fail(`homeAllowance: ${foreign.token} may be spent by ${foreign.spender}`)
+  if (hist.v.approvedForAll.length) return fail(`homeApprovedForAll: ${hist.v.approvedForAll[0]} may move the home's positions`)
+  if (hist.v.signedMessages) return fail('homeSignedMessages: the home stored a signed message')
+  // P1-a, bounded: the home's C is never above the sibling's (the C Mamoru signs for both).
+  if (home.v.capUsd > sib.v.capUsd) return fail("homeConfig: the home's C is above the sibling's")
   return { ok: true }
 }
