@@ -76,6 +76,23 @@ contract MamoruV4ClassesTest is Test {
         );
     }
 
+    /// pairsOf / vaultsOf list exactly the rows classOf / vaultOf have (the deploy script iterates them).
+    function test_listsMatchTheRows() public pure {
+        uint256[3] memory ids = [uint256(8453), 143, 1];
+        uint256[3] memory nPairs = [uint256(3), 1, 1];
+        for (uint256 k; k < 3; k++) {
+            address[2][] memory p = MamoruV4Classes.pairsOf(ids[k]);
+            assertEq(p.length, nPairs[k]);
+            for (uint256 i; i < p.length; i++) {
+                _checkClass(ids[k], p[i][0], p[i][1]);
+                assertTrue(MamoruV4Classes.classOf(ids[k], p[i][0], p[i][1]).ref != address(0), "a listed pair has a class");
+            }
+        }
+        assertEq(MamoruV4Classes.vaultsOf(8453).length, 1);
+        assertEq(MamoruV4Classes.vaultsOf(143).length, 0);
+        assertEq(MamoruV4Classes.pairsOf(42161).length, 0);
+    }
+
     function test_feeBits() public pure {
         assertEq(MamoruV4Classes.feeBit(100), 1);
         assertEq(MamoruV4Classes.feeBit(500), 2);

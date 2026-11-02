@@ -10,6 +10,8 @@ interface IMamoruV4Table {
     function chainOf(uint32 domain) external pure returns (uint256);
     function classOf(uint256 chainId, address a, address b) external pure returns (MamoruV4Classes.Class memory);
     function vaultOf(uint256 chainId, address vault) external pure returns (MamoruV4Classes.Vault memory);
+    function pairsOf(uint256 chainId) external pure returns (address[2][] memory);
+    function vaultsOf(uint256 chainId) external pure returns (address[] memory);
 }
 
 /**
@@ -38,5 +40,13 @@ contract MamoruV4Table is IMamoruV4Table {
 
     function vaultOf(uint256 chainId, address vault) external pure returns (MamoruV4Classes.Vault memory) {
         return MamoruV4Classes.vaultOf(chainId, vault);
+    }
+
+    function pairsOf(uint256 chainId) external pure returns (address[2][] memory) {
+        return MamoruV4Classes.pairsOf(chainId);
+    }
+
+    function vaultsOf(uint256 chainId) external pure returns (address[] memory) {
+        return MamoruV4Classes.vaultsOf(chainId);
     }
 }
