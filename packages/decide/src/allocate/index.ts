@@ -2,7 +2,7 @@ import type { ChainId, ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasIncrease, hasManageAny, preferenceTotal, type PolicyVersion } from '@mamoru/policy'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { safeSavings } from '../enter/index.ts'
-import { convertKey, inEdgeBand } from '../rerange/index.ts'
+import { convertKey, inEdgeBand, rerangeOf } from '../rerange/index.ts'
 import { depthOf } from '../depth/index.ts'
 import { rangeFor, widthFor, widthOf } from '../geometry/index.ts'
 import { purgaIdentity, registryOf } from '../gates/index.ts'
@@ -94,8 +94,9 @@ function liveSession(obs: Observation, grant: string): boolean {
  * (otto/mamoru#220: b54dda3a, 2 Nov 2026). Under manage-any every position of a policy pool is managed (isManaged). The position must have liquidity and the price strictly
  * inside its range (both amounts positive, as the grant's minimums need). One NFT per pool by design (otto/mamoru#220,
  * Ot 2 Nov 2026): such a position takes the entry however far its edges are from `range` (what a mint would get now),
- * unless the price sits in its re-range edge band (`inEdgeBand`), where the re-range would take the new money straight
- * back out; then the entry mints the fresh position and the re-range closes the old one into it. `range.increaseToleranceBps`
+ * unless the price sits in its re-range edge band (`inEdgeBand`) and the re-range acts on it this review, which would
+ * take the new money straight back out; then the entry mints the fresh position and the re-range closes the old one
+ * into it. `range.increaseToleranceBps`
  * no longer excludes one (a held position 340 ticks off took a second NFT on c23e94e1, 2 Nov): the nearest wins, lowest
  * tokenId on ties. The engine re-reads admission and ownership before it builds the call.
  */
@@ -106,7 +107,10 @@ export function reusablePosition(obs: Observation, policy: PolicyVersion, pool: 
   let bestDistance = 0
   for (const p of obs.positions) {
     if (p.pool !== pool.name || p.liquidity <= 0n || p.admitted !== true) continue
-    if (!(p.tickLower < pool.tick && pool.tick < p.tickUpper) || inEdgeBand(policy, pool, p)) continue
+    if (!(p.tickLower < pool.tick && pool.tick < p.tickUpper)) continue
+    // In its edge band it is skipped only when the re-range acts on it now: held there (cooldown, weekly cap, below
+    // cost) it takes the entry, so a mint beside it never becomes a merge that bypasses those holds.
+    if (inEdgeBand(policy, pool, p) && rerangeOf(obs, policy, p, pool).proposal !== null) continue
     const distance = Math.abs(p.tickLower - range.tickLower) + Math.abs(p.tickUpper - range.tickUpper)
     if (!best || distance < bestDistance || (distance === bestDistance && p.tokenId < best.tokenId)) {
       best = p

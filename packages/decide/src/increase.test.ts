@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV2, conservadorLiveV4, conservadorLiveV5, grantKey, type PolicyVersion } from '@mamoru/policy'
 import { address, entry, baseRegistry } from '@mamoru/registry'
 import { sqrtRatioAtTick, token1InToken0 } from '@mamoru/uniswap-v3/quote'
-import { decide, rangeFor, reusablePosition, type Observation, type PoolObs, type PositionObs, type SessionObs } from './index.ts'
+import { decide, rangeFor, rerangeOf, reusablePosition, type Observation, type PoolObs, type PositionObs, type SessionObs } from './index.ts'
 
 // otto/mamoru#171: an entry into a pool where the account holds a position of (nearly) the same range adds to it.
 // Spec 007: only a policy whose manage-any carries MamoruActionPolicyV2.increase can (conservador-live-v5).
@@ -136,8 +136,14 @@ describe('increase instead of a second mint (otto/mamoru#171)', () => {
 
   test('#220: a position whose price sits in its re-range edge band takes no entry (the re-range would take it back out)', () => {
     const sessions = pairSessions(LAB)
-    // 1980 wide, the price 90 ticks from the upper edge: inside the 10 % (198-tick) band.
+    // 1980 wide, the price 90 ticks from the upper edge: inside the 10 % (198-tick) band, and the re-range acts.
+    expect(rerangeOf(obs([held(3n, -900)], sessions), LAB, held(3n, -900), riskPool).proposal).not.toBeNull()
     expect(reusablePosition(obs([held(3n, -900)], sessions), LAB, riskPool, fresh)).toBeNull()
+    // The same position with the re-range held by its cooldown: it takes the entry (no mint beside it to merge later).
+    const base = obs([held(3n, -900)], sessions)
+    const cooling: Observation = { ...base, lastRerangeAt: base.block.timestamp - 1n }
+    expect(rerangeOf(cooling, LAB, held(3n, -900), riskPool).proposal).toBeNull()
+    expect(reusablePosition(cooling, LAB, riskPool, fresh)?.tokenId).toBe(3n)
     // Just past the band it does.
     expect(reusablePosition(obs([held(3n, -780)], sessions), LAB, riskPool, fresh)?.tokenId).toBe(3n)
     // A lazy policy has no edge trigger: any in-range position takes the entry.
