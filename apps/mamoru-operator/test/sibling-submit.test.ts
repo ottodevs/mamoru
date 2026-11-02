@@ -80,6 +80,7 @@ function world(prior?: Partial<StoredSibling>) {
   const bo = new BridgeOut({ ...l1, getBalanceOf: undefined } as never, relayer, dir, fetch, Date.now, undefined, () => true)
   ;(bo as unknown as { l1: { getBalance: () => Promise<bigint> } }).l1.getBalance = async () => 55_000_000_000_000_000n
   bo.siblingCapUsd = () => 1_000_000_000n
+  bo.siblingInScope = () => true
   return { bo, sent, journal: () => JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8')).siblings.k as StoredSibling, setHash: (h: Hex) => { sentHash = h } }
 }
 

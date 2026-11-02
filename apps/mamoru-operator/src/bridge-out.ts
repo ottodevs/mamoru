@@ -107,8 +107,10 @@ const opGasOf = (k: keyof typeof SIBLING_GAS) => SIBLING_GAS[k].verificationGasL
 export const SIBLING_HANDLE_OPS_OVERHEAD = 200_000n
 /** The highest fee a sibling op signs (its maxFeePerGas): the relayer's own ceiling, under GasPolicyV2's 5 gwei. */
 export const SIBLING_MAX_FEE = 3_000_000_000n // = MAX_GAS_PRICE_WEI (declared below)
-/** A swap stays this far (bps) under V4's room: the quote and V4's own valuation differ a little. */
-export const SIBLING_ROOM_MARGIN_BPS = 300n
+/** A swap sized down to V4's room stays this far (bps) under it (V4's valuation is not exactly linear in the amount). */
+export const SIBLING_ROOM_MARGIN_BPS = 100n
+/** The op search stops this many blocks behind the head: a provider's logs may lag its state (review r2 of #238). */
+export const SIBLING_SCAN_LAG = 12n
 /** The outstanding nonce's op is searched SIBLING_SCAN_CHUNKS log chunks a pass, from where the last pass stopped. */
 export const SIBLING_SCAN_CHUNKS = 20
 /** Less than this of ETH (beyond the gas reserve) or of USDC is left where it is: not worth its gas. */
@@ -361,7 +363,8 @@ type PreparedSibling = { prepareId: string; accountKey: string; live: LiveAccoun
 
 /** What the owner signs for the sibling: the Safe tx, the plain lines, and the builder's input (the Worker rebuilds it). */
 export type SiblingToSign = { safe: Address; chainId: number; safeTxHash: Hex; summary: string[]; expiresAt: string; prepareId: string; built: { input: MigrateV4Input; safeTxHash: Hex } }
-export type SiblingView = { state: 'none' | StoredSibling['state']; safe?: Address; l1Tx?: Hex; sessionKey?: Address }
+/** `offered`: the account may set up its sibling now (in the one-authorization scope, V4 pinned on Ethereum, none yet). */
+export type SiblingView = { state: 'none' | StoredSibling['state']; offered: boolean; safe?: Address; l1Tx?: Hex; sessionKey?: Address }
 
 type Journal = { siblings?: Record<string, StoredSibling>; converts?: Record<string, StoredConvert>; convertDays?: Record<string, { day: string; n: number }>; reservations?: Record<string, Reservation>; cctpBurns?: Record<string, string[]>; routes: Record<string, Stored>; spent: { day: string; wei: string }; moves: Record<string, { day: string; n: number }>; mintDays?: Record<string, { n: number; wei: string }>; cctpNonces?: Record<string, string[]> }
 
@@ -1411,6 +1414,8 @@ export class BridgeOut {
 
   // ---------------------------------------------------------------- #309 (b): the V4 sibling on Ethereum
 
+  /** #333: the account is in the one-authorization scope (set by boot from the operator). No sibling outside it. */
+  siblingInScope: (ctx: AccountContext) => boolean = () => false
   /** The account's C on Base (USD units), set by boot from the operator (the same C a Base V4 home signs). Null: unknown. */
   siblingCapUsd: (ctx: AccountContext) => bigint | null = () => null
   private readonly preparedSibling = new Map<string, PreparedSibling>()
@@ -1459,9 +1464,10 @@ export class BridgeOut {
     return usdcHeld + (wei * answer) / 10n ** 20n
   }
 
-  siblingView(accountKey: string): SiblingView {
+  siblingView(accountKey: string, ctx?: AccountContext): SiblingView {
     const c = this.journal.siblings?.[accountKey]
-    return c ? { state: c.state, safe: c.safe, sessionKey: c.sessionKey, ...(c.l1Tx ? { l1Tx: c.l1Tx } : {}) } : { state: 'none' }
+    const offered = (!c || c.state === 'failed') && !!ctx && this.enabledFor(accountKey) && !!oneAuthV4Deployment(ethereumRegistry) && this.siblingInScope(ctx)
+    return c ? { state: c.state, offered, safe: c.safe, sessionKey: c.sessionKey, ...(c.l1Tx ? { l1Tx: c.l1Tx } : {}) } : { state: 'none', offered }
   }
 
   /** A sibling enable on its way (it signs the Safe's nonce on Ethereum): conversions and moves wait for it. */
@@ -1482,6 +1488,7 @@ export class BridgeOut {
    */
   async prepareSibling(ctx: AccountContext): Promise<SiblingToSign> {
     this.on(ctx.accountKey)
+    if (!this.siblingInScope(ctx)) throw new HttpError(404, 'SIBLING_NOT_OFFERED', 'Mamoru on Ethereum is not available for this account yet')
     const deployment = oneAuthV4Deployment(ethereumRegistry)
     if (!deployment) throw new HttpError(503, 'SIBLING_UNAVAILABLE', 'Mamoru on Ethereum is not available yet')
     const live = this.live(ctx)
@@ -1587,7 +1594,7 @@ export class BridgeOut {
     }
     this.writeSibling(ctx.accountKey, c)
     if (c.state === 'failed') throw new HttpError(502, 'SIBLING_FAILED', 'setting up your Safe on Ethereum did not go through; nothing moved')
-    return this.siblingView(ctx.accountKey)
+    return this.siblingView(ctx.accountKey, ctx)
   }
 
   /** Done only when the Safe executed it (ExecutionSuccess for its hash) AND SmartSession lists the V4 session now. */
@@ -1904,21 +1911,30 @@ export class BridgeOut {
       let limit: bigint
       try {
         const helper = (await this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'HELPER' })) as Address
-        // Review r1 of #238: never more value than V4's room (account bucket, the pool's sub-bucket, 30 days, the 24 h
-        // breaker, the review threshold): over it, V4 reverts or trips its breaker and pauses the account.
-        const entry = (await this.l1.readContract({ address: d.registry, abi: mamoruRegistryAbi, functionName: 'poolOf', args: [SIBLING_POOL] })) as { ratioBps: number }
+        // Review r1/r2 of #238: never more value than V4's room (account bucket, the pool's sub-bucket, 30 days, the 24 h
+        // breaker, the review threshold), as V4 itself values the swap (MamoruV4Helper.swapValue: the band's edge, not the
+        // quote): over it V4 reverts, or trips its breaker and pauses the account.
+        const entry = (await this.l1.readContract({ address: d.registry, abi: mamoruRegistryAbi, functionName: 'poolOf', args: [SIBLING_POOL] })) as { twapWindow: number; twapShortWindow: number; bandTicks: number; anchorTick: number; anchorBand: number; ratioBps: number; active: boolean }
+        const info = (await this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'poolInfo', args: [SIBLING_POOL] })) as { token0: Address; token1: Address; fee: number; in1: boolean; stablePair: boolean }
         const left = (await this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'budgetLeft', args: [safe, SIBLING_POOL, entry.ratioBps] })) as readonly bigint[]
-        const room = (left.reduce((m, x) => (x < m ? x : m)) * (10_000n - SIBLING_ROOM_MARGIN_BPS)) / 10_000n
-        const quote = async (a: bigint) => (await this.l1.simulateContract({ address: QUOTER_V2, abi: quoterV2Abi, functionName: 'quoteExactInputSingle', args: [{ tokenIn: L1_WETH, tokenOut: L1_USDC, amountIn: a, fee: WETH_USDC_FEE, sqrtPriceLimitX96: 0n }] })).result[0]
-        let q = await quote(amount)
-        if (q > room) {
-          amount = (amount * room) / q
+        const room = left.reduce((m, x) => (x < m ? x : m))
+        const zeroForOne = getAddress(info.token0) === getAddress(L1_WETH)
+        const valued = async (a: bigint) => {
+          const b = await this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'swapBounds', args: [SIBLING_POOL, L1_WETH, a] })
+          const v = await this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'swapValue', args: [SIBLING_POOL, info, entry, zeroForOne, a, b[0], b[1]] })
+          return { bound: b, v }
+        }
+        let at = await valued(amount)
+        if (at.v > room) {
+          amount = (amount * room * (10_000n - SIBLING_ROOM_MARGIN_BPS)) / (at.v * 10_000n)
           if (amount < SIBLING_MIN_SWAP_WEI) return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: V4's room is ${room} USD units, no swap now`, undefined)
-          q = await quote(amount)
+          at = await valued(amount)
+          if (at.v > room) return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: V4 values the sized swap above its room, no swap now`, undefined)
         }
         wrap = amount > weth ? amount - weth : 0n
-        const [bound, round] = await Promise.all([
-          this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'swapBounds', args: [SIBLING_POOL, L1_WETH, amount] }),
+        const bound = at.bound
+        const [q, round] = await Promise.all([
+          this.l1.simulateContract({ address: QUOTER_V2, abi: quoterV2Abi, functionName: 'quoteExactInputSingle', args: [{ tokenIn: L1_WETH, tokenOut: L1_USDC, amountIn: amount, fee: WETH_USDC_FEE, sqrtPriceLimitX96: 0n }] }).then((r) => r.result[0]),
           this.l1.readContract({ address: CHAINLINK_ETH_USD, abi: aggregatorAbi, functionName: 'latestRoundData' }),
         ])
         const checked = convertMinOut(amount, q, { answer: round[1], updatedAt: round[3] }, nowSec)
@@ -1940,6 +1956,12 @@ export class BridgeOut {
     const hash = userOpHash(op, ETHEREUM_CHAIN_ID, ethereumRegistry)
     const data = handleOpsData([op], this.relayer.address)
     const txGas = opGasOf(kind) + SIBLING_HANDLE_OPS_OVERHEAD
+    // The nonce's ledger entry, from the first op ever signed with it, before anything else sees this one (the simulation
+    // shows it to the RPC: review r2 of #238); a later one with the same nonce keeps it.
+    if (!c.opNonce || c.opNonce.nonce !== nonce.toString()) {
+      c.opNonce = { nonce: nonce.toString(), from: block.number!.toString(), scan: block.number!.toString() }
+      this.save()
+    }
     try {
       // The calls as the account would run them, then the whole op through the EntryPoint (validation, V4's checks).
       await this.l1.call({ account: ep, to: safe, data: op.callData })
@@ -1947,8 +1969,6 @@ export class BridgeOut {
     } catch (e) {
       return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} simulation refused, nothing sent:`, e instanceof Error ? e.message.split('\n')[0] : e)
     }
-    // The nonce's ledger entry, from the first op ever signed with it (a later one with the same nonce keeps it).
-    if (!c.opNonce || c.opNonce.nonce !== nonce.toString()) c.opNonce = { nonce: nonce.toString(), from: block.number!.toString(), scan: block.number!.toString() }
     const prev = c.leg
     const leg: SiblingLeg = { kind, userOpHash: hash, nonce: nonce.toString(), nonceFrom: c.opNonce.from, amount: amount.toString(), state: 'sending', at: new Date(now).toISOString() }
     c.leg = leg
@@ -2018,9 +2038,11 @@ export class BridgeOut {
    * is found nothing new is signed and the account stays in flight (fail closed), alerted.
    */
   private async recoverNonce(accountKey: string, c: StoredSibling): Promise<void> {
+    // Review r2 of #238: a leg written before the ledger existed carries its nonce and first block itself.
+    if (!c.opNonce && c.leg) c.opNonce = { nonce: c.leg.nonce, from: c.leg.nonceFrom, scan: c.leg.nonceFrom }
     const o = c.opNonce
     if (!o) return
-    const head = await this.l1.getBlockNumber({ cacheTime: 0 })
+    const head = (await this.l1.getBlockNumber({ cacheTime: 0 })) - SIBLING_SCAN_LAG
     let lo = BigInt(o.scan)
     for (let i = 0; i < SIBLING_SCAN_CHUNKS && lo <= head; i++) {
       const hi = lo + LOG_CHUNK_BLOCKS - 1n < head ? lo + LOG_CHUNK_BLOCKS - 1n : head
@@ -2033,7 +2055,9 @@ export class BridgeOut {
       }
       lo = hi + 1n
     }
-    o.scan = lo.toString()
+    // Review r2 of #238: a full pass that found nothing starts again from the first block (a provider that left the log
+    // out once is asked again), alerted; until then nothing new is signed.
+    o.scan = (lo > head ? BigInt(o.from) : lo).toString()
     if (c.leg && (c.leg.state === 'failed' || c.leg.state === 'done')) c.leg.state = 'unconfirmed' // in flight until read
     this.save()
     if (lo > head) logErr(`[alert] bridge-out sibling ${accountKey.slice(0, 8)}: nonce ${o.nonce} of ${c.safe} spent, its op not found up to block ${head}: nothing new is signed`, undefined)

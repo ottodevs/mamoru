@@ -852,6 +852,7 @@ export async function bootOperator(o: BootOptions) {
     operator.bridgeInFlight = (accountKey) => bo.inFlightUsdc(accountKey)
     // otto/mamoru#309: the sibling's C is the C a V4 home of the account signs on Base.
     bo.siblingCapUsd = (ctx) => operator.siblingCapUsd(ctx)
+    bo.siblingInScope = (ctx) => operator.siblingInScope(ctx)
     operator.siblingHoldingsUsdc = (ctx) => bo.siblingHoldingsUsdc(ctx)
     setInterval(() => void bo.tick(), 60_000)
     void bo.tick()

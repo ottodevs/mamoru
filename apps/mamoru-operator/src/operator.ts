@@ -1296,6 +1296,12 @@ export class Operator {
   }
 
   /** otto/mamoru#309: the C of the account's V4 sibling on Ethereum: the C its V4 home holds, else the one it would sign. */
+  /** #309 / #333: the account may have a V4 sibling on Ethereum: it is in the one-authorization scope (BridgeOut asks). */
+  siblingInScope(ctx: AccountContext): boolean {
+    const acc = this.store.state.accounts[ctx.accountKey]
+    return !!acc && this.oneAuthOnly(acc)
+  }
+
   siblingCapUsd(ctx: AccountContext): bigint | null {
     const acc = this.store.state.accounts[ctx.accountKey]
     if (!acc) return null

@@ -83,6 +83,10 @@ export const mamoruV4HelperAbi = parseAbi([
   'function remoteDeployment(address account, uint32 domain) view returns (address at, bytes createCall)',
   'function ownersHashOf(address account) view returns (bytes32)',
   'function swapBounds(address pool, address tokenIn, uint256 amountIn) view returns (uint256 minOut, uint160 sqrtPriceLimitX96)',
+  'struct PoolInfoV4 { address token0; address token1; uint24 fee; bool in1; bool stablePair; }',
+  'struct PoolEntryV4 { uint32 twapWindow; uint32 twapShortWindow; uint24 bandTicks; int24 anchorTick; uint24 anchorBand; uint16 ratioBps; bool active; }',
+  'function poolInfo(address pool) view returns (PoolInfoV4)',
+  'function swapValue(address pool, PoolInfoV4 p, PoolEntryV4 e, bool zeroForOne, uint256 amountIn, uint256 minOutIn, uint160 limitIn) view returns (uint256 v)',
 ])
 
 export const mamoruRegistryAbi = parseAbi([

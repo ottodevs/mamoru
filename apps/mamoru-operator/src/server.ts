@@ -319,7 +319,7 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
         case 'POST ethereum-sibling':
           return json(200, await bridge().submitSibling(ctx, parse()))
         case 'GET ethereum-sibling':
-          return json(200, bridge().siblingView(ctx.accountKey))
+          return json(200, bridge().siblingView(ctx.accountKey, ctx))
         // otto/mamoru#251: the Base operator asks the operator of the account's own Safe on this chain for its session
         // key, then to provision that Safe once the owner's Base approval has landed (remote-peer.ts).
         case 'POST remote-key':

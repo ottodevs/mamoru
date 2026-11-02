@@ -90,6 +90,7 @@ try {
   const make = (now: () => number = Date.now) => {
     const b = new BridgeOut(l1, relayer, dir, fetcher, now, undefined, on)
     b.siblingCapUsd = () => CAP
+    b.siblingInScope = () => true
     return b
   }
   const bo = make()
@@ -118,6 +119,7 @@ try {
   const d = oneAuthV4Deployment(ethereumRegistry)!
   check(!!d && ((await l1.getCode({ address: d.policy })) ?? '0x') !== '0x', 'V4 is deployed on this fork (T7)')
   check((await code(new BridgeOut(l1, relayer, dir, fetcher).prepareSibling(ctx))) === 'BRIDGE_OFF', 'flag off on /ops: BRIDGE_OFF')
+  check((await code(new BridgeOut(l1, relayer, dir, fetcher, Date.now, undefined, on).prepareSibling(ctx))) === 'SIBLING_NOT_OFFERED', 'outside the one-authorization scope: SIBLING_NOT_OFFERED')
   check((await code(bo.prepareSibling(ctx))) === 'SIBLING_NOTHING', 'nothing on Ethereum: SIBLING_NOTHING')
 
   await lab.setBalance(safe, ETH)

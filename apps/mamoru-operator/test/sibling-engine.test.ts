@@ -82,20 +82,23 @@ function make(fake: Fake, now: () => number, leg?: Partial<SiblingLeg>, extra: P
   }
   let lastHash: Hex | undefined
   const l1 = {
-    getBlockNumber: async () => 100n,
+    getBlockNumber: async () => 200n,
     getBlock: async () => ({ number: 100n, timestamp: BigInt(Math.floor(now() / 1000)), baseFeePerGas: fake.baseFee }),
     getGasPrice: async () => fake.baseFee,
     getBalance: async () => fake.eth,
     call: async () => ({ data: '0x' }),
     // QuoterV2 at 2,500 USD per ETH
     simulateContract: async ({ args }: { args: [{ amountIn: bigint }] }) => ({ result: [(args[0].amountIn * 2_500n * 10n ** 6n) / 10n ** 18n] }),
-    readContract: async ({ functionName, address: at }: { functionName: string; address: string }) => {
+    readContract: async ({ functionName, address: at, args }: { functionName: string; address: string; args?: readonly unknown[] }) => {
       if (functionName === 'balanceOf' && at.toLowerCase() === EP.toLowerCase()) return 0n
       if (functionName === 'balanceOf') return at.toLowerCase() === L1_USDC.toLowerCase() ? fake.usdc : (fake.weth ?? 0n)
       if (functionName === 'HELPER') return '0x00000000000000000000000000000000000000e1'
       if (functionName === 'poolOf') return { ratioBps: 10_000 }
       if (functionName === 'budgetLeft') return [fake.room ?? 10n ** 12n, 10n ** 12n, 10n ** 12n, 10n ** 12n, 10n ** 12n]
       if (functionName === 'swapBounds') return [1n, 0n]
+      if (functionName === 'poolInfo') return { token0: L1_USDC, token1: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', fee: 500, in1: false, stablePair: false }
+      // V4 values WETH at its band's edge: 4% above the quote here
+      if (functionName === 'swapValue') return (args![4] as bigint) * 2_600n * 10n ** 6n / 10n ** 18n
       if (functionName === 'latestRoundData') return [0n, 2_500n * 10n ** 8n, 0n, BigInt(Math.floor(now() / 1000)), 0n]
       if (functionName === 'isReady') return fake.ready
       if (functionName === 'isPaused') return fake.paused
@@ -251,8 +254,10 @@ describe('the sibling engine (#309 c)', () => {
     await m.bo.tick()
     const leg = m.journal().siblings.k.leg
     expect(leg?.kind).toBe('swap')
-    // $50 less the 3% margin at $2,500: 0.0194 ETH, not the 0.09 ETH beyond the reserve
-    expect(BigInt(leg!.amount)).toBe(19_400_000_000_000_000n)
+    // sized by V4's own valuation ($2,600 an ETH here, 4% above the quote), not the quote: within the $50 room
+    const a = BigInt(leg!.amount)
+    expect((a * 2_600n * 10n ** 6n) / 10n ** 18n).toBeLessThanOrEqual(50_000_000n)
+    expect(a).toBeGreaterThan(18_000_000_000_000_000n)
   })
 
   test('review r1 of #238: the reserve covers the bridge at the highest fee a sibling op pays', async () => {
@@ -278,7 +283,7 @@ describe('the sibling engine (#309 c)', () => {
     await m.bo.tick()
     const j = m.journal()
     expect(m.sent).toEqual([])
-    expect(j.siblings.k.opNonce?.scan).toBe('101')
+    expect(j.siblings.k.opNonce?.scan).toBe('90') // searched up to the head (200) less SIBLING_SCAN_LAG: next pass starts again from the first block
     expect(j.siblings.k.leg?.state).toBeUndefined()
   })
 
@@ -289,6 +294,14 @@ describe('the sibling engine (#309 c)', () => {
     expect(m.sent).toEqual([])
     expect(j.routes.k?.state).toBe('deposited')
     expect(j.siblings.k.opNonce).toBeUndefined()
+  })
+
+  test('review r2 of #238: a leg written before the nonce ledger is still recovered when its nonce is spent', async () => {
+    const m = make({ ...ready, nonce: 1n, ranElsewhere: true, receipt: 'none' }, () => T0, { state: 'unconfirmed', l1Tx: TX })
+    await m.bo.tick()
+    const j = m.journal()
+    expect(j.routes.k?.state).toBe('deposited')
+    expect(j.siblings.k.leg?.state).toBe('done')
   })
 })
 
