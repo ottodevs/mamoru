@@ -109,8 +109,11 @@ export function decodeInitV4(data: Hex): InitV4 {
 
 // ---- MamoruGasPolicyV2.Caps -----------------------------------------------------------------------------------
 
-/** MamoruGasPolicyV2.Caps (contracts/action-policy/src/MamoruGasPolicyV2.sol), field for field. Wei, gas, seconds. */
-export type GasCapsV2 = GasCaps & { maxPaymasterGas: bigint; perWindow: bigint; window: number }
+/**
+ * MamoruGasPolicyV2.Caps (contracts/action-policy/src/MamoruGasPolicyV2.sol), field for field: the per-op caps. Spec 010
+ * A1 (otto/mamoru#317): the gas rate per window (G, W) is the chain's, in MamoruV4Chains, not owner-signed.
+ */
+export type GasCapsV2 = GasCaps & { maxPaymasterGas: bigint }
 
 export const GAS_CAPS_V2_TUPLE = [
   {
@@ -122,8 +125,6 @@ export const GAS_CAPS_V2_TUPLE = [
       { name: 'maxPreVerificationGas', type: 'uint32' },
       { name: 'maxFeePerGas', type: 'uint64' },
       { name: 'maxPaymasterGas', type: 'uint32' },
-      { name: 'perWindow', type: 'uint128' },
-      { name: 'window', type: 'uint32' },
     ],
   },
 ] as const
@@ -137,8 +138,6 @@ export function encodeGasCapsV2(c: GasCapsV2): Hex {
       maxPreVerificationGas: Number(c.maxPreVerificationGas),
       maxFeePerGas: c.maxFeePerGas,
       maxPaymasterGas: Number(c.maxPaymasterGas),
-      perWindow: c.perWindow,
-      window: c.window,
     },
   ])
 }
@@ -152,19 +151,17 @@ export function decodeGasCapsV2(data: Hex): GasCapsV2 {
     maxPreVerificationGas: BigInt(c.maxPreVerificationGas),
     maxFeePerGas: c.maxFeePerGas,
     maxPaymasterGas: BigInt(c.maxPaymasterGas),
-    perWindow: c.perWindow,
-    window: c.window,
   }
 }
 
 /**
  * The gas caps of the V4 sessions, by chain: the same as MamoruV4Chains.remoteCaps (a remote Safe's caps are pinned in
  * V4; the home's are owner-signed and chosen equal, so one table holds both): V1's per-op caps (V4_GAS_CAPS on Base,
- * MONAD_GAS_CAPS on Monad), no paymaster, a gas bucket of 0.002 ETH / 1 MON per day.
+ * MONAD_GAS_CAPS on Monad), no paymaster. The rate (MamoruV4Chains, A1): 0.002 ETH / 1 MON per day.
  */
 export const GAS_CAPS_V2_BY_CHAIN: Readonly<Record<number, GasCapsV2>> = {
-  8453: { maxPriorityFeePerGas: 10_000_000n, maxVerificationGasLimit: 3_000_000n, maxCallGasLimit: 2_000_000n, maxPreVerificationGas: 200_000n, maxFeePerGas: 100_000_000n, maxPaymasterGas: 0n, perWindow: 2_000_000_000_000_000n, window: 86_400 },
-  143: { maxPriorityFeePerGas: 1_000_000_000n, maxVerificationGasLimit: 3_000_000n, maxCallGasLimit: 2_000_000n, maxPreVerificationGas: 200_000n, maxFeePerGas: 1_000_000_000_000n, maxPaymasterGas: 0n, perWindow: 1_000_000_000_000_000_000n, window: 86_400 },
+  8453: { maxPriorityFeePerGas: 10_000_000n, maxVerificationGasLimit: 3_000_000n, maxCallGasLimit: 2_000_000n, maxPreVerificationGas: 200_000n, maxFeePerGas: 100_000_000n, maxPaymasterGas: 0n },
+  143: { maxPriorityFeePerGas: 1_000_000_000n, maxVerificationGasLimit: 3_000_000n, maxCallGasLimit: 2_000_000n, maxPreVerificationGas: 200_000n, maxFeePerGas: 1_000_000_000_000n, maxPaymasterGas: 0n },
 }
 
 /** MamoruV4Chains: the CCTP domain of each chain V4 pins (0 = not pinned). */
