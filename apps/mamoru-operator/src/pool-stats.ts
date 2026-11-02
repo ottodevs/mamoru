@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { Observation } from '@mamoru/decide'
-import { baseRegistry, entry } from '@mamoru/registry'
+import { baseRegistry, entry, monadRegistry } from '@mamoru/registry'
 
 /**
  * otto/mamoru#101 phase 1b (shadow only): off-chain pool statistics for Packaging's TVL change and activity rules.
@@ -10,17 +10,20 @@ import { baseRegistry, entry } from '@mamoru/registry'
  *   from 2026-11-13: after that the fallback fails quietly and the own series alone carries the rule (no paid API).
  * - GeckoTerminal `/pools/<address>` (reserve_in_usd = current TVL) and `/pools/<address>/ohlcv/day?limit=29` (daily USD
  *   volume, newest first, the first row is the day in progress) -> 7d volume, last full day, 28d daily average.
+ * Monad (LC-T12): GeckoTerminal network `monad` only; DefiLlama has no chart for WMON/USDC, so the lookbacks come from
+ * the own series alone (1d after a day of samples, 30d after a month; unread until then).
  * No API keys. Refreshed at most once an hour per pool; a failed fetch keeps the last good value until `staleMs`, then the
  * fields turn null (the rule reports RISK_POOL_STATS_UNREAD, never an exit). Nothing here throws into a review.
  */
 
 type Stats = NonNullable<Observation['poolStats']>[string]
-export type PoolStatsPool = { name: string; address: string; llamaId: string }
+/** `llamaId` null: no DefiLlama fallback. `network` is GeckoTerminal's network id (default base). */
+export type PoolStatsPool = { name: string; address: string; llamaId: string | null; network?: 'base' | 'monad' }
 type Fetch = (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>
 
 const DAY = 86_400
 const LLAMA = 'https://yields.llama.fi/chart/'
-const GECKO = 'https://api.geckoterminal.com/api/v2/networks/base/pools/'
+const GECKO = (p: PoolStatsPool) => `https://api.geckoterminal.com/api/v2/networks/${p.network ?? 'base'}/pools/${p.address}`
 const UA = 'mamoru-operator/1.0 (+https://mamoru.lol)'
 
 /** Own TVL samples: kept 31 days, at most this many points per pool. */
@@ -173,15 +176,15 @@ export class PoolStatsCache {
       this.lastTry.set(p.name, now)
       const nowSec = Math.floor(now / 1000)
       const entryOf = this.cache.get(p.name) ?? {}
-      const llama = await this.getJson(`${LLAMA}${p.llamaId}`)
+      const llama = p.llamaId === null ? undefined : await this.getJson(`${LLAMA}${p.llamaId}`)
       if (llama !== undefined) {
         const part = parseLlamaChart(llama, nowSec)
         if (part.tvl1dAgoUsd !== null || part.tvl7dAgoUsd !== null || part.tvl30dAgoUsd !== null) entryOf.llama = { at: now, part }
       }
       await this.pause()
-      const pool = await this.getJson(`${GECKO}${p.address}`)
+      const pool = await this.getJson(GECKO(p))
       await this.pause()
-      const ohlcv = await this.getJson(`${GECKO}${p.address}/ohlcv/day?limit=29`)
+      const ohlcv = await this.getJson(`${GECKO(p)}/ohlcv/day?limit=29`)
       await this.pause()
       // Each source keeps its last good value and its own timestamp: a failure never refreshes another source's data.
       const tvlUsd = pool === undefined ? null : parseGeckoPool(pool)
@@ -275,4 +278,10 @@ export function livePoolStats(stateFile?: string): PoolStatsCache {
     Object.entries(LLAMA_POOL_IDS).map(([name, llamaId]) => ({ name, llamaId, address: entry(name as never, baseRegistry).address })),
     stateFile ? { stateFile } : {},
   )
+}
+
+/** The cache for the Monad live pool (otto/mamoru#101 LC-T12): GeckoTerminal only, lookbacks from the own series. */
+export function monadPoolStats(stateFile?: string): PoolStatsCache {
+  const name = 'pool:WMON/USDC/3000'
+  return new PoolStatsCache([{ name, llamaId: null, network: 'monad', address: entry(name, monadRegistry).address }], stateFile ? { stateFile } : {})
 }

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
+import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
@@ -66,7 +66,7 @@ import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-us
 import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
-import { livePoolStats, type PoolStatsCache } from './pool-stats.ts'
+import { livePoolStats, monadPoolStats, type PoolStatsCache } from './pool-stats.ts'
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
 export type AccountsSummary = { known: number; active: number; armed: number }
@@ -949,8 +949,8 @@ export class Operator {
     const saved = cfg.guardReadsState
     const restored = saved?.load()
     this.guardReads = new SharedGuardReads({ fees: restored?.fees, series: restored?.series, onUpdate: saved ? (s) => saved.update(s) : undefined })
-    // The sources know only the Base pools: another chain gets no stats (no fetches, no "unread" lines for its pools).
-    this.poolStats = cfg.registry?.chainId === baseRegistry.chainId ? livePoolStats(cfg.poolStatsStateFile) : undefined
+    // One source per chain the stats know (Base, Monad); another chain gets none (no fetches, no "unread" lines for its pools).
+    this.poolStats = cfg.registry?.chainId === baseRegistry.chainId ? livePoolStats(cfg.poolStatsStateFile) : cfg.registry?.chainId === monadRegistry.chainId ? monadPoolStats(cfg.poolStatsStateFile) : undefined
     // Base only, like the stats: the curve reads the Base pools and their QuoterV2. Monad pools are not in the ladder's list.
     this.poolDepth = poolDepthFor(cfg.registry, client, { over: () => cfg.rpcBudget?.over() ?? false })
   }

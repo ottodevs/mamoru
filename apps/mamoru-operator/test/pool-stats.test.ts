@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { entry, monadRegistry } from '@mamoru/registry'
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -297,4 +298,23 @@ describe('PoolStatsCache', () => {
     await b.settled()
     expect(urls).toHaveLength(0)
   })
+
+  test('Monad (LC-T12): GeckoTerminal network monad, no DefiLlama call; the 1d lookback comes from the own series a day later', async () => {
+    const M = { name: 'pool:WMON/USDC/3000', address: '0x659bD0BC4167BA25c62E05656F78043E7eD4a9da', llamaId: null, network: 'monad' as const }
+    expect(entry(M.name, monadRegistry).address as string).toBe(M.address)
+    let t = NOW
+    const { f, urls } = fetcher()
+    const c = new PoolStatsCache([M], { fetch: f, now: () => t, gapMs: 0 })
+    await c.settled()
+    expect(urls).toEqual([`https://api.geckoterminal.com/api/v2/networks/monad/pools/${M.address}`, `https://api.geckoterminal.com/api/v2/networks/monad/pools/${M.address}/ohlcv/day?limit=29`])
+    const first = c.get()[M.name]!
+    expect(first.tvlUsd).toBeGreaterThan(0)
+    expect(first.volume7dUsd).not.toBeNull()
+    expect(first.tvl1dAgoUsd).toBeNull()
+    t = NOW + 86_400_000
+    await c.settled()
+    expect(c.get()[M.name]!.tvl1dAgoUsd).toBe(first.tvlUsd)
+    expect(urls.some((u) => u.includes('llama'))).toBe(false)
+  })
 })
+
