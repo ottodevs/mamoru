@@ -99,8 +99,8 @@ for _ in $(seq 1 90); do
 done
 [ "$conclusion" = "success" ] || { echo "CI on $new_head did not finish in 15 minutes ($conclusion)" >&2; exit 1; }
 
-# Pull requests stacked on this branch, read now: once GitHub deletes the branch it retargets them to main.
-children="$(gh pr list -R "$repo" --base "$head" --state open --json number,headRefName -q '.[] | "\(.number)\t\(.headRefName)"')"
+# Pull requests stacked on this branch, read before main moves (GitHub retargets them to main when it deletes the branch).
+children="$(gh pr list -R "$repo" --base "$head" --state open --json number -q '.[].number')"
 
 # Not forced: if main moved since the fetch above (another machine merged), this push is not a fast-forward and git
 # refuses it, so nothing lands on a main the overlap check did not see.
@@ -114,28 +114,30 @@ done
 echo "PR #$pr: $(gh pr view "$pr" -R "$repo" --json state -q .state)"
 
 # The rebase re-signed every commit, so a stacked pull request still carries the old ones and conflicts with main.
-# Its author drops them with one rebase; say exactly which, on the pull request and here.
-if [ -n "$children" ] && [ "$new_head" != "$old_head" ]; then
-  while IFS=$'\t' read -r child child_head; do
-    fix="git fetch origin && git rebase --onto origin/main $old_head $child_head && git push --force-with-lease origin $child_head"
-    gh pr comment "$child" -R "$repo" --body "Its base #$pr was merged as \`${new_head:0:7}\` with re-signed commits, so this branch still carries the old ones (up to \`${old_head:0:7}\`). In your worktree: \`$fix\`. The rebase only drops #$pr's commits; if the range-diff of your own commits is identical, the review stands." >/dev/null
-    echo "stacked PR #$child ($child_head): $fix"
-  done <<<"$children"
-fi
+# A plain rebase onto main drops them (same patches) and keeps the author's own. Main is merged by now: a failed
+# comment is reported, not fatal.
+fix="git fetch origin && git rebase origin/main && git push --force-with-lease"
+for child in $children; do
+  echo "stacked PR #$child: in its worktree, $fix"
+  gh pr comment "$child" -R "$repo" --body "Its base #$pr was merged into main as \`${new_head:0:7}\` with re-signed commits, so this branch still carries #$pr's old commits. In your worktree: \`$fix\`. The rebase drops only those; if the range-diff of your own commits is identical, the review stands." </dev/null >/dev/null \
+    || echo "could not comment on #$child: tell its author by hand" >&2
+done
 
 # The repository deletes merged branches itself (delete_branch_on_merge), usually within seconds. Delete it here only
-# if it is still there, so a missing branch is not reported as an error and a real failure is.
-branch_exists() { [ -n "$(git -C "$root" ls-remote --heads origin "refs/heads/$head")" ]; }
+# if it is still there, so GitHub's delete is not reported as an error and a real failure is.
+# remote_branch prints present, absent or unknown (ls-remote failed: network, auth).
+remote_branch() {
+  local rc=0
+  git -C "$root" ls-remote --exit-code --heads origin "refs/heads/$head" >/dev/null 2>&1 || rc=$?
+  case "$rc" in 0) echo present ;; 2) echo absent ;; *) echo unknown ;; esac
+}
 if [ "$keep_branch" = "--keep-branch" ]; then
   echo "kept $head (GitHub may still delete it: delete_branch_on_merge is on)"
-else
-  for _ in $(seq 1 6); do branch_exists || break; sleep 5; done
-  if ! branch_exists; then
-    echo "branch $head deleted"
-  elif git -C "$root" push -q origin --delete "$head" 2>/dev/null || ! branch_exists; then
-    echo "branch $head deleted"
-  else
-    echo "could not delete branch $head: delete it by hand" >&2
-    exit 1
-  fi
+  exit 0
 fi
+for _ in $(seq 1 6); do [ "$(remote_branch)" = absent ] && break; sleep 5; done
+[ "$(remote_branch)" = present ] && { git -C "$root" push -q origin --delete "$head" 2>/dev/null || true; }
+case "$(remote_branch)" in
+  absent) echo "branch $head deleted" ;;
+  *) echo "main is merged, but branch $head may still exist on origin: check and delete it by hand" >&2; exit 1 ;;
+esac
