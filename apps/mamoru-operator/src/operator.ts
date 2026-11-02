@@ -6,7 +6,7 @@ import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, m
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LAB_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, type OneAuthV4Deployment, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, V4_RETIRED_SAFE_CAP_USD, withRegistryPools, type OneAuthV4Deployment, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -279,7 +279,7 @@ const RELAYABLE_KINDS = new Set<string>(['activate', 'renew', 'migrate-v4'])
 /** otto/mamoru#293 (review of #202 r2, Opus 6): the least time between two registerRemote userOps of one account. */
 const REREGISTER_MS = 600_000
 /** otto/mamoru#293 (review of #202, P1-11): the InitV4 C of a retired design-C Safe: one unit, so its session moves no value. */
-const RETIRED_SAFE_CAP_USD = 1n
+const RETIRED_SAFE_CAP_USD = V4_RETIRED_SAFE_CAP_USD
 /** otto/mamoru#293 (review of #202, P1-8): SessionCreated pages one background scan pass reads at most, and how far behind the head it may be when a prepare finishes it. */
 const INVENTORY_PAGES_PER_PASS = 200n
 const INVENTORY_SLACK_BLOCKS = 4_000n

@@ -229,7 +229,10 @@ describe('P1-3: what is shown is what is signed', () => {
     const w = { ...two, currentStep: 1 }
     expect(preparedProblem(tx({ chainId: 8453 }), w, 1)).toContain('does not match')
     expect(preparedProblem(tx({ moveTo: '0x0000000000000000000000000000000000000bad' }), w, 1)).toContain('does not match')
-    expect(preparedProblem(tx({ moveTo: undefined }), w, 1)).toContain('does not match')
+    // A step with nothing to move prepares no destination even if the offer named one: accepted; a different one is not.
+    expect(preparedProblem(tx({ moveTo: undefined }), w, 1)).toBeNull()
+    expect(preparedProblem(tx({ moveTo: '0x0000000000000000000000000000000000000bad' }), w, 1)).toContain('does not match')
+    expect(preparedProblem(tx({}), { ...w, steps: [w.steps[0]!, { chain: 'monad', summary: [] }] }, 1)).toContain('does not match')
     expect(preparedProblem({ ...tx({}), step: 0 }, w, 1)).toContain('does not match')
     expect(preparedProblem({ step: 0, tx: { chainId: 8453, moveTo: NEW_SAFE } } as never, one, 0)).toContain('does not match')
   })
@@ -300,5 +303,21 @@ describe('the submit step reaches migrate-v4 only', () => {
     }
     await SUBMIT['migrate-v4'](api)('k', sig, 1)
     expect(calls.migrate).toEqual(['k', sig, 1])
+  })
+})
+
+describe('step 1 with nothing to move', () => {
+  test('the card says no funds move on Monad, and shows no destination', () => {
+    const w = { ...two, currentStep: 1 }
+    const { text } = render(<WhatsNewBody whatsNew={w} step={1} summary={[]} busy={null} shown={{ chain: 'monad', moveTo: undefined }} error={null} onApprove={noop} onLater={noop} onLearn={noop} />)
+    expect(text).toContain('No funds to move on Monad: this step only replaces the approvals.')
+    expect(text).not.toContain('It moves your funds')
+    expect(text).not.toContain(NEW_SAFE)
+  })
+
+  test('with a destination it shows it in full, not the no-move line', () => {
+    const { text } = render(<WhatsNewBody whatsNew={{ ...two, currentStep: 1 }} step={1} summary={[]} busy={null} shown={{ chain: 'monad', moveTo: NEW_SAFE }} error={null} onApprove={noop} onLater={noop} onLearn={noop} />)
+    expect(text).toContain(NEW_SAFE)
+    expect(text).not.toContain('No funds to move')
   })
 })

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { MigrateV4Input, OwnerTxToSign, RemoteSpec } from '@mamoru/domain'
-import { liveWmonUsdcMonadV6, ONE_AUTH_V4_REMOTE } from '@mamoru/policy'
+import { liveWmonUsdcMonadV6, ONE_AUTH_V4_REMOTE, v4CapUsdOf, V4_REVOKE_FLAG } from '@mamoru/policy'
 import { remoteInput, remoteSafe, v4RemoteFromSpec } from '@mamoru/account/remote'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
 import { registryFor, type Registry } from '@mamoru/registry'
@@ -26,7 +26,8 @@ const withV4 = (r: Registry): Registry => ({
 const registry = (chainId: number) => withV4(chainId === 143 ? withPinnedV3() : registryFor(chainId))
 const unpinned = (chainId: number) => (chainId === 143 ? withPinnedV3() : registryFor(chainId))
 const OLD_SPEC: RemoteSpec = { chainId: 143, policyId: liveWmonUsdcMonadV6.policyId, sessionKey: A(0xbeef), validAfter: 1_790_000_000, validUntil: 1_821_536_000, capUsdc: '1500000000' }
-const CAP = '100000000'
+const CAP = '100000000' // the account's D1 cap
+const BASE_CAP = v4CapUsdOf(BigInt(CAP)).toString() // the C the Base step signs, from the shared policy function
 const KEY = A(0x5e55e5)
 const ELSEWHERE = A(0xbad01)
 const TOKEN = registry(143).entries.find((e) => e.kind === 'token')!.address
@@ -55,15 +56,15 @@ async function world(registryOf: (c: number) => Registry = registry) {
     return h.app.request(`https://app.mamoru.lol/api/accounts/${a.accountKey}/migrate-v4/prepare`, { method: 'POST', body: JSON.stringify({ step }), headers: { cookie: a.cookie, origin: 'https://app.mamoru.lol', 'content-type': 'application/json' } }, h.env)
   }
   // The V4 remote Safe this account's own keys give (what V4's remoteOf(account, 15) is).
-  const destSpec = (sessionKey: Address = KEY): RemoteSpec => ({ chainId: 143, policyId: ONE_AUTH_V4_REMOTE, sessionKey, validAfter: 0, validUntil: 0, capUsdc: CAP, home: a.base.address as Address, homeDomain: 6 })
+  const destSpec = (sessionKey: Address = KEY): RemoteSpec => ({ chainId: 143, policyId: ONE_AUTH_V4_REMOTE, sessionKey, validAfter: 0, validUntil: 0, capUsdc: BASE_CAP, home: a.base.address as Address, homeDomain: 6 })
   const dest = v4RemoteFromSpec(accountContext(a.base), destSpec(), registry(143)).address
-  return { a, b, post, rows, dest }
+  return { a, b, post, rows, dest, destSpec }
 }
 type W = Awaited<ReturnType<typeof world>>
 
-const input0 = (w: W, o: Partial<MigrateV4Input> = {}): MigrateV4Input => ({ chainId: 8453, safe: w.a.base.address as Address, safeNonce: '4', step: 0, capUsdc: CAP, sessionKey: KEY, generation: '1', admit: ['7'], oldPermissionIds: [ID(1), ID(2)], removeIds: [ID(1)], noncesBefore: ['0', '3'], home: A(0), homeDomain: 0, ...o })
+const input0 = (w: W, o: Partial<MigrateV4Input> = {}): MigrateV4Input => ({ chainId: 8453, safe: w.a.base.address as Address, safeNonce: '4', step: 0, capUsdc: BASE_CAP, sessionKey: KEY, generation: '1', admit: ['7'], oldPermissionIds: [ID(1), ID(2)], removeIds: [ID(1)], noncesBefore: ['0', '3'], home: A(0), homeDomain: 0, ...o })
 const input1 = (w: W, o: Partial<MigrateV4Input> = {}): MigrateV4Input => ({
-  chainId: 143, safe: w.a.old.address as Address, safeNonce: '9', step: 1, capUsdc: CAP, sessionKey: KEY, generation: '1', admit: [], oldPermissionIds: [ID(3)], removeIds: [ID(3)], noncesBefore: ['1'],
+  chainId: 143, safe: w.a.old.address as Address, safeNonce: '9', step: 1, capUsdc: '1', sessionKey: KEY, generation: '1', admit: [], oldPermissionIds: [ID(3)], removeIds: [ID(3)], noncesBefore: ['1'],
   home: w.a.base.address as Address, homeDomain: 6, moveTo: w.dest, transfers: [{ token: TOKEN, amount: '1000000' }], ...o,
 })
 /** The prepare an honest operator answers: everything from `buildMigrateV4`. */
@@ -91,6 +92,12 @@ describe('happy paths', () => {
   test("Monad step: the account's own pre-V4 Safe, moving funds to the remote Safe its keys give", async () => {
     const w = await world()
     expect((await w.post(1, prepareOf(input1(w)))).status).toBe(200)
+  })
+
+  test('step 1 of a Safe with nothing to move: no transfers and no destination, accepted (what the operator emits)', async () => {
+    const w = await world()
+    const honest = input1(w, { moveTo: undefined, transfers: undefined })
+    expect((await w.post(1, prepareOf(honest))).status).toBe(200)
   })
 
   test('the id lists are not checked: on chain assertMigrated reads getPermissionIDs and reverts unless only V4 is enabled', async () => {
@@ -142,6 +149,33 @@ describe('a tampered Safe transaction', () => {
   })
 })
 
+describe('the cap each step signs, from the shared policy function', () => {
+  test('the raw D1 cap is not the Base C; the retired Safe signs one unit', async () => {
+    const w = await world()
+    await refused(w.post(0, prepareOf(input0(w, { capUsdc: CAP }))))
+    await refused(w.post(0, prepareOf(input0(w, { capUsdc: '1' }))))
+    await refused(w.post(1, prepareOf(input1(w, { capUsdc: BASE_CAP }))))
+    await refused(w.post(1, prepareOf(input1(w, { capUsdc: CAP }))))
+  })
+
+  test('the destination is derived with the Base C, not the retired Safe\'s unit', async () => {
+    const w = await world()
+    const wrong = v4RemoteFromSpec(accountContext(w.a.base), { ...w.destSpec(), capUsdc: '1' }, registry(143)).address
+    await refused(w.post(1, prepareOf(input1(w, { moveTo: wrong }))))
+  })
+})
+
+describe('admit', () => {
+  test('an entry with the revoke flag (bit 255) is refused; a plain position id passes', async () => {
+    const w = await world()
+    const flagged = ((1n << 255n) | 777n).toString()
+    expect(V4_REVOKE_FLAG).toBe(1n << 255n)
+    await refused(w.post(0, prepareOf(input0(w, { admit: ['7', flagged] }))))
+    await refused(w.post(1, prepareOf(input1(w, { admit: [flagged] }))))
+    expect((await w.post(0, prepareOf(input0(w, { admit: ['7', '8'] })))).status).toBe(200)
+  })
+})
+
 describe('a tampered input', () => {
   test('safe, cap, home, chain and step on the Base step', async () => {
     const w = await world()
@@ -174,11 +208,13 @@ describe('a tampered input', () => {
     await refused(w.post(1, prepareOf(input1(w, { safe: w.a.base.address as Address }))))
   })
 
-  test('a missing moveTo on step 1, or funds moved on step 0', async () => {
+  test('a half destination on step 1, or funds moved on step 0', async () => {
     const w = await world()
-    await refused(w.post(1, forged(input1(w), input1(w, { moveTo: undefined, transfers: undefined }), { moveTo: undefined })))
     await refused(w.post(1, forged(input1(w), input1(w, { moveTo: undefined }), { moveTo: undefined })))
     await refused(w.post(1, forged(input1(w), input1(w, { transfers: [] }))))
+    // Funds with no destination, or a destination announced that the build does not carry.
+    await refused(w.post(1, forged(input1(w), input1(w, { moveTo: undefined }))))
+    await refused(w.post(1, forged(input1(w, { moveTo: undefined, transfers: undefined }), input1(w, { moveTo: undefined, transfers: undefined }), { moveTo: w.dest })))
     await refused(w.post(0, { ...prepareOf(input0(w)), moveTo: w.dest }))
   })
 

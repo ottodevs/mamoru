@@ -1,7 +1,7 @@
 import { ReasonError, type Hex0x, type OwnerTxToSign } from '@mamoru/domain'
 import { baseKeyOf, remoteAccountKey } from '@mamoru/account/remote'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
-import { ONE_AUTH_V4_REMOTE, V4_DOMAIN_BY_CHAIN } from '@mamoru/policy'
+import { ONE_AUTH_V4_REMOTE, V4_DOMAIN_BY_CHAIN, V4_RETIRED_SAFE_CAP_USD, V4_REVOKE_FLAG, v4CapUsdOf } from '@mamoru/policy'
 import { accountContext } from './accounts/operator.ts'
 import { ownedAccount, type AccountRow } from './accounts/store.ts'
 import type { Db } from './env.ts'
@@ -53,30 +53,44 @@ export function checkMigrateTx(args: { tx: OwnerTxToSign; step: number; base: Ac
   if (input.chainId !== chainId || tx.chainId !== chainId) return fail('another chain')
   const own = step === 0 ? base : monad
   if (!own || own.chain_id !== chainId || !same(input.safe, own.address) || !same(tx.safe, own.address)) return fail("not this account's own Safe on this chain")
-  if (!same(input.capUsdc, capUsdc)) return fail("not this account's cap")
+  // The C each step signs, from the operator's own shared policy function (never a copied formula): the account's D1 cap through
+  // v4CapUsdOf on Base, and the retired design-C Safe's one unit on Monad. The Base V4 cap is also the one the new Monad Safe is derived with.
+  const baseCap = v4CapUsdOf(BigInt(capUsdc)).toString()
+  if (!same(input.capUsdc, step === 0 ? baseCap : V4_RETIRED_SAFE_CAP_USD.toString())) return fail("not this account's cap")
+  // An admitted position with the REVOKE flag (bit 255) would revoke it for good: never in a migration. V4 itself checks at enable
+  // that every other admitted id is owned by the account (ownerOf == account), so a foreign position cannot be admitted.
+  if (input.admit.some((a) => (BigInt(a) & V4_REVOKE_FLAG) !== 0n)) return fail('an admitted position carries the revoke flag')
   if (step === 0) {
     if (BigInt(input.home) !== 0n || input.homeDomain !== 0 || input.moveTo || input.transfers?.length || tx.moveTo) return fail('the Base step moves no funds and has no home')
   } else {
     if (!same(input.home, base.address) || input.homeDomain !== V4_DOMAIN_BY_CHAIN[8453]) return fail("not this account's home")
-    // A destination is required, and it is the V4 remote Safe the owner's own keys give (verifyRemote), never the operator's string.
-    if (!input.moveTo || !input.transfers?.length) return fail('the Monad step names no destination')
-    if (tx.moveTo !== undefined && !same(tx.moveTo, input.moveTo)) return fail('the announced destination is not the one built')
-    try {
-      verifyRemote(
-        accountContext(base),
-        {
-          chainId,
-          address: input.moveTo as Hex0x,
-          spec: { chainId, policyId: ONE_AUTH_V4_REMOTE, sessionKey: input.sessionKey, validAfter: 0, validUntil: 0, capUsdc, home: base.address as Hex0x, homeDomain: V4_DOMAIN_BY_CHAIN[8453] },
-        },
-        registryOf,
-      )
-    } catch {
-      return fail("the destination is not this account's remote Safe")
+    // Funds to move: a destination and transfers go together, and the destination is the V4 remote Safe the owner's own keys give
+    // (verifyRemote, with the Base V4 cap as the operator derives it), never the operator's string. A Safe with nothing to move
+    // has neither (the merged operator emits none), and the card says so.
+    const moves = !!input.moveTo || !!input.transfers?.length
+    if (moves !== (!!input.moveTo && !!input.transfers?.length)) return fail('a destination and transfers go together')
+    if (tx.moveTo !== undefined && (!input.moveTo || !same(tx.moveTo, input.moveTo))) return fail('the announced destination is not the one built')
+    if (input.moveTo) {
+      try {
+        verifyRemote(
+          accountContext(base),
+          {
+            chainId,
+            address: input.moveTo as Hex0x,
+            spec: { chainId, policyId: ONE_AUTH_V4_REMOTE, sessionKey: input.sessionKey, validAfter: 0, validUntil: 0, capUsdc: baseCap, home: base.address as Hex0x, homeDomain: V4_DOMAIN_BY_CHAIN[8453] },
+          },
+          registryOf,
+        )
+      } catch {
+        return fail("the destination is not this account's remote Safe")
+      }
     }
   }
 
   // (b) rebuild with the operator's own builder and compare, field by field.
+  // `oldPermissionIds` are taken as given and not inventoried here. Production never signs a SmartSession ENABLE payload
+  // (guard test packages/account/sessions/no-enable-mode.test.ts, rule in contracts/action-policy/SECURITY.md), so a
+  // disabled-but-signed old permission cannot exist; the enabled ones are read on chain by assertMigrated (getPermissionIDs).
   let built
   try {
     built = buildMigrateV4(input, registryOf(chainId))

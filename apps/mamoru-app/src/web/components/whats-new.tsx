@@ -92,7 +92,9 @@ export function preparedProblem(prepared: { step: number; tx: OwnerTxToSign } | 
   const announced = whatsNew.steps[step]
   if (prepared.step !== step || !announced) return copy.mismatch
   if (prepared.tx.chainId !== CHAIN_ID[announced.chain]) return copy.mismatch
-  if ((prepared.tx.moveTo ?? null)?.toLowerCase() !== (announced.moveTo ?? null)?.toLowerCase()) return copy.mismatch
+  // A step with nothing to move prepares no destination even when the offer named one (the Worker has already rebuilt it); a
+  // destination the prepare does carry must be the announced one.
+  if (prepared.tx.moveTo !== undefined && prepared.tx.moveTo.toLowerCase() !== (announced.moveTo ?? '').toLowerCase()) return copy.mismatch
   return null
 }
 
@@ -181,6 +183,11 @@ export function WhatsNewBody({
       {/* What this signature does, in the client's own fixed words, right above the button (#41): never only in the list. */}
       <div className="mt-4 grid gap-1 text-[0.95rem] leading-snug" data-testid="whats-new-scope">
         <p className="m-0">{copy.scope}</p>
+        {chain === 'monad' && shown && !moveTo ? (
+          <p className="m-0" data-testid="whats-new-no-move">
+            {copy.noMove}
+          </p>
+        ) : null}
         {moveTo ? (
           <>
             <p className="m-0">{copy.moves(chain)}</p>

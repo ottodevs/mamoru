@@ -53,6 +53,7 @@ export const signatureCopy = {
     // Client-owned, fixed: what this signature does, said outside the disclosure so it is never only behind a tap (#41).
     scope: "This replaces Mamoru's approvals with one that does not expire. You are asked again only to withdraw or stop.",
     moves: (chain: 'base' | 'monad') => `It moves your funds to your new Safe on ${chain === 'base' ? 'Base' : 'Monad'}:`,
+    noMove: 'No funds to move on Monad: this step only replaces the approvals.',
     laterFailed: (chain: 'base' | 'monad') => `Base is done; the ${chain === 'base' ? 'Base' : 'Monad'} step did not go through. Nothing moved on ${chain === 'base' ? 'Base' : 'Monad'}.`,
     mismatch: 'What this approval would sign does not match what Mamoru announced. Nothing was signed. Reload and try again.',
     statusFailed: "Couldn't check your account's status.",
