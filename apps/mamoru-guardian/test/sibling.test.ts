@@ -33,8 +33,9 @@ function world() {
     signMsgs: 0,
     head: 10n,
     ownerTxs: [] as { to: Address; operation: number }[],
-    homePolicySetAt: 5n as bigint | undefined,
     ownerChangeAt: undefined as bigint | undefined,
+    configAtChange: { set: false, generation: 0n },
+    homeGeneration: 1n,
     moduleTxs: [] as { operation: number }[],
     nftApprovals: [] as { tokenId: bigint; approved: Address; owned: boolean }[],
     sibCode: PROXY as Hex | undefined,
@@ -65,7 +66,7 @@ function client(w: W, side: 'sibling' | 'home'): ChainClient {
     getStorageAt: async ({ slot }) => pad(slot.startsWith('0x4a204f62') ? w.home.guard : slot.startsWith('0x6c9a6c4a') ? w.home.handler : w.home.singleton, { size: 32 }),
     getLogs: async ({ event, address: at }) => {
       const name = (event as { name: string }).name
-      if (name === 'PolicySet') return side === 'sibling' ? w.logs : w.homePolicySetAt === undefined ? [] : [{ args: { account: ACCOUNT }, blockNumber: w.homePolicySetAt }]
+      if (name === 'PolicySet') return side === 'sibling' ? w.logs : []
       if (side !== 'home') return []
       const npm = address('NonfungiblePositionManager', baseRegistry)
       const one = typeof at === 'string' ? at : undefined
@@ -81,11 +82,12 @@ function client(w: W, side: 'sibling' | 'home'): ChainClient {
       if (name === 'SafeModuleTransaction') return w.moduleTxs.map((t) => ({ args: { operation: t.operation } }))
       return []
     },
-    readContract: async ({ functionName, args }: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[] }) => {
+    readContract: async ({ functionName, args, blockNumber }: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[]; blockNumber?: bigint }) => {
+      if (functionName === 'configOf' && side === 'home' && blockNumber !== undefined) return { capUsd: w.home.capUsd, generation: w.configAtChange.generation, homeDomain: 0, set: w.configAtChange.set, home: A(0), initHash: HASH }
       const s = side === 'sibling'
       switch (functionName) {
         case 'HELPER': return HELPER
-        case 'configOf': return s ? { capUsd: w.sibling.capUsd, generation: 1n, homeDomain: w.sibling.homeDomain, set: w.sibling.set, home: w.sibling.home, initHash: HASH } : { capUsd: w.home.capUsd, generation: 1n, homeDomain: 0, set: w.home.set, home: w.home.home, initHash: HASH }
+        case 'configOf': return s ? { capUsd: w.sibling.capUsd, generation: 1n, homeDomain: w.sibling.homeDomain, set: w.sibling.set, home: w.sibling.home, initHash: HASH } : { capUsd: w.home.capUsd, generation: w.homeGeneration, homeDomain: 0, set: w.home.set, home: w.home.home, initHash: HASH }
         case 'allowance': return w.allowance[String(args?.[1]).toLowerCase()] ?? 1n
         case 'isApprovedForAll': return w.approvedForAll
         case 'ownerOf': { const n = w.nftApprovals.find((x) => x.tokenId === args?.[0]); return n?.owned ? ACCOUNT : A(0xdead) }
@@ -352,26 +354,26 @@ describe('security review of r3 (#223)', () => {
 })
 
 describe('review r4 of #223', () => {
-  test("a V4 authorization older than the home's last owner change is refused (an old owner's own session key)", async () => {
-    const w = world(); w.homePolicySetAt = 3n; w.ownerChangeAt = 4n
+  test("V4 in force since before the last owner change, same generation: refused (an old owner's own session key survives a same-generation re-enable)", async () => {
+    const w = world(); w.ownerChangeAt = 4n; w.configAtChange = { set: true, generation: 1n }; w.homeGeneration = 1n
     const s = setup(w)
     await runPass(s.cfg, s.deps)
     expect(s.sent).toEqual([])
     expect(s.alerts.some((a) => a.includes('homeSessionStale'))).toBe(true)
   })
 
-  test('re-signed after the owner change: accepted', async () => {
-    const w = world(); w.ownerChangeAt = 4n; w.homePolicySetAt = 6n
+  test('the current owners signed a new generation after the change: accepted', async () => {
+    const w = world(); w.ownerChangeAt = 4n; w.configAtChange = { set: true, generation: 1n }; w.homeGeneration = 2n
     const s = setup(w)
     await runPass(s.cfg, s.deps)
     expect(s.sent.length).toBe(1)
   })
 
-  test('no V4 enable in the home history: refused', async () => {
-    const w = world(); w.homePolicySetAt = undefined
+  test('no V4 config yet at the owner change (the account moved to V4 after it): accepted', async () => {
+    const w = world(); w.ownerChangeAt = 4n
     const s = setup(w)
     await runPass(s.cfg, s.deps)
-    expect(s.sent).toEqual([])
+    expect(s.sent.length).toBe(1)
   })
 
   test('an allowance on a registry vault share to a foreign spender is refused', async () => {

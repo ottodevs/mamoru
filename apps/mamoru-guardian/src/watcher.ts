@@ -15,7 +15,7 @@ export type ChainClient = {
   getBlockNumber(): Promise<bigint>
   getCode(a: { address: Address; blockNumber?: bigint }): Promise<Hex | undefined>
   getStorageAt(a: { address: Address; slot: Hex }): Promise<Hex | undefined>
-  readContract(a: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[] }): Promise<unknown>
+  readContract(a: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[]; blockNumber?: bigint }): Promise<unknown>
   getLogs(a: { address?: Address | Address[]; event: unknown; args?: Record<string, unknown>; fromBlock: bigint; toBlock: bigint }): Promise<{ args: Record<string, unknown>; address?: Address; blockNumber?: bigint | null }[]>
 }
 
@@ -277,10 +277,10 @@ async function foldLogs(home: ChainClient, s: Sibling, h: Hist, reg: ReturnType<
   // Review r3 (P0-B): every owner tx and every module tx of the home (SafeL2 events, emitted by the home itself).
   for (const l of await home.getLogs({ address: s.account, event: safeMultiSigEvent, fromBlock: from, toBlock: to })) if (Number(l.args.operation) === 1 && !isAddressEqual(getAddress(String(l.args.to)), callOnly)) h.delegatecalls = (h.delegatecalls ?? 0) + 1
   for (const l of await home.getLogs({ address: s.account, event: safeModuleTxEvent, fromBlock: from, toBlock: to })) if (Number(l.args.operation) === 1) h.delegatecalls = (h.delegatecalls ?? 0) + 1
-  // Review r4 (P1): the last owner change, and V4's last enable for this account (PolicySet: the account is not indexed).
+  // Review r4 (P1): the block of the last owner change (its V4 generation then is compared with the one in force now).
   const max = (a: string | undefined, b: bigint | null | undefined) => (b == null ? a : a === undefined || b > BigInt(a) ? b.toString() : a)
   for (const ev of [addedOwnerEvent, removedOwnerEvent, changedThresholdEvent]) for (const l of await home.getLogs({ address: s.account, event: ev, fromBlock: from, toBlock: to })) h.lastOwnerChange = max(h.lastOwnerChange, l.blockNumber)
-  for (const l of await home.getLogs({ address: v4, event: policySetEvent, fromBlock: from, toBlock: to })) if (l.args.account !== undefined && isAddressEqual(getAddress(String(l.args.account)), s.account)) h.lastPolicySet = max(h.lastPolicySet, l.blockNumber)
+  void v4
 }
 
 /**
@@ -294,8 +294,10 @@ async function homeHistoryOf(cfg: WatcherConfig, d: WatcherDeps, s: Sibling, hom
   const reg = registryFor(homeChainId)
   const tip = await home.getBlockNumber()
   const head = tip > HISTORY_CONFIRMATIONS ? tip - HISTORY_CONFIRMATIONS : 0n
-  if (s.hist && (s.hist.v !== 3 || s.hist.delegatecalls === undefined || s.hist.nftIds === undefined || s.hist.operators.some((o) => !String(o).includes(':')))) s.hist = undefined
-  const h = (s.hist ??= { v: 3, next: '', spenders: {}, operators: [], signed: 0, delegatecalls: 0, nftIds: [] })
+  // The emitter set a scan covered (security review of r4): a registry that gains a token or vault restarts the scan.
+  const emitters = reg.entries.filter((e) => e.kind === 'token' || e.kind === 'vault').map((e) => e.address.toLowerCase()).sort().join(',')
+  if (s.hist && (s.hist.v !== 4 || s.hist.emitters !== emitters || s.hist.delegatecalls === undefined || s.hist.nftIds === undefined || s.hist.operators.some((o) => !String(o).includes(':')))) s.hist = undefined
+  const h = (s.hist ??= { v: 4, next: '', spenders: {}, operators: [], signed: 0, delegatecalls: 0, nftIds: [], emitters })
   const empty = (note?: string): HomeHistory => ({ complete: false, ...(note ? { note } : {}), allowances: [], approvedForAll: [], signedMessages: 0, delegatecalls: 0, positionApprovals: [] })
   if (h.next === '') {
     let at: bigint | null
@@ -355,13 +357,15 @@ async function homeHistoryOf(cfg: WatcherConfig, d: WatcherDeps, s: Sibling, hom
       if (BigInt(approved) !== 0n) positionApprovals.push(BigInt(id))
     }
   }
-  return { complete: true, ...(ignored.length ? { note: `Approval logs from ${ignored.length} contract(s) outside the registry ignored` } : {}), allowances, approvedForAll, signedMessages: view.signed, delegatecalls: view.delegatecalls ?? 0, positionApprovals, ...(view.lastOwnerChange !== undefined ? { lastOwnerChange: BigInt(view.lastOwnerChange) } : {}), ...(view.lastPolicySet !== undefined ? { lastPolicySet: BigInt(view.lastPolicySet) } : {}) }
+  return { complete: true, ...(ignored.length ? { note: `Approval logs from ${ignored.length} contract(s) outside the registry ignored` } : {}), allowances, approvedForAll, signedMessages: view.signed, delegatecalls: view.delegatecalls ?? 0, positionApprovals, ...(view.lastOwnerChange !== undefined ? { lastOwnerChange: BigInt(view.lastOwnerChange) } : {}) }
 }
 
 /** Safe proxy storage slot 0: its singleton. */
 const SINGLETON_SLOT: Hex = '0x0000000000000000000000000000000000000000000000000000000000000000'
 /** An unbroken run of failed reads of a ready sibling this long clears it (fail closed; security review of #223). */
 const SIBLING_TRANSIENT_CLEAR_MS = 30 * 60_000
+/** A ready sibling whose history re-scan has not finished in this long is cleared too (fail closed). */
+const SIBLING_SCAN_CLEAR_MS = 6 * 3600_000
 /** A sent setReady is not sent again within this window: Ethereum's inclusion plus a lagging read RPC. */
 const SIBLING_RESEND_MS = 15 * 60_000
 
@@ -380,6 +384,7 @@ export function siblingReadsFor(cfg: WatcherConfig, sibChain: ChainClient, homeC
   const smart = address('SmartSession', homeReg)
   return {
     config: async (side, a) => configOf(await call<unknown>(on(side), cfg.v4, mamoruActionPolicyV4Abi, 'configOf', [a])),
+    homeConfigAt: async (a, block) => configOf(await homeClient.readContract({ address: cfg.v4, abi: mamoruActionPolicyV4Abi as Abi, functionName: 'configOf', args: [a], blockNumber: block })),
     codeHash: async (side, a) => {
       const code = await on(side).getCode({ address: a })
       return code && code !== '0x' ? keccak256(code) : undefined
@@ -458,10 +463,10 @@ async function processSiblings(cfg: WatcherConfig, d: WatcherDeps): Promise<stri
           continue
         }
         if (res.transient) {
-          // Security review of #223: only failed READS start the clock (a history scan in progress is no failure), and
-          // it is time, not passes: SIBLING_TRANSIENT_CLEAR_MS of unbroken failed reads clears the sibling.
-          if (!res.failed.startsWith('homeHistory:')) s.transientSince ??= now
-          const expired = s.transientSince !== undefined && now - s.transientSince >= SIBLING_TRANSIENT_CLEAR_MS
+          // Security review of #223: failed reads clear after SIBLING_TRANSIENT_CLEAR_MS unbroken; a scan in progress (an
+          // explicit flag) only after SIBLING_SCAN_CLEAR_MS (it may run over several passes, but never forever).
+          s.transientSince ??= now
+          const expired = now - s.transientSince >= (res.scanning ? SIBLING_SCAN_CLEAR_MS : SIBLING_TRANSIENT_CLEAR_MS)
           if (!expired) {
             s.checkedAt = undefined // re-read next pass
             d.store.save()

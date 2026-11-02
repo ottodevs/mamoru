@@ -48,7 +48,7 @@ export type CheckInput = {
 }
 
 /** `transient`: a read failed or is still in progress: not a proof of anything (review r3 of #223: never cleared on it). */
-export type CheckResult = { ok: true } | { ok: false; failed: string; transient?: true }
+export type CheckResult = { ok: true } | { ok: false; failed: string; transient?: true; scanning?: true }
 
 const fail = (failed: string): CheckResult => ({ ok: false, failed })
 const sameList = (a: readonly Address[], b: readonly Address[]) => a.length === b.length && a.every((x, i) => isAddressEqual(x, b[i]!))
@@ -177,6 +177,8 @@ export type SiblingReads = {
   codeHash(side: 'sibling' | 'home', account: Address): Promise<Hex | undefined>
   /** Storage slot 0 of the account on the home chain: a Safe proxy's singleton. */
   homeSingleton(account: Address): Promise<Address>
+  /** Security review of r4: V4.configOf(account) on the home chain AT a past block (the last owner change). */
+  homeConfigAt(account: Address, block: bigint): Promise<V4Config>
   /** MamoruV4Helper.ownersHashOf(account) on each chain (the helper is at the same address). */
   ownersHash(side: 'sibling' | 'home', account: Address): Promise<Hex>
   /** The home Safe's other execution paths: Safe modules, guard, fallback handler, Safe7579's validators, executors, hook. */
@@ -209,9 +211,8 @@ export type HomeHistory = {
   delegatecalls: number
   /** Review r3 (P1-2): positions of the home with a single-token approval still set (ERC-721 getApproved). */
   positionApprovals: readonly bigint[]
-  /** Review r4 of #223 (P1): blocks of the home's last owner change (AddedOwner/RemovedOwner/ChangedThreshold) and of V4's last PolicySet for it. */
+  /** Review r4 of #223 (P1): the block of the home's last owner change (AddedOwner/RemovedOwner/ChangedThreshold). */
   lastOwnerChange?: bigint
-  lastPolicySet?: bigint
 }
 
 const ZERO: Address = '0x0000000000000000000000000000000000000000'
@@ -292,7 +293,8 @@ export async function checkSibling(
   // Base 2 Nov: not installable there.)
   const hist = await read('homeHistory', () => r.homeHistory(i.account))
   if ('failed' in hist) return readFail(hist.failed)
-  if (!hist.v.complete) return { ok: false, failed: `homeHistory: the home's history is still being read${hist.v.note ? ` (${hist.v.note})` : ''}`, transient: true }
+  // A scan in progress is `scanning`; one that cannot complete (no archive RPC) is a failed read (security review r4).
+  if (!hist.v.complete) return hist.v.note ? { ok: false, failed: `homeHistory: ${hist.v.note}: read failed`, transient: true } : { ok: false, failed: "homeHistory: the home's history is still being read", transient: true, scanning: true }
   // Review r3 of #223 (P0-B): a DELEGATECALL lets whoever was an owner rewrite any storage of the home with no event
   // (approvedHashes for the new owners, an unlinked module, a hidden owner, signedMessages): reading its state back then
   // proves nothing. Mamoru only ever delegatecalls MultiSendCallOnly (call-only inner txs) and never from a module.
@@ -309,10 +311,15 @@ export async function checkSibling(
   if (hist.v.approvedForAll.length) return fail(`homeApprovedForAll: ${hist.v.approvedForAll[0]} may move the home's positions`)
   if (hist.v.signedMessages) return fail('homeSignedMessages: the home stored a signed message')
   if (hist.v.positionApprovals.length) return fail(`homePositionApproval: position ${hist.v.positionApprovals[0]} has an approved operator`)
-  // Review r4 of #223 (Opus P1-1, GPT-6 P1): a V4 session enabled by whoever was an owner, with their own key, keeps
-  // working after an owner swap until a new generation. The V4 Init in force must be newer than the last owner change.
-  if (hist.v.lastPolicySet === undefined) return fail('homeConfig: no V4 enable seen in the home\'s history')
-  if (hist.v.lastOwnerChange !== undefined && hist.v.lastPolicySet <= hist.v.lastOwnerChange) return fail('homeSessionStale: the V4 authorization predates the last owner change: the current owners must sign it again')
+  // Review r4 of #223 (Opus P1-1, GPT-6 P1) and its security review: a V4 session enabled by whoever was an owner, with
+  // their own key, keeps working after an owner swap until V4's generation steps (a higher generation retires every lower
+  // binding: MamoruActionPolicyV4.checkAction). A re-enable at the same generation does NOT retire it. So when the home
+  // already had a V4 config at its last owner change, the generation in force must be strictly higher than it was then.
+  if (hist.v.lastOwnerChange !== undefined) {
+    const then = await read('homeConfigAt', () => r.homeConfigAt(i.account, hist.v.lastOwnerChange!))
+    if ('failed' in then) return readFail(then.failed)
+    if (then.v.set && home.v.generation <= then.v.generation) return fail('homeSessionStale: the V4 authorization predates the last owner change: the current owners must sign a new one')
+  }
   // P1-a, bounded: the home's C is never above the sibling's (the C Mamoru signs for both).
   if (home.v.capUsd > sib.v.capUsd) return fail("homeConfig: the home's C is above the sibling's")
   return { ok: true }
