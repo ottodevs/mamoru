@@ -97,7 +97,7 @@ export function setup(w: World, over: Partial<WatcherConfig> = {}, allow: string
   const store = new StateStore(dir)
   const alerts: string[] = []
   const sent: { account: Address; domain: number; remote: Address }[] = []
-  const alerter: Alerter = { alert: async (t) => void alerts.push(t) }
+  const alerter: Alerter = { alert: async (t) => (alerts.push(t), { delivered: true }) }
   const cfg: WatcherConfig = { homeChainId: HOME, v4: V4, gasPolicy: GAS_POLICY, registryAt: { [HOME]: REGISTRY, [REMOTE_CHAIN]: REGISTRY }, fromBlock: { [HOME]: 1n, [REMOTE_CHAIN]: 1n }, logPage: 4n, maxPagesPerStream: 50, dryRun: false, realertMs: 1000, ...over }
   const deps: WatcherDeps = {
     clients: { [HOME]: client(w, 'home'), [REMOTE_CHAIN]: client(w, 'remote') },

@@ -187,7 +187,7 @@ describe('alerts from logs', () => {
     const s = setup(w, { registryAt: { 8453: A(0x88) } })
     let fail = true
     const alerts: string[] = []
-    s.deps.alerter.alert = async (t) => { if (fail) throw new Error('down'); alerts.push(t) }
+    s.deps.alerter.alert = async (t) => { if (fail) throw new Error('down'); alerts.push(t); return { delivered: true } }
     const errs = await runPass(s.cfg, s.deps)
     expect(errs.length).toBeGreaterThan(0)
     expect(s.store.cursor('queued:8453')).toBeUndefined()

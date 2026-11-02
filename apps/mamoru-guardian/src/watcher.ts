@@ -139,16 +139,26 @@ export function readsFor(cfg: WatcherConfig, home: ChainClient, remote: ChainCli
   }
 }
 
-/** Alert once per key (or once per ttl). A failed delivery throws, so the caller does not advance its checkpoint. */
-async function alertOnce(d: WatcherDeps, key: string, text: string, ttlMs?: number) {
+/**
+ * Alert once per key (or once per ttl). A failed delivery throws, so the caller does not advance its checkpoint.
+ * Review of #202 r5 (Sol 2): only a delivered alert is recorded. A line that only reached the journal (no webhook: dev)
+ * returns false and is not recorded, so it is raised again on the next pass and delivered once a webhook is configured.
+ * Returns true when the alert is recorded (delivered now or before).
+ */
+async function alertOnce(d: WatcherDeps, key: string, text: string, ttlMs?: number): Promise<boolean> {
   const now = d.now()
-  if (d.store.seen(key, now, ttlMs)) return
-  await d.alerter.alert(text)
+  if (d.store.seen(key, now, ttlMs)) return true
+  const { delivered } = await d.alerter.alert(text)
+  if (!delivered) return false
   d.store.markAlerted(key, now)
+  return true
 }
 
-/** Scans [cursor, head] of one stream in bounded pages; `onPage` handles each page's logs, then the cursor moves and state is saved. */
-async function scan(cfg: WatcherConfig, d: WatcherDeps, key: string, chainId: number, from: bigint, address: Address, event: unknown, onLogs: (logs: { args: Record<string, unknown> }[]) => Promise<void>, setNext: (n: bigint) => void, getNext: () => bigint | undefined) {
+/**
+ * Scans [cursor, head] of one stream in bounded pages; `onLogs` handles each page's logs, then the cursor moves and state is
+ * saved. `onLogs` returning false holds the cursor at that page (an alert in it was not delivered): the page is read again.
+ */
+async function scan(cfg: WatcherConfig, d: WatcherDeps, key: string, chainId: number, from: bigint, address: Address, event: unknown, onLogs: (logs: { args: Record<string, unknown> }[]) => Promise<boolean | void>, setNext: (n: bigint) => void, getNext: () => bigint | undefined) {
   const c = d.clients[chainId]
   if (!c) return
   const head = await c.getBlockNumber()
@@ -156,7 +166,7 @@ async function scan(cfg: WatcherConfig, d: WatcherDeps, key: string, chainId: nu
   for (let page = 0; page < cfg.maxPagesPerStream && next <= head; page++) {
     const to = next + cfg.logPage - 1n < head ? next + cfg.logPage - 1n : head
     const logs = await c.getLogs({ address, event, fromBlock: next, toBlock: to })
-    await onLogs(logs)
+    if ((await onLogs(logs)) === false) return
     next = to + 1n
     setNext(next)
     d.store.save()
@@ -188,11 +198,13 @@ async function scanQueued(cfg: WatcherConfig, d: WatcherDeps, chainId: number) {
   if (!reg) return
   const key = `queued:${chainId}`
   await scan(cfg, d, key, chainId, cfg.fromBlock[chainId]!, reg, queuedEvent, async (logs) => {
+    let recorded = true
     for (const l of logs) {
       const a = l.args as { id: Hex; kind: number; key: Hex; params: Hex; eta: bigint }
       const eta = new Date(Number(a.eta) * 1000).toISOString()
-      await alertOnce(d, `queued:${chainId}:${a.id}`, `MamoruRegistry Queued on chain ${chainId}: kind=${KIND[Number(a.kind)] ?? a.kind} key=${a.key} params=${a.params} eta=${eta} id=${a.id}`)
+      if (!(await alertOnce(d, `queued:${chainId}:${a.id}`, `MamoruRegistry Queued on chain ${chainId}: kind=${KIND[Number(a.kind)] ?? a.kind} key=${a.key} params=${a.params} eta=${eta} id=${a.id}`))) recorded = false
     }
+    return recorded
   }, (n) => d.store.setCursor(key, n), () => d.store.cursor(key))
 }
 
@@ -224,7 +236,8 @@ async function scanSafe(cfg: WatcherConfig, d: WatcherDeps, k: string) {
       // now (the earliest block this RPC can say anything about), and that gap is paged.
       if (((await c.getCode({ address: w.address })) ?? '0x') === '0x') return
       at = head
-      await alertOnce(d, `deployblock:${k}`, `Remote Safe ${w.address} (chain ${w.chainId}): deploy block unknown (RPC without history); its owner transactions are watched from block ${head} only`)
+      // Not delivered: the start block is not fixed, so the next pass tries (and alerts) again.
+      if (!(await alertOnce(d, `deployblock:${k}`, `Remote Safe ${w.address} (chain ${w.chainId}): deploy block unknown (RPC without history); its owner transactions are watched from block ${head} only`))) return
     }
     if (at === null) return // not deployed: no owner transaction can exist yet
     w.next = at.toString()
@@ -232,11 +245,13 @@ async function scanSafe(cfg: WatcherConfig, d: WatcherDeps, k: string) {
   }
   const allow = d.allowlist()
   await scan(cfg, d, k, w.chainId, 0n, w.address, executionSuccessEvent, async (logs) => {
+    let recorded = true
     for (const l of logs) {
       const h = String(l.args.txHash).toLowerCase()
       if (allow.has(h)) continue
-      await alertOnce(d, `exec:${w.chainId}:${w.address}:${h}`, `Owner transaction on remote Safe ${w.address} (chain ${w.chainId}) that Mamoru did not prepare: safeTxHash=${h}`)
+      if (!(await alertOnce(d, `exec:${w.chainId}:${w.address}:${h}`, `Owner transaction on remote Safe ${w.address} (chain ${w.chainId}) that Mamoru did not prepare: safeTxHash=${h}`))) recorded = false
     }
+    return recorded
   }, (n) => { w.next = n.toString() }, () => BigInt(w.next))
 }
 

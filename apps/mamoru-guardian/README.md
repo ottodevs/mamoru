@@ -67,7 +67,14 @@ bunx tsc -p apps/mamoru-guardian/tsconfig.json --noEmit
 
 The systemd template is `ops/systemd/mamoru-guardian.service` (not installed by anything in the repo).
 
-**Paging (review of #202 r4).** With `MAMORU_GUARDIAN_WEBHOOK_FILE` set, the guardian refuses to start unless the file
-holds an http(s) URL (it exits non-zero and `mamoru-guardian-alert@` pages through `OnFailure=`): it never runs
-console-only when paging is configured. Only a delivered webhook post counts as delivered (dedupe stamps, `alertOnce`).
-Without the variable (dev) it says `NO PAGING CONFIGURED` at start and writes alerts to the journal only.
+**Paging (review of #202 r4, r5).** With `MAMORU_GUARDIAN_WEBHOOK_FILE` set, the guardian refuses to start unless the
+file holds an http(s) URL: it exits 78 (EX_CONFIG), the unit stops restarting and enters `failed`, and
+`mamoru-guardian-alert@` pages through `OnFailure=` on its own channel (`MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE` from
+`~/.config/mamoru-guardian-alert/env`; it never reads the guardian's webhook file). Every other configuration error
+exits 78 too; a transient one (an RPC down) exits 1 and restarts with backoff. It never runs console-only when paging is
+configured. Without the variable (dev) it says `NO PAGING CONFIGURED` at start and writes alerts to the journal only.
+
+Only a delivered webhook post counts as delivered. `alert()` returns `{ delivered }`; the journal sink never delivers.
+An alert that only reached the journal is not recorded as alerted, and the log cursor of its stream does not move past
+its page: the next pass raises it again, and once a webhook is configured it is delivered (then recorded). Startup
+stamps follow the same rule. Which unit reads which secret file: `ops/systemd/README.md`.

@@ -1,10 +1,17 @@
-# TEMPLATE user unit (otto/mamoru#293, review of #202 r3): OnFailure of mamoru-guardian. Posts a fixed line (no log text)
-# through the guardian's own webhook file. Not installed by anything in the repo.
+# TEMPLATE user unit (otto/mamoru#293, review of #202 r3, r5): OnFailure of mamoru-guardian. Not installed by anything in
+# the repo. Posts a fixed line (no log text) through an INDEPENDENT channel: its own env file, holding only
+# MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE (a second Mattermost incoming webhook, e.g. for ops-mamoru, in its own 0600 file).
+# It never loads ~/.config/mamoru-guardian/env and never reads the guardian's webhook file: a broken guardian webhook is
+# one of the failures it reports.
 [Unit]
 Description=Mamoru guardian: alert on %i failure
 
 [Service]
 Type=oneshot
 WorkingDirectory=%h/box/src/mamoru.workspace/mamoru
-EnvironmentFile=%h/.config/mamoru-guardian/env
+EnvironmentFile=%h/.config/mamoru-guardian-alert/env
 ExecStart=/etc/profiles/per-user/otto/bin/bun apps/mamoru-guardian/src/unit-alert.ts %i
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only

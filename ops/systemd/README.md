@@ -134,6 +134,26 @@ file, never in that env file) and writes only `~/.local/state/mamoru-guardian`. 
 operator never does. Nothing installs or starts it; to apply: copy or symlink to `~/.config/systemd/user/`, then
 `systemctl --user daemon-reload && systemctl --user enable --now mamoru-guardian` (try `--dry-run` first).
 
-It restarts forever with a growing backoff (`Restart=always`, 30 s up to 1 h, no start limit). The guardian pages its own
-startup failures (an RPC down or on the wrong chain), at most once an hour, before it exits. `mamoru-guardian-alert@.service`
-is its `OnFailure=` unit (copy it beside it): a fixed line through the same webhook file if the unit ever ends `failed`.
+It restarts forever with a growing backoff (`Restart=always`, 30 s up to 1 h, no start limit) on any transient failure
+(exit 1: an RPC down). The guardian pages its own startup failures, at most once an hour per reason, before it exits.
+A configuration error exits 78 (EX_CONFIG: a missing or malformed setting, an unusable webhook file, a key that is not
+`V4.GUARDIAN`, an RPC on another chain). `RestartPreventExitStatus=78` stops the restarts, the unit enters `failed`, and
+`OnFailure=` runs `mamoru-guardian-alert@.service` (copy it beside it).
+
+Which secret file each unit reads (all 0600, none in the repo, none in an env file as a value):
+
+| Unit | Env file | Secret files it names |
+|---|---|---|
+| `mamoru-guardian` | `~/.config/mamoru-guardian/env` | `MAMORU_GUARDIAN_KEY_FILE` (guardian key), `MAMORU_GUARDIAN_WEBHOOK_FILE` (guardian alerts webhook) |
+| `mamoru-guardian-alert@` | `~/.config/mamoru-guardian-alert/env` | `MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE` only: a second Mattermost incoming webhook (e.g. ops-mamoru), its own file |
+
+The alert unit never loads the guardian's env file or webhook file, so a broken guardian webhook still pages. Deploy
+step: create the second webhook in Mattermost, write its URL to its own 0600 file (e.g.
+`~/.config/mamoru-guardian-alert/webhook`), and put `MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE=<that path>` in
+`~/.config/mamoru-guardian-alert/env`. Check it with
+`systemctl --user start mamoru-guardian-alert@mamoru-guardian.service` (posts one test line).
+
+Backstop, nothing to install: lady's fleet-watchdog (`~/box/sys/fleet-watchdog/README.md`, check 2, every 15 min) lists
+`failed` user units and crash-looping ones (`auto-restart`, or 5+ restarts in 20 min) and posts them as `sentinel` to
+`#infra` with its own bot token (`~/.config/mm-bots/sentinel.env`, outside this repo). So a guardian in `failed` (EX_CONFIG)
+or restarting with backoff is seen there too, independent of both guardian webhooks.

@@ -10,9 +10,12 @@
 Description=Mamoru guardian watcher (setReady readback, registry and remote Safe alerts)
 After=network-online.target
 Wants=network-online.target
-# Review of #202 r3 (Sol 2): never give up. systemd restarts it with a growing backoff (30 s up to 1 h); the guardian
-# itself pages a startup failure (once an hour, src/main.ts pageStartupFailure). OnFailure= also pages if the unit ever
-# lands in `failed` (an operator stop with an error, or a systemd that cannot restart it).
+# Review of #202 r3 (Sol 2): never give up on a transient failure. systemd restarts it with a growing backoff (30 s up to
+# 1 h); the guardian itself pages a startup failure (once an hour, src/main.ts pageStartupFailure).
+# Review of #202 r5 (Sol 1): a configuration error (bad or missing setting, unusable webhook file, wrong key, RPC on another
+# chain) exits 78 (EX_CONFIG). RestartPreventExitStatus=78 below stops the restarts, the unit enters `failed`, and OnFailure=
+# pages through mamoru-guardian-alert@, whose channel is independent of the guardian's webhook (its own env file).
+# fleet-watchdog's failed/crash-loop check (~/box/sys/fleet-watchdog, every 15 min, #infra) also sees both states.
 StartLimitIntervalSec=0
 OnFailure=mamoru-guardian-alert@%N.service
 
@@ -25,10 +28,13 @@ Restart=always
 RestartSec=30
 RestartSteps=8
 RestartMaxDelaySec=1h
+# EX_CONFIG: restarting cannot fix it; `failed` + OnFailure= instead. Every other exit code keeps restarting.
+RestartPreventExitStatus=78
 # State file, key and webhook files are 0600; never create anything group/other-readable.
 UMask=0077
 
-# Reads the repo and the key/webhook files, writes only its state dir.
+# Secrets it reads: MAMORU_GUARDIAN_KEY_FILE and MAMORU_GUARDIAN_WEBHOOK_FILE (paths set in the env file above). It never
+# reads ~/.config/mamoru-guardian-alert/. Reads the repo and those files, writes only its state dir.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only

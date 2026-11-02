@@ -10,7 +10,7 @@ import { alerterFrom, clearStartupStamps, pageStartupFailure, run, shortWhy, typ
 const env = () => ({ MAMORU_GUARDIAN_HOME_RPC_URL: 'http://127.0.0.1:9/', MAMORU_GUARDIAN_V4_ADDRESS: '0x00000000000000000000000000000000000000a2', MAMORU_GUARDIAN_GAS_POLICY_ADDRESS: '0x00000000000000000000000000000000000000a3', MAMORU_GUARDIAN_STATE_DIR: mkdtempSync(join(tmpdir(), 'guardian-start-')), MAMORU_GUARDIAN_FROM_BLOCK_8453: '1', MAMORU_GUARDIAN_DRY_RUN: '1' })
 const capture = (paging = true) => {
   const alerts: string[] = []
-  const a = { alert: async (t: string) => void alerts.push(t), paging }
+  const a = { alert: async (t: string) => (alerts.push(t), { delivered: paging }), paging }
   return { a, alerts }
 }
 
