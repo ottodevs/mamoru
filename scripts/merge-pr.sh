@@ -32,16 +32,17 @@ esac
 work_lock="$HOME/.local/state/mamoru-coord/op-work.lock"
 if ! flock -n "$work_lock" true; then echo "refusing: a command of an earlier coordinator operation is still running (op-work.lock)" >&2; exit 1; fi
 bun "$root/scripts/release/coord.ts" assert || exit 1
-# Run the reviewed scripts of main, not whatever this checkout last pulled: a stale checkout ran an old copy of this
-# file 109 commits behind main, so a fixed merge script did not run (#312). Fast-forward a clean main checkout and start again; anything else refuses.
-git -C "$root" fetch -q origin main
-if ! git -C "$root" diff --quiet HEAD origin/main -- scripts/merge-pr.sh scripts/release; then
-  if [ "$(git -C "$root" branch --show-current)" = main ] && [ -z "$(git -C "$root" status --porcelain)" ] \
-    && git -C "$root" merge -q --ff-only origin/main; then
-    echo "updated $root to origin/main $(git -C "$root" rev-parse --short HEAD); running the current script"
-    exec "$root/scripts/merge-pr.sh" "$@"
+# Run main as it is, not whatever this checkout last pulled: a checkout 109 commits behind ran an old copy of this
+# script (#312). A clean main checkout is fast-forwarded once and the script starts again; anything else refuses.
+git -C "$root" fetch -q origin main || { echo "refusing: cannot fetch origin main" >&2; exit 1; }
+if [ "$(git -C "$root" rev-parse HEAD)" != "$(git -C "$root" rev-parse origin/main)" ]; then
+  if [ -z "${MAMORU_MERGE_UPDATED:-}" ] && [ "$(git -C "$root" branch --show-current)" = main ] \
+    && [ -z "$(git -C "$root" status --porcelain)" ] && git -C "$root" merge -q --ff-only origin/main \
+    && [ "$(git -C "$root" rev-parse HEAD)" = "$(git -C "$root" rev-parse origin/main)" ]; then
+    echo "updated $root to origin/main $(git -C "$root" rev-parse --short HEAD); running it"
+    MAMORU_MERGE_UPDATED=1 exec "$root/scripts/merge-pr.sh" "$@"
   fi
-  echo "refusing: the merge scripts in $root differ from origin/main and it is not a clean main checkout to fast-forward" >&2
+  echo "refusing: $root is not a clean main checkout at origin/main; update it (git pull --ff-only) and run again" >&2
   exit 1
 fi
 
