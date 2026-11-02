@@ -11,7 +11,7 @@ import { Brand, Modal } from '../components/ui.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
-import { belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, MIN_ENTRY_USDC, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
+import { accountTotal, belowMinimumOf, cbbtcPrice, ceilCents, humanMessage, MIN_ENTRY_USDC, overCapOf, split, usd, usdExactInput, usdInput, usdPlain, type Split } from '../lib/money.ts'
 import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TERMINAL } from '../lib/ops.ts'
 import { historyEntries, moveLine, moveState } from '../lib/moves.ts'
 import { detailHead, MoveDetail, OpDetail, Sheet } from '../components/activity-detail.tsx'
@@ -198,8 +198,11 @@ export function Balance({
   past = null,
   down = false,
   chain = null,
+  total = null,
 }: {
   s: Split | null
+  /** The account on every chain (`accountTotal`); null: `s.total`, Base alone. */
+  total?: bigint | null
   earnedSoFarUsd?: string | null
   earnedDaily?: { day: string; earnedUsd: string }[] | null
   onAdd: () => void
@@ -219,7 +222,7 @@ export function Balance({
           {homeCopy.total}
         </p>
         <p className={`sum${shownPast ? ' past' : ''}`} data-testid="total">
-          {shownPast ? usd(shownPast.totalUsd) : s ? <TweenUsd raw={s.total} countUp /> : '0.00'}
+          {shownPast ? usd(shownPast.totalUsd) : s ? <TweenUsd raw={total ?? s.total} countUp /> : '0.00'}
           <span className="unit">USDC</span>
         </p>
         {shownPast ? (
@@ -1261,10 +1264,18 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   }, [signedOut, qc])
   const price = cbbtcPrice(pools.data)
   const s = f ? split(f, price) : null
+  // Brais, 2 Nov: the balance is the account on every chain; a move to Monad does not change it.
+  const total = s ? accountTotal(s.total, otherChainsUsdc, f) : null
+  // A burn minted on Monad leaves `progress`: Monad's balance is read again at once, so its USDC never drops out between.
+  const bridging = f?.progress?.bridge?.state ?? null
+  const monadKey = monadSleeve?.accountKey
+  useEffect(() => {
+    if (monadKey) void qc.invalidateQueries({ queryKey: queryKeys.funding(monadKey) })
+  }, [bridging, monadKey, qc])
   // The past reading: this tab's last good read, or, with none, the last snapshot in D1. Its total is the one shown
   // while the read was live (review round 4): re-pricing it with a newer pool price would move a "last reading".
   const lastLiveTotal = useRef<bigint | null>(null)
-  if (!liveDown && s) lastLiveTotal.current = s.total
+  if (!liveDown && total !== null) lastLiveTotal.current = total
   const past = !liveDown
     ? null
     : cached
@@ -1376,6 +1387,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       </header>
       <Balance
         s={s}
+        total={total}
         earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd}
         earnedDaily={yieldLedger.data?.earnedDaily}
         onAdd={addMoney}
