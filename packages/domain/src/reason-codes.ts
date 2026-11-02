@@ -40,8 +40,6 @@ export const REASON_CODES = [
   // names (deployed address, the address the grant was retargeted to, the grant's pool and tokens).
   'SESSION_ACTION_POLICY_MISMATCH',
   'REMOTE_SAFE_MISMATCH',
-  // otto/mamoru#295: a migrate-v4 prepare whose hash, Safe, destination or calldata is not what the card shows (Worker check).
-  'MIGRATE_TX_MISMATCH',
   // T7: basefee leaves no room under a v4 session's MamoruGasPolicy maxFeePerGas cap; the engine waits.
   'GAS_PRICE_OVER_CAP',
   // Pre-chequeo de política en el motor

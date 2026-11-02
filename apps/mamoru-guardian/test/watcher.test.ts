@@ -23,7 +23,9 @@ describe('setReady', () => {
     ['threshold differs', (w) => { w.remote.threshold = 2n }, 'threshold'],
     ['home owners changed', (w) => { w.home.ownersHash = `0x${'11'.repeat(32)}` }, 'ownersHash'],
     ['smartsession not installed', (w) => { w.remote.ssInstalled = false }, 'smartSession'],
-    ['safe7579 not enabled', (w) => { w.remote.modEnabled = false }, 'safe7579Module'],
+    ['safe7579 not enabled', (w) => { w.remote.modules = [] }, 'safe7579Module'],
+    ['an extra module beside Safe7579 (review of #202, P1-6)', (w) => { w.remote.modules = [...w.remote.modules, A(0xbad)] }, 'safe7579Module'],
+    ['a transaction guard (P1-6)', (w) => { w.remote.guard = A(0xbad) }, 'guard'],
     ['wrong fallback handler', (w) => { w.remote.handler = A(0xbad) }, 'fallbackHandler'],
     ['permission not enabled', (w) => { w.remote.permEnabled = false }, 'permissionEnabled'],
     ['extra permission', (w) => { w.remote.permIds = [...w.remote.permIds, `0x${'22'.repeat(32)}`] }, 'permissionIds'],
@@ -73,11 +75,11 @@ describe('setReady', () => {
     expect(w.reads.filter((r) => r.startsWith('remote.'))).toEqual([])
   })
 
-  test('readyOf already names the remote: skipped', async () => {
+  test('readyOf names the remote but isReady is false (stale owners hash): read back and setReady sent again (review of #202, P1-5)', async () => {
     const w = makeWorld(); withReg(w); w.home.readyRemote = w.event.remote
     const s = setup(w)
     await runPass(s.cfg, s.deps)
-    expect(s.sent).toEqual([])
+    expect(s.sent).toEqual([{ account: w.event.account, domain: w.event.domain, remote: w.event.remote }])
   })
 
   test('dry-run reads and alerts but never sends', async () => {
@@ -104,6 +106,22 @@ describe('setReady', () => {
     await runPass(s.cfg, s.deps)
     expect(s.store.cursor('reg')).toBe(11n) // head 10 + 1
     expect(s.store.cursor(`queued:8453`)).toBe(11n)
+  })
+})
+
+describe('remote Safe cursors (review of #202, P1-10)', () => {
+  test('a newly registered Safe is scanned from its deploy block, persisted; not before it is deployed', async () => {
+    const w = makeWorld(); withReg(w); w.home.ready = true
+    w.remote.code = undefined
+    const s = setup(w)
+    await runPass(s.cfg, s.deps)
+    const k = Object.keys(s.store.state.safes)[0]!
+    expect(s.store.state.safes[k]!.next).toBe('')
+    w.remote.code = '0x6080'
+    await runPass(s.cfg, s.deps)
+    expect(BigInt(s.store.state.safes[k]!.next)).toBe(11n) // scanned from block 3 (deploy) to the head 10
+    const { deployBlockOf } = await import('../src/watcher.ts')
+    expect(await deployBlockOf(s.deps.clients[143]!, w.event.remote, 10n)).toBe(3n)
   })
 })
 

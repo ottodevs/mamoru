@@ -60,16 +60,33 @@ export const INIT_V4_TUPLE = [
 ] as const
 
 /**
- * otto/mamoru#293: the C an account's InitV4 carries, as a multiple of its USDC cap. V4 charges every swap, mint and increase
- * against C per day (and pauses past C in 24 h): placing a whole deposit is a swap of about half and a mint of all of it
- * (1.5x), and a re-range on the same day adds as much again, so C = 3x the cap keeps normal operation under the breaker
- * (spec 010 open question 4; to be re-measured against D1 spend). The engine also never sends an op whose simulation
- * trips it (the call then moves nothing: EHG_SIM_DELTA_MISMATCH).
+ * otto/mamoru#293 (review of #202, P1-11): the C an account's InitV4 carries on a chain, from the same values the "What's
+ * new" lines state: the account's USDC cap x the chain's share of the policy split (Base 85 %, Monad 15 % for one-auth-v4)
+ * x V4_CAP_MULTIPLE_BPS. V4 charges every swap, mint and increase against C per day and pauses past C in 24 h; placing a
+ * deposit is a swap of about half and a mint of all of it (1.5x the chain's share), so the multiple must stay above 1.5:
+ * 2x (pending Ot's decision; spec 010 open question 4). Charging an entry once (net) instead of per call needs a V4 change.
+ * A remote Safe's C is not this: V4 gives a remote its home's C at registerRemote (contract, MamoruV4Helper.remote).
  */
-export const V4_CAP_MULTIPLE = 3n
-export function v4CapUsdOf(accountCapUsdc: bigint): bigint {
-  return accountCapUsdc * V4_CAP_MULTIPLE
+export const V4_CAP_MULTIPLE_BPS = 20_000
+
+/** The chain's share of the policy split, bps: its local buckets' preference (home) or its remote buckets' (a remote chain). */
+export function v4ChainShareBps(policy: Pick<PolicyVersion, 'buckets' | 'remoteBuckets'>, chainId: number, homeChainId = 8453): number {
+  const total = policy.buckets.reduce((s, b) => s + b.preference, 0) + (policy.remoteBuckets ?? []).reduce((s, b) => s + b.preference, 0)
+  if (total <= 0) return 0
+  const mine = chainId === homeChainId ? policy.buckets.reduce((s, b) => s + b.preference, 0) : (policy.remoteBuckets ?? []).filter((b) => b.chainId === chainId).reduce((s, b) => s + b.preference, 0)
+  return Math.floor((mine * 10_000) / total)
 }
+
+/** InitV4.capUsd of the home account on `chainId` (USD units, 6 decimals) for an account cap of `accountCapUsdc`. */
+export function v4CapUsdOf(accountCapUsdc: bigint, policy: Pick<PolicyVersion, 'buckets' | 'remoteBuckets'> = oneAuthV4LiveSplit, chainId = 8453, multipleBps = V4_CAP_MULTIPLE_BPS): bigint {
+  return (accountCapUsdc * BigInt(v4ChainShareBps(policy, chainId)) * BigInt(multipleBps)) / 100_000_000n
+}
+
+/** V4's rolling 30-day cap: CAP30_MULTIPLE x C (contract constant). */
+export const V4_CAP30_MULTIPLE = 3n
+
+/** one-auth-v4's split (Base 50 + 35, Monad 15), for v4CapUsdOf's default. */
+const oneAuthV4LiveSplit = { buckets: [{ preference: 5000 }, { preference: 3500 }], remoteBuckets: [{ preference: 1500, chainId: 143 }] } as unknown as Pick<PolicyVersion, 'buckets' | 'remoteBuckets'>
 
 /** V4's MAX_ADMIT, MAX_CAP_USD and MAX_FIRST_GENERATION (LeftClaw H-1). */
 export const V4_MAX_ADMIT = 64
@@ -239,7 +256,7 @@ function tokenName(a: Address, registry: Registry): RegistryName | undefined {
  * as base.json names them, except that a pool whose token0 is the stable keeps that order too). Only pools of two
  * V4-pinned tokens, one of them a pinned stable, are kept (what V4 itself would price); any other is dropped.
  */
-export function registryPoolEntry(p: RegistryPool, registry: Registry): RegistryEntry | null {
+export function registryPoolEntry(p: RegistryPool, registry: Registry, opts: { unpinned?: boolean } = {}): RegistryEntry | null {
   const pinned = V4_PINNED[registry.chainId]
   if (!pinned) return null
   const t0 = tokenName(p.token0, registry)
@@ -249,6 +266,10 @@ export function registryPoolEntry(p: RegistryPool, registry: Registry): Registry
   if (!isPinned(t0) || !isPinned(t1) || !(pinned.stables.includes(t0) || pinned.stables.includes(t1))) return null
   const known = registry.entries.find((e) => e.kind === 'pool' && e.address.toLowerCase() === p.address.toLowerCase())
   if (known) return known
+  // Review of #202 (P0-4): the operator's own reads (funding, withdrawals, Stop) resolve pools in the chain's registry
+  // json and nothing else, so the engine never enters a pool they could not see: a MamoruRegistry pool that the json does
+  // not pin is not used (pinning it is a reviewed PR, still no owner signature).
+  if (!opts.unpinned) return null
   return { name: `pool:${t0}/${t1}/${p.fee}`, kind: 'pool', role: 'MamoruRegistry (spec 010), read on chain', address: getAddress(p.address), codeHash: null, token0: t0, token1: t1, fee: p.fee, tickSpacing: p.tickSpacing }
 }
 

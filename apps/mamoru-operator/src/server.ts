@@ -292,7 +292,7 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
           return json(200, op.migrateV4Status(ctx))
         // otto/mamoru#293: an account created on V4 (setup mode): its session key before it exists, then its start.
         case 'POST one-auth-key':
-          return json(200, op.oneAuthKey(ctx))
+          return json(200, await op.oneAuthKey(ctx))
         case 'POST one-auth-start':
           return json(200, await op.startOneAuth(ctx))
         case 'POST bridge-out/prepare':

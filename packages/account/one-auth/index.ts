@@ -340,14 +340,14 @@ export function inventoryOf(p: { events: readonly Hex[]; enabled: readonly Hex[]
  * Every permission id SmartSession's SessionCreated events name for `account` in [fromBlock, toBlock], in pages of
  * `pageBlocks` (the event has no indexed field: each page reads every SessionCreated of the chain and keeps the account's).
  */
-export async function sessionCreatedIds(client: PublicClient, registry: Registry, account: Address, fromBlock: bigint, toBlock: bigint, pageBlocks = 2_000n, onPage?: (to: bigint) => void): Promise<Hex[]> {
+export async function sessionCreatedIds(client: PublicClient, registry: Registry, account: Address, fromBlock: bigint, toBlock: bigint, pageBlocks = 2_000n, onPage?: (to: bigint, ids: Hex[]) => void): Promise<Hex[]> {
   const out = new Set<Hex>()
   const smart = address('SmartSession', registry)
   for (let from = fromBlock; from <= toBlock; from += pageBlocks) {
     const to = from + pageBlocks - 1n > toBlock ? toBlock : from + pageBlocks - 1n
     const logs = await client.getLogs({ address: smart, event: SESSION_CREATED_EVENT, fromBlock: from, toBlock: to })
     for (const l of logs) if (l.args.account && isAddressEqual(l.args.account, account) && l.args.permissionId) out.add(l.args.permissionId.toLowerCase() as Hex)
-    onPage?.(to)
+    onPage?.(to, [...out])
   }
   return [...out]
 }

@@ -6,7 +6,7 @@
 import { keccak256, toHex, zeroAddress, type Hex, type PublicClient } from 'viem'
 import type { Address, WhatsNew } from '@mamoru/domain'
 import { address, type Registry } from '@mamoru/registry'
-import { ONE_AUTH_V4, registryPoolsKey, V4_USAGE_LIMIT, V4_VALID_UNTIL, type OneAuthV4Deployment, type RegistryPool, type SessionGrant } from '@mamoru/policy'
+import { ONE_AUTH_V4, V4_CAP30_MULTIPLE, registryPoolsKey, V4_USAGE_LIMIT, V4_VALID_UNTIL, type OneAuthV4Deployment, type RegistryPool, type SessionGrant } from '@mamoru/policy'
 import { mamoruActionPolicyV4Abi, mamoruRegistryAbi } from '@mamoru/account/one-auth'
 
 /** The reasons the screen gives, one line each (#295 renders 1-4). */
@@ -27,7 +27,7 @@ export type OneAuthState = {
   capUsd?: string
   generation?: string
   /** The home's remote on Monad as V4 registered it (registerRemote), and whether the guardian marked it ready. */
-  remote?: { domain: number; address: Hex; sessionKey: Hex; ready?: boolean; registeredAt?: string; tx?: Hex }
+  remote?: { domain: number; address: Hex; sessionKey: Hex; ready?: boolean; registeredAt?: string; tx?: Hex; accountKey?: string }
   /** The account's pause from the last read: V4's (guardian, breaker or review) on V4, the V2/V3 guardian's before. */
   paused?: boolean
 }
@@ -50,10 +50,13 @@ const usd = (raw: bigint) => {
 
 /** Every line the owner signs in step 0 (the Base Safe transaction), in the order of its calls. */
 export function baseStepLines(p: { remove: number; revoke: number; capUsd: bigint; admitted: number; remoteChain?: string }): string[] {
+  // Review of #202 (P1-11): the numbers are the Init's own C and V4's 30-day multiple, never fixed text. A remote Safe gets
+  // its home's C from V4 itself (registerRemote), so the line says the same limit applies there.
   const lines = [
     `Removes Mamoru's ${p.remove} current permission${p.remove === 1 ? '' : 's'} on your Safe, and cancels any unused ones (${p.revoke} in all)`,
     'Gives Mamoru one permission that does not expire. It may only swap, provide liquidity and use savings vaults in the pools, vaults and chains of Mamoru\'s public list, where each addition waits 72 hours in public',
-    `Mamoru may put at most ${usd(p.capUsd)} USDC to work a day, and ${usd(p.capUsd * 3n)} USDC in any 30 days. Past that it pauses by itself`,
+    `On this Safe Mamoru may move at most ${usd(p.capUsd)} USDC of value a day (each swap and each deposit into a pool counts), and ${usd(p.capUsd * V4_CAP30_MULTIPLE)} USDC in any 30 days. Past that it pauses by itself`,
+    ...(p.remoteChain ? [`Your Safe on ${p.remoteChain}, when Mamoru creates it, has the same limits of its own (${usd(p.capUsd)} USDC a day, ${usd(p.capUsd * V4_CAP30_MULTIPLE)} USDC in 30 days)`] : []),
     `Money only ever goes to your own Safes${p.remoteChain ? ` (this one, and yours on ${p.remoteChain})` : ''}. Taking money out still needs your signature`,
   ]
   if (p.admitted) lines.push(`Your ${p.admitted} current position${p.admitted === 1 ? ' stays' : 's stay'} where ${p.admitted === 1 ? 'it is' : 'they are'}, and Mamoru keeps managing ${p.admitted === 1 ? 'it' : 'them'}`)
@@ -66,8 +69,8 @@ export function monadStepLines(p: { remove: number; revoke: number; moveTo: stri
   return [
     `Removes Mamoru's ${p.remove} permission${p.remove === 1 ? '' : 's'} on your Safe on Monad, and cancels any unused ones (${p.revoke} in all)`,
     `Moves ${p.tokens.length ? p.tokens.join(' and ') : 'what this Safe holds'} to your new Safe on Monad, ${p.moveTo}: same owner (your passkey)`,
-    ...(p.positions ? [`Your ${p.positions} position${p.positions === 1 ? '' : 's'} on Monad stay${p.positions === 1 ? 's' : ''} in this Safe, which Mamoru may then only close and send home to your Safe on Base`] : []),
-    'Gives this Safe the same one permission as your Safe on Base; the transaction checks that it is the only one left',
+    ...(p.positions ? [`Your ${p.positions} position${p.positions === 1 ? '' : 's'} on Monad stay${p.positions === 1 ? 's' : ''} in this Safe: Mamoru no longer manages ${p.positions === 1 ? 'it' : 'them'}, and you can withdraw ${p.positions === 1 ? 'it' : 'them'} as before`] : []),
+    'Leaves this Safe one permission that can move no value (a limit of 0.000001 USDC a day); the transaction checks that it is the only one left',
   ]
 }
 

@@ -318,7 +318,7 @@ try {
   scoped.one_auth_v4 = [accountKey]
   let ctx: AccountContext = { accountKey, chainId: 8453, address: '0x0000000000000000000000000000000000000000', owners, saltNonce: saltNonce.toString(), passkey: { credentialId: 'e2e-one-auth', x: toHex(passkey.x, { size: 32 }), y: toHex(passkey.y, { size: 32 }) } }
   if (PHASES.has('A')) {
-    const key = bo.oneAuthKey(ctx)
+    const key = await bo.oneAuthKey(ctx)
     const session = v4HomeSession({ sessionKey: key.sessionKey, deployment: d, capUsd: BigInt(key.capUsdc), generation: 1n, admit: [], registry: baseRegistry })
     const created = v4CreateSetup(owners, saltNonce, webAuthnSigner(passkey.x, passkey.y, baseRegistry), session, baseRegistry)
     ctx = { ...ctx, address: created.address, oneAuth: { sessionKey: key.sessionKey, capUsdc: key.capUsdc } }

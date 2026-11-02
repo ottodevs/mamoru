@@ -20,8 +20,10 @@ export type CheckReads = {
   homeOwnersHash(account: Address): Promise<Hex>
   /** Safe7579.isModuleInstalled(1, SmartSession, 0x) on the remote. */
   smartSessionInstalled(remote: Address): Promise<boolean>
-  /** Safe.isModuleEnabled(Safe7579) on the remote. */
-  safe7579Enabled(remote: Address): Promise<boolean>
+  /** Every Safe module enabled on the remote (getModulesPaginated from the sentinel, to the end). */
+  modules(remote: Address): Promise<readonly Address[]>
+  /** The Safe's guard slot on the remote (zero = no guard). */
+  guard(remote: Address): Promise<Address>
   /** The Safe's fallback handler slot on the remote. */
   fallbackHandler(remote: Address): Promise<Address>
   permissionEnabled(permissionId: Hex, remote: Address): Promise<boolean>
@@ -99,9 +101,13 @@ export async function checkRemote(i: CheckInput, r: CheckReads): Promise<CheckRe
   if ('failed' in sessionInstalled) return fail(sessionInstalled.failed)
   if (!sessionInstalled.v) return fail('smartSession: validator not installed on the remote')
 
-  const moduleEnabled = await read('safe7579Module', () => r.safe7579Enabled(remote))
-  if ('failed' in moduleEnabled) return fail(moduleEnabled.failed)
-  if (!moduleEnabled.v) return fail('safe7579Module: Safe7579 is not an enabled module of the remote')
+  // Review of #202 (P1-6): Safe7579 is the ONLY module (any other module can move the Safe's funds), and there is no guard.
+  const modules = await read('safe7579Module', () => r.modules(remote))
+  if ('failed' in modules) return fail(modules.failed)
+  if (modules.v.length !== 1 || !isAddressEqual(modules.v[0]!, address('Safe7579', remoteRegistry))) return fail('safe7579Module: the remote modules are not exactly Safe7579')
+  const guard = await read('guard', () => r.guard(remote))
+  if ('failed' in guard) return fail(guard.failed)
+  if (BigInt(guard.v) !== 0n) return fail('guard: the remote has a transaction guard')
 
   const handler = await read('fallbackHandler', () => r.fallbackHandler(remote))
   if ('failed' in handler) return fail(handler.failed)

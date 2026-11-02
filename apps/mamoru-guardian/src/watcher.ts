@@ -13,7 +13,7 @@ import type { StateStore } from './state.ts'
 /** The slice of a viem PublicClient the guardian uses (a real client is cast to it in main.ts). */
 export type ChainClient = {
   getBlockNumber(): Promise<bigint>
-  getCode(a: { address: Address }): Promise<Hex | undefined>
+  getCode(a: { address: Address; blockNumber?: bigint }): Promise<Hex | undefined>
   getStorageAt(a: { address: Address; slot: Hex }): Promise<Hex | undefined>
   readContract(a: { address: Address; abi: Abi; functionName: string; args?: readonly unknown[] }): Promise<unknown>
   getLogs(a: { address: Address; event: unknown; fromBlock: bigint; toBlock: bigint }): Promise<{ args: Record<string, unknown> }[]>
@@ -52,6 +52,10 @@ const executionSuccessEvent = parseAbiItem('event ExecutionSuccess(bytes32 index
 /** Safe's keccak256("fallback_manager.handler.address"). */
 const FALLBACK_SLOT: Hex = '0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5'
 const KIND = ['Pool', 'Vault', 'Route']
+/** Safe's keccak256("guard_manager.guard.address"). */
+const GUARD_SLOT: Hex = '0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8'
+const SENTINEL: Address = '0x0000000000000000000000000000000000000001'
+const modulesAbi = [{ type: 'function', name: 'getModulesPaginated', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'address[]' }, { type: 'address' }] }] as const satisfies Abi
 
 /** The allowlist file: JSON array of safeTxHashes; absent = empty. A present but malformed file throws (fail closed: no silent muting). */
 export function readAllowlist(path: string | undefined): () => ReadonlySet<string> {
@@ -88,7 +92,22 @@ export function readsFor(cfg: WatcherConfig, home: ChainClient, remote: ChainCli
     },
     homeOwnersHash: (a) => call(home, helper, mamoruV4HelperAbi, 'ownersHashOf', [a]),
     smartSessionInstalled: (a) => call(remote, a, safe7579Abi, 'isModuleInstalled', [1n, address('SmartSession', remoteReg), '0x']),
-    safe7579Enabled: (a) => call(remote, a, safeAbi, 'isModuleEnabled', [address('Safe7579', remoteReg)]),
+    modules: async (a) => {
+      // Every module, page by page from the sentinel; a page ends at the sentinel (bounded: 20 pages of 10).
+      const out: Address[] = []
+      let start: Address = SENTINEL
+      for (let i = 0; i < 20; i++) {
+        const [page, next] = await call<readonly [readonly Address[], Address]>(remote, a, modulesAbi, 'getModulesPaginated', [start, 10n])
+        out.push(...page)
+        if (isAddressEqual(next, SENTINEL) || BigInt(next) === 0n) return out
+        start = next
+      }
+      throw new Error('too many modules')
+    },
+    guard: async (a) => {
+      const w = await remote.getStorageAt({ address: a, slot: GUARD_SLOT })
+      return getAddress(slice(pad(w ?? '0x', { size: 32 }), 12))
+    },
     fallbackHandler: async (a) => {
       const w = await remote.getStorageAt({ address: a, slot: FALLBACK_SLOT })
       return getAddress(slice(pad(w ?? '0x', { size: 32 }), 12))
@@ -135,7 +154,8 @@ async function scanRegistrations(cfg: WatcherConfig, d: WatcherDeps) {
       // Every remote ever registered is watched, also after it is superseded: an old remote still holds funds until swept (spec I4).
       if (chainId !== undefined) {
         const sk = `${chainId}:${getAddress(a.remote)}`
-        st.safes[sk] ??= { chainId, address: getAddress(a.remote), next: (cfg.fromBlock[chainId] ?? 0n).toString() }
+        // Review of #202 (P1-10): its cursor starts at the Safe's deploy block, found when it has code ('' = not deployed yet).
+        st.safes[sk] ??= { chainId, address: getAddress(a.remote), next: '' }
       }
     }
   }, (n) => d.store.setCursor('reg', n), () => d.store.cursor('reg'))
@@ -154,8 +174,30 @@ async function scanQueued(cfg: WatcherConfig, d: WatcherDeps, chainId: number) {
   }, (n) => d.store.setCursor(key, n), () => d.store.cursor(key))
 }
 
+/** The first block with code at `a` (binary search over getCode at a block), or null when it has none at the head. */
+export async function deployBlockOf(c: ChainClient, a: Address, head: bigint): Promise<bigint | null> {
+  const has = async (b: bigint) => ((await c.getCode({ address: a, blockNumber: b })) ?? '0x') !== '0x'
+  if (!(await has(head))) return null
+  let lo = 0n
+  let hi = head
+  while (lo < hi) {
+    const mid = (lo + hi) / 2n
+    if (await has(mid)) hi = mid
+    else lo = mid + 1n
+  }
+  return lo
+}
+
 async function scanSafe(cfg: WatcherConfig, d: WatcherDeps, k: string) {
   const w = d.store.state.safes[k]!
+  if (w.next === '') {
+    const c = d.clients[w.chainId]
+    if (!c) return
+    const at = await deployBlockOf(c, w.address, await c.getBlockNumber())
+    if (at === null) return // not deployed: no owner transaction can exist yet
+    w.next = at.toString()
+    d.store.save()
+  }
   const allow = d.allowlist()
   await scan(cfg, d, k, w.chainId, 0n, w.address, executionSuccessEvent, async (logs) => {
     for (const l of logs) {
@@ -175,8 +217,8 @@ async function processRegistrations(cfg: WatcherConfig, d: WatcherDeps) {
     const cur = await call<{ remote: Address; capUsd: bigint }>(home, cfg.v4, mamoruActionPolicyV4Abi, 'remoteOf', [reg.account, reg.domain])
     if (!isAddressEqual(cur.remote, reg.remote)) { delete st.registrations[k]; d.store.save(); continue } // superseded
     if (await call<boolean>(home, cfg.v4, mamoruActionPolicyV4Abi, 'isReady', [reg.account, reg.domain])) { delete st.registrations[k]; d.store.save(); continue }
-    const ready = await call<{ remote: Address }>(home, cfg.v4, mamoruActionPolicyV4Abi, 'readyOf', [reg.account, reg.domain])
-    if (isAddressEqual(ready.remote, reg.remote)) continue
+    // Review of #202 (P1-5): not ready is not ready, whatever readyOf still names (a stale owners hash after a rotation):
+    // the remote is read back again and setReady sent again.
 
     const chainId = V4_CHAIN_BY_DOMAIN[reg.domain]
     const remoteClient = chainId === undefined ? undefined : d.clients[chainId]

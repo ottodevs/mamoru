@@ -41,7 +41,9 @@ export function makeWorld() {
       owners: owners as Address[],
       threshold: 1n,
       ssInstalled: true,
-      modEnabled: true,
+      modules: [address('Safe7579', monadRegistry)] as Address[],
+      guard: A(0) as Address,
+      deployedAt: 3n,
       handler: address('Safe7579', monadRegistry) as Address,
       permEnabled: true,
       permIds: [exp.permissionId] as Hex[],
@@ -53,8 +55,8 @@ export function makeWorld() {
 function client(w: World, side: 'home' | 'remote'): ChainClient {
   return {
     getBlockNumber: async () => 10n,
-    getCode: async () => w.remote.code,
-    getStorageAt: async () => pad(w.remote.handler, { size: 32 }),
+    getCode: async ({ blockNumber }) => (blockNumber !== undefined && blockNumber < w.remote.deployedAt ? undefined : w.remote.code),
+    getStorageAt: async ({ slot }) => pad(slot.startsWith('0x4a204f62') ? w.remote.guard : w.remote.handler, { size: 32 }),
     getLogs: async ({ event }) => {
       const name = (event as { name: string }).name
       if (name === 'RemoteRegistered') return side === 'home' ? w.regLogs : []
@@ -75,7 +77,7 @@ function client(w: World, side: 'home' | 'remote'): ChainClient {
         case 'getOwners': return side === 'home' ? h.owners : r.owners
         case 'getThreshold': return side === 'home' ? h.threshold : r.threshold
         case 'isModuleInstalled': return r.ssInstalled
-        case 'isModuleEnabled': return r.modEnabled
+        case 'getModulesPaginated': return [r.modules, A(1)]
         case 'isPermissionEnabled': return r.permEnabled
         case 'getPermissionIDs': return r.permIds
         default: throw new Error(`unexpected read ${functionName} ${String(args)}`)

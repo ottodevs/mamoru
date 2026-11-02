@@ -194,6 +194,8 @@ export type OperatorState = {
   remoteKeys?: Record<string, Hex>
   /** otto/mamoru#293: the session key of each account created on V4 (setup mode), given before its address exists. 0600 only, never logged. */
   oneAuthKeys?: Record<string, Hex>
+  /** otto/mamoru#293: the block each of those keys was given at (the account's deposits are counted from there). */
+  oneAuthKeyBlocks?: Record<string, string>
 }
 
 const BIG = '$big'

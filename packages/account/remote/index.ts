@@ -104,12 +104,23 @@ export function remoteAccountKey(baseKey: string, chainId: number): string {
   return `${baseKey}@${chainId}`
 }
 
-/** The Base account key of a remote account key, or null when it is not one for `chainId`. */
+/**
+ * otto/mamoru#293 (review of #202, P0-3): the account key of a Base account's V4 remote Safe on `chainId` when the account
+ * still has its design-C Safe there under `remoteAccountKey`: a key of its own, so the remote operator holds both Safes
+ * (the old one for step 1 and its positions, the new one provisioned and running) and neither displaces the other.
+ */
+export function v4RemoteAccountKey(baseKey: string, chainId: number): string {
+  return `${remoteAccountKey(baseKey, chainId)}.v4`
+}
+
+/** The Base account key of a remote account key (design C or V4), or null when it is not one for `chainId`. */
 export function baseKeyOf(remoteKey: string, chainId: number): string | null {
-  const suffix = `@${chainId}`
-  if (!remoteKey.endsWith(suffix)) return null
-  const base = remoteKey.slice(0, -suffix.length)
-  return base && !base.includes('@') ? base : null
+  for (const suffix of [`@${chainId}`, `@${chainId}.v4`]) {
+    if (!remoteKey.endsWith(suffix)) continue
+    const base = remoteKey.slice(0, -suffix.length)
+    return base && !base.includes('@') ? base : null
+  }
+  return null
 }
 
 /** The remote policies a spec may name, wired to the chain's pinned contracts. Any other id is refused. */
