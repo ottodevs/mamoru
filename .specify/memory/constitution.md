@@ -161,7 +161,7 @@ Mamoru es sencillo de explicar, de operar y de revisar. Una regla que el equipo 
 
 - Cada regla del pack se puede enunciar en una frase: qué pasa y cuándo. El texto que la acompaña concreta esa frase sin añadirle excepciones; si necesita una cadena de excepciones, se reescribe.
 - Un caso raro se trata con la salida segura más simple: no mover, esperar con un código de razón o avisar. Solo gana una rama propia cuando hay datos, del Lab o de producción, de que ocurre y de lo que cuesta.
-- Las salidas por riesgo y los caminos de recuperación que el pack ya exige (spec 004, la vuelta a Base por riesgo de chain, el walkaway) son esa salida segura: se cumplen siempre, sin depender de la frecuencia ni del coste medido.
+- Las salidas por riesgo y los caminos de recuperación que el pack ya exige (spec 004, la vuelta a Base y el bloqueo por riesgo de FR-XCH-014, el walkaway) son esa salida segura: se cumplen tal como el pack las define, sin depender de la frecuencia ni del coste medido.
 - La revisión de un spec, un plan o un cambio de código marca como hallazgo P2 la complejidad sin valor medido, y propone el equivalente sencillo.
 - Sencillo no quita seguridad: los principios I, II, V, IX y XIX se cumplen igual. Lo que se recorta son ramas, no comprobaciones.
 
