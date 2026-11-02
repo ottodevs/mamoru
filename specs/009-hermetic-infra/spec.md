@@ -87,7 +87,7 @@ user from that sum.
 | INV-3 | **No external control of a user.** No Mamoru-side address is, or can become, owner, guardian, executor with unrestricted calls, revoker or account-wide pauser. Accounts still on a guardian-bearing grant are declared non-compliant until migrated. | T9 (per-account state check: owners, threshold, guard, fallback handler, modules, executors, attesters, policy version; any Mamoru address in an authority slot fails) |
 | INV-4 | **Hermetic infra.** Every Mamoru infra contract has immutable, verified code and constructor-only configuration, no privileged state change, no upgrade, and pays only fixed recipients for fixed purposes. | T3 (inventory of every Mamoru-deployed contract on every chain: V1, V2, V3/V-next, MamoruGasPolicy, MamoruPauseGate, MamoruV3Routes, MamoruV4LiquidityPolicy; entry-point analysis of each for privileged or value-moving paths), T11 if a funded contract is built |
 | INV-5 | **Finite infra exposure.** For every reachable history (donations, reentrancy, failures, top-ups), the total value an infra version can ever pay out is at most its declared ceiling. | T11 (Halmos + invariant fuzzing), only if a funded contract is built |
-| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; per userOp, `UserOperationEvent.sender` is the user's account and `actualGasCost` is charged to it or to an admitted third-party paymaster; per bundle, the submitter's fee ≤ Σ `actualGasCost` paid to the beneficiaries + a stated tolerance; funding provenance: no transfer from any Mamoru wallet to a user account or to a paymaster that serves users) |
+| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; per userOp, `UserOperationEvent.sender` is the user's account and `actualGasCost` is charged to it or to an admitted third-party paymaster, and its effective price (`actualGasCost / actualGasUsed`) is at least the bundle transaction's effective gas price minus the tolerance, so one user cannot be subsidized by another in the same bundle (the bundler also refuses underpriced userOps); per bundle, the submitter's fee ≤ Σ `actualGasCost` paid to the beneficiaries + a stated tolerance; funding provenance: no transfer from any Mamoru wallet to a user account or to a paymaster that serves users) |
 
 ## Decisions
 
@@ -179,9 +179,12 @@ bounded by the owner's allowance.
   - **D4-R1: Domain held long-term.** `mamoru.lol` is prepaid for the longest term the registrar allows, with registrar
     lock and DNS at more than one provider.
   - **D4-R2: Static signer.** An open-source static signer page (build, sign and export a SafeTx or owner userOp; no
-    backend) is published with a reproducible build. Anyone can serve it under the same RP ID from several hosts:
-    Cloudflare, an IPFS gateway via DNSLink, a plain static host behind a `mamoru.lol` subdomain. Mamoru's Worker
-    going down does not remove the owner's signing path.
+    backend) is published with a reproducible build. Anyone the domain owner delegates DNS to can serve it under the
+    same RP ID from several hosts. Every such host must be `mamoru.lol` or one of its subdomains: Cloudflare, a
+    subdomain DNSLinked to IPFS, a plain static host behind a subdomain. WebAuthn refuses `rpId: "mamoru.lol"` from
+    any other origin. An ENS gateway such as `*.eth.limo` or a public IPFS gateway origin is therefore a mirror for
+    verifying the build only, never a signing host, unless D4-R3 is used. Every signing host depends on `mamoru.lol`
+    DNS. Mamoru's Worker going down does not remove the owner's signing path.
     - **RP ID pinned.** Today `rpId = location.hostname`, so a page at `exit.mamoru.lol` would ask for that
       subdomain's RP ID and an existing `mamoru.lol` passkey would not sign. The signer and the app therefore pass
       `rpId: "mamoru.lol"` explicitly, which WebAuthn allows from any subdomain. Beta keeps its own hostname-scoped
@@ -201,8 +204,10 @@ bounded by the owner's allowance.
     - registrar lock, DNSSEC and CAA records (D4-R1);
     - the static signer's release hash published in the repo, so a user or a third party can compare what a host
       serves;
-    - the decoded transaction shown before the tap;
-    - the optional backup owner on a wallet that decodes the transaction independently (hardware clear signing).
+    - nothing else. A decoded transaction shown by the page does not help, because a compromised page shows whatever
+      it wants while asking for a signature over another hash. The passkey prompt shows only the RP ID. The optional
+      backup owner does not help either: the passkey alone meets the threshold. The release hash helps only after
+      the fact.
 
     Disclosed with D4-R4. A WebAuthn signer that pins the origin on chain would remove this risk. It is a new module,
     out of scope here.
@@ -295,8 +300,10 @@ bounded by the owner's allowance.
   provable on chain. The app asks every V2 account to renew now rather than at expiry. From a published cutoff date
   the operator stops signing V2 grants and deletes its V2 session keys. Neither deletion can be proven on chain.
   **Accounts that ignore renewal:** until V2's own `validUntil`, two things remain possible:
-  - a copied V2 session key can still act, within V2's on-chain caps and pinned recipients (recipient = account, so
-    no funds leave the Safe);
+  - a copied V2 session key can still act within V2's on-chain bounds: caps, pinned recipients, and its TWAP-band
+    and budget checks. Pinned recipients do not prevent value loss through bad trades inside those bounds, so the
+    disclosed worst case for such an account is a loss up to V2's remaining budget for the generation. T9 states it
+    per account, with V2's bounds cited by file:line;
   - the guardian, if a copy of its key exists, can still pause that account's sessions. It cannot touch the owner
     path or move funds.
 
@@ -349,7 +356,8 @@ bounded by the owner's allowance.
   permissionless `receiveMessage` step) and ETH left on L1. The exit also enumerates every non-zero allowance the Safe
   has granted and revokes it (`approve(spender, 0)`) in the same transaction.
 - **WLK-02: Static frontend.** An open-source static frontend on IPFS with an ENS name builds and signs the exit with
-  the user's passkey, served under the `mamoru.lol` RP ID (D4-R2), or with the optional backup owner. It needs no
+  the user's passkey on a host under `mamoru.lol` (D4-R2; an ENS/IPFS gateway origin only verifies, it cannot sign),
+  or with the optional backup owner anywhere. It needs no
   Mamoru backend.
 - **WLK-03: Tested with Mamoru off.** In CI, on a fork of each chain, Mamoru's operator, relayer, bundler and Worker
   are unreachable. Two cases:
@@ -413,7 +421,7 @@ bounded by the owner's allowance.
 | Wrong constructor parameters | n/a | Fork test of exact init calldata; bytecode and code-hash check per chain; unknown chain pays nothing | A wrong value stays until the next version |
 | Shared V4 executor bug | Undeployed design reaches every account | Not deployed (POL-10) | None |
 | Users linked by one beneficiary / shared keys | One relayer address on every bundle | Per-account session keys, rotating beneficiary | On-chain analysis of funding sources |
-| Takeover of `mamoru.lol` or a signer host | Phishing page can obtain a full-Safe passkey signature | Registrar lock, DNSSEC, CAA, published signer hash, decoded tx display, optional hardware backup owner (D4-R5) | Balances of users who sign on the compromised page while it is up |
+| Takeover of `mamoru.lol` or a signer host | Phishing page can obtain a full-Safe passkey signature | Registrar lock, DNSSEC, CAA; published signer hash (after the fact only) (D4-R5) | Balances of users who sign on the compromised page while it is up |
 | Sequencer censorship, issuer freeze | Same | Documented (WLK-06) | Outside Mamoru's contracts |
 
 ## Out of scope
@@ -432,8 +440,10 @@ bounded by the owner's allowance.
 - **T2: Owner path.**
   - D4-R1: prepay the domain, registrar lock, multi-provider DNS.
   - D4-R2: the static signer, reproducible and served from at least two hosts under `mamoru.lol`. `rpId` is pinned to
-    `mamoru.lol` in the signer and the app, and an existing production credential is tested from every host.
-  - D4-R5: DNSSEC, CAA, the published release hash, and the decoded-transaction display.
+    `mamoru.lol` in the signer and the app. First, check from the stored credentials that every production passkey
+    was registered with RP ID `mamoru.lol` and not a subdomain; then test an existing production credential from
+    every host.
+  - D4-R5: DNSSEC, CAA and the published release hash.
   - The optional backup owner in settings (FR-ONB-004 signed challenge), with the D4-R4 disclosure and the `/ops`
     count.
 - **T3: Inventory checks.**
