@@ -199,9 +199,9 @@ describe('the migrate-v4 contract of #201 (currentStep, OpView.step, prepare fie
     const w = world(0n, on)
     const acc = running(w)
     clean(acc)
-    acc.ops = [{ opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'submitted', updatedAt: '', migrateStep: 0, step: 0 } as never]
+    acc.ops = [{ opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'submitted', updatedAt: '', migrateStep: 0 } as never]
     expect((priv(w.op).approvalView(acc) as { whatsNew: { currentStep: number } }).whatsNew.currentStep).toBe(0)
-    acc.ops = [{ opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'confirmed', updatedAt: '', migrateStep: 0, step: 0 } as never]
+    acc.ops = [{ opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'confirmed', updatedAt: '', migrateStep: 0 } as never]
     expect((priv(w.op).approvalView(acc) as { whatsNew: { currentStep: number } }).whatsNew.currentStep).toBe(1)
   })
 
@@ -210,7 +210,8 @@ describe('the migrate-v4 contract of #201 (currentStep, OpView.step, prepare fie
     const acc = running(w)
     const op = { opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'proposed', updatedAt: '' }
     ;(w.op as unknown as { stash(a: AccountState, o: unknown, p: unknown): void }).stash(acc, op, { kind: 'migrate-v4', step: 0, safeTxHash: '0x01', tx: { nonce: 3n } })
-    expect((op as { step?: number }).step).toBe(0)
+    expect((op as { migrateStep?: number }).migrateStep).toBe(0)
+    expect((op as { step?: unknown }).step).toBeUndefined()
   })
 
   test('moveTo is read from the built calls: the one transfer recipient, or none', () => {
@@ -228,5 +229,32 @@ describe('the migrate-v4 contract of #201 (currentStep, OpView.step, prepare fie
     prepared.set('p1', { prepareId: 'p1', accountKey: 'k', kind: 'migrate-v4', step: 1, expires: Date.now() + 60_000, safeTxHash: '0x01', tx: { nonce: 0n } })
     const e = await w.op.submit(ctx, 'migrate-v4', { prepareId: 'p1', authenticatorData: '', clientDataJSON: '', signature: '', step: 0 } as never).catch((x) => x)
     expect((e as HttpError).code).toBe('ONE_AUTH_STEP_MISMATCH')
+  })
+})
+
+describe('repeat prepares and submits of a step are refused (typed)', () => {
+  test('a confirmed step: ONE_AUTH_DONE; a step on its way: ONE_AUTH_STEP_IN_FLIGHT', async () => {
+    const w = world(0n, on)
+    const acc = running(w)
+    clean(acc)
+    acc.ops = [{ opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'submitted', updatedAt: '', migrateStep: 0 } as never]
+    expect(((await w.op.prepareMigrateV4(ctx, { step: 0 }).catch((x) => x)) as HttpError).code).toBe('ONE_AUTH_STEP_IN_FLIGHT')
+    expect(((await w.op.submitMigrateV4(ctx, { prepareId: 'x', authenticatorData: '', clientDataJSON: '', signature: '', step: 0 }).catch((x) => x)) as HttpError).code).toBe('ONE_AUTH_STEP_IN_FLIGHT')
+    acc.ops = [{ opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'confirmed', updatedAt: '', migrateStep: 0 } as never]
+    expect(((await w.op.prepareMigrateV4(ctx, { step: 0 }).catch((x) => x)) as HttpError).code).toBe('ONE_AUTH_DONE')
+  })
+})
+
+describe('GET /ops?kind=migrate-v4', () => {
+  test('every migrate-v4 op, unwindowed, with migrateStep and state', () => {
+    const w = world(0n, on)
+    const acc = running(w)
+    acc.ops = [
+      { opId: 'own-1-migrate-v4', kind: 'migrate-v4', state: 'confirmed', updatedAt: '2026-01-01T00:00:00Z', migrateStep: 0 },
+      { opId: 'eng-1-x', kind: 'enter', state: 'confirmed', updatedAt: '2026-01-02T00:00:00Z' },
+      { opId: 'own-2-migrate-v4', kind: 'migrate-v4', state: 'submitted', updatedAt: '2026-01-03T00:00:00Z', migrateStep: 1 },
+    ] as never
+    const r = w.op.ops(ctx, 'own-2-migrate-v4', false, 'migrate-v4').ops
+    expect(r.map((o) => [o.opId, o.migrateStep, o.state])).toEqual([['own-1-migrate-v4', 0, 'confirmed'], ['own-2-migrate-v4', 1, 'submitted']])
   })
 })

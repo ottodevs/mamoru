@@ -6,7 +6,7 @@ import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, m
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LAB_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, type OneAuthV4Deployment, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, POLICIES, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, type OneAuthV4Deployment, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -516,6 +516,8 @@ const PEER_REFUSALS: Record<string, string> = {
   ONE_AUTH_STEP_ORDER: 'the Base step of the update must be confirmed first',
   ONE_AUTH_PAUSED: 'Mamoru is paused on your Safe: the update waits until the pause ends',
   ONE_AUTH_DONE: 'your Safe on Monad is already updated',
+  ONE_AUTH_STEP_IN_FLIGHT: 'this step of the update is already on its way: wait for it to settle',
+  ONE_AUTH_STEP_MISMATCH: 'this signature is for another step of the update: prepare that step again',
   ONE_AUTH_NOT_OFFERED: 'the update is not available on Monad yet',
   ONE_AUTH_INVENTORY_MISMATCH: 'Mamoru could not account for every permission on your Safe on Monad: nothing was prepared, and the team was alerted',
   REMOTE_SAFE_MISMATCH: 'the destination is not your new Safe on Monad: nothing was prepared',
@@ -546,6 +548,27 @@ export function movedTo(calls: readonly { data: Hex }[]): Address | undefined {
   }
   if (to.size > 1) throw new Error(`a migration sends funds to ${to.size} different Safes`)
   return [...to][0] as Address | undefined
+}
+
+/** otto/mamoru#293: what a migrate-v4 prepare answers besides the summary: the step, the destination, and the whole Safe tx. */
+function migrateFields(tx: SafeTx, step: 0 | 1, moveTo: Address | undefined): Partial<OwnerTxToSign> {
+  const zero = '0x0000000000000000000000000000000000000000' as const
+  return {
+    step,
+    ...(moveTo ? { moveTo } : {}),
+    safeTx: {
+      to: tx.to,
+      value: tx.value.toString(),
+      data: tx.data,
+      operation: tx.operation,
+      safeTxGas: (tx.refund?.safeTxGas ?? 0n).toString(),
+      baseGas: (tx.refund?.baseGas ?? 0n).toString(),
+      gasPrice: (tx.refund?.gasPrice ?? 0n).toString(),
+      gasToken: zero,
+      refundReceiver: tx.refund?.refundReceiver ?? zero,
+      nonce: tx.nonce.toString(),
+    },
+  }
 }
 
 /** POST migrate-v4/prepare of a step 1, as the Base operator sends it to the Monad operator. */
@@ -673,6 +696,8 @@ type Prepared = {
   step?: 0 | 1
   removes?: Hex[]
   home?: Address
+  /** migrate-v4: the C (USD units) the V4 Init carries (v4CapUsdOf the signed cap). */
+  v4CapUsd?: string
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** otto/mamoru#223: out-of-range positions the last decision does not re-range, with the re-range code. */ rangeHolds?: { tokenId: string; code: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -1770,8 +1795,10 @@ export class Operator {
   }
 
   /** GET /ops. Failed engine ops are internal attempts: left out unless `all` (debugging). */
-  ops(ctx: AccountContext, after: string | null, includeFailedEngine = false): { ops: OpView[] } {
+  ops(ctx: AccountContext, after: string | null, includeFailedEngine = false, kind?: string | null): { ops: OpView[] } {
     const { acc } = this.account(ctx, { readOnly: true })
+    // otto/mamoru#293 (#295): every migrate-v4 op of the account, unwindowed, with its migrateStep and state.
+    if (kind === 'migrate-v4') return { ops: acc.ops.filter((o) => o.kind === 'migrate-v4').map((o) => ({ ...o })) }
     // reconcileSoon is itself a no-op on an account with no unsettled own-* op (true of any account this readOnly
     // call just built in memory, which always starts with ops: []) — but it is never run against one that is not
     // the store's own record, so it can never schedule work against an object a mutating call will later replace.
@@ -1869,7 +1896,7 @@ export class Operator {
     // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
     const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' && extra.step !== undefined ? { step: extra.step } : {}), ...(kind === 'migrate-v4' && movedTo(calls) ? { moveTo: movedTo(calls)! } : {}) }
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? migrateFields(tx, extra.step ?? 0, movedTo(calls)) : {}) }
   }
 
   /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */
@@ -4565,7 +4592,6 @@ export class Operator {
       if (p.removes) o.removes = p.removes
       if (p.capUsdc) o.capUsdc = p.capUsdc
       o.migrateStep = p.step ?? 0
-      o.step = p.step ?? 0
     }
     o.safeTxHash = p.safeTxHash
     o.safeNonce = p.tx.nonce.toString()
@@ -5061,7 +5087,7 @@ export class Operator {
       }
       else if (op.kind === 'migrate-v4' && op.ownerGrants && !later('exit')) {
         // otto/mamoru#293: a migration whose receipt was not read when it ran: applied now, as afterOwner would have.
-        this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'migrate-v4', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, removes: op.removes, step: op.migrateStep ?? 0, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
+        this.afterOwner(acc, { prepareId: op.opId, accountKey: acc.accountKey, kind: 'migrate-v4', tx: undefined as never, safeTxHash: '0x', expires: 0, grants: op.ownerGrants, revokes: op.revokes, removes: op.removes, step: op.migrateStep === 1 ? 1 : 0, ...(op.capUsdc ? { capUsdc: op.capUsdc } : {}) }, receipt ?? ({ blockNumber: BigInt(block) } as TransactionReceipt))
       }
       else if (op.kind === 'renew' && op.ownerGrants && later('exit')) {
         // It landed, and a stop came after it: whatever that stop did not revoke of its grants is still enabled.
@@ -5196,7 +5222,7 @@ export class Operator {
     if (this.onV4(acc)) {
       const v = acc.oneAuth?.remote
       if (!v?.ready) return {}
-      const remotePermission = this.v4RemoteTarget(acc, v.sessionKey as Address, BigInt(acc.oneAuth?.capUsd ?? this.signedCapOf(acc).toString()))
+      const remotePermission = this.v4RemoteTarget(acc, v.sessionKey as Address, BigInt(acc.oneAuth?.capUsd ?? v4CapUsdOf(this.signedCapOf(acc)).toString()))
       if (!remotePermission) return {}
       const ids = [v4RemoteFromSpec(acc.ctx, remotePermission.spec, this.remoteRegistryOf(BRIDGE_MONAD_CHAIN_ID)).permissionId]
       return { remote: (block: bigint) => bridge.remote(acc.accountKey, v.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, ids) }
@@ -5292,6 +5318,17 @@ export class Operator {
     return acc.remote && !isOneAuthV4(acc.remote.spec.policyId) ? acc.remote : undefined
   }
 
+  /** A migrate-v4 op of `step` still on its way (not confirmed, not failed): no second prepare or submit of it meanwhile. */
+  private v4StepInFlight(acc: AccountState, step: 0 | 1): boolean {
+    return acc.ops.some((o) => o.kind === 'migrate-v4' && ((o as StoredOp).migrateStep ?? 0) === step && o.state !== 'confirmed' && o.state !== 'failed')
+  }
+
+  /** Refuses a step already confirmed (ONE_AUTH_DONE) or one with an op in flight (ONE_AUTH_STEP_IN_FLIGHT). */
+  private assertStepOpen(acc: AccountState, step: 0 | 1): void {
+    if (this.v4StepsDone(acc).has(step) || (step === 0 && this.onV4(acc))) this.refuseMigrate('ONE_AUTH_DONE', step === 0 ? 'this account already runs on the new approval' : 'your Safe on Monad is already updated')
+    if (this.v4StepInFlight(acc, step)) this.refuseMigrate('ONE_AUTH_STEP_IN_FLIGHT', 'this step of the update is already on its way: wait for it to settle')
+  }
+
   /** The confirmed migrate-v4 steps of the account. */
   private v4StepsDone(acc: AccountState): Set<number> {
     return new Set(acc.ops.filter((o) => o.kind === 'migrate-v4' && o.state === 'confirmed').map((o) => (o as StoredOp).migrateStep ?? 0))
@@ -5317,7 +5354,7 @@ export class Operator {
     if (!this.cfg.oneAuth || this.pausedNow(acc)) return null
     const done = this.v4StepsDone(acc)
     const c = this.designC(acc)
-    const cap = BigInt(acc.oneAuth?.capUsd ?? this.signedCapOf(acc).toString())
+    const cap = BigInt(acc.oneAuth?.capUsd ?? v4CapUsdOf(this.signedCapOf(acc)).toString())
     const monad = c
       ? (() => {
           const moveTo = acc.oneAuth?.remote?.address ?? this.v4RemoteTarget(acc, c.spec.sessionKey as Address, cap)?.address
@@ -5349,7 +5386,7 @@ export class Operator {
       keys[ctx.accountKey] = generatePrivateKey()
       this.store.save()
     }
-    return { sessionKey: privateKeyToAccount(keys[ctx.accountKey]!).address, capUsdc: this.capFor(view).toString() }
+    return { sessionKey: privateKeyToAccount(keys[ctx.accountKey]!).address, capUsdc: v4CapUsdOf(this.capFor(view)).toString() }
   }
 
   /**
@@ -5371,12 +5408,13 @@ export class Operator {
     const priv = this.store.state.oneAuthKeys?.[ctx.accountKey]
     if (!priv || privateKeyToAccount(priv).address.toLowerCase() !== ctx.oneAuth.sessionKey.toLowerCase()) throw new HttpError(409, 'REMOTE_KEY_UNKNOWN', 'this Safe names a session key this operator did not give')
     const cap = BigInt(ctx.oneAuth.capUsdc)
+    if (cap !== v4CapUsdOf(this.capFor(acc))) throw new HttpError(409, 'REMOTE_SAFE_MISMATCH', "this Safe's approval names another limit than this account's: nothing runs on it")
     const refusal = this.writeRefusal()
     if (refusal) throw new HttpError(503, 'CHAIN_UNSUPPORTED', refusal)
     const { deployed } = await readSafeNonce(this.client, live.safe)
     const usdc = await this.usdcOf(live.safe)
     if (!deployed && usdc < MIN_DEPLOY_USDC) return { state: 'waiting', code: 'BELOW_DEPLOY_MINIMUM' }
-    if (usdc > cap) return { state: 'waiting', code: 'DEPOSIT_OVER_CAP' }
+    if (usdc > this.capFor(acc)) return { state: 'waiting', code: 'DEPOSIT_OVER_CAP' }
     if (!deployed) {
       const { hash, receipt } = await this.relayer.send(deployCall(live))
       console.log(`[v4] deploy ${live.safe} tx ${hash} ${receipt.status}`)
@@ -5401,7 +5439,7 @@ export class Operator {
     }
     const real = this.persist(acc)
     const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey: ctx.oneAuth.sessionKey as Address, permissionId: pid, salt: session.salt, deployment: d, registry: this.cfg.registry, policyId: this.v4PolicyOf({ policyId: ONE_AUTH_V4 }).policyId }), permissionId: pid }
-    Object.assign(real, { trusted: true, active: true, deactivated: undefined, sessionKey: priv, grants: [stored], policyId: stored.grant.policyId, signedCapUsdc: cap.toString(), managedTokenIds: [], admittedTokenIds: real.admittedTokenIds ?? [], depositsAfter: block.toString(), historyFromBlock: block.toString(), epoch: real.epoch + 1, gen: (real.gen ?? 0) + 1, oneAuth: { ...real.oneAuth, capUsd: cap.toString(), generation: '1' } })
+    Object.assign(real, { trusted: true, active: true, deactivated: undefined, sessionKey: priv, grants: [stored], policyId: stored.grant.policyId, signedCapUsdc: this.capFor(acc).toString(), managedTokenIds: [], admittedTokenIds: real.admittedTokenIds ?? [], depositsAfter: block.toString(), historyFromBlock: block.toString(), epoch: real.epoch + 1, gen: (real.gen ?? 0) + 1, oneAuth: { ...real.oneAuth, capUsd: cap.toString(), generation: '1' } })
     this.store.save()
     this.startLoop(real)
     console.log(`[v4] ${ctx.accountKey} ${live.safe} created on V4 and running`)
@@ -5469,7 +5507,7 @@ export class Operator {
   }
 
   /** Typed refusals of the move (never the generic "try again"). */
-  private refuseMigrate(code: 'ONE_AUTH_NOT_OFFERED' | 'ONE_AUTH_PAUSED' | 'ONE_AUTH_STEP_ORDER' | 'ONE_AUTH_INVENTORY_MISMATCH' | 'ONE_AUTH_DONE', message: string): never {
+  private refuseMigrate(code: 'ONE_AUTH_NOT_OFFERED' | 'ONE_AUTH_PAUSED' | 'ONE_AUTH_STEP_ORDER' | 'ONE_AUTH_INVENTORY_MISMATCH' | 'ONE_AUTH_DONE' | 'ONE_AUTH_STEP_IN_FLIGHT', message: string): never {
     throw new HttpError(409, code, message)
   }
 
@@ -5501,7 +5539,7 @@ export class Operator {
   private async planMigration(ctx: AccountContext): Promise<OwnerTxToSign> {
     this.assertLive()
     const { acc, live } = this.account(ctx, { readOnly: true })
-    if (this.v4StepsDone(acc).has(0) || this.onV4(acc)) this.refuseMigrate('ONE_AUTH_DONE', 'this account already runs on the new approval')
+    this.assertStepOpen(acc, 0)
     if (!this.v4Eligible(acc)) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'the update is not offered for this account')
     await this.assertNotPaused(acc)
     if (!acc.sessionKey) throw new Error(`${acc.accountKey} has no session key`)
@@ -5510,14 +5548,14 @@ export class Operator {
     const d = this.cfg.oneAuth!
     const r = await readSafe(this.client, live.safe, this.cfg.registry)
     const admit = this.sizingPositions(acc, r).map((p) => p.tokenId).slice(0, V4_MAX_ADMIT)
-    const cap = this.signedCapOf(acc)
+    const cap = v4CapUsdOf(this.signedCapOf(acc))
     const session = v4HomeSession({ sessionKey: privateKeyToAccount(acc.sessionKey).address, deployment: d, capUsd: cap, generation: 1n, admit, registry: this.cfg.registry })
     const { nonces } = await readSessionState(this.client, this.cfg.registry, live.safe, inv.revoke, r.block)
     const attestData = keccak256(toHex(`mamoru.v4.attest:${acc.accountKey}:${randomBytes(8).toString('hex')}`))
     const tx = migrationTx({ account: live.safe, remove: inv.remove, revoke: inv.revoke, noncesBefore: nonces, session, deployment: d, attestData, registry: this.cfg.registry })
     const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey: privateKeyToAccount(acc.sessionKey).address, permissionId: tx.permissionId, salt: session.salt, deployment: d, registry: this.cfg.registry }), permissionId: tx.permissionId, ...(admit.length ? { admit: admit.map(String) } : {}) }
     const summary = baseStepLines({ remove: inv.remove.length, revoke: inv.revoke.length, capUsd: cap, admitted: admit.length, ...(this.v4PolicyOf(acc).remoteBuckets?.length ? { remoteChain: 'Monad' } : {}) })
-    return this.hold(acc, live, 'migrate-v4', tx.calls, summary, { step: 0, grants: [stored], revokes: inv.revoke, removes: inv.remove, capUsdc: cap.toString() })
+    return this.hold(acc, live, 'migrate-v4', tx.calls, summary, { step: 0, grants: [stored], revokes: inv.revoke, removes: inv.remove, capUsdc: this.signedCapOf(acc).toString(), v4CapUsd: cap.toString() })
   }
 
   /** Base side of step 1: refused before step 0 is confirmed; the Monad operator builds it on the design-C Safe. */
@@ -5526,13 +5564,13 @@ export class Operator {
     const { acc } = this.account(ctx, { readOnly: true })
     const done = this.v4StepsDone(acc)
     if (!done.has(0) || !this.onV4(acc)) this.refuseMigrate('ONE_AUTH_STEP_ORDER', 'the Base step of the update must be confirmed first')
-    if (done.has(1)) this.refuseMigrate('ONE_AUTH_DONE', 'your Safe on Monad is already updated')
+    this.assertStepOpen(acc, 1)
     const c = this.designC(acc)
     if (!c) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'this account has no Safe on Monad to update')
     await this.assertNotPaused(acc)
     const peer = this.cfg.remotePeers?.[c.chainId]
     if (!peer?.migrateV4) throw new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru on Monad is not reachable right now: nothing was changed, try again in a few minutes')
-    const target = this.v4RemoteTarget(acc, c.spec.sessionKey as Address, BigInt(acc.oneAuth?.capUsd ?? this.signedCapOf(acc).toString()))
+    const target = this.v4RemoteTarget(acc, c.spec.sessionKey as Address, BigInt(acc.oneAuth?.capUsd ?? v4CapUsdOf(this.signedCapOf(acc)).toString()))
     if (!target) throw new HttpError(503, 'REMOTE_UNAVAILABLE', 'your new Safe on Monad could not be worked out just now: nothing was changed')
     const tx = (await peer.migrateV4(this.remoteContext(acc, c), 'prepare', { step: 1, home: acc.ctx.address as Address, capUsdc: target.spec.capUsdc, moveTo: target.address }).catch(peerRefusal)) as OwnerTxToSign
     if (!tx || typeof tx.safeTxHash !== 'string' || tx.chainId !== c.chainId || tx.safe.toLowerCase() !== c.address.toLowerCase()) throw new HttpError(502, 'REMOTE_UNAVAILABLE', 'Mamoru on Monad answered with something else: nothing was signed')
@@ -5555,6 +5593,7 @@ export class Operator {
     const baseKey = baseKeyOf(ctx.accountKey, this.cfg.chainId)
     if (!spec || !baseKey || isOneAuthV4(spec.policyId) || body?.step !== 1) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'this Safe has no update to make')
     if (this.onV4(acc)) this.refuseMigrate('ONE_AUTH_DONE', 'your Safe on Monad is already updated')
+    if (this.v4StepInFlight(acc, 1)) this.refuseMigrate('ONE_AUTH_STEP_IN_FLIGHT', 'this step of the update is already on its way: wait for it to settle')
     const d = this.cfg.oneAuth
     if (!d || !this.cfg.homeClient) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'the update is not available on Monad yet')
     const home = getAddress(String(body.home)) as Address
@@ -5610,10 +5649,13 @@ export class Operator {
     const step = this.submitStep(body)
     const { acc } = this.account(ctx, { readOnly: true })
     if (this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID) {
-      if (!this.onV4(acc) && !(await this.homeMigrated(ctx, body))) this.refuseMigrate('ONE_AUTH_STEP_ORDER', 'the Base step of the update must be confirmed first')
+      if (this.onV4(acc)) this.refuseMigrate('ONE_AUTH_DONE', 'your Safe on Monad is already updated')
+      if (this.v4StepInFlight(acc, 1)) this.refuseMigrate('ONE_AUTH_STEP_IN_FLIGHT', 'this step of the update is already on its way: wait for it to settle')
+      if (!(await this.homeMigrated(ctx, body))) this.refuseMigrate('ONE_AUTH_STEP_ORDER', 'the Base step of the update must be confirmed first')
       return this.submit(ctx, 'migrate-v4', body)
     }
     if (step === 1 && !this.v4StepsDone(acc).has(0)) this.refuseMigrate('ONE_AUTH_STEP_ORDER', 'the Base step of the update must be confirmed first')
+    this.assertStepOpen(acc, step)
     await this.assertNotPaused(acc)
     if (step === 0) return this.submit(ctx, 'migrate-v4', body)
     const c = this.designC(acc)
@@ -5623,7 +5665,6 @@ export class Operator {
     const real = this.persist(acc)
     const op = this.newOp(real, 'migrate-v4')
     ;(op as StoredOp).migrateStep = 1
-    op.step = 1
     this.patchOp(real, op.opId, { state: res?.state === 'confirmed' ? 'confirmed' : res?.state === 'failed' ? 'failed' : 'submitted', ...(res?.code ? { code: res.code } : {}), ...(res?.txHash ? { txHash: res.txHash } : {}) })
     return { ...real.ops.find((o) => o.opId === op.opId)! }
   }
@@ -5665,7 +5706,7 @@ export class Operator {
     }
     const now0 = await readV4Remote(this.client, d.policy, acc.ctx.address as Address, domain)
     if (!now0) return
-    const cap = BigInt(acc.oneAuth?.capUsd ?? this.signedCapOf(acc).toString())
+    const cap = BigInt(acc.oneAuth?.capUsd ?? v4CapUsdOf(this.signedCapOf(acc)).toString())
     if (BigInt(now0.remote) === 0n) {
       if (!peer) return
       const sessionKey = await peer.key(acc.ctx)
@@ -5719,7 +5760,7 @@ export class Operator {
     const revoked = new Set(acc.revoked.map((x) => x.toLowerCase()))
     acc.revoked.push(...(p.revokes ?? []).filter((x) => !revoked.has(x.toLowerCase())))
     acc.superseded = []
-    acc.oneAuth = { ...acc.oneAuth, from: acc.policyId, capUsd: p.capUsdc ?? this.signedCapOf(acc).toString(), generation: '1' }
+    acc.oneAuth = { ...acc.oneAuth, from: acc.policyId, capUsd: p.v4CapUsd ?? v4CapUsdOf(this.signedCapOf(acc)).toString(), generation: '1' }
     acc.policyId = g.grant.policyId
     acc.grants = [g]
     acc.managedTokenIds = []

@@ -59,6 +59,18 @@ export const INIT_V4_TUPLE = [
   },
 ] as const
 
+/**
+ * otto/mamoru#293: the C an account's InitV4 carries, as a multiple of its USDC cap. V4 charges every swap, mint and increase
+ * against C per day (and pauses past C in 24 h): placing a whole deposit is a swap of about half and a mint of all of it
+ * (1.5x), and a re-range on the same day adds as much again, so C = 3x the cap keeps normal operation under the breaker
+ * (spec 010 open question 4; to be re-measured against D1 spend). The engine also never sends an op whose simulation
+ * trips it (the call then moves nothing: EHG_SIM_DELTA_MISMATCH).
+ */
+export const V4_CAP_MULTIPLE = 3n
+export function v4CapUsdOf(accountCapUsdc: bigint): bigint {
+  return accountCapUsdc * V4_CAP_MULTIPLE
+}
+
 /** V4's MAX_ADMIT, MAX_CAP_USD and MAX_FIRST_GENERATION (LeftClaw H-1). */
 export const V4_MAX_ADMIT = 64
 export const V4_MAX_CAP_USD = 10n ** 15n

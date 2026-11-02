@@ -24,8 +24,7 @@ export type StoredOp = OpView & {
   capUsdc?: string
   /** Owner stop: the permissionIds its tx revokes. */
   revokes?: Hex[]
-  /** otto/mamoru#293, migrate-v4: the step (0 Base, 1 Monad) and the old ids it removed (revokes: every id it revoked). */
-  migrateStep?: 0 | 1
+  /** otto/mamoru#293, migrate-v4: the old ids it removed (revokes: every id it revoked; OpView.migrateStep its step). */
   removes?: Hex[]
   /** Owner op: the Safe transaction hash it was signed for (ExecutionSuccess carries it) and its Safe nonce. */
   safeTxHash?: Hex

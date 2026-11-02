@@ -346,6 +346,9 @@ export type OwnerTxToSign = {
   // when the prepared calls move funds, the Safe they send them to (read from the built calls). Submit refuses another step.
   step?: 0 | 1
   moveTo?: Hex0x
+  // otto/mamoru#295 (migrate-v4): the Safe transaction itself, so the Worker can recompute `safeTxHash` from it, check the Safe
+  // and the destination, and read the calldata before the owner is asked to sign. Bigints as decimal strings.
+  safeTx?: { to: Hex0x; value: string; data: Hex0x; operation: 0 | 1; safeTxGas: string; baseGas: string; gasPrice: string; gasToken: Hex0x; refundReceiver: Hex0x; nonce: string }
 }
 // WebAuthn assertion for SafeWebAuthnSharedSigner (base64url fields as returned by the browser).
 export type OwnerSignature = {
@@ -397,8 +400,9 @@ export type OpView = {
    * otto/mamoru#219, engine ops only, absent on rows stored before it: the engine's own op kind (`kind` folds a
    * range move, a trim and a harvest into 'reduce'), the decision's reason code, and for a range move why it moved.
    */
-  // otto/mamoru#293: on a migrate-v4 op, the step it ran (0 Base, 1 Monad) instead of an engine step.
-  step?: 'enter_swap' | 'enter_mint' | 'increase_liquidity' | 'harvest' | 'convert' | 'rerange' | 'reduce' | 'close_position' | 'bridge_out' | 0 | 1
+  step?: 'enter_swap' | 'enter_mint' | 'increase_liquidity' | 'harvest' | 'convert' | 'rerange' | 'reduce' | 'close_position' | 'bridge_out'
+  /** otto/mamoru#293: set on every migrate-v4 op, the step it runs (0 Base, 1 the design-C Safe on Monad). */
+  migrateStep?: number
   cause?: string
   why?: 'out' | 'edge' | 'widen'
   /** The position acted on (rerange/reduce/harvest/increase) or minted (enter_mint), and its range. */

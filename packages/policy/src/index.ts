@@ -51,6 +51,8 @@ export {
   registryPoolsKey,
   staticPool,
   v4BridgeTemplate,
+  V4_CAP_MULTIPLE,
+  v4CapUsdOf,
   V4_CHAIN_BY_DOMAIN,
   V4_DOMAIN_BY_CHAIN,
   V4_MAX_ADMIT,

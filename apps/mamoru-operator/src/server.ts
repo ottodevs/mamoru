@@ -266,7 +266,7 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
         case 'GET withdraw-assets':
           return json(200, await op.withdrawAssets())
         case 'GET ops':
-          return json(200, op.ops(ctx, url.searchParams.get('after'), url.searchParams.get('all') === '1'))
+          return json(200, op.ops(ctx, url.searchParams.get('after'), url.searchParams.get('all') === '1', url.searchParams.get('kind')))
         case 'POST activate/prepare':
           return json(200, await op.prepareActivate(ctx))
         case 'POST activate':
