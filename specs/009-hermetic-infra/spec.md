@@ -87,7 +87,7 @@ user from that sum.
 | INV-3 | **No external control of a user.** No Mamoru-side address is, or can become, owner, guardian, executor with unrestricted calls, revoker or account-wide pauser. Accounts still on a guardian-bearing grant are declared non-compliant until migrated. | T9 (per-account state check: owners, threshold, guard, fallback handler, modules, executors, attesters, policy version; any Mamoru address in an authority slot fails) |
 | INV-4 | **Hermetic infra.** Every Mamoru infra contract has immutable, verified code and constructor-only configuration, no privileged state change, no upgrade, and pays only fixed recipients for fixed purposes. | T3 (inventory of every Mamoru-deployed contract on every chain: V1, V2, V3/V-next, MamoruGasPolicy, MamoruPauseGate, MamoruV3Routes, MamoruV4LiquidityPolicy; entry-point analysis of each for privileged or value-moving paths), T11 if a funded contract is built |
 | INV-5 | **Finite infra exposure.** For every reachable history (donations, reentrancy, failures, top-ups), the total value an infra version can ever pay out is at most its declared ceiling. | T11 (Halmos + invariant fuzzing), only if a funded contract is built |
-| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; per userOp, `UserOperationEvent.sender` is the user's account and `actualGasCost` is charged to it or to an admitted third-party paymaster, and its effective price (`actualGasCost / actualGasUsed`) is at least the bundle transaction's effective gas price minus the tolerance, so one user cannot be subsidized by another in the same bundle (the bundler also refuses underpriced userOps); per bundle, the submitter's fee ≤ Σ `actualGasCost` paid to the beneficiaries + a stated tolerance; funding provenance: no transfer from any Mamoru wallet to a user account or to a paymaster that serves users) |
+| INV-6 | **User-paid accounting.** Every user action and its gas debit that user's own account under an explicit maximum. No Mamoru wallet pays for a user's workload. | T10 (payer trace per user cost: the payer is the user's Safe, the user's own wallet, or a third-party paymaster bounded by an owner-signed allowance; never a Mamoru wallet or a Mamoru-funded paymaster; per userOp, `UserOperationEvent.sender` is the user's account and `actualGasCost` is charged to it or to an admitted third-party paymaster, Mamoru's bundler submits **one userOp per bundle**, so the bundle's whole cost (gas × price, intrinsic overhead and, on Base, the L1 data fee) is attributable to that one user: per bundle, the submitter's total fee ≤ that op's `actualGasCost` + a per-chain tolerance stated in wei; funding provenance: no transfer from any Mamoru wallet to a user account or to a paymaster that serves users) |
 
 ## Decisions
 
@@ -302,8 +302,14 @@ bounded by the owner's allowance.
   **Accounts that ignore renewal:** until V2's own `validUntil`, two things remain possible:
   - a copied V2 session key can still act within V2's on-chain bounds: caps, pinned recipients, and its TWAP-band
     and budget checks. Pinned recipients do not prevent value loss through bad trades inside those bounds, so the
-    disclosed worst case for such an account is a loss up to V2's remaining budget for the generation. T9 states it
-    per account, with V2's bounds cited by file:line;
+    disclosed worst case for such an account has two parts:
+    - **Trade loss:** up to V2's remaining `total` for the generation. The per-period bucket refills, but `total` does
+      not.
+    - **Gas debits:** a copied key can act as its own bundler and beneficiary, and the Safe pays every op's
+      `actualGasCost`, reverting ops included. This part is bounded by the grant's gas caps (`MamoruGasPolicy` ×
+      `UsageLimitPolicy`) where the grant has them. Where it does not, the bound is the Safe's native balance.
+
+    T9 states both parts per account, citing V2's bounds and the grant's gas policies by file:line;
   - the guardian, if a copy of its key exists, can still pause that account's sessions. It cannot touch the owner
     path or move funds.
 
@@ -442,7 +448,10 @@ bounded by the owner's allowance.
   - D4-R2: the static signer, reproducible and served from at least two hosts under `mamoru.lol`. `rpId` is pinned to
     `mamoru.lol` in the signer and the app. First, check from the stored credentials that every production passkey
     was registered with RP ID `mamoru.lol` and not a subdomain; then test an existing production credential from
-    every host.
+    every host. **If any credential is scoped to a subdomain**, that account can sign only under that host, so for it
+    D4-R2's several hosts do not exist. The account is flagged on `/ops` and the app asks the owner to add a new
+    `mamoru.lol`-scoped passkey as owner, signed with the old one while its host still serves, then to remove the old
+    passkey. Until that is done, the account's walkaway is disclosed as single-host.
   - D4-R5: DNSSEC, CAA and the published release hash.
   - The optional backup owner in settings (FR-ONB-004 signed challenge), with the D4-R4 disclosure and the `/ops`
     count.
@@ -479,7 +488,8 @@ bounded by the owner's allowance.
   - Delete G7.
   - Add the INV-6 payer trace in CI and on `/ops`:
     - per-userOp attribution from `UserOperationEvent`;
-    - per-bundle submitter fee against receipts;
+    - one userOp per bundle, and the submitter's total fee (including the L1 data fee on Base) against that op's
+      `actualGasCost`, within the per-chain tolerance in wei;
     - a provenance ledger of every outgoing transfer from Mamoru wallets.
 - **T11: Bundler.** Relayer keys per chain in KMS, private submission with a public-bundler fallback, rotating
   beneficiary. Build `GasTreasury` (TRS-01..07, with Halmos and fuzzing for INV-5) only if D3's condition holds.
