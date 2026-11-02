@@ -249,6 +249,9 @@ export type OverCap = { code: 'DEPOSIT_OVER_CAP'; usdc: string; capUsdc: string;
 // POST /api/accounts/:accountKey/stop/prepare        -> OwnerTxToSign
 // POST /api/accounts/:accountKey/renew/prepare       -> OwnerTxToSign   (running account: same grants, fresh validity; or, with grants missing and no renewal due, only the missing ones)
 // POST /api/accounts/:accountKey/renew  OwnerSignature -> OpView
+// POST /api/accounts/:accountKey/migrate-v4/prepare  body: { step: 0 | 1 } -> OwnerTxToSign   (otto/mamoru#295, #293)
+// POST /api/accounts/:accountKey/migrate-v4          body: OwnerSignature & { step: 0 | 1 } -> OpView
+// Step 0 is Base; step 1 (only when whatsNew.signatures is 2) is the account's older Monad Safe.
 // POST /api/accounts/:accountKey/stop                body: OwnerSignature -> OpView
 // Stop allocation: revoke every grant, close every position, swap the volatile side to USDC. USDC stays in the Safe.
 // GET  /api/accounts/:accountKey/ops?after=          -> { ops: OpView[] }

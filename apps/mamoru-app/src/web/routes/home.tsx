@@ -31,6 +31,7 @@ import { Chevron, Fold, LiveSync, PullToRefresh, Spark, TweenPct, TweenUsd } fro
 import { useThrottledRefresh } from '../lib/refresh-throttle.ts'
 import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '../components/monad-consent.tsx'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
+import { setWhatsNewDismissed, WhatsNewCard, WhatsNewRow, whatsNewDismissed, whatsNewOffered } from '../components/whats-new.tsx'
 
 export const homeCopy = {
   total: 'Total balance',
@@ -1088,8 +1089,10 @@ export function approvalHeading(approval: NonNullable<FundingView['approval']>):
  * otto/mamoru#148: owners cannot be messaged, so an approval in its last weeks (or over) is asked for in a dialog
  * the moment Home opens, once per visit and per approval. The row at the top stays for whoever closes it.
  */
-export function renewAskFor(f: FundingView | undefined, renewing: boolean): string | null {
+export function renewAskFor(f: FundingView | undefined, renewing: boolean, whatsNewDismissed = false): string | null {
   if (!f || !f.active || !f.approval || renewing) return null
+  // otto/mamoru#295: What's new is the one notice, but never over a safety state (paused, ended, spent) nor, after "Not now", a due renewal.
+  if (whatsNewOffered(f.approval, whatsNewDismissed)) return null
   // #149: a grant that ran out of what its approval allows has stopped the engine there: asked like a due renewal.
   if (f.approval.usage?.spent) return `mamoru:renew-asked:${f.address}:${f.approval.validUntil}:spent`
   if (!f.approval.renewDue) return null
@@ -1218,6 +1221,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   const [howOpen, setHowOpen] = useState(false)
   const [renewAsked, setRenewAsked] = useState(false)
+  // otto/mamoru#295: "Not now" on What's new holds for this session; the quiet row is the way back in.
+  const [wnLater, setWnLater] = useState(() => whatsNewDismissed(accountKey))
   // Amount the withdraw form opens with; a new value remounts the dialog.
   const [withdrawSeed, setWithdrawSeed] = useState('')
   // otto/mamoru#208 (reviews of PR #133): the live read is down whenever the last poll failed, cached data or not —
@@ -1232,7 +1237,9 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const cached = funding.data
   // Review round 4: a dialog the owner has open (a signed withdraw, stop, start or renewal may be on its way) is never
   // unmounted by an outage; it keeps the cached read until it is closed, and its own request reports what happened.
-  const keepOpen = dialog !== null || renewAsked
+  // otto/mamoru#295: the What's new card (or its row) is never unmounted mid-flow: not by an outage, not by an op in flight.
+  const migrating = opList.some((o) => o.kind === 'migrate-v4' && !TERMINAL.has(o.state))
+  const keepOpen = dialog !== null || renewAsked || (!!cached?.active && (!wnLater || migrating) && !!whatsNewOffered(cached.approval, wnLater))
   const f = liveDown && !keepOpen ? undefined : cached
   const multichain = isMultichainTarget(f?.approval?.policyId)
   // Unknown until the session has said whether a Monad sleeve exists and, if so, its balance has loaded (#142 review).
@@ -1258,7 +1265,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const armed = activationLive(opList)
   // A renewal the owner signed is on its way: the row that asks for it steps aside until it settles.
   const renewing = opList.some((o) => o.kind === 'renew' && !TERMINAL.has(o.state))
-  const renewAsk = renewAskFor(f, renewing)
+  const renewAsk = renewAskFor(f, renewing, wnLater)
   useEffect(() => {
     if (renewAsk && !askedBefore(renewAsk)) setRenewAsked(true)
   }, [renewAsk])
@@ -1280,7 +1287,23 @@ export function HomeView({ accountKey }: { accountKey: string }) {
     setSigned((s) => (s?.opId === inFlightRenew ? s : approvalKey ? { key: approvalKey, opId: inFlightRenew } : s))
   }, [inFlightRenew, approvalKey])
   const signedFailed = !!signed && opList.some((o) => o.opId === signed.opId && o.state === 'failed')
-  const approvalOpen = !!f?.approval && (approvalKey !== signed?.key || signedFailed)
+  // otto/mamoru#295: while What's new is offered it is the one notice; a safety state or a due renewal after "Not now" is not overridden.
+  const offeredWhatsNew = f?.active ? whatsNewOffered(f.approval, wnLater) : null
+  // N1: when a migrate-v4 op confirms, the funding read is asked again at once, so `currentStep` (or the offer) refreshes.
+  const migrateConfirmed = opList.filter((o) => o.kind === 'migrate-v4' && o.state === 'confirmed').length
+  useEffect(() => {
+    if (migrateConfirmed > 0) void qc.invalidateQueries({ queryKey: queryKeys.funding(accountKey) })
+  }, [migrateConfirmed, qc, accountKey])
+  const whatsNew = offeredWhatsNew
+  const laterWhatsNew = useCallback(() => {
+    setWhatsNewDismissed(accountKey, true)
+    setWnLater(true)
+  }, [accountKey])
+  const reviewWhatsNew = useCallback(() => {
+    setWhatsNewDismissed(accountKey, false)
+    setWnLater(false)
+  }, [accountKey])
+  const approvalOpen = !offeredWhatsNew && !!f?.approval && (approvalKey !== signed?.key || signedFailed)
   // A confirmed activation exists somewhere in this account's history (Stop and restart only matter once this
   // is true); ops history, not the funding poll, so this is never behind it.
   const ranBefore = everStarted(opList)
@@ -1325,7 +1348,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
     setDialog('withdraw')
   }
   // A renewal is retried from its own row at the top, which is back as soon as the failed one settles.
-  const retry = (kind: OpView['kind']) => (kind === 'renew' ? window.scrollTo({ top: 0, behavior: 'smooth' }) : kind === 'transfer' ? withdraw() : kind === 'exit' ? setDialog('stop') : start())
+  const retry = (kind: OpView['kind']) => (kind === 'migrate-v4' ? reviewWhatsNew() : kind === 'renew' ? window.scrollTo({ top: 0, behavior: 'smooth' }) : kind === 'transfer' ? withdraw() : kind === 'exit' ? setDialog('stop') : start())
   // #226: pull down (home-screen app) or tap the live pill: every read on the page again, the balance at most 2 s old.
   const refreshAll = useCallback(
     () =>
@@ -1370,6 +1393,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       />
       <Indicators f={noPositions ? undefined : f} apy={apy.data} price={price} noRead={(!f && liveDown) || noPositions} />
       <WrongNetwork accountKey={accountKey} />
+      {whatsNew && wnLater ? <WhatsNewRow onOpen={reviewWhatsNew} /> : null}
       {past ? (
         <section className="card" data-testid="past-notice" role="status">
           <span className="title">{homeCopy.pastTitle}</span>
@@ -1446,6 +1470,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           </span>
         </div>
       </footer>
+      {whatsNew && !wnLater ? <WhatsNewCard accountKey={accountKey} whatsNew={whatsNew} onLater={laterWhatsNew} onLearn={() => setHowOpen(true)} /> : null}
       <HowItWorks open={howOpen} onClose={() => setHowOpen(false)} />
       <FeedbackDialog accountKey={accountKey} open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
 

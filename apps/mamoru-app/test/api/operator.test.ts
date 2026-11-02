@@ -108,6 +108,32 @@ describe('operator proxy', () => {
     expect(s.headers.get('x-mamoru-sig')).toBe(await hmac('POST', path, s.headers.get('x-mamoru-account')!, raw, s.headers.get('x-mamoru-ts')!))
   })
 
+  test('migrate-v4 prepare and submit forward the body, with the step, signed (otto/mamoru#295)', async () => {
+    const op = fakeOperator()
+    const h = harness(undefined, { env: LIVE, operatorFetch: op.fetch })
+    const { cookie, owner } = await onboard(h)
+    for (const [route, raw] of [['migrate-v4/prepare', '{"step":1}'], ['migrate-v4', '{"prepareId":"p","step":1}']] as const) {
+      const path = `/api/accounts/${owner.accountKey}/${route}`
+      const res = await h.request(path, { method: 'POST', body: raw, cookie, headers: { 'content-type': 'application/json', origin: ORIGIN } })
+      // The prepare reaches the operator, but this stand-in's answer carries no Safe transaction, so the Worker refuses to pass it on.
+      expect(res.status).toBe(route.endsWith('/prepare') ? 502 : 200)
+      const s = op.seen.at(-1)!
+      expect(new URL(s.url).pathname).toBe(path)
+      expect(s.body).toBe(raw)
+      expect(s.headers.get('x-mamoru-sig')).toBe(await hmac('POST', path, s.headers.get('x-mamoru-account')!, raw, s.headers.get('x-mamoru-ts')!))
+    }
+  })
+
+  test('GET /ops?kind=migrate-v4 forwards the filter to the operator (otto/mamoru#295)', async () => {
+    const op = fakeOperator(() => Response.json({ ops: [] }))
+    const h = harness(undefined, { env: LIVE, operatorFetch: op.fetch })
+    const { cookie, owner } = await onboard(h)
+    const path = `/api/accounts/${owner.accountKey}/ops?kind=migrate-v4`
+    expect((await h.request(path, { cookie })).status).toBe(200)
+    expect(op.seen[0]!.url).toBe(OPERATOR_URL + path)
+    expect(op.seen[0]!.headers.get('x-mamoru-sig')).toBe(await hmac('GET', path, op.seen[0]!.headers.get('x-mamoru-account')!, '', op.seen[0]!.headers.get('x-mamoru-ts')!))
+  })
+
   test('every live route is forwarded', async () => {
     const op = fakeOperator()
     const h = harness(undefined, { env: LIVE, operatorFetch: op.fetch })

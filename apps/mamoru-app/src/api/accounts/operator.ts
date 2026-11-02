@@ -1,5 +1,5 @@
 import { Hono, type Context } from 'hono'
-import type { AccountContext, RemoteSpec } from '@mamoru/domain'
+import { ReasonError, type AccountContext, type OwnerTxToSign, type RemoteSpec } from '@mamoru/domain'
 import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
 import { accountNotFound, apiError } from '../errors.ts'
@@ -7,7 +7,8 @@ import { ACCOUNT_KEY } from '../onboarding/account.ts'
 import { ownersOf, type AccountRow } from './store.ts'
 import { BASE, ownedSleeve } from '../sleeves.ts'
 import { defaultRemoteRegistry, remoteOf, upsertRemoteSleeve, verifyRemote, type RemoteRegistry } from '../remote.ts'
-import { chainFundingResponse, fundingRpcUrls, type ChainFunding } from './chain-funding.ts'
+import { checkMigrateTx, migrateAnchors } from '../migrate-check.ts'
+import { capOf, chainFundingResponse, fundingRpcUrls, type ChainFunding } from './chain-funding.ts'
 
 // Live funds (sprint amendment 2026-09-26 21:40): after the device session proves it owns the account,
 // the Worker forwards the same route to the operator with a signed account context (app-api.ts AccountContext).
@@ -125,6 +126,23 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     }
   }
 
+  /** otto/mamoru#295: a migrate-v4 prepare is rebuilt and compared before it reaches the owner (migrate-check.ts). */
+  const checkMigrate = async (c: Context<AppEnv>, row: AccountRow, requestBody: string, text: string): Promise<Response | null> => {
+    try {
+      const step = (JSON.parse(requestBody) as { step?: unknown }).step
+      if (typeof step !== 'number' || !Number.isInteger(step)) throw new ReasonError('MIGRATE_TX_MISMATCH', 'no step')
+      const { base, monad } = await migrateAnchors(c.env.DB, row)
+      if (!base || !chain) throw new ReasonError('MIGRATE_TX_MISMATCH', 'no account or no default cap to check against')
+      const cap = await capOf(c.env.DB, base, chain.capUsdc)
+      if (!cap.known) throw new ReasonError('MIGRATE_TX_MISMATCH', 'the cap could not be read')
+      checkMigrateTx({ tx: JSON.parse(text) as OwnerTxToSign, step, base, monad, capUsdc: cap.usdc, registryOf: remoteRegistry })
+      return null
+    } catch (e) {
+      console.error(`migrate-v4 prepare refused for ${row.account_key}`, e instanceof Error ? e.message : String(e))
+      return apiError(c, 502, 'Mamoru could not confirm what this approval signs. Nothing was signed.', 'MIGRATE_TX_MISMATCH')
+    }
+  }
+
   const forwardWith = (opts: { timeoutMs?: (c: Context<AppEnv>, row: AccountRow) => number; fallback?: (c: Context<AppEnv>, row: AccountRow) => Promise<Response | null> } = {}) => async (c: Context<AppEnv>) => {
     const session = await c.var.auth.current(c)
     if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
@@ -173,6 +191,12 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     if (opts.fallback && operatorFailed(res.status)) {
       const answer = await opts.fallback(c, row)
       if (answer) return answer
+    }
+    // otto/mamoru#295: a migrate-v4 prepare is judged first and writes nothing (upsertRemoteSleeve runs only on a funding read).
+    const migratePrepare = method === 'POST' && c.req.path.endsWith('/migrate-v4/prepare')
+    if (res.ok && migratePrepare) {
+      const refused = await checkMigrate(c, row, body, text)
+      if (refused) return refused
     }
     if (res.ok && row.chain_id === BASE) {
       const refused = await checkRemote(c, row, method, c.req.path, text)
