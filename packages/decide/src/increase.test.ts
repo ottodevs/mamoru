@@ -114,24 +114,34 @@ describe('increase instead of a second mint (otto/mamoru#171)', () => {
     expect(decide(obs([held(3n, 0, { managed: false })], pairSessions(LAB)), LAB).proposal).toMatchObject({ kind: 'increase_liquidity', tokenId: 3n })
   })
 
-  test('tolerance: each edge within 10% of the width (198 of 1980 ticks at 60 spacing, as the Revert range) adds, past it mints', () => {
+  test('#220 one NFT per pool: any in-range admitted position takes the entry, however far its edges are from a fresh range', () => {
     expect(fresh.tickUpper - fresh.tickLower).toBe(1980)
     const sessions = pairSessions(LAB)
     expect(reusablePosition(obs([held(3n, 180)], sessions), LAB, riskPool, fresh)?.tokenId).toBe(3n)
     expect(decide(obs([held(3n, 60)], sessions), LAB).proposal).toMatchObject({ kind: 'increase_liquidity', tokenId: 3n, tickLower: fresh.tickLower + 60, tickUpper: fresh.tickUpper + 60 })
-    // Off-centre by 180 the held range needs more WETH than is idle: the swap toward it comes first, not a mint.
-    expect(decide(obs([held(3n, 180)], sessions), LAB).proposal).toMatchObject({ kind: 'enter_swap', tokenOut: 'WETH' })
-    expect(reusablePosition(obs([held(3n, -240)], sessions), LAB, riskPool, fresh)).toBeNull()
-    expect(decide(obs([held(3n, -240)], sessions), LAB).proposal).toMatchObject({ kind: 'enter_mint', ...fresh })
-    // A wider position whose range only contains the new centre is not reused either.
-    expect(decide(obs([held(3n, 0, { tickLower: fresh.tickLower - 600, tickUpper: fresh.tickUpper + 600 })], sessions), LAB).proposal?.kind).toBe('enter_mint')
+    // Past the old 10 % tolerance (c23e94e1's keeper sat 340 ticks off and got a second NFT beside it, 2 Nov 2026).
+    expect(reusablePosition(obs([held(3n, -240)], sessions), LAB, riskPool, fresh)?.tokenId).toBe(3n)
+    expect(decide(obs([held(3n, -240)], sessions), LAB).proposal?.kind).not.toBe('enter_mint')
+    // A wider position whose range contains the price is reused too.
+    expect(decide(obs([held(3n, 0, { tickLower: fresh.tickLower - 600, tickUpper: fresh.tickUpper + 600 })], sessions), LAB).proposal?.kind).not.toBe('enter_mint')
+    // The nearest wins, lowest tokenId on ties.
+    expect(reusablePosition(obs([held(5n, 180), held(4n, 60)], sessions), LAB, riskPool, fresh)?.tokenId).toBe(4n)
+    expect(reusablePosition(obs([held(5n), held(4n)], sessions), LAB, riskPool, fresh)?.tokenId).toBe(4n)
   })
 
-  test('the policy field sets the tolerance: 0 reuses only the exact range', () => {
+  test('#220: the policy field no longer excludes a held position (0 still reuses an off-centre one)', () => {
     const exact: PolicyVersion = { ...LAB, range: { ...LAB.range, increaseToleranceBps: 0 } }
+    expect(decide(obs([held(3n, 60)], pairSessions(LAB)), exact).proposal).toMatchObject({ kind: 'increase_liquidity', tokenId: 3n })
+  })
+
+  test('#220: an admitted position the price has left gets no second NFT beside it; the entry waits', () => {
     const sessions = pairSessions(LAB)
-    expect(decide(obs([held(3n, 60)], sessions), exact).proposal?.kind).toBe('enter_mint')
-    expect(decide(obs([held(3n)], sessions), exact).proposal?.kind).toBe('increase_liquidity')
+    const out = held(3n, 0, { tickLower: fresh.tickUpper + 600, tickUpper: fresh.tickUpper + 2_580 })
+    const d = decide(obs([out], sessions), LAB)
+    expect(d.proposal?.kind === 'enter_mint' || d.proposal?.kind === 'increase_liquidity').toBe(false)
+    expect(d.buckets.find((b) => b.bucket === 'risk')?.code).toBe('OBS_POSITION_OUT_OF_RANGE')
+    // A position the policy never admitted cannot be added to or closed by it: the entry still mints (as before).
+    expect(decide(obs([{ ...out, admitted: false }], sessions), LAB).proposal?.kind).not.toBe('increase_liquidity')
   })
 
   test('an empty position, or one the price is not strictly inside, is not reused', () => {

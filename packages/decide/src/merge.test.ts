@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV2, conservadorLiveV4, conservadorLiveV5, grantKey, type PolicyVersion } from '@mamoru/policy'
 import { address, entry, baseRegistry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { decide, mergeOf, MERGES_PER_WEEK, rangeFor, reusablePosition, type Observation, type PoolObs, type PositionObs, type SessionObs } from './index.ts'
+import { decide, mergeOf, MERGES_PER_DAY, rangeFor, reusablePosition, type Observation, type PoolObs, type PositionObs, type SessionObs } from './index.ts'
 
 // otto/mamoru#220: one position per pool. c23e94e1 held two NFTs per pool from before #171 (WETH 6291301+6291328 on
 // the same range, cbBTC 6291323+6351872 on two ranges).
@@ -110,11 +110,13 @@ describe('one position per pool (otto/mamoru#220)', () => {
     expect(mergeOf(obs([out, held(4n)]), LIVE, new Set([RISK]))).toBeNull()
   })
 
-  test('review r1: at most MERGES_PER_WEEK merges a pool in 7 days', () => {
+  test('at most MERGES_PER_DAY merges a pool in 24 h; older ones do not count (#220)', () => {
     const pools = new Set([RISK])
-    const two = Array.from({ length: MERGES_PER_WEEK }, (_, i) => ({ pool: RISK, at: 10_000n + BigInt(i), merge: true as const }))
+    const two = Array.from({ length: MERGES_PER_DAY }, (_, i) => ({ pool: RISK, at: 20_000n + BigInt(i), merge: true as const }))
     expect(mergeOf(obs([held(3n, 60), held(4n)], { recentReranges: two }), LIVE, pools)).toBeNull()
     expect(mergeOf(obs([held(3n, 60), held(4n)], { recentReranges: two.slice(1) }), LIVE, pools)).toMatchObject({ tokenId: 3n })
+    // Two merges more than a day ago leave room (they used up the week before #220's fix: b54dda3a, 2 Nov 2026).
+    expect(mergeOf(obs([held(3n, 60), held(4n)], { recentReranges: two.map((r) => ({ ...r, at: r.at - 10_001n })) }), LIVE, pools)).toMatchObject({ tokenId: 3n })
     // Re-ranges do not use up merges.
     expect(mergeOf(obs([held(3n, 60), held(4n)], { recentReranges: [{ pool: RISK, at: 10_000n }, { pool: RISK, at: 10_001n }] }), LIVE, pools)).toMatchObject({ tokenId: 3n })
   })

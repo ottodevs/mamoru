@@ -18,10 +18,9 @@ const SWAP_BELOW_BPS = 9_000n
 /** Sell idle volatile only when it exceeds what the mint needs by more than this share (bps) and savings are short to pair it. */
 const SELL_ABOVE_BPS = 11_000n
 /**
- * otto/mamoru#171: default for `range.increaseToleranceBps`, how far (bps of the new range's width) each edge of a held
- * position may sit from the edge of the range a mint would get, for the entry to add to it instead. 1000 is the
- * re-range trigger's own edge share: a position that close has the price well inside it, so what is added is not
- * taken straight out again by a re-range, and its token split is within a few percent of the fresh range's.
+ * otto/mamoru#171: default for `range.increaseToleranceBps`. Since otto/mamoru#220 (one NFT per pool) it no longer
+ * decides whether an entry adds to a held position (`reusablePosition` takes any in-range admitted one); kept, with the
+ * policy field, so policy hashes and stored policies do not change.
  */
 export const DEFAULT_INCREASE_TOLERANCE_BPS = 1_000
 
@@ -92,24 +91,22 @@ function liveSession(obs: Observation, grant: string): boolean {
  * engine at the observation block: a position minted under v2/v3 or V1 and never admitted by V2 is refused by the
  * policy, so that pool mints). Not `managed`: that flag lists the ids this engine run minted or was granted one by
  * one, so after a restart every older position read unmanaged and each top-up minted a second NFT beside it
- * (otto/mamoru#220: b54dda3a, 2 Nov 2026). Under manage-any every position of a policy pool is managed (isManaged). The position must have liquidity, the price strictly
- * inside its range (both amounts positive, as the grant's minimums need), and each of its edges within
- * `range.increaseToleranceBps` of the width of `range` (what a mint would get now) from that range's edge. The nearest
- * such position wins, lowest tokenId on ties. The engine re-reads admission and ownership before it builds the call.
+ * (otto/mamoru#220: b54dda3a, 2 Nov 2026). Under manage-any every position of a policy pool is managed (isManaged). The position must have liquidity and the price strictly
+ * inside its range (both amounts positive, as the grant's minimums need). One NFT per pool by design (otto/mamoru#220,
+ * Ot 2 Nov 2026): such a position takes the entry however far its edges are from `range` (what a mint would get now);
+ * the re-range rules move it when they would move any position. `range.increaseToleranceBps` no longer excludes one
+ * (a held position 340 ticks off took a second NFT on c23e94e1, 2 Nov): the nearest wins, lowest tokenId on ties. The
+ * engine re-reads admission and ownership before it builds the call.
  */
 export function reusablePosition(obs: Observation, policy: PolicyVersion, pool: PoolObs, range: { tickLower: number; tickUpper: number }): PositionObs | null {
   if (!hasIncrease(policy, pool.name)) return null
   if (!liveSession(obs, grantKeyFor(policy, 'manage-any', pool.name))) return null
-  const tolerance = Math.floor(((range.tickUpper - range.tickLower) * (policy.range.increaseToleranceBps ?? DEFAULT_INCREASE_TOLERANCE_BPS)) / 10_000)
   let best: PositionObs | null = null
   let bestDistance = 0
   for (const p of obs.positions) {
     if (p.pool !== pool.name || p.liquidity <= 0n || p.admitted !== true) continue
     if (!(p.tickLower < pool.tick && pool.tick < p.tickUpper)) continue
-    const lower = Math.abs(p.tickLower - range.tickLower)
-    const upper = Math.abs(p.tickUpper - range.tickUpper)
-    if (lower > tolerance || upper > tolerance) continue
-    const distance = lower + upper
+    const distance = Math.abs(p.tickLower - range.tickLower) + Math.abs(p.tickUpper - range.tickUpper)
     if (!best || distance < bestDistance || (distance === bestDistance && p.tokenId < best.tokenId)) {
       best = p
       bestDistance = distance
@@ -263,6 +260,12 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     // position close enough to it takes the entry instead, and the split follows that position's range.
     const fresh = rangeFor(obs, policy, pool)
     const reuse = reusablePosition(obs, policy, pool, fresh)
+    // otto/mamoru#220, one NFT per pool: an admitted position the price has left is never joined by a second NFT. The
+    // re-range rules close it (and the entry then mints the one fresh position) or hold it; the money waits as savings.
+    if (!reuse && hasIncrease(policy, pool.name) && obs.positions.some((p) => p.pool === pool.name && p.liquidity > 0n && p.admitted === true)) {
+      if (row) row.code = 'OBS_POSITION_OUT_OF_RANGE'
+      continue
+    }
     const range = reuse ? { tickLower: reuse.tickLower, tickUpper: reuse.tickUpper } : fresh
     const volShare = volatileShareBps(pool, policy, range)
     // otto/mamoru#127: no more than the pool can take at its depth; the rest waits as savings, with its reason. The

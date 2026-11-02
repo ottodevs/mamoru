@@ -154,10 +154,9 @@ export type PolicyVersion = {
     /** otto/mamoru#218: at most this many re-ranges per pool in any 7 days (both modes). Absent: no cap. */
     maxPerWeek?: number
     /**
-     * otto/mamoru#171, policies whose grants carry MamoruActionPolicyV2.increase (conservadorLiveV5): an entry adds to a
-     * held, admitted position when each of its edges is within this share (bps) of the fresh range's width from that
-     * range's edge, instead of minting a second NFT. Absent: `DEFAULT_INCREASE_TOLERANCE_BPS` where the grants can
-     * increase; a policy without that action never increases, whatever this says.
+     * otto/mamoru#171: once the share (bps) of the fresh range's width within which an entry added to a held position.
+     * Since otto/mamoru#220 (one NFT per pool) an entry adds to any held, admitted, in-range position whatever its edges,
+     * so this no longer decides anything; kept so policy hashes and stored policies do not change.
      */
     increaseToleranceBps?: number
   }
