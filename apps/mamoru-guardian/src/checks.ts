@@ -152,3 +152,46 @@ export async function checkRemote(i: CheckInput, r: CheckReads): Promise<CheckRe
 
   return { ok: true }
 }
+
+// ---------------------------------------------------------------- #310: a V4 sibling's home, read back
+
+/** A V4 Config, as `configOf` returns it. */
+export type V4Config = { set: boolean; home: Address; homeDomain: number; generation: bigint }
+
+export type SiblingReads = {
+  /** V4.configOf(account) on the sibling's chain (this guardian's chain) and on its home chain (V4 is at the same address). */
+  config(side: 'sibling' | 'home', account: Address): Promise<V4Config>
+  /** Bytecode at the account's address on the home chain. */
+  homeCode(account: Address): Promise<Hex | undefined>
+  /** Storage slot 0 of the account on the home chain: a Safe proxy's singleton. */
+  homeSingleton(account: Address): Promise<Address>
+  /** MamoruV4Helper.ownersHashOf(account) on each chain (the helper is at the same address). */
+  ownersHash(side: 'sibling' | 'home', account: Address): Promise<Hex>
+}
+
+/**
+ * Spec 010 #307 + otto/mamoru#310: before `setReady(account, homeDomain, account)` on the sibling's chain, the same address
+ * on the home chain must be the user's Mamoru account: deployed, a Safe of the pinned singleton, a V4 HOME there (set,
+ * no home of its own), and owned by the same keys (V4's owners hash, owners + threshold + passkey, equal on both chains).
+ * An undeployed home is not marked ready (fail closed): the app deploys it at Start, in the same approval.
+ */
+export async function checkSibling(i: { account: Address; homeDomain: number; homeRegistry: Registry }, r: SiblingReads): Promise<CheckResult> {
+  const sib = await read('siblingConfig', () => r.config('sibling', i.account))
+  if ('failed' in sib) return fail(sib.failed)
+  if (!sib.v.set || !isAddressEqual(sib.v.home, i.account) || sib.v.homeDomain !== i.homeDomain) return fail('siblingConfig: not a sibling of this account on this domain')
+  const code = await read('homeCode', () => r.homeCode(i.account))
+  if ('failed' in code) return fail(code.failed)
+  if (!code.v || code.v === '0x') return fail('homeCode: the home account is not deployed')
+  const single = await read('homeSingleton', () => r.homeSingleton(i.account))
+  if ('failed' in single) return fail(single.failed)
+  if (!isAddressEqual(single.v, address('SafeL2_141', i.homeRegistry))) return fail('homeSingleton: not a Safe of the pinned singleton')
+  const home = await read('homeConfig', () => r.config('home', i.account))
+  if ('failed' in home) return fail(home.failed)
+  if (!home.v.set || BigInt(home.v.home) !== 0n) return fail('homeConfig: the address is not a V4 home account there')
+  const a = await read('ownersHash', () => r.ownersHash('sibling', i.account))
+  if ('failed' in a) return fail(a.failed)
+  const b = await read('ownersHash', () => r.ownersHash('home', i.account))
+  if ('failed' in b) return fail(b.failed)
+  if (a.v.toLowerCase() !== b.v.toLowerCase()) return fail('ownersHash: the keys differ between the sibling and its home')
+  return { ok: true }
+}

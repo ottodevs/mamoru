@@ -5,6 +5,8 @@ import type { Address, Hex } from 'viem'
 
 export type Registration = { account: Address; domain: number; remote: Address; ownersHash: Hex; sessionKey: Address }
 export type WatchedSafe = { chainId: number; address: Address; next: string }
+/** #310: a V4 sibling (Init home == account) on this guardian's chain, and its home domain. */
+export type Sibling = { account: Address; domain: number }
 export type State = {
   v: 1
   /** Next block to scan, by stream key (`reg`, `queued:<chainId>`). */
@@ -13,11 +15,13 @@ export type State = {
   registrations: Record<string, Registration>
   /** Remote Safes whose ExecutionSuccess logs are scanned, each with its own cursor. */
   safes: Record<string, WatchedSafe>
+  /** #310: V4 siblings seen on this chain (PolicySet with home == account); kept, and re-checked whenever not ready. */
+  siblings: Record<string, Sibling>
   /** Alert dedup: key -> unix ms of the last delivery. */
   alerted: Record<string, number>
 }
 
-export const emptyState = (): State => ({ v: 1, cursors: {}, registrations: {}, safes: {}, alerted: {} })
+export const emptyState = (): State => ({ v: 1, cursors: {}, registrations: {}, safes: {}, siblings: {}, alerted: {} })
 
 export class StateStore {
   state: State
@@ -30,6 +34,7 @@ export class StateStore {
       if ((statSync(this.file).mode & 0o077) !== 0) throw new Error('guardian state file must be 0600')
       const s = JSON.parse(readFileSync(this.file, 'utf8')) as State
       if (s.v !== 1) throw new Error('guardian state file: unknown version')
+      s.siblings ??= {} // a state file from before #310
       this.state = s
     } else {
       this.state = emptyState()

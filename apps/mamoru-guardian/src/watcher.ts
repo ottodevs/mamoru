@@ -7,7 +7,7 @@ import { mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi } from '@
 import { V4_CHAIN_BY_DOMAIN, type OneAuthV4Deployment } from '@mamoru/policy'
 import { address, registryFor, safe7579Abi, safeAbi, safeWebAuthnSharedSignerAbi } from '@mamoru/registry'
 import type { Alerter } from './alerts.ts'
-import { checkRemote, type CheckReads, type Side } from './checks.ts'
+import { checkRemote, checkSibling, type CheckReads, type Side, type SiblingReads, type V4Config } from './checks.ts'
 import type { StateStore } from './state.ts'
 
 /** The slice of a viem PublicClient the guardian uses (a real client is cast to it in main.ts). */
@@ -47,6 +47,7 @@ export type WatcherDeps = {
 }
 
 const registeredEvent = parseAbiItem('event RemoteRegistered(address indexed account, uint32 indexed domain, address remote, bytes32 ownersHash, address sessionKey)')
+const policySetEvent = parseAbiItem('event PolicySet(bytes32 id, address multiplexer, address account)')
 const queuedEvent = parseAbiItem('event Queued(bytes32 indexed id, uint8 indexed kind, bytes32 indexed key, bytes params, uint256 nonce, uint256 eta)')
 const executionSuccessEvent = parseAbiItem('event ExecutionSuccess(bytes32 indexed txHash, uint256 payment)')
 /** Safe's keccak256("fallback_manager.handler.address"). */
@@ -193,6 +194,70 @@ async function scanRegistrations(cfg: WatcherConfig, d: WatcherDeps) {
   }, (n) => d.store.setCursor('reg', n), () => d.store.cursor('reg'))
 }
 
+/**
+ * #310: every V4 enable on this chain emits PolicySet; an account whose Init names itself as home is a sibling. Its own
+ * cursor ('sib') starts at the chain's first block to scan, as the registrations' does (the same V4, the same chain).
+ */
+async function scanSiblings(cfg: WatcherConfig, d: WatcherDeps) {
+  const st = d.store.state
+  const home = d.clients[cfg.homeChainId]!
+  await scan(cfg, d, 'sib', cfg.homeChainId, cfg.fromBlock[cfg.homeChainId]!, cfg.v4, policySetEvent, async (logs) => {
+    for (const l of logs) {
+      const account = getAddress(String(l.args.account))
+      const c = configOf(await call<unknown>(home, cfg.v4, mamoruActionPolicyV4Abi, 'configOf', [account]))
+      if (c.set && isAddressEqual(c.home, account)) st.siblings[regKey(account, c.homeDomain)] ??= { account, domain: c.homeDomain }
+    }
+  }, (n) => d.store.setCursor('sib', n), () => d.store.cursor('sib'))
+}
+
+function configOf(raw: unknown): V4Config {
+  const c = raw as { set: boolean; home: Address; homeDomain: number | bigint; generation: bigint }
+  return { set: c.set, home: getAddress(c.home), homeDomain: Number(c.homeDomain), generation: BigInt(c.generation) }
+}
+
+/** Safe proxy storage slot 0: its singleton. */
+const SINGLETON_SLOT: Hex = '0x0000000000000000000000000000000000000000000000000000000000000000'
+
+/** #310: read each sibling's home back and mark it ready (or alert). A ready sibling is re-checked only when it stops being ready. */
+async function processSiblings(cfg: WatcherConfig, d: WatcherDeps) {
+  const sibChain = d.clients[cfg.homeChainId]!
+  const st = d.store.state
+  if (Object.keys(st.siblings).length === 0) return
+  const helper = await call<Address>(sibChain, cfg.v4, mamoruActionPolicyV4Abi, 'HELPER')
+  for (const [k, s] of Object.entries(st.siblings)) {
+    if (await call<boolean>(sibChain, cfg.v4, mamoruActionPolicyV4Abi, 'isReady', [s.account, s.domain])) continue
+    const where = `sibling ${s.account} on chain ${cfg.homeChainId}, home domain ${s.domain}`
+    const homeChainId = V4_CHAIN_BY_DOMAIN[s.domain]
+    const homeClient = homeChainId === undefined ? undefined : d.clients[homeChainId]
+    if (homeChainId === undefined || !homeClient) {
+      await alertOnce(d, `sib:${k}:rpc`, `Sibling not marked ready, ${where}: no RPC configured for its home chain`, cfg.realertMs)
+      continue
+    }
+    const on = (side: 'sibling' | 'home') => (side === 'sibling' ? sibChain : homeClient)
+    const reads: SiblingReads = {
+      config: async (side, a) => configOf(await call<unknown>(on(side), cfg.v4, mamoruActionPolicyV4Abi, 'configOf', [a])),
+      homeCode: (a) => homeClient.getCode({ address: a }),
+      homeSingleton: async (a) => getAddress(slice(pad((await homeClient.getStorageAt({ address: a, slot: SINGLETON_SLOT })) ?? '0x', { size: 32 }), 12)),
+      ownersHash: (side, a) => call<Hex>(on(side), helper, mamoruV4HelperAbi, 'ownersHashOf', [a]),
+    }
+    const res = await checkSibling({ account: s.account, homeDomain: s.domain, homeRegistry: registryFor(homeChainId) }, reads)
+    if (!res.ok) {
+      await alertOnce(d, `sib:${k}:${res.failed}`, `Sibling not marked ready, ${where}: ${res.failed}`, cfg.realertMs)
+      continue
+    }
+    if (cfg.dryRun) {
+      await alertOnce(d, `sib:dry:${k}`, `[dry-run] all checks passed, would setReady: ${where}`, cfg.realertMs)
+      continue
+    }
+    try {
+      const tx = await d.send({ account: s.account, domain: s.domain, remote: s.account })
+      await alertOnce(d, `sib:ready:${k}:${tx}`, `setReady sent: ${where} tx=${tx}`)
+    } catch {
+      await alertOnce(d, `sib:sendfail:${k}`, `setReady failed to send, will retry: ${where}`, cfg.realertMs)
+    }
+  }
+}
+
 async function scanQueued(cfg: WatcherConfig, d: WatcherDeps, chainId: number) {
   const reg = cfg.registryAt[chainId]
   if (!reg) return
@@ -313,6 +378,8 @@ export async function runPass(cfg: WatcherConfig, d: WatcherDeps): Promise<strin
   await section('registrations', () => scanRegistrations(cfg, d))
   for (const chainId of Object.keys(d.clients).map(Number)) await section(`queued:${chainId}`, () => scanQueued(cfg, d, chainId))
   await section('process', () => processRegistrations(cfg, d))
+  await section('siblings', () => scanSiblings(cfg, d))
+  await section('process-siblings', () => processSiblings(cfg, d))
   for (const k of Object.keys(d.store.state.safes)) await section(`exec:${k}`, () => scanSafe(cfg, d, k))
   d.store.save()
   return errors

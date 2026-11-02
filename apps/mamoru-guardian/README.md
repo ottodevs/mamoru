@@ -17,6 +17,14 @@ Each pass (interval from env, idempotent, all state in one 0600 JSON file):
    alert naming the failed check, retried next pass. A superseded registration is dropped.
 3. Alerts on every `MamoruRegistry.Queued` (kind, key, params, eta) on each watched chain.
 4. Alerts on any `ExecutionSuccess` of a registered remote Safe whose safeTxHash is not in the allowlist file.
+5. V4 siblings (#307, #310): reads V4 `PolicySet` logs on its chain. An account whose Init names itself as home (an
+   account's own address on Ethereum, the home on Base) is tracked. When it is not ready, the guardian reads the same
+   address back on the home chain and calls `V4.setReady(account, homeDomain, account)` only if:
+   - it is deployed there, a Safe of the pinned SafeL2 singleton, and a V4 home there (`configOf`: set, no home);
+   - V4's owners hash (owners, threshold, passkey) is equal on both chains.
+   An undeployed home is not marked ready: the app deploys it at Start, in the same approval. This runs on the Ethereum
+   instance (`MAMORU_GUARDIAN_HOME_CHAIN_ID=1`, `MAMORU_GUARDIAN_RPC_URL_8453`; unit
+   `ops/systemd/mamoru-guardian-ethereum.service`).
 
 Alerts go to a Mattermost incoming webhook (and always to the journal) and are deduplicated in the state file.
 
