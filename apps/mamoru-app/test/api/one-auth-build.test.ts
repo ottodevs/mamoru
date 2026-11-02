@@ -2,6 +2,12 @@ import { describe, expect, test } from 'bun:test'
 import type { MigrateV4Input } from '@mamoru/domain'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
 import { registryFor } from '@mamoru/registry'
+import type { RemoteSpec } from '@mamoru/domain'
+import { liveWmonUsdcMonadV6 } from '@mamoru/policy'
+import { remoteInput, remoteSafe } from '@mamoru/account/remote'
+import { withPinnedV3 } from '../../../../packages/account/remote/fixture.ts'
+import { accountContext } from '../../src/api/accounts/operator.ts'
+import { upsertRemoteSleeve } from '../../src/api/remote.ts'
 import type { AccountRow } from '../../src/api/accounts/store.ts'
 import { harness, PASSKEY_A, register, sessionCookie } from './helpers.ts'
 
@@ -19,7 +25,9 @@ const offer = (input: MigrateV4Input, tamper: Partial<{ safeTxHash: string }> = 
   return { safe: input.safe, chainId: input.chainId, safeTxHash: tamper.safeTxHash ?? built.safeTxHash, summary: [], expiresAt: 'x', prepareId: 'p1', input }
 }
 
-async function world(prepare: (b: AccountRow) => unknown) {
+const SPEC: RemoteSpec = { chainId: 143, policyId: liveWmonUsdcMonadV6.policyId, sessionKey: KEY, validAfter: 1_790_000_000, validUntil: 1_821_536_000, capUsdc: '1000000000' }
+
+async function world(prepare: (b: AccountRow) => unknown, opts: { sleeve?: boolean } = {}) {
   let base!: AccountRow
   const seen: string[] = []
   const operatorFetch = async (url: string, init: RequestInit) => {
@@ -28,11 +36,13 @@ async function world(prepare: (b: AccountRow) => unknown) {
     if (init.method === 'POST' && url.endsWith('/prepare')) return json(prepare(base))
     return json({ state: 'none' })
   }
-  const h = harness(undefined, { env: { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET }, operatorFetch })
+  const h = harness(undefined, { env: { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET }, operatorFetch, remoteRegistry: () => withPinnedV3() })
   const res = await register(h, PASSKEY_A)
   const cookie = sessionCookie(res)
   const { accountKey } = (await res.json()) as { accountKey: string }
   base = h.db.raw.query('SELECT * FROM accounts WHERE account_key = ?').get(accountKey) as AccountRow
+  if (opts.sleeve) await upsertRemoteSleeve(h.db, base, { chainId: 143, address: remoteSafe(remoteInput(accountContext(base), SPEC, withPinnedV3())).address as `0x${string}`, spec: SPEC }, new Date())
+  const sleeveAddress = () => (h.db.raw.query('SELECT address FROM accounts WHERE chain_id = 143').get() as { address: `0x${string}` } | null)?.address
   const call = (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers)
     headers.set('cookie', cookie)
@@ -42,7 +52,7 @@ async function world(prepare: (b: AccountRow) => unknown) {
     }
     return h.app.request(`https://app.mamoru.lol/api/accounts/${accountKey}${path}`, { ...init, headers }, h.env)
   }
-  return { call, seen, base: () => base }
+  return { call, seen, base: () => base, sleeveAddress }
 }
 
 describe('one-authorization prepares are rebuilt by the Worker (#311)', () => {
@@ -95,4 +105,22 @@ describe('one-authorization prepares are rebuilt by the Worker (#311)', () => {
     const noInput = await world(() => ({ safe: '0x1', chainId: 1, safeTxHash: '0x2', prepareId: 'p1' }))
     expect((await noInput.call('/ethereum-sibling/prepare', { method: 'POST', body: '{}' })).status).toBe(502)
   })
+
+  test('review r1 of #239: migrate-v4/prepare without the builder input is refused', async () => {
+    const t = await world(() => ({ safe: '0x1', chainId: 8453, safeTxHash: '0x2', summary: [], expiresAt: 'x', prepareId: 'p1' }))
+    expect((await t.call('/migrate-v4/prepare', { method: 'POST', body: '{}' })).status).toBe(502)
+  })
+
+  test("review r1 of #239: step 1 through the Base account on its stored Monad Safe passes; funds moved to an unverified address do not", async () => {
+    let moveTo: `0x${string}` | undefined
+    let sleeve: () => `0x${string}` | undefined = () => undefined
+    const step1 = (b: AccountRow): MigrateV4Input => ({ ...home(b), chainId: 143, step: 1, safe: sleeve()!, home: b.address as `0x${string}`, homeDomain: 6, ...(moveTo ? { moveTo, transfers: [{ token: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603', amount: '1' }] } : {}) })
+    const t = await world((b) => offer(step1(b)), { sleeve: true })
+    sleeve = t.sleeveAddress
+    expect(sleeve()).toBeDefined()
+    expect((await t.call('/migrate-v4/prepare', { method: 'POST', body: '{"step":1}' })).status).toBe(200)
+    moveTo = '0x00000000000000000000000000000000000b0b00'
+    expect((await t.call('/migrate-v4/prepare', { method: 'POST', body: '{"step":1}' })).status).toBe(502)
+  })
 })
+

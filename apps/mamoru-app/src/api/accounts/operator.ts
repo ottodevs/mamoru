@@ -138,18 +138,26 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
    * Anything else: 502 BUILD_MISMATCH, nothing signed. A prepare of these routes without the builder's input passes as
    * before (an old activation; the operator's own check refuses a migration without it).
    */
-  const checkBuilt = (c: Context<AppEnv>, row: AccountRow, path: string, text: string, registryOf: (chainId: number) => Registry = registryFor): Response | null => {
+  const checkBuilt = async (c: Context<AppEnv>, row: AccountRow, path: string, text: string, registryOf: (chainId: number) => Registry = registryFor): Promise<Response | null> => {
     const sibling = path.endsWith('/ethereum-sibling/prepare')
-    if (!sibling && !path.endsWith('/activate/prepare') && !path.endsWith('/migrate-v4/prepare')) return null
-    let body: { safe?: string; chainId?: number; safeTxHash?: string; input?: MigrateV4Input; built?: { input?: MigrateV4Input; safeTxHash?: string } }
+    const migrate = path.endsWith('/migrate-v4/prepare')
+    if (!sibling && !migrate && !path.endsWith('/activate/prepare')) return null
+    let body: { safe?: string; chainId?: number; safeTxHash?: string; input?: MigrateV4Input; built?: { input?: MigrateV4Input; safeTxHash?: string }; remote?: { address?: string } }
     try {
       body = JSON.parse(text)
     } catch {
-      return null
+      return sibling || migrate ? refusedBuild(c, row, 'not JSON') : null
     }
     const input = sibling ? body.built?.input : body.input
-    if (!input) return sibling ? refusedBuild(c, row, 'no input') : null
+    // Review r1 of #239: a migration and the sibling are always the builder's (an activation without input is the old
+    // v1-v6 Start, which #333 retires).
+    if (!input) return sibling || migrate ? refusedBuild(c, row, 'no input') : null
     const me = row.address.toLowerCase()
+    // Through a Base account, step 1 runs on its own Safe on the other chain: the remote row the Worker stored for it
+    // (review r1 of #239: its spec lives on that row), re-derived from the keys.
+    const sleeve = BigInt(input.home) !== 0n && !sibling && row.chain_id === BASE
+      ? await c.env.DB.prepare('SELECT * FROM accounts WHERE user_id = ? AND chain_id = ?').bind(row.user_id, input.chainId).first<AccountRow>()
+      : null
     const why = (() => {
       const home = BigInt(input.home) !== 0n
       if (body.chainId !== input.chainId) return 'chain'
@@ -159,14 +167,19 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
       } else if (home && row.chain_id === BASE) {
         // Step 1 through the Base account: its own Safe on the other chain (the one its keys give, from its D1 row), whose
         // home is this account.
-        if (input.home.toLowerCase() !== me || input.chainId === BASE || !row.remote_json) return 'home'
+        if (input.home.toLowerCase() !== me || input.chainId === BASE || !sleeve?.remote_json || sleeve.address.toLowerCase() !== input.safe.toLowerCase()) return 'home'
         try {
-          verifyRemote(accountContext(row), { chainId: input.chainId, address: input.safe, spec: JSON.parse(row.remote_json) as RemoteSpec }, remoteRegistry)
+          verifyRemote(accountContext(row), { chainId: input.chainId, address: input.safe, spec: JSON.parse(sleeve.remote_json) as RemoteSpec }, remoteRegistry)
         } catch {
           return 'remote safe'
         }
       } else if (input.safe.toLowerCase() !== me || input.chainId !== row.chain_id) return 'safe' // the row's own Safe on its own chain
       if (body.safe && body.safe.toLowerCase() !== input.safe.toLowerCase()) return 'safe'
+      // Review r1 of #239: funds the tx moves go only to the account's own new Safe, the `remote` offer checkRemote has
+      // just re-derived from its keys; the sibling moves nothing.
+      if (input.moveTo || input.transfers?.length) {
+        if (sibling || row.chain_id !== BASE || !body.remote?.address || body.remote.address.toLowerCase() !== (input.moveTo ?? '').toLowerCase()) return 'moveTo'
+      }
       let hash: string
       try {
         hash = buildMigrateV4(input, registryOf(input.chainId)).safeTxHash
@@ -238,7 +251,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
       if (refused) return refused
     }
     if (res.ok && method === 'POST') {
-      const refused = checkBuilt(c, row, c.req.path, text)
+      const refused = await checkBuilt(c, row, c.req.path, text)
       if (refused) return refused
     }
     return new Response(text, {
