@@ -166,53 +166,75 @@ function reopen(r: ReleaseState): void {
 /** The chain reads `settle` needs (the operator's client of this chain). */
 export type SettleChain = Pick<PublicClient, 'getBlock' | 'readContract' | 'getLogs' | 'getTransactionReceipt'>
 
+/** What the chain says of a sending request; `stay`: not settled yet (or not provable: it stays sending). */
+export type SettleOutcome = { kind: 'stay' } | { kind: 'burned'; userOpHash: Hex; amount: string; txHash: Hex; block: number } | { kind: 'reopen'; why: string }
+
+/** How far back from its first prepare block a try's nonce is looked for, at most (doubling steps). */
+const MAX_BACK_STEPS = 20
+
 /**
- * A sending request, settled by the chain at `safe`: nothing while its nonce is unused there; once used, the
- * UserOperationEvent of one of its tries makes it burned (exactly that burn: DepositForBurn of the try's amount from its
- * depositor to the home, on the home domain) or open again (reverted); none of them up to `safe` makes it open again
- * (another op took the nonce). Returns whether the state changed. A landed op that is not exactly its burn throws:
- * it stays sending, never under-counted, until someone looks.
+ * Reads only: the op that used a sending request's nonce, found positively. Nothing while the nonce is unused at
+ * `safe`. Else the first block where it is used (binary search on getNonce from the first prepare block), and in that
+ * block the UserOperationEvent of this Safe with exactly that nonce: one of its tries with exactly its burn
+ * (DepositForBurn of the try's amount from its depositor to the home, on the home domain) is burned; one of its tries
+ * reverted, or another op, reopens it. No such event (a provider behind), or a landed try that is not exactly its burn:
+ * throws, and the request stays sending: a missing log is never taken for "not burned".
  */
-export async function settle(acc: AccountState, chain: SettleChain, registry: Registry, now: string): Promise<boolean> {
+export async function settleOutcome(acc: AccountState, chain: SettleChain, registry: Registry): Promise<SettleOutcome> {
   const r = acc.release
   const h = homeOf(acc)
-  if (r?.state !== 'sending' || !r.sending || !h) return false
+  if (r?.state !== 'sending' || !r.sending || !h) return { kind: 'stay' }
   const s = r.sending
   const ep = address('EntryPointV07', registry)
-  const safe = await chain.getBlock({ blockTag: 'safe' })
   const sender = acc.ctx.address as Address
-  const used = (await chain.readContract({ address: ep, abi: entryPointV07Abi, functionName: 'getNonce', args: [sender, BigInt(s.nonceKey)], blockNumber: safe.number })) as bigint
-  if (used <= BigInt(s.nonce)) return false
-  for (let from = BigInt(s.fromBlock); from <= safe.number; from += SETTLE_LOG_CHUNK) {
-    const to = from + SETTLE_LOG_CHUNK - 1n < safe.number ? from + SETTLE_LOG_CHUNK - 1n : safe.number
-    for (const t of s.tries) {
-      const logs = (await chain.getLogs({ address: ep, event: userOperationEvent, args: { userOpHash: t.userOpHash }, fromBlock: from, toBlock: to })) as unknown as (Log & { args: { sender?: Address; nonce?: bigint; success?: boolean } })[]
-      if (!logs.length) continue
-      const ev = logs[0]!
-      if (!ev.args.sender || !isAddressEqual(ev.args.sender, sender) || ev.args.nonce !== BigInt(s.nonce)) throw new Error(`release ${r.id}: UserOperationEvent of ${ev.args.sender} nonce ${ev.args.nonce} for its try`)
-      if (!ev.args.success) {
-        reopen(r)
-        r.updatedAt = now
-        return true
-      }
-      const receipt = await chain.getTransactionReceipt({ hash: ev.transactionHash! })
-      const burn = burnOf(userOpLogs(receipt.logs, ev.logIndex!, registry), { account: sender, depositor: t.depositor, recipient: h.home, amount: t.amount, destinationDomain: h.homeDomain }, registry)
-      if (!burn) throw new Error(`release ${r.id}: its userOp landed in ${ev.transactionHash} without exactly its burn; kept sending`)
-      Object.assign(r, { state: 'burned', burn: { userOpHash: t.userOpHash, amount: t.amount, txHash: ev.transactionHash!, block: Number(ev.blockNumber!) }, updatedAt: now })
-      delete r.sending
-      return true
-    }
+  const nonce = BigInt(s.nonce)
+  const usedAt = async (block: bigint) => ((await chain.readContract({ address: ep, abi: entryPointV07Abi, functionName: 'getNonce', args: [sender, BigInt(s.nonceKey)], blockNumber: block })) as bigint) > nonce
+  const safe = (await chain.getBlock({ blockTag: 'safe' })).number
+  if (!(await usedAt(safe))) return { kind: 'stay' }
+  // A block where the nonce was not used yet, at or before the first prepare block (a provider ahead there is stepped back).
+  let lo = BigInt(s.fromBlock) < safe ? BigInt(s.fromBlock) : safe
+  for (let step = 1n, i = 0; await usedAt(lo); step *= 2n, i++) {
+    if (i >= MAX_BACK_STEPS || lo === 0n) throw new Error(`release ${r.id}: nonce ${s.nonce} used before every block looked at`)
+    lo = lo > step ? lo - step : 0n
   }
-  // The nonce is used at `safe` and none of the tries is there: another op took it, none of them can ever land.
-  reopen(r)
+  let hi = safe
+  while (hi - lo > 1n) {
+    const mid = (lo + hi) / 2n
+    if (await usedAt(mid)) hi = mid
+    else lo = mid
+  }
+  const logs = (await chain.getLogs({ address: ep, event: userOperationEvent, args: { sender }, fromBlock: hi, toBlock: hi })) as unknown as (Log & { args: { userOpHash?: Hex; sender?: Address; nonce?: bigint; success?: boolean } })[]
+  const ev = logs.find((l) => l.args.nonce === nonce && !!l.args.sender && isAddressEqual(l.args.sender, sender))
+  if (!ev?.args.userOpHash) throw new Error(`release ${r.id}: nonce ${s.nonce} used in block ${hi} without its UserOperationEvent there; kept sending`)
+  const t = s.tries.find((x) => x.userOpHash === ev.args.userOpHash!.toLowerCase())
+  if (!t) return { kind: 'reopen', why: `nonce ${s.nonce} taken by another op in block ${hi}` }
+  if (!ev.args.success) return { kind: 'reopen', why: `its burn reverted in block ${hi}` }
+  const receipt = await chain.getTransactionReceipt({ hash: ev.transactionHash! })
+  const burn = burnOf(userOpLogs(receipt.logs, ev.logIndex!, registry), { account: sender, depositor: t.depositor, recipient: h.home, amount: t.amount, destinationDomain: h.homeDomain }, registry)
+  if (!burn) throw new Error(`release ${r.id}: its userOp landed in ${ev.transactionHash} without exactly its burn; kept sending`)
+  return { kind: 'burned', userOpHash: t.userOpHash, amount: t.amount, txHash: ev.transactionHash!, block: Number(hi) }
+}
+
+/**
+ * Applies what `settleOutcome` read, synchronously, only to the same request still sending at the same nonce (anything
+ * written while it read wins). Returns whether the state changed.
+ */
+export function applySettle(acc: AccountState, read: ReleaseState, nonce: string, o: SettleOutcome, now: string): boolean {
+  const r = acc.release
+  if (o.kind === 'stay' || r !== read || r.state !== 'sending' || r.sending?.nonce !== nonce) return false
+  if (o.kind === 'reopen') reopen(r)
+  else {
+    Object.assign(r, { state: 'burned', burn: { userOpHash: o.userOpHash, amount: o.amount, txHash: o.txHash, block: o.block } })
+    delete r.sending
+  }
   r.updatedAt = now
   return true
 }
 
 /**
  * Whether the nonce of a sending request is already used at the head: one of its tries landed, or another op took it.
- * Until the burn is settled at `safe`, the engine is not told of the request (it would free value again for a burn
- * already sent); nothing is signed for it meanwhile.
+ * Until it is settled at `safe` the engine holds (the operator stops the review): neither freeing value again for a
+ * burn already out, nor placing what the home asked back.
  */
 export async function nonceUsedAtHead(acc: AccountState, chain: Pick<PublicClient, 'readContract'>, registry: Registry): Promise<boolean> {
   const s = acc.release?.state === 'sending' ? acc.release.sending : undefined

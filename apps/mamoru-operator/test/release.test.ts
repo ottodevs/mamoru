@@ -4,7 +4,7 @@ import type { AccountContext } from '@mamoru/domain'
 import { address, baseRegistry, messageTransmitterV2Abi, tokenMessengerV2Abi } from '@mamoru/registry'
 import type { BridgeSigning } from '@mamoru/scenarios/driver/engine.ts'
 import { MESSAGE_TRANSMITTER_V2, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
-import { beforeSign, cancelRelease, homeOf, nonceUsedAtHead, releaseObs, ReleaseRefused, releaseView, requestRelease, RELEASES_KEPT, settle, unsigned, type SettleChain } from '../src/release.ts'
+import { beforeSign, cancelRelease, homeOf, nonceUsedAtHead, releaseObs, ReleaseRefused, releaseView, requestRelease, RELEASES_KEPT, applySettle, settleOutcome, unsigned, type SettleChain } from '../src/release.ts'
 import type { AccountState } from '../src/state.ts'
 
 // The settle logic is chain-agnostic: these tests run it against the Base registry (USDC, messenger, EntryPoint there).
@@ -17,6 +17,9 @@ const UOP2 = `0x${'ef'.repeat(32)}` as Hex
 const TX = `0x${'cd'.repeat(32)}` as Hex
 const T = '2026-11-02T18:00:00.000Z'
 const AMOUNT = 4_000_000n
+/** A smart-session nonce key (non-zero, as the engine's) and the full EntryPoint nonce of the burn: key << 64 | 7. */
+const KEY = 0x1234n
+const N = (KEY << 64n) | 7n
 
 function remote(over: { home?: string | null; homeDomain?: number } = {}): AccountState {
   const spec = { chainId: 143, policyId: 'one-auth-v4-remote', sessionKey: '0x01', validAfter: 0, validUntil: 0, capUsdc: '1000', ...(over.home === null ? {} : { home: over.home ?? HOME, homeDomain: over.homeDomain ?? 6 }) }
@@ -25,7 +28,7 @@ function remote(over: { home?: string | null; homeDomain?: number } = {}): Accou
 
 const signing = (over: Partial<BridgeSigning> = {}): BridgeSigning => ({
   opId: 'op-1', account: SAFE, recipient: HOME, depositor: V4, chainId: 8453, pool: 'pool:WMON/USDC/3000', bucket: 'growth', amount: AMOUNT, destinationDomain: 6,
-  userOpHash: UOP, nonceKey: 0n, nonce: 7n, prepareBlock: 1_000n, ...over,
+  userOpHash: UOP, nonceKey: KEY, nonce: N, prepareBlock: 1_000n, ...over,
 })
 
 const refused = (f: () => unknown) => {
@@ -102,11 +105,11 @@ describe('release: signing', () => {
   test('the first try goes on disk as sending; tries at the same nonce are added; another nonce is refused until settled', () => {
     const acc = opened()
     beforeSign(acc, signing(), T)
-    expect(acc.release).toMatchObject({ state: 'sending', sending: { nonceKey: '0', nonce: '7', fromBlock: '1000', tries: [{ userOpHash: UOP, amount: AMOUNT.toString() }] } })
+    expect(acc.release).toMatchObject({ state: 'sending', sending: { nonceKey: KEY.toString(), nonce: N.toString(), fromBlock: '1000', tries: [{ userOpHash: UOP, amount: AMOUNT.toString() }] } })
     beforeSign(acc, signing(), T)
     beforeSign(acc, signing({ userOpHash: UOP2, amount: AMOUNT - 1n }), T)
     expect(acc.release!.sending!.tries.map((t) => t.userOpHash)).toEqual([UOP, UOP2])
-    expect(() => beforeSign(acc, signing({ userOpHash: `0x${'99'.repeat(32)}`, nonce: 8n }), T)).toThrow('not settled yet')
+    expect(() => beforeSign(acc, signing({ userOpHash: `0x${'99'.repeat(32)}`, nonce: N + 1n }), T)).toThrow('not settled yet')
     // Still read by the engine while sending: nothing else is placed, and a try never sent is replaced at the same nonce.
     expect(releaseObs(acc)).toEqual({ amount: AMOUNT, chainId: 8453 as never })
   })
@@ -165,24 +168,28 @@ function receiptLogs(o: { amount?: bigint; recipient?: Hex; depositor?: Hex } = 
   ]
 }
 
-/** `nonce` at safe; `landed`: the try whose UserOperationEvent is on chain, with its outcome and receipt. */
-function chain(o: { safe?: bigint; nonce: bigint; landed?: { hash: Hex; success?: boolean; logs?: Log[]; sender?: Hex; eventNonce?: bigint } }): SettleChain & { ranges: [bigint, bigint][] } {
-  const ranges: [bigint, bigint][] = []
+/**
+ * A fake Monad: the Safe's nonce N is used from block `usedFrom` on (absent: never), by the op `landed` in that block
+ * (one of the tries, or another hash), with its outcome and receipt. `eventsLag`: the log provider answers nothing.
+ */
+function chain(o: { safe?: bigint; usedFrom?: bigint; landed?: { hash: Hex; success?: boolean; logs?: Log[] }; eventsLag?: boolean }): SettleChain & { nonceReads: bigint[] } {
+  const nonceReads: bigint[] = []
+  const safe = o.safe ?? 1_020n
   return {
-    ranges,
-    getBlock: async () => ({ number: o.safe ?? 1_020n }),
-    readContract: async ({ functionName }: { functionName: string }) => {
-      if (functionName === 'getNonce') return o.nonce
-      throw new Error(functionName)
+    nonceReads,
+    getBlock: async () => ({ number: safe }),
+    readContract: async ({ functionName, blockNumber }: { functionName: string; blockNumber?: bigint }) => {
+      if (functionName !== 'getNonce') throw new Error(functionName)
+      const at = blockNumber ?? safe + 5n
+      nonceReads.push(at)
+      return o.usedFrom !== undefined && at >= o.usedFrom ? N + 1n : N
     },
-    getLogs: async ({ args, fromBlock, toBlock }: { args: { userOpHash: Hex }; fromBlock: bigint; toBlock: bigint }) => {
-      ranges.push([fromBlock, toBlock])
-      const l = o.landed
-      if (!l || l.hash !== args.userOpHash || 1_010n < fromBlock || 1_010n > toBlock) return []
-      return [{ args: { userOpHash: l.hash, sender: l.sender ?? SAFE, nonce: l.eventNonce ?? 7n, success: l.success ?? true }, blockNumber: 1_010n, transactionHash: TX, logIndex: 3 }]
+    getLogs: async ({ args, fromBlock, toBlock }: { args: { sender: Hex }; fromBlock: bigint; toBlock: bigint }) => {
+      if (o.eventsLag || !o.landed || o.usedFrom === undefined || o.usedFrom < fromBlock || o.usedFrom > toBlock || args.sender.toLowerCase() !== SAFE) return []
+      return [{ args: { userOpHash: o.landed.hash, sender: SAFE, nonce: N, success: o.landed.success ?? true }, blockNumber: o.usedFrom, transactionHash: TX, logIndex: 3 }]
     },
     getTransactionReceipt: async () => ({ logs: o.landed?.logs ?? receiptLogs() }),
-  } as unknown as SettleChain & { ranges: [bigint, bigint][] }
+  } as unknown as SettleChain & { nonceReads: bigint[] }
 }
 
 const sending = (tries: Hex[] = [UOP]) => {
@@ -191,50 +198,77 @@ const sending = (tries: Hex[] = [UOP]) => {
   return acc
 }
 
-describe('release: settled by the chain', () => {
+/** settleOutcome then applySettle, as the operator does. */
+async function settled(acc: AccountState, c: SettleChain): Promise<boolean> {
+  const r = acc.release!
+  const nonce = r.sending!.nonce
+  return applySettle(acc, r, nonce, await settleOutcome(acc, c, REG), T)
+}
+
+describe('release: settled by the chain (review r2: the op that used the nonce, found positively)', () => {
   test('nonce unused at safe: still sending, no log read', async () => {
     const acc = sending()
-    const c = chain({ nonce: 7n })
-    expect(await settle(acc, c, REG, T)).toBe(false)
+    expect(await settled(acc, chain({}))).toBe(false)
     expect(acc.release!.state).toBe('sending')
-    expect(c.ranges).toHaveLength(0)
   })
 
-  test('nonce used and one of its tries landed with exactly its burn: burned with tx, block and that try amount', async () => {
+  test('one of its tries used the nonce with exactly its burn: burned with tx, the landing block and that amount', async () => {
     const acc = sending([UOP, UOP2])
-    expect(await settle(acc, chain({ nonce: 8n, landed: { hash: UOP } }), REG, T)).toBe(true)
+    const c = chain({ usedFrom: 1_010n, landed: { hash: UOP } })
+    expect(await settled(acc, c)).toBe(true)
     expect(releaseView(acc)).toEqual({ id: 'r1', amount: AMOUNT.toString(), chainId: 8453, state: 'burned', burn: { amount: AMOUNT.toString(), txHash: TX, block: 1010 } })
     expect(acc.release!.sending).toBeUndefined()
-    expect(releaseObs(acc)).toBeUndefined()
+    // Bounded: a binary search, not a scan of every block.
+    expect(c.nonceReads.length).toBeLessThan(12)
   })
 
-  test('nonce used by another op, none of the tries on chain: open again (it can never land)', async () => {
-    const acc = sending([UOP, UOP2])
-    expect(await settle(acc, chain({ nonce: 8n }), REG, T)).toBe(true)
-    expect(acc.release).toMatchObject({ state: 'open' })
-    expect(acc.release!.sending).toBeUndefined()
+  test('another op used the nonce: open again; its try reverted: open again', async () => {
+    const other = sending()
+    expect(await settled(other, chain({ usedFrom: 1_010n, landed: { hash: `0x${'77'.repeat(32)}` } }))).toBe(true)
+    expect(other.release!.state).toBe('open')
+    const reverted = sending()
+    expect(await settled(reverted, chain({ usedFrom: 1_010n, landed: { hash: UOP, success: false } }))).toBe(true)
+    expect(reverted.release!.state).toBe('open')
   })
 
-  test('its try reverted: open again, nothing burned', async () => {
+  test('nonce used but the log provider shows no event: throws, stays sending (never taken for "not burned")', async () => {
     const acc = sending()
-    expect(await settle(acc, chain({ nonce: 8n, landed: { hash: UOP, success: false } }), REG, T)).toBe(true)
-    expect(acc.release!.state).toBe('open')
+    await expect(settleOutcome(acc, chain({ usedFrom: 1_010n, landed: { hash: UOP }, eventsLag: true }), REG)).rejects.toThrow('without its UserOperationEvent')
+    expect(acc.release!.state).toBe('sending')
   })
 
-  test('landed but not exactly its burn (other recipient, depositor or amount), or an event of another sender: throws, stays sending', async () => {
+  test('landed before the first prepare block (a provider ahead), or after a late prepare above safe: still found', async () => {
+    const early = sending()
+    expect(await settled(early, chain({ usedFrom: 995n, landed: { hash: UOP } }))).toBe(true)
+    expect(early.release).toMatchObject({ state: 'burned', burn: { block: 995 } })
+    const late = sending()
+    expect(await settled(late, chain({ safe: 1_000n, usedFrom: 1_000n, landed: { hash: UOP } }))).toBe(true)
+    expect(late.release).toMatchObject({ state: 'burned', burn: { block: 1000 } })
+  })
+
+  test('landed but not exactly its burn (other recipient, depositor or amount): throws, stays sending', async () => {
     for (const logs of [receiptLogs({ recipient: SAFE }), receiptLogs({ depositor: SAFE }), receiptLogs({ amount: AMOUNT - 1n })]) {
       const acc = sending()
-      await expect(settle(acc, chain({ nonce: 8n, landed: { hash: UOP, logs } }), REG, T)).rejects.toThrow('without exactly its burn')
+      await expect(settleOutcome(acc, chain({ usedFrom: 1_010n, landed: { hash: UOP, logs } }), REG)).rejects.toThrow('without exactly its burn')
       expect(acc.release!.state).toBe('sending')
     }
-    const acc = sending()
-    await expect(settle(acc, chain({ nonce: 8n, landed: { hash: UOP, sender: HOME } }), REG, T)).rejects.toThrow('UserOperationEvent of')
   })
 
-  test('nonce used at the head (landed or taken, not settled at safe yet): the engine is not told of the request', async () => {
+  test('an outcome read for a request that changed meanwhile is not applied (anything written while it read wins)', async () => {
+    const acc = sending()
+    const r = acc.release!
+    const o = await settleOutcome(acc, chain({ usedFrom: 1_010n, landed: { hash: `0x${'77'.repeat(32)}` } }), REG)
+    // Meanwhile: settled elsewhere and a new request opened.
+    Object.assign(r, { state: 'burned' })
+    requestRelease(acc, { id: 'r2', amount: '1' }, T)
+    expect(applySettle(acc, r, N.toString(), o, T)).toBe(false)
+    expect(acc.release).toMatchObject({ id: 'r2', state: 'open' })
+  })
+
+  test('nonce used at the head (landed or taken, not settled at safe yet): the review holds', async () => {
     const read = (n: bigint) => ({ readContract: async () => n }) as never
-    expect(await nonceUsedAtHead(opened(), read(9n), REG)).toBe(false)
-    expect(await nonceUsedAtHead(sending(), read(7n), REG)).toBe(false)
-    expect(await nonceUsedAtHead(sending(), read(8n), REG)).toBe(true)
+    expect(await nonceUsedAtHead(opened(), read(N + 2n), REG)).toBe(false)
+    expect(await nonceUsedAtHead(sending(), read(N), REG)).toBe(false)
+    expect(await nonceUsedAtHead(sending(), read(N + 1n), REG)).toBe(true)
   })
 })

@@ -34,7 +34,7 @@ import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
 import { buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
-import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, nonceUsedAtHead, settle as settleRelease, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
+import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
 import { baseStepLines, monadStepLines, readRegistryPools, readV4Paused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
 import { draftUserOp, executeCallData, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
@@ -6128,25 +6128,43 @@ export class Operator {
     }
   }
 
+  /**
+   * A sending request settled against the chain: reads first (nothing is changed while they run, and a read error
+   * changes nothing), then the outcome applied at once, only to the same request at the same nonce, saved, and undone
+   * if the save throws.
+   */
   private async settleReleaseOf(acc: AccountState): Promise<void> {
-    if (acc.release?.state !== 'sending') return
-    const before = structuredClone(acc.release)
+    const r = acc.release
+    if (r?.state !== 'sending' || !r.sending) return
+    const nonce = r.sending.nonce
+    let o: Awaited<ReturnType<typeof settleOutcome>>
     try {
-      if (await settleRelease(acc, this.client, this.cfg.registry, now())) this.store.save()
+      o = await settleOutcome(acc, this.client, this.cfg.registry)
     } catch (e) {
-      acc.release = before
       console.error(`[release] ${acc.accountKey}: ${(e as Error).message?.split('\n')[0]}`)
+      return
+    }
+    const before = structuredClone(r)
+    if (!applySettle(acc, r, nonce, o, now())) return
+    try {
+      this.store.save()
+      if (o.kind === 'reopen') console.log(`[release] ${acc.accountKey}: ${r.id} open again (${o.why})`)
+    } catch (e) {
+      Object.assign(r, before)
+      if (!before.sending) delete r.sending
+      if (!before.burn) delete r.burn
+      console.error(`[release] ${acc.accountKey}: could not save the settled ${r.id}: ${(e as Error).message?.split('\n')[0]}`)
     }
   }
 
   /**
-   * The engine's `release` on a V4 remote Safe, before each review: the request settled against the chain, and none
-   * while a sending burn's nonce is used at the head but not settled at `safe` yet (the burn may be out already).
+   * The engine's `release` on a V4 remote Safe, before each review: the request settled against the chain; while a
+   * sending burn's nonce is used at the head but not settled at `safe`, the review holds (the burn may be out).
    */
   private async releaseForReview(acc: AccountState): Promise<Observation['release'] | undefined> {
-    // No account lock: a review never waits behind an owner operation; settling is idempotent (both read the chain).
+    // No account lock: a review never waits behind an owner operation; settle applies only to an unchanged request.
     await this.settleReleaseOf(acc)
-    if (await nonceUsedAtHead(acc, this.client, this.cfg.registry)) return undefined
+    if (await nonceUsedAtHead(acc, this.client, this.cfg.registry)) throw new ReasonError('DECIDE_RELEASE', `release ${acc.release?.id}: its burn's nonce is used, settling at safe`)
     return releaseObs(acc)
   }
 

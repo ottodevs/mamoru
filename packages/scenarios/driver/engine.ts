@@ -720,6 +720,7 @@ export class Engine {
         const release = await this.cfg.release()
         if (release && release.amount > 0n) obs = { ...obs, release }
       } catch (e) {
+        if (e instanceof ReasonError) return { kind: 'observation-failed', code: e.code, detail: e.detail }
         return { kind: 'observation-failed', code: 'OBS_RPC_UNAVAILABLE', detail: `release: ${(e as Error).message?.split('\n')[0] ?? String(e)}` }
       }
     }
