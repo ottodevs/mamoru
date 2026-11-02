@@ -9,7 +9,7 @@ import {PolicyFixture} from "./MamoruActionPolicy.t.sol";
 
 /**
  * otto/mamoru#93: what a public engine session key can lose for a 25 USDC account, measured on a Base fork.
- * It prints the numbers docs/security/leaked-key-loss.md quotes, and asserts the bounds those numbers rest on.
+ * It prints the numbers docs/security/leaked-key.md quotes, and asserts the bounds those numbers rest on.
  * Run alone:
  *   forge test --mc LeakedKeyLoss -vv
  *
@@ -113,8 +113,8 @@ contract LeakedKeyLoss is PolicyFixture {
 
     // ------------------------------------------------------------ v2: minOut 1
 
-    /// Pushes of increasing depth before a minOut-1 swap. Prints the account's loss and the attacker's net USDC after
-    /// pushing back (positive: the sandwich pays for itself, so it is theft through the pool, not only griefing).
+    /// Pushes of increasing depth before a minOut-1 swap. Prints the account's loss and what the push and the push
+    /// back cost a pure taker (an attacker who also owns the pool's liquidity gets that back; not modelled).
     function test_v2_minOutOneSandwich() public {
         Leg[3] memory legs = _legs();
         int24[4] memory depths = [int24(10), 100, 1000, 10_000];
@@ -154,8 +154,8 @@ contract LeakedKeyLoss is PolicyFixture {
     }
 
     function _logNet(uint256 spent, uint256 back) internal pure {
-        if (back >= spent) console2.log("    attacker net +USDC (6 dp):", back - spent);
-        else console2.log("    attacker net -USDC (6 dp):", spent - back);
+        if (back >= spent) console2.log("    taker round trip +USDC (6 dp):", back - spent);
+        else console2.log("    taker round trip -USDC (6 dp):", spent - back);
     }
 
     // ------------------------------------------------------------ v6: the TWAP band

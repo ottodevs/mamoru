@@ -8,7 +8,7 @@ The setup is one Mamoru account on Base with a 25 USDC cap. Its engine session k
 
 **"This key cannot send your money to anyone else."** Do not say "you cannot lose anything" or "the key is harmless". As shown below, the key can still lose value inside the account.
 
-The claim rests on these fork scenarios:
+The claim rests on these fork scenarios. They run on the lab policy `conservador-lab-v1` (UniActionPolicy, the same rules v2 uses for recipients, targets and approvals), not on v6:
 
 | Attempt | Scenario | Refused with |
 |---|---|---|
@@ -18,6 +18,8 @@ The claim rests on these fork scenarios:
 | Add an owner, install a module, set a guard, delegatecall | SESS-14, SESS-15, SESS-16, SESS-23 | `POLICY_DENIED_TARGET` |
 
 The key also cannot sign for the account: there is no ERC-1271 policy (`packages/account/sessions/index.ts`). It cannot reach a paymaster or the relayer subsidy either. Sessions have `permitERC4337Paymaster: false` (`packages/policy/src/instantiate.ts`), so the Safe pays its own gas.
+
+On v6, MamoruActionPolicyV3 adds ERC-4626 vault and CCTP routes. It admits them only with `receiver == account` (and `owner == account` on the way out), and a CCTP burn only to the configured domain with `mintRecipient` equal to the account's own address (`contracts/action-policy/src/MamoruActionPolicyV3.sol`). No SESS scenario runs these routes on v6 yet; the V3 Foundry suites cover them.
 
 ## What it can lose: the sandwich
 
@@ -40,27 +42,27 @@ Every token stays in the account, but the account trades at a bad price. How bad
 forge test --mc LeakedKeyLoss -vv
 ```
 
-Swap sizes are the v2 per-call caps at C = 25: 12.5 USDC for stables, 10 for cbBTC, 5 for WETH. Each loss is measured against the 30-min TWAP quote, so it includes the pool fee. "Attacker net" is what the push and the push back cost the attacker in USDC.
+Swap sizes are the v2 per-call caps at C = 25: 12.5 USDC for stables, 10 for cbBTC, 5 for WETH. Each loss is measured against the 30-min TWAP quote, so it includes the pool fee. "Taker round trip" is what the push and the push back cost an attacker who only trades and owns no liquidity in the pool. An attacker who also provides the liquidity the account trades against gets those fees and that impact back, and captures the account's loss. That case is not modelled here, so the taker cost is not a floor on the attacker's cost.
 
 **v2: the swap the key signs with minOut 1.**
 
-| Pool | Push | Account loss | Attacker net |
+| Pool | Push | Account loss | Taker round trip |
 |---|---|---|---|
 | USDC/USDT 0.01% | 100 ticks | 1.0% | -23.8 USDC |
 | | 10,000 ticks | 63% | -17.4 USDC |
 | USDC/cbBTC 0.05% | 10,000 ticks | 63% | -4,366 USDC |
 | WETH/USDC 0.3% | 10,000 ticks | 63% | -575,219 USDC |
 
-A deeper push takes the swap close to 100%. Nothing on chain bounds the loss below the amount.
+Nothing on chain bounds the loss below the amount: the test asserts more than 60% at 10,000 ticks, and a deeper push takes more (not measured). With minOut 1, the swap's loss is whatever the attacker's push makes it.
 
-On these pools the sandwich does not pay for itself. The attacker spends more than the account loses, so this is griefing, not theft. The cheapest route is the stables pool: about 17 USDC of the attacker's money to wipe one 12.5 USDC swap.
+Treat this as theft, not only griefing. A pure taker pays more than the account loses (17.4 USDC of round trip for a 7.9 USDC loss on the stables pool), but an attacker who owns the liquidity at the pushed price keeps the account's loss.
 
 **v6: the spot parked one tick inside the band edge.** This is the worst price V3 admits. One tick further and validation refuses the swap.
 
-| Pool | No push (churn at spot) | At the band edge | Attacker net per push |
+| Pool | No push (churn at spot) | At the band edge | Taker round trip per push |
 |---|---|---|---|
 | USDC/USDT 0.01% | 0.00% | 0.08% | -9.3 USDC |
-| USDC/cbBTC 0.05% | 0.08% | 1.03% | -360 USDC |
+| USDC/cbBTC 0.05% (USDC in) | 0.08% | 1.03% | -360 USDC |
 | WETH/USDC 0.3% | 0.42% | 1.28% | -43,365 USDC |
 
 V3 refuses the minOut 1 swap that v2 accepts. It also refuses a push one tick past the edge.
@@ -74,18 +76,20 @@ Spec 007 bounds the volume a key can make the account swap per pool: `V_p + 2 x 
 
 cbBTC is exit-only in v6.
 
+The rates are the measured ones on 5 to 12.5 USDC swaps, not spec 007's `band + fee` (about 0.11% for stables and 1.3% for WETH/USDC at the full band). They sit just under it.
+
 | Session revoked | Free (churn at spot) | Paid (spot at the edge) |
 |---|---|---|
 | within 1 day | 0.35 USDC | 1.25 USDC |
 | never | 0.80 USDC | 2.6 USDC |
 
-Add 1.03% of any cbBTC the account still holds; at most 10 USDC of cbBTC gives 0.10.
+Add about 1% of any cbBTC the account still holds; at most 10 USDC of cbBTC gives about 0.10. This is an estimate: the test measures USDC into cbBTC, while v6's cbBTC grant only sells cbBTC for USDC.
 
-To get the paid column through WETH/USDC, the attacker spends about 43k USDC per push. The rational worst case is therefore the free column, plus a few cents through the stables.
+A taker would pay about 43k USDC per push through WETH/USDC to reach the paid column. An attacker who owns the liquidity there pays far less, so the paid column is the worst case to quote.
 
 ### Gas
 
-The Safe pays its own gas from a reserve of 0.0005 ETH, about 1.35 USD (`docs/gas-reserve.md`):
+The Safe pays its own gas from a reserve of 0.0005 ETH, about 1.35 USD at 2,700 USD/ETH (`docs/gas-reserve.md`). It is counted in USD next to the USDC loss:
 
 - **v2:** no gas policy. A key holder who submits its own user operation can set any fee and spend the whole reserve in one operation.
 - **v6:** MamoruGasPolicy caps one operation at 5.2e14 wei. That is about the whole reserve, so the result is the same.
@@ -97,14 +101,14 @@ Count the whole reserve as lost in both policies.
 
 | Policy | Worst case at C = 25 | Bounty |
 |---|---|---|
-| v2 | The whole account (~25 USDC) plus ~1.35 USD of gas. Griefing at a cost to the attacker of about 2 to 3 times the loss, measured through the stables. | **No-go** |
-| v6 | Rational, never revoked: ~0.8 USDC + 1.35 USD of gas, about 9% of 25. Paid, never revoked: ~2.7 USDC + 1.35 USD, about 16%, for an attacker who spends tens of thousands of USDC. | Go, after review and Ot's GO, on a v6 account only |
+| v2 | The whole account (~25 USDC) plus ~1.35 USD of gas. Theft through the pool is possible for an attacker who owns the liquidity. | **No-go** |
+| v6 | Never revoked: ~2.7 USDC (with 10 USDC of cbBTC) + 1.35 USD of gas, about 16% of 25. Without any push: ~0.8 USDC + 1.35 USD, about 9%. | Go, after review and Ot's GO, on a v6 account only. The page quotes the 16%. |
 
 The v2 row is not specific to the bounty. Any account still on v2 has the same bound if the operator's key leaks. Spec 007 and V3 exist to fix that.
 
 ## What the user sees today
 
-Nothing specific. SESS-24 (`SESSION_FOREIGN_USE`: alert, pause, "Revoke Mamoru now") is specified in `specs/001-mamoru-v1/scenarios.md` but is not in the catalog. The guardian watches only V4 registrations.
+Nothing specific. SESS-24 (`SESSION_FOREIGN_USE`: alert, pause, "Revoke Mamoru now") is specified in `specs/001-mamoru-v1/scenarios.md` but is not in the catalog. The guardian watches only V4 registrations and registry queues (`apps/mamoru-guardian/README.md`).
 
 Two signals show indirectly:
 
