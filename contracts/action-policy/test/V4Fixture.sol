@@ -554,10 +554,9 @@ abstract contract V4Fixture is Test {
         assertTrue(ISmartSessionT(SMART_SESSION).isPermissionEnabled(pid, safe), "V4 session enabled");
     }
 
-    /// The registry-backed deployment: V4 and the gas policy registered as modules (so a Safe can attest them), as
-    /// T7 deploys them through ModuleRegistry.deployModule. On forks, the deterministic-deployer copies are given a
-    /// module record by deploying the same init code through the module registry at a second address would change the
-    /// address; instead the tests deploy the stack through ModuleRegistry itself when they need attestations.
+    /// The stack deployed through ModuleRegistry.deployModule (CREATE2 from the module registry), so V4 and the gas
+    /// policy have module records and a Safe can self-attest them for the production enable flow (T7's path on the
+    /// home chain). Single-chain tests only; the cross-chain tests use the deterministic deployer (`_deployStack`).
     function _deployStackViaModuleRegistry() internal {
         bytes32 resolverUID = IModRegT(MODULE_REGISTRY).findModule(TIME_FRAME).resolverUID;
         vm.startPrank(makeAddr("deployer"));

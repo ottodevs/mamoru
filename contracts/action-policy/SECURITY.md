@@ -1,3 +1,90 @@
+# MamoruActionPolicyV4: threat model (spec 010, one authorization)
+
+Scope: `src/MamoruActionPolicyV4.sol` (with `MamoruV4Helper`, created by V4), `src/MamoruRegistry.sol`, `src/MamoruGasPolicyV2.sol`, `src/MamoruRemoteSafe.sol` (`MamoruRemoteInit` and the initializer encoders), `src/MamoruV4Chains.sol`, `src/MamoruMigrationCheck.sol` (otto/mamoru#292). Not deployed and not audited. Results and every measured figure: `specs/010-one-authorization/results/t2-t4-contracts-2026-11-02.md`.
+
+The account carries **one** SmartSession session per chain: a single fallback action (`FALLBACK_TARGET_FLAG`) whose only action policy is V4, and `MamoruGasPolicyV2` as its only userOp policy. The owner signs once (`InitV4`: the cap C, the generation, and for a remote Safe its home). Which pools, vaults and chain routes the engine may use comes from `MamoruRegistry`, timelocked. Everything that could send value elsewhere (router, position manager, messenger, tokens, Safe stack, the remote's shape) is a V4 constant.
+
+Adversaries: a leaked **session key** (or a misbehaving operator); a leaked **registry admin** (both keys of the team Safe); a leaked **guardian**; combinations. Not covered: anything the owner signs (withdrawals, Stop, rotations, migrations), Circle (CCTP, USDC), Uniswap, Safe, Rhinestone's code as deployed, and a MetaMorpho curator's conduct inside the vault's share of the bucket.
+
+## I1: funds land only in the owner's Safes; approvals only to V4
+
+| Check | Threat | Why it holds |
+|---|---|---|
+| `checkAction` admits only: V4's `swap`, `mint`, `increase`, `deposit`, `redeem`, `bridge`, `registerRemote`; `approve(V4, x)` on any target but the position manager; the position manager's `decreaseLiquidity`, `collect`, `burn` of admitted positions. Everything else returns FAILED. | A key approves the router, a vault, the messenger or itself, calls them directly, transfers, withdraws the EntryPoint deposit, calls the Safe itself. | The fallback action sends every call of every session op through `checkAction` (T1). Tested at validation through the real stack (`V4UserOpFork`, `AA23` for each) and directly (`test_I1_checkActionAdmitsOnlyV4AndExits`). SmartSession itself refuses empty batches and calls to SmartSession. |
+| Each V4 spending function pulls the exact amount from `msg.sender`, approves the pinned counterparty for exactly that amount, acts with the account as recipient, resets the allowance to 0 and returns any rest (balance delta). | The counterparty pulls more, or an allowance lingers on the router / manager / vault / messenger. | Test asserts allowances back to 0 and nothing left in V4 after every action. |
+| V4 only ever pulls from `msg.sender`, inside its own functions, under `nonReentrant`. | A leftover allowance on V4 (even unlimited) is used by someone else. | No V4 function takes a `from`. `test_I1_leftoverAllowanceIsInert`. |
+| Every check of V3's swap / mint / increase / vault / bridge paths runs at **execution**, inside V4's function, with the account as `msg.sender`. | A check at validation and an action at execution see different states (V3's LeftClaw M-2 window). | There is no window; a failing check reverts the action (nothing charged, nothing moved; the op's gas is still charged to the gas bucket). |
+| `value == 0`, `data.length >= 4`. | Native value leaves; an action-free op. | |
+| The session cannot sign for the account. | A leaked key signs a `permit` / Permit2 order. | The V4 session has no ERC-1271 policy; SmartSession refuses (`test_sessionKeyCannotSignForTheAccount`). |
+
+## Pinned in V4 (r1 P0, r2 P1)
+
+| Check | Threat | Why it holds |
+|---|---|---|
+| Per-chain tuple in code (`MamoruV4Chains`, keyed by `block.chainid`): Uniswap factory, position manager, SwapRouter02, pinned stables (USDC, USDT on Base; USDC on Monad), pinned assets (WETH, cbBTC; WMON), MetaMorpho factories (Base), CCTP domain. Only Base and Monad. | The registry names a router, a manager, a messenger, a token, a "stable". | The registry has no such entries. A pool must be `factory.getPool(token0, token1, fee) == pool` of two pinned tokens, one a pinned stable (the budget unit); a stable pair must carry the parity anchor. Tests: non-pinned EURC pool refused, the router or messenger listed as a "pool"/"vault" refused, a route to an unpinned domain refused. A chain outside the table refuses every enable and every validation. |
+| Safe stack code hashes at every enable (singleton, factory, MultiSend, Safe7579, launchpad, shared signer, SmartSession, OwnableValidator, messenger proxy). | A chain where the canonical address runs different code. | `BadStack` (tested by etching one). |
+| CCTP burn token: a pinned stable that the canonical messenger's own `localMinter().burnLimitsPerMessage(token) > 0`. | A burn of anything else. | |
+| V4, its helper, `MamoruRemoteInit`, the gas policy and the registry are CREATE2 with chain-independent init code; the runtime code reads the chain only at call time. | "The same address" means different code on another chain. | Deterministic deployer, same salts and arguments on both forks give the same addresses (`V4RemoteFork` setUp asserts it). |
+
+## I2: price and depth
+
+V3's two-TWAP range, anchor, swap bounds (minOut and limit at the range edge, limit strictly past the spot), mint/increase minimums at the spot, decrease minimums without the anchor (M-6): unchanged, in `MamoruV4Helper`, run at execution. Parameters come from the registry entry and are **refused** (never clamped) outside V3's hard bounds, by the registry at queue and by V4 at use (`test_M1_entriesOutsideTheHardBoundsAreRefusedByV4`). At every priced use, LeftClaw M-5's in-band depth must cover `DEPTH_MULTIPLE` (20) times the call's value. The tick walk is capped at 64 steps per direction, which can only under-count the depth (refuse more). A thin pool queued by a compromised admin, live after 72 h, is refused for any call of meaningful size (`test_trapThinPoolAfterDelayRefused`). The observation ring must cover the long window at every use (T6 L-4).
+
+## I3: positions
+
+As V3: only positions minted through V4 or admitted in an owner-signed Init, still owned by the account. The account-wide Init revokes a position for good (M-4). A position in a pool the registry removed is exit-only: decrease, collect, burn priced by the removed entry's kept parameters; no increase (I8).
+
+## I4: the remote Safe
+
+| Check | Threat | Why it holds |
+|---|---|---|
+| `remoteOf` is computed by V4 (`MamoruV4Helper.remote`) from the account's **current** owners, threshold and passkey (x, y, verifiers), the domain, the session key, and V4's own canonical initializer. Salt `keccak(account, domain, ownersHash)`. `registerRemote` acts on `msg.sender` only. | A key names another account's state, or a revoked key is carried into a new remote (r2 P0). | Nothing but the session key is caller-supplied. `test_I4_registerRemoteWithAnotherAccountsStateRefused`. |
+| The initializer: plain `Safe.setup` (owners, threshold, the shared signer's `configure`), then `MamoruRemoteInit` (enable Safe7579, initialize it with SmartSession as the only validator, ERC-7484 registry **off**), SmartSession in UNSAFE_ENABLE with one fallback session bound to V4 (`InitV4{C, 1, home, homeDomain}`) and the gas policy with the destination's pinned caps. | The remote cannot be deployed after funds were minted to it (r2 P0-1). | Deployment reads only code and immutable state. **Deviation from the spec's self-attestation**: an attestation goes through ModuleRegistry's resolver for SmartSession's record, which the Rhinestone attester can repoint (`setResolver`); T1b does it on a fork and the self-attested setup reverts, while this one deploys. It deploys 400 days later too. |
+| `bridge` from a home account: the registry routes the domain, the guardian marked the registered remote ready for the same owners hash, and the account's owners hash is still that one. | A burn to an address nobody verified deployable and correct (r4 P0); a burn during a rotation (r3 P0-1). | Only the guardian writes readiness, after reading the remote back on its chain. Any owner change makes `isReady` false and refuses every burn until re-registration and a new read-back. A new registration starts unready. Tests: refused before readiness, after an owner swap, after the route's removal. |
+| `bridge` from a remote Safe: only to its `home`, on its `homeDomain`. | A remote's funds go anywhere else. | Bridge-back needs no route and no readiness, so an exit always works. |
+| A remote cannot register remotes. | Chains multiply past MAX_CHAINS. | `BadBridge(4)`. |
+
+Residual (accepted in the spec): a compromised (not lost) passkey controls every remote until rotated there; the guardian is trusted to read a remote back before `setReady` (a compromised guardian alone moves no funds: it can only mark V4's own computed address); a leaked session key can choose the remote's session key (bounded by V4 on the remote) and can keep re-registering to clear readiness (griefing).
+
+## I5: the account's budget per chain
+
+| Limit | Mechanism | Crossing call |
+|---|---|---|
+| Account bucket | Token bucket of capacity C, refilled C per day. | Reverts `BudgetExceeded(0)`. |
+| Per pool / per vault | Token bucket of `ratioBps x C`, same refill; a capacity change settles the refill at the old rate first, then clamps (LeftClaw M-3). | Reverts `BudgetExceeded(key)`. |
+| Rolling 30 days | Sum over 31 daily periods (covers at least the last 30 days) <= 3C. | Reverts `Cap30Exceeded`. |
+| Circuit breaker | Sum over 25 hourly periods (covers at least the last 24 h) <= C. | Not executed; V4 pauses the account (`PAUSE_BREAKER`) until the guardian unpauses. |
+| Review threshold | Spend since the guardian's last `review` <= 10C. | Not executed; V4 pauses (`PAUSE_REVIEW`) until the guardian reviews. |
+
+Charged: swaps (amountIn at the range edge that values it highest), mints and increases (desired amounts, same valuation), vault deposits (assets). Not charged: decrease, collect, burn (the band bounds their price), redeem (value returns to the account), bridge (value stays the user's, bounded by V4 on the other chain). Because the breaker never lets the crossing call execute, the stated bounds are hard: C per 24 h, 3C per 30 days, 10C between reviews, per chain, times at most MAX_CHAINS (4) chains per account.
+
+## I6: gas (`MamoruGasPolicyV2`)
+
+V1's per-op caps, plus a per-account bucket per window and a cumulative `GAS_REVIEW` (0.01 ETH on Base, 5 MON on Monad, 0 elsewhere: fail closed). Each op is charged at validation from its own capped fields, `(call + verification + preVerification + paymaster limits) x maxFeePerGas`, the EntryPoint prefund; an op that would cross either is rejected. Only SmartSession can charge (V1 let any caller write its own slot; V2's per-account state forbids it). Measured through the EntryPoint: at the caps, 3 griefing ops per day, 19 in total, then every op refused until the guardian reviews; the Safe paid 0.00053 ETH for them (the charge, 0.00988 ETH, is the prefund bound).
+
+## I7, I8: guardian and registry
+
+Guardian: `pause`, `unpause`, `review` (V4 and the gas policy), `setReady` / `clearReady` (I4), and `cancel` on the registry. It cannot enable, widen, list or move anything. Registry admin (the team Safe, 2 of 2): `queue` and `execute` additions and loosenings after an immutable `DELAY` (>= 48 h, 72 h in production), each public (`Queued` with its parameters); immediate `remove*` and `tighten*`. Admin, guardian and delay are constructor arguments that must be identical on every chain (same init code, same address).
+
+## Threat model, worst case per chain (C = the owner's cap)
+
+| Who | Bound | Measured |
+|---|---|---|
+| Leaked session key | The whole permitted spend is the conservative bound: C per 24 h, 3C per 30 days, 10C per review, per chain. | Single-block sandwich on WETH/USDC 0.3 % with the registry at its loosest (band 500, ratio 10,000): **5.0 % of C per day** (501 bps; 10,000 USDC cap, 9,498 charged, 501.55 lost), stopped by the bucket. The bound is reached through a vault: anyone can create a MetaMorpho vault through the pinned factory (`test_factoryVaultByAnyoneIsAdmissibleButCapped`); once listed at ratio 10,000 a hostile curator can take up to **C per 24 h** per chain. |
+| Leaked session key, gas | Gas bucket per window, then GAS_REVIEW per chain. | Above. |
+| Leaked registry admin | Each addition waits 72 h in public; guardian cancels. Then the session-key bound. Cannot name a token, router, manager, messenger, Safe stack or remote. | Router/messenger/NPM entries and an EURC pool refused; a thin trap pool refused by depth. |
+| Admin + session key | Same as the session key. | |
+| Leaked guardian | Pause, unpause, clear the review counters, cancel queued entries, mark V4's own computed remote ready. No funds move. | |
+| Compromised operator | Within I1-I6; withdrawal stays owner-only. | |
+
+## Migration (v2-v6 -> V4)
+
+One owner Safe transaction: `removeSession` for every old id, self-attest V4 and the gas policy, enable the V4 session (positions admitted in its Init), then `MamoruMigrationCheck.assertOnly(account, [v4 id])`, which reads SmartSession's own `getPermissionIDs` and reverts unless the V4 session is the only one enabled; the Safe then reverts the whole transaction (GS013). `assertNone(account, ids)` is the spec's narrower check. Measured: 1.66M gas for a v6-shaped account (9 + 9 + 3 actions). Open: an owner-signed ENABLE-mode payload of an old session that was never used could still enable it later; the migration should also `revokeEnableSignature` for every old id (operator, #293).
+
+## ERC-7562
+
+V4's validation reads the registry, the pool oracle and the position manager (exits only), and the gas policy writes per-account state at validation, so these ops are not public-mempool compatible; Mamoru bundles its own userOps (spec 007). The gas policy's mappings have the account as last key (associated storage), as do V4's binding, generation and pause; `admittedPool` (exits only) is keyed account first.
+
 # MamoruActionPolicyV3: threat model of each check
 
 Scope: `src/MamoruActionPolicyV3.sol` (otto/mamoru#116 T1), with `MamoruV3Routes`, the vault and bridge checks V3 calls. Not deployed and not audited.
