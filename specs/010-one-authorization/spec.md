@@ -73,12 +73,22 @@ policy on Base can reason about what lives at an address on Monad. Constants:
 ### Invariants
 
 1. **Funds only ever land in a Safe the owner controls.** Every recipient, receiver, owner field and CCTP
-   `mintRecipient` is the account itself, or `remoteOf(account, domain)` (I4). Approvals go only to the pinned
-   router, NPM via V4's `mint`/`increase`, the pinned messenger, or a listed vault, and always **for the exact
-   amount of the next call in the same batch**: V4 refuses an `approve` not immediately followed by the call that
-   spends it.
-2. **Price.** V3's two-TWAP band (plus the anchor on stable pools), with parameters from the registry entry, which
-   V4 clamps to V3's hard bounds.
+   `mintRecipient` is the account itself, or `remoteOf(account, domain)` (I4).
+   - **The account approves only V4** (r3 P1). Every spending action is a V4 function the session calls:
+     `swap`, `mint`, `increase`, `deposit`, `redeem`, `bridge`.
+   - Each one pulls the exact amount from `msg.sender` (the account), approves the pinned router / NPM /
+     messenger / listed vault for exactly that amount, performs the operation with the account as recipient,
+     then sets the allowance back to 0 and returns any rest.
+   - An allowance left on V4 is inert: V4 only spends the allowance of the account calling it, inside its own
+     functions, under every check below.
+   - The fallback action refuses any `approve` whose spender is not V4, and any direct call to the router, NPM,
+     messenger or a vault, except `decrease`/`collect`/`burn` on admitted positions (they move no tokens out of
+     the account).
+2. **Price and depth.** V3's two-TWAP band (plus the anchor on stable pools), with parameters from the registry
+   entry, which V4 clamps to V3's hard bounds. **At every priced use** (not only at enable, as V3's M-5), the
+   pool's in-range liquidity over the band must cover `DEPTH_MULTIPLE` (pinned, 20) times the call's value.
+   Distorting a TWAP then costs the attacker capital that grows with the depth (r3 P1). The bound is still
+   stated conservatively: see the threat model.
 3. **Positions.** As V3: only positions minted through V4, or admitted at migration, that the account still owns.
 4. **Remote Safe.** `remoteOf(account, domain)` is computed **inside V4** from:
    - **The account's current owners**, read on chain at `registerRemote`: `Safe.getOwners()`, the threshold, and
@@ -89,7 +99,22 @@ policy on Base can reason about what lives at an address on Monad. Constants:
      `configure`) plus the 7579 adapter and the SmartSession, installed with the account's **own self-attestation** as the only trusted attester (the production enable flow,
      T1). No third party can revoke it, so deployment depends on nothing that can change after a mint: anyone can
      deploy the address at any time through the permissionless factory, and the result is always the user's Safe
-     (r2 P0). T4 tests deploy-after-mint on a fork.
+     (r2 P0).
+   - **Before the first burn to a domain** (r3 P0-2), the operator deploys the remote Safe (relayed and
+     permissionless) and reads back on the remote chain its owners, the threshold, the modules and the session.
+     It burns only if all of them match. Base cannot verify Monad on chain, so this check is off chain and fails
+     closed.
+   - The setup itself is **T1b**, run before any V4 code: the exact canonical initializer, with the
+     self-attestation *inside* setup, deployed on a fork after funds were sent to its address.
+
+   **Key rotation** (r3 P0-1): an owner change on the home Safe is already an owner-signed ceremony. Under V4 the
+   ceremony also rotates the owners of every registered remote Safe (one more passkey prompt per remote chain;
+   rotations are rare), and the app does not report the rotation as done until every remote reads back the new
+   owners. Until then V4 refuses burns.
+
+   **Accepted residual risk, stated in the app:** a passkey that is compromised (not merely lost) controls every
+   remote Safe until it is rotated there. This is the same for every multichain smart wallet, and is today's
+   property of design C. Ops alerts on any owner tx of a remote Safe that Mamoru did not prepare.
 
    V4 stores `ownersHash` with the remote and refuses every burn while the account's current owners hash differs.
    `registerRemote` may then compute a new remote. The old remote's own V4 sends its funds back only to the home
@@ -191,7 +216,7 @@ Worst case per chain, with V4's hard bounds and `capUsd = C`:
 
 | Who | What they can do | Bound |
 |---|---|---|
-| Leaked session key | V3's attacks within the band and the bucket, on any listed pool or vault | Per window: the bucket share of the pool; 24 h: at most C before the breaker pauses; 30 days: at most 3C spent, of which the loss is the band slippage share. Spec 007's measured loss (6.6 % of cap per day) holds per pool at today's parameters. Under V4's maximum band (500 ticks) the per-day loss bound is T4's job to state on a fork, before #292 merges. |
+| Leaked session key | V3's attacks within the band and the bucket, on any listed pool or vault | **Conservative bound: the whole permitted spend is loss** (r3 P1): at most C per 24 h (breaker), 3C per 30 days, and 10C per chain before the guardian must review, × `MAX_CHAINS`. Spec 007's measured loss (6.6 % of cap per day per pool) is the expected case at today's parameters, not the bound. |
 | Leaked session key, gas | Repeated no-op or tiny userOps paid by the Safe | The gas bucket per window (`MamoruGasPolicyV2`); the empty batch is refused. |
 | Leaked registry admin (both keys) | Queue a thin pool of pinned tokens, a factory-verified vault, looser parameters within V4's bounds | Each waits 72 h in public, and the guardian (a separate key) can cancel it. After the delay: one pool's share of the bucket per window, at band slippage on pinned assets, inside the breaker, the 30-day cap and the 10C review threshold. It **cannot** list a token, a router, an NPM, a messenger, a Safe stack or a remote account: all of those are V4 constants (r1 P0, r2 P1). |
 | Leaked registry admin + session key | The row above, at once | Same bounds: the session key adds nothing past the bucket. |
@@ -224,6 +249,15 @@ bounds that do not end the authorization.
 | P1-4 | An admin-chosen "stable" makes the loss bound meaningless | Tokens are pinned in V4; the registry chooses pools only among them. |
 | P1-5 | A slow leak repeats with no end | A 10C cumulative review threshold per chain pauses until the guardian reviews. |
 
+## Review r3 (GPT-6 Sol, PR #196, NO-GO) → r4
+
+| # | Finding | r4 |
+|---|---|---|
+| P0-1 | A revoked owner can still drain an old remote Safe | The rotation ceremony rotates the remote owners, burns stop until they read back, and an alert fires on unprepared remote owner txs. The compromised-passkey residual is stated as accepted (I4). |
+| P0-2 | A burn can target a remote Safe that cannot be deployed | The remote is deployed and read back before the first burn (fail closed); T1b fork-tests the exact self-attested initializer, deploying after a mint, before V4 code (I4). |
+| P1-3 | V4 cannot enforce approve/spend pairing on a per-call fallback | Approvals go only to V4. V4 performs each operation atomically and resets the allowance; direct router/NPM/messenger/vault calls are refused (I1). |
+| P1-4 | A thin pool's TWAP is not a value bound | A depth check at every priced use (20× the call), and the stated bound is now the full permitted spend (threat model). |
+
 ## Open questions
 
 1. ~~T1~~ **Answered** (`results/t1-smartsession-probe-2026-11-02.md`, Base and Monad forks, 13/13):
@@ -246,6 +280,8 @@ bounds that do not end the authorization.
 ## Tasks
 
 - **T1** fork probe: fallback action and a gas-only userOp policy; `removeSession` gas; registry read gas.
+- **T1b** fork test of the canonical remote initializer: self-attestation inside setup, deployment after a CCTP
+  mint to the counterfactual address, owners/modules/session read back. Before T3.
 - **T2** `MamoruRegistry` (queue/execute/cancel, guardian cancel, bounds, events).
 - **T3** `MamoruActionPolicyV4` + `MamoruGasPolicyV2` + `MamoruMigrationCheck`, deployed by CREATE2, under
   EIP-170.
