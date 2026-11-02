@@ -240,7 +240,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     const keep = frozenPools.length ? new Set([...(pendingMint ?? []), ...frozenPools]) : pendingMint
     const idle = exit || reranges.length || harvests.length || reduce?.proposal ? null : idleConvertOf(obs, policy, policyPools, keep)
     // otto/mamoru#278: an open release (the home account wants savings back) is all this Safe does until it is sent.
-    const release = releaseOf(obs, policy, policyPools, new Set(frozenPools))
+    // Every pool of a frozen bucket, not only the guard's own, and the depegged one.
+    const release = releaseOf(obs, policy, policyPools, new Set([...frozenPools, ...policy.buckets.filter((b) => frozen.has(b.id)).flatMap((b) => b.pools)]))
     if (release) {
       releasing = true
       proposal = exit ?? release.proposal

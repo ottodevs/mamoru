@@ -25,9 +25,9 @@ export function releaseOf(obs: Observation, policy: PolicyVersion, policyPools: 
   const floor = opCostInSavings(obs, savings) * BigInt(policy.harvest.costFactorBps)
   // What is missing, with the margin: a sale or a reduce frees this much, never the whole holding when less will do.
   const missing = ((r.amount - free) * (10_000n + RELEASE_MARGIN_BPS)) / 10_000n
-  // Missing less than one op is worth: what is there goes now (or nothing is left to do) instead of a sale or a reduce
-  // that costs more than it frees.
-  if (missing * 10_000n <= floor) return free > 0n ? { code: 'DECIDE_RELEASE', proposal: home(free) } : { code: 'DECIDE_RELEASE_EMPTY', proposal: null }
+  // Missing less than one op is worth: what is there goes now instead of a sale or a reduce that costs more than it
+  // frees. Nothing free and only that dust missing: no release in effect, the Safe is managed as usual.
+  if (missing * 10_000n <= floor) return free > 0n ? { code: 'DECIDE_RELEASE', proposal: home(free) } : null
   // A frozen pool (fall freeze, depeg) is never sold into nor reduced: the release sends what the others free.
   for (const pool of obs.pools) {
     if (!policyPools.has(pool.name) || frozen.has(pool.name)) continue
