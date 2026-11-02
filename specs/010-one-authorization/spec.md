@@ -2,191 +2,229 @@
 
 Ticket: otto/mamoru#291 (milestone "One authorization": #292 contracts, #293 operator, #294/#295 app, #296 /ops).
 Decision: Brais, 1 Nov (chat-mamoru thread "[firma única]"), OK from Ot on 2 Nov, who had asked the same in #281.
-Noema `1-projects/mamoru/decisions/2026-11-02-firmar-solo-crear-y-retirar.md`. Status: spec. Nothing built,
+Noema `1-projects/mamoru/decisions/2026-11-02-firmar-solo-crear-y-retirar.md`. Status: spec r2. r1 got NO-GO
+from GPT-6 Sol on PR #196 (2 P0, 5 P1); every finding is addressed below and listed in "Review r1". Nothing built,
 nothing deployed.
 
 ## Problem
 
 Today a Mamoru account asks its owner for a passkey signature whenever the engine's scope changes:
 
-- **A new pool or vault.** `MamoruActionPolicyV3.Init.pool` binds each config to one pool (`_config[account][pool]`).
-  The vault allowlist is fixed in `MamoruV3Routes`' constructor. Anything new means a new Init, so the owner signs.
+- **A new pool or vault.** `MamoruActionPolicyV3.Init.pool` binds each config to one pool. The vault allowlist is
+  fixed in `MamoruV3Routes`' constructor.
 - **A new chain.** The remote Safe and the bridge-out grant (`mintRecipient EQUAL REMOTE_ACCOUNT`, `grants.ts:375`)
-  are fixed when the owner signs (design C, #251). A chain added later needs another owner signature.
+  are fixed when the owner signs (design C, #251).
 - **Expiry and lifetime caps.** These stop the engine without the owner deciding anything:
-  - `TimeFramePolicy` runs for 365 days (`policies.ts:51`).
-  - `UsageLimitPolicy` caps the number of userOps per approval (36,000 per pool session in v6).
-  - V3 `total` caps spend per generation (10 x C_p).
-  - The bridge `cumulative` cap applies per approval.
-- **Upgrades.** v2 → v6 each needed a signed move, sometimes several transactions (#259: two on a real account).
+  - `TimeFramePolicy`: 365 days.
+  - `UsageLimitPolicy`: 36,000 userOps per pool session in v6.
+  - V3 `total`: 10 x C_p per generation.
+  - The bridge `cumulative` cap.
+- **Upgrades.** v2 → v6 each needed a signed move, sometimes over several transactions (#259).
 
-The owner taps something they do not read, and the engine stops when they don't. Brais's rule: the user trusts
-Mamoru once, when creating the account, and signs again only to take money out.
+Brais's rule: the user trusts Mamoru once, when creating the account, and signs again only to take money out.
 
 ## Decision
 
-Mamoru moves the parts that change (which pools, vaults and chains) out of owner-signed data into an **on-chain,
-timelocked registry**. Each account carries **one long-lived session** whose only action policy is
-`MamoruActionPolicyV4`, which reads that registry on every check. The owner signs the *rules* once (account cap,
-the registry address, where their money may go). Mamoru picks *within* them.
+Mamoru moves the parts that change (which pools and vaults, which chains) out of owner-signed data into an
+**on-chain, timelocked registry**. Each account carries **one long-lived session** whose only action policy is
+`MamoruActionPolicyV4`, which reads the registry. The owner signs the *rules* once. Mamoru picks *within* them.
+Everything that could move money to someone else (the Safe stack, CCTP, the shape of the remote account) is
+**pinned in V4's code**, never in the registry. The registry can only choose among things V4 already trusts, and
+size them within V4's hard bounds.
 
 | Owner signature | When |
 |---|---|
 | Create + authorize | sign-up (one screen, #294; two OS prompts until #116) |
 | Withdraw / stop | every withdrawal (owner Safe tx, unchanged: `planTransfer`, `planStop`) |
-| Migrate | once, for every account on v2–v6 (the "What's new" screen, #295) |
+| Migrate | once, for every account on v2–v6 (the "What's new" screen, #295); a second prompt only for an account that already has a design-C remote Safe |
 | New action-policy contract | only if V4 itself must be replaced; optional, and the old one keeps working |
 
-### Invariants (what V4 + the registry guarantee, whatever the registry admin or a session key does)
+### Pinned in V4 (constructor-free constants, identical bytecode on every chain)
 
-1. **Funds only ever land in a Safe the owner controls.** Every recipient, CCTP `mintRecipient`, vault receiver
-   and owner field is the account itself, or the account's remote Safe on the destination chain (I4). Never a
-   third party. *(same as V3, extended to bridges)*
-2. **Price.** Every priced action stays within V3's two-TWAP band (the stable pools also within the anchor). The
-   band parameters come from the registry entry of the pool, which is timelocked and bounded by the same hard
-   limits as V3 Init (`MIN_BAND`..`MAX_BAND`, windows, `MIN_WINDOW_RATIO`).
-3. **Positions.** Decrease, collect and burn apply only to positions minted through V4, or admitted at migration,
-   that the account still owns. *(V3 unchanged)*
-4. **Remote Safe.** Before the bridge can mint to an account's remote Safe, its address is **computed on chain**
-   from the owner's own commitment: the passkey (x, y), the owners and the `saltNonce`, in the owner-signed Init.
-   The remote setup must be a registry template (Safe singleton, factory, launchpad, the remote V4 and
-   SmartSession, the passkey signer), so every candidate address is a Safe whose only owner is the user's
-   passkey. No operator input, no Worker, no D1.
-5. **Budget.** There is one value budget per account, in USD-stable units. Every registered pool must have a
-   budget token in the registry's stable list (USDC, USDT; WMON/USDC and WETH/USDC qualify). It works as a token
-   bucket: `perWindow` comes from the owner-signed account cap times a registry ratio, which itself has a hard
-   upper bound in V4's code. It has **no lifetime total**. Per-pool limits remain as registry ratios of the
-   account bucket, so no single pool can take all of it.
-6. **Guardian.** It can pause and unpause, and do nothing else, as in V3. A pause ends with `unpause`. The owner's
-   migration signature does not end it. *(V3 ended pauses on renewal, and renewals go away.)*
-7. **Additions wait, removals don't.** An entry queued in the registry (pool, vault, stable token, chain route,
-   remote template, risk parameters) takes effect only after `DELAY` (72 h). The queue is public: events, and
-   `/ops` #296. Removing a pool or vault, disabling a route, tightening a parameter, and `cancel` all take effect
-   immediately. Positions in a removed pool stay exit-only (decrease, collect, burn; swap back to the budget
-   token within the band).
+V4, its routes helper and the registry are deployed with **CREATE2 through the canonical deterministic deployer**,
+with **chain-independent init code**. The same address therefore implies the same code on every EVM chain, so a
+policy on Base can reason about what lives at an address on Monad. Constants:
+
+- **Safe stack:** SafeL2 1.4.1 singleton, SafeProxyFactory 1.4.1, MultiSend 1.4.1, Safe7579 adapter + launchpad,
+  `SafeWebAuthnSharedSigner`, and the SmartSession. All of these are canonical CREATE2 deployments already at the
+  same address on Base and Monad (`base.json` / `monad.json`). V4 also checks at enable that each one has code on
+  the local chain, with the expected `EXTCODEHASH`.
+- **`address(this)`** (the remote V4) and **`REGISTRY`**: both CREATE2, both the same on every chain.
+- **CCTP:** the canonical `TokenMessengerV2` address (the same on every chain Circle supports: verify on
+  Base and Monad in T1). The burn token is
+  not a constant. V4 accepts a token only if the canonical messenger's own `localMinter()` accepts it as burnable
+  (non-zero burn limit). The token is therefore Circle's, whatever the registry says.
+- **Uniswap:** the registry gives the chain's v3 factory, NPM and router, and V4 checks that the factory appears in
+  a constant list of canonical v3 factory addresses (Base, Monad, Ethereum). Every pool must be
+  `factory.getPool(t0, t1, fee) == pool`, as in V3.
+- **Hard bounds on everything the registry may set:**
+  - The band, window and anchor limits of V3.
+  - `ratioBps ≤ 10,000`.
+  - `DELAY` of at least 48 h.
+  - `MAX_CHAINS = 4` (each chain's bucket is separate, so the worst case is 4 x the per-chain bound, stated below).
+
+### Invariants
+
+1. **Funds only ever land in a Safe the owner controls.** Every recipient, receiver, owner field and CCTP
+   `mintRecipient` is the account itself, or `remoteOf(account, domain)` (I4). Approvals go only to the pinned
+   router, NPM via V4's `mint`/`increase`, the pinned messenger, or a listed vault, and always **for the exact
+   amount of the next call in the same batch**: V4 refuses an `approve` not immediately followed by the call that
+   spends it.
+2. **Price.** V3's two-TWAP band (plus the anchor on stable pools), with parameters from the registry entry, which
+   V4 clamps to V3's hard bounds.
+3. **Positions.** As V3: only positions minted through V4, or admitted at migration, that the account still owns.
+4. **Remote Safe.** `remoteOf(account, domain)` is computed **inside V4** from:
+   - the owner's commitment in the signed Init: passkey (x, y), owners, saltNonce. V4 checks at enable that the
+     commitment reproduces `account` itself, so it cannot name someone else's passkey.
+   - **V4's own canonical initializer**: the pinned singleton, factory, launchpad, signer and SmartSession, V4 as
+     the only action policy, and the session key given by `registerRemote`.
+
+   The result is a Safe with the same code as every Mamoru Safe, owned by the user's passkey only. Its one
+   session is bound by the same V4. The registry has no say in it. `registerRemote(domain, sessionKey)` is only
+   callable through the account's own session.
+5. **Budget.** Per chain, one value bucket for the account, in USD-stable units, refilled each window, with:
+   - **Per pool and per vault:** at most `ratioBps` of the bucket.
+   - **A rolling 30-day cap** of `3 x capUsd` per chain on spend (it replaces the per-approval lifetime `total`:
+     it bounds loss in any 30 days and never ends the authorization).
+   - **An on-chain circuit breaker:** if spend in 24 h exceeds `capUsd x 1.0`, V4 pauses the account by itself
+     until the guardian unpauses.
+6. **Gas.** `MamoruGasPolicyV2` (userOp policy) keeps the per-op cap and adds a per-account **gas bucket per
+   window**. No action-free userOp: V4 refuses an empty batch and a call it cannot classify, through the
+   fallback action.
+7. **Guardian.** It can pause, unpause, and **cancel any queued registry entry**. It can never add, enable or move
+   a token.
+8. **Additions wait, removals don't.** Pool, vault, chain route and parameter changes take effect after `DELAY`
+   (72 h) and are public (events, `/ops` #296, ops alert on every `Queued`). Removal, tightening and cancel take
+   effect immediately. Positions in a removed pool are exit-only.
 
 ### MamoruRegistry
 
-- One per chain, no proxy. The admin is a team Safe (default 2 of 2, Ot and Brais, signed offline), and it is
-  the only key able to `queue` / `execute` / `cancel`. No upgrade path: replacing the registry is a new V4
-  deployment, so it takes a new owner signature (the optional row above).
+- **Shape:**
+  - One per chain, at the same CREATE2 address, with no proxy.
+  - The admin is a team Safe (2 of 2, Ot and Brais, signed offline): `queue`, `execute` and `cancel`.
+  - The guardian: `cancel` only.
 - **Entries:**
-  - `pools[pool]`: twapWindow, shortWindow, band, anchorTick, anchorBand, budgetToken, poolRatioBps.
-  - `vaults[vault]`: asset, ratioBps.
+  - `pools[pool]`: twapWindow, shortWindow, band, anchor, budgetToken, ratioBps.
+  - `vaults[vault]`: ratioBps.
   - `stables[token]`.
-  - `routes[domain]`: messenger, burnToken, minFinality ≥ 2000, maxFee = 0, and the `remoteTemplate` hash.
-  - `templates[hash]`: singleton, factory, fallback/launchpad, remote SmartSession, remote V4, passkey signer,
-    and the initializer layout version.
-- **Hard bounds in V4, not in the registry:**
-  - Every pool comes from the canonical Uniswap v3 factory of the chain.
-  - Every vault has `asset()` in the stables list.
-  - `DELAY` is an immutable of at least 48 h.
-  - Ratios never exceed 10,000 bps of the owner's cap.
-  - Band limits are V3's.
-  - A route's `burnToken` is a registered stable.
-- **Views V4 reads:** `poolParams(pool)` and `vaultAsset(vault)`, both reverting if the entry is not active, and
-  `route(domain)`. Each is one SLOAD-heavy call. Measure the validation gas (ERC-7562 already does not apply,
-  spec 007).
+  - `routes[domain]`: an on/off flag only (the messenger and the remote stack are V4 constants), with `domain` ≠
+    local and ≤ `MAX_CHAINS` routes.
+  - `chain`: factory, NPM, router, checked by V4 against the canonical list.
+- **Vaults** (r1 finding 3):
+  - A vault qualifies only if its `asset()` is a registered stable **and** it is created by a factory from a
+    constant list in V4: the MetaMorpho factory's `isMetaMorpho(vault)`, and Aave's wrapper factory (its membership
+    view, to be verified in T2; until then, Aave vaults are not admissible).
+  - Deposits are charged to the bucket and capped by the vault's ratio.
+  - An approval to a vault is exact and spent in the same batch (I1).
 
 ### MamoruActionPolicyV4
 
-- **V3 kept as is:**
-  - The Uniswap checks: price band, admitted positions, `mint`/`increase` through the policy, swap deadline,
-    LeftClaw fixes.
-  - The guardian.
-  - `initializeWithMultiplexer` restricted to `SMART_SESSION`.
-  - The setup mode (Init without live reads) for new accounts.
-- **Per-pool config replaced:**
-  - **Init (owner-signed, account-wide):** `{ capUsd, passkeyX, passkeyY, owners[], saltNonce, admit[], generation }`.
-    `owners`/`saltNonce` must reproduce the account's own address with the account's own template (V4 checks
-    `computeAddress(...) == account` at enable, so the commitment cannot name someone else's passkey).
-  - **Pool params:** taken from the registry at each check, never from the Init.
-- **New actions (session-callable, all bounded by I1):**
-  - `registerRemote(domain, sessionKey)`: computes the remote Safe from the account's commitment and the
-    route's template with that session key, and stores `remoteOf[account][domain]` once. Callable only through
-    the account's own session, so only Mamoru's key can call it. Whatever key it names, the Safe it yields is
-    owned by the user's passkey alone, and its sessions run the remote V4.
-  - CCTP `depositForBurn` to `remoteOf[account][domain]` on a registered route, charged to the account bucket.
-  - The vault family: V3's checks against the registry instead of the constructor list.
-- **One session per account and chain.** It has a single fallback action (SmartSession's fallback-action flag, any
-  target and selector) whose only policy is V4, which decides everything (target, selector, recipient). There are
-  no per-token approve actions, no per-pool sessions, and no UniActionPolicy or PauseGate (V4 runs the pause check
-  itself).
-- **UserOp policies:** `MamoruGasPolicy` (per-op gas) only. No TimeFrame, no UsageLimit.
-  - **Verify on a fork** that the deployed SmartSession accepts a session with a fallback action and no
-    TimeFrame/UsageLimit (`NoPoliciesSet` requires *some* policy: the gas policy). If it refuses, use TimeFrame
-    with `validUntil = 0` (treated as unbounded in our own driver; verify on chain) and a UsageLimit at
-    `MAX_USAGE_LIMIT`.
+- **V3 kept:**
+  - The Uniswap checks: band, admitted positions, `mint`/`increase` through the policy, swap deadline, LeftClaw
+    fixes.
+  - `initializeWithMultiplexer` only from `SMART_SESSION`.
+  - The setup mode for new accounts.
+- **Init (owner-signed, account-wide):** `{ capUsd, passkeyX, passkeyY, owners[], saltNonce, admit[], generation }`.
+- **The pause check runs inside V4** (no PauseGate). The circuit breaker writes the same pause.
+- **One session per account and chain:**
+  - A single fallback action whose only policy is V4.
+  - The userOp policy is `MamoruGasPolicyV2` only.
+  - T1 (fork probe) confirms the deployed SmartSession supports this. If not: one action per pinned target and
+    selector (the target set is finite: router, NPM, V4, messenger, the stables, the listed vaults), and
+    `TimeFramePolicy(validUntil = 0)`, if T1 shows 0 means no bound.
 
-### Migration (v2–v6 → V4, one owner transaction)
+### Migration (v2–v6 → V4)
 
+- **Inventory** (r1 finding 4):
+  - The operator rebuilds the account's complete set of Mamoru permission ids from SmartSession's own
+    `SessionCreated` / enable events for the Safe, cross-checked with `accounts.json`.
+  - A mismatch means no migration is offered: an ops alert, fail closed.
 - **One Safe transaction:**
-  1. Remove every old Mamoru session (`removeSession` for each permissionId the account holds).
-  2. Enable the V4 session with the account's commitment and its admitted positions.
-- **Gas:** one V3-only session cost ~2.7M; one fallback-action session should be below that. Adding `removeSession`
-  for each old session is far under the 14.5M target. Measure it on the largest real account (c23e94e1, b54dda3a
-  after #259).
-- **Monad:** an account that already has a design-C remote Safe keeps it. `registerRemote` accepts it if its
-  address matches the commitment computed with the session key it was set up with. Otherwise the operator
-  provisions a new V4 remote Safe and the old one is drained by its own session to the new one, inside I1 (both
-  are the user's).
-- **The old policies keep working until the owner signs:**
-  - A user who taps "Not now" stays on v2–v6 as today, renewals included.
-  - Renew rows disappear only for V4 accounts.
+  1. `removeSession` for every id.
+  2. Enable V4.
+  3. A last call to `MamoruMigrationCheck.assertNone(account, ids)`, which reverts if any id is still enabled.
+- **Old policy state:** the old policies' state (V2/V3 generations, buckets) can no longer act once their
+  sessions are removed. No old policy is ever called again.
+- **Design-C remote Safes** (r1 finding 5; today one account, b54dda3a):
+  - They cannot be migrated from Base. Their bridge stop (`REMOTE_BRIDGE_STOP_SECONDS`) stays until they are
+    migrated.
+  - The migration screen asks a second passkey prompt, on Monad, that:
+    1. removes the remote V3 sessions;
+    2. enables V4;
+    3. moves the remote Safe's funds to `remoteOf(account, 15)` if that is a different address. Both Safes
+       belong to the user.
+  - No new design-C remote Safe is created after V4 ships (`multichain_v6` stays scoped).
+- **A user who taps "Not now"** stays on v2–v6, renewals included.
 
 ### What the operator stops doing (#293)
 
 - **Removed:**
-  - `planRenew`, `planExtend`, `prepareRenew`, `settleRenewals`, `renewTarget`, `assertRenewable` and
-    `renewRefusal`, and the `'renew'` owner kind.
-  - The `V4/V5/V6_MIGRATES_FROM` chains, `upgradeSplitOf`, `missingGrants` and the usage refresh
-    (`session-usage.ts`, `USAGE_RENEW_BPS`).
-  - `REMOTE_BRIDGE_STOP_SECONDS`.
-  - (refs in #291's research note)
-- **Kept, now reading from the registry:** activation, the setup-mode create, and the engine's choice of pools
-  (`buckets[].pools` resolves against `registry.activePools()`, not the static `V4_POOLS`).
+  - The renew/extend/upgrade family: `planRenew`, `planExtend`, `prepareRenew`, `settleRenewals`, `renewTarget`,
+    `assertRenewable`, `renewRefusal`, and the `'renew'` owner kind.
+  - The `V*_MIGRATES_FROM` chains, `upgradeSplitOf` and `missingGrants`.
+  - The usage refresh.
+  - This applies to V4 accounts only.
+- **Changed:** the engine's pools resolve against `registry.activePools()`.
 
-## Threat model
+## Threat model (r2)
+
+Worst case per chain, with V4's hard bounds and `capUsd = C`:
 
 | Who | What they can do | Bound |
 |---|---|---|
-| Leaked session key | V3's attacks, within the band and the bucket | Same per-window loss as spec 007 (3.6% of cap in minutes, 6.6% in a day), **no lifetime cap**: an unrevoked key keeps losing ~6.6%/day until the guardian pauses. Mitigation: the guardian watches V4 budget burn (ops alert at 2 windows in a row at > 80%), pause in minutes. Owner key rotation = one signature, prompted only after a pause. |
-| Leaked registry admin (both keys) | Queue a trap pool (e.g. a factory pool of a stable/attacker token pair with thin liquidity), wait `DELAY`, then drain each account's bucket through it | One pool's ratio of the bucket per window, after ≥ 48 h of public notice. The stables list is timelocked too, so a fake "stable" also waits. Mitigation: `/ops` and an ops alert on every `Queued` event, and a revoke-only `cancel` that the guardian can also call (open question 2). |
-| Leaked registry admin + session key | Both of the above at once | Same as the row above; the session key adds nothing past the bucket |
-| Compromised operator / Worker | Pick bad pools within the registry, refuse service | Within I1–I5; withdrawal stays owner-only |
-| Malicious remote template | Queue a template whose Safe is not the user's | Template fields are checked by V4's hard bounds: the owner of the remote Safe is derived from the user's passkey by `SafeWebAuthnSharedSigner` at a fixed address per chain. A template can only change the singleton/factory/launchpad addresses, and those must be the registry's `templates` entry after `DELAY`. Review this row hardest. |
+| Leaked session key | V3's attacks within the band and the bucket, on any listed pool or vault | Per window: the bucket share of the pool; 24 h: at most C before the breaker pauses; 30 days: at most 3C spent, of which the loss is the band slippage share. Spec 007's measured loss (6.6 % of cap per day) holds per pool at today's parameters. Under V4's maximum band (500 ticks) the per-day loss bound is T4's job to state on a fork, before #292 merges. |
+| Leaked session key, gas | Repeated no-op or tiny userOps paid by the Safe | The gas bucket per window (`MamoruGasPolicyV2`); the empty batch is refused. |
+| Leaked registry admin (both keys) | Queue a trap pool (a factory pool with thin liquidity), a hostile vault, or looser parameters | Each waits 72 h in public; the guardian (a separate key) and either team member can see and cancel it. After the delay: one pool's ratio of the bucket per window, inside the breaker and the 30-day cap. It **cannot** change the messenger, the burn token, the Safe stack or the remote account. Those are V4 constants (r1 P0s). |
+| Leaked registry admin + session key | The row above, at once | Same bounds: the session key adds nothing past the bucket. |
+| Compromised operator / Worker | Pick bad pools within the registry, refuse service | Within I1–I6. Withdrawal stays owner-only. |
+| A new chain | Admin enables a route to a domain | Funds mint only at `remoteOf`, a canonical Mamoru Safe owned by the user's passkey, bound by the same V4. A chain without the canonical deployer, or with different CREATE2 semantics, cannot host V4 at the pinned address, so its route cannot work. The risk is a non-EVM-equivalent chain where the same address runs different code: the route list is therefore capped (`MAX_CHAINS`) and every addition is timelocked. |
 
-What the owner gives up compared to V3: per-pool consent, and a lifetime total. What they get: no renewals, no
-stoppage at day 365 or at a usage limit, no tap for each new pool or chain.
+What the owner gives up compared to V3: per-pool consent and a per-approval total. What they get: no renewals, no
+stop at day 365 or at a usage limit, no tap for each new pool or chain. The 30-day cap and the breaker are hard
+bounds that do not end the authorization.
 
-## Open questions (resolve in review, before #292 code)
+## Review r1 (GPT-6 Sol, PR #196, NO-GO) → r2
 
-1. Does the deployed SmartSession (Base and Monad) support fallback actions, and enable/validate a session with
-   only `MamoruGasPolicy` as userOp policy? Fork test first (T1).
-2. Who can `cancel` a queued entry: the admin Safe only, or also the guardian (revoke-only key)? Proposal: the
-   guardian too. Cancelling only ever restricts.
-3. Remote address derivation on chain: the Safe `initializer` includes the session data (with the session key)
-   and the passkey `configure`. Is a pure Solidity reconstruction under ~1M gas feasible, and identical to
-   `packages/account/remote` byte for byte? If not, `registerRemote` takes the initializer as calldata and V4
-   checks it against the template piece by piece.
-4. Per-pool ratio defaults: stables 50%, WETH/USDC 35%, WMON/USDC 15% of the bucket (the v6 mix), or a flat
-   per-pool max (e.g. 60%)?
-5. The guardian pause no longer ends on renewal. Is `unpause` by the guardian enough, or does the owner also need
-   an unpause signature (a fifth screen)?
+| # | Finding | r2 |
+|---|---|---|
+| P0-1 | A registry template can make the remote "Safe" hostile | No template in the registry: the Safe stack and the initializer are V4 constants, identical bytecode on every chain (CREATE2), with `EXTCODEHASH` checked locally at enable (I4). |
+| P0-2 | The registry can swap CCTP for a drainer | The messenger is a constant; the burn token must be accepted by the canonical messenger's `localMinter()`; approvals are exact and spent in the same batch (I1). |
+| P1-3 | A listed vault can take assets for worthless shares | Factory-verified vaults only (MetaMorpho, Aave static aToken), exact approvals, exposure capped by the vault ratio. |
+| P1-4 | Migration cannot prove old sessions are gone | Inventory from SmartSession events, fail closed, and an `assertNone` check inside the migration transaction. |
+| P1-5 | A design-C remote Safe is not migrated | A second prompt on Monad for those accounts; the bridge stop stays until then; no new design-C Safes. |
+| P1-6 | A gas-only userOp policy allows unbounded gas spend | `MamoruGasPolicyV2` with a gas bucket per window; empty or unclassifiable calls refused. |
+| P1-7 | No justification for dropping the lifetime cap | A rolling 30-day cap (3C) and an on-chain breaker (C in 24 h), per chain; `MAX_CHAINS = 4`; the worst-case loss under maximum registry parameters is a T4 deliverable; guardian cancel is mandatory. |
+
+## Open questions
+
+1. T1: does the deployed SmartSession support a fallback action, and a session whose only userOp policy is the gas
+   policy?
+2. Is a pure-Solidity reconstruction of the canonical initializer (`packages/account/remote`) feasible in
+   `registerRemote`, at under ~1M gas? Otherwise V4 takes the initializer as calldata and checks it piece by piece
+   against the constants.
+3. The default per-pool ratios: the v6 mix (50/35/15) or a flat maximum?
+4. The breaker threshold (C in 24 h) and the 30-day multiple (3): measure them against the engine's real spend
+   from D1 so that the breaker never fires in normal operation.
 
 ## Tasks
 
-- **T1:** fork probe on Base and Monad: fallback action + gas-policy-only session against the deployed SmartSession;
-  `removeSession` cost; validation gas of one registry read.
-- **T2:** `MamoruRegistry`: queue/execute/cancel, `DELAY` immutable, hard bounds, events; Foundry tests.
-- **T3:** `MamoruActionPolicyV4`: V3 diff (registry-driven pools/vaults, account bucket without total,
-  `registerRemote`, bridge family, pause check inside), under EIP-170 (split routes as V3 does).
-- **T4:** adversarial suite: V3's LeftClaw tests ported, plus trap pool after DELAY, fake stable, template swap,
-  `registerRemote` with someone else's commitment, migration with a stale session left enabled.
-- **T5:** high-stakes review (GPT-6 Sol, or Opus 5.5 + Gemini 4 Argon), then an external review if Ot wants one
+- **T1** fork probe: fallback action and a gas-only userOp policy; `removeSession` gas; registry read gas.
+- **T2** `MamoruRegistry` (queue/execute/cancel, guardian cancel, bounds, events).
+- **T3** `MamoruActionPolicyV4` + `MamoruGasPolicyV2` + `MamoruMigrationCheck`, deployed by CREATE2, under
+  EIP-170.
+- **T4** adversarial suite:
+  - V3's LeftClaw tests, ported.
+  - A trap pool after the delay; a fake stable; a hostile vault; a non-canonical factory; a messenger swap.
+  - `registerRemote` with someone else's commitment; a migration with a stale session.
+  - Gas griefing; the breaker.
+  - The worst-case loss per day at maximum parameters.
+- **T5** high-stakes review (GPT-6 Sol, or Opus 5.5 + Gemini 4 Argon), plus an external review if Ot wants one
   before mainnet.
-- **T6:** operator #293 and app #295 against V4 on forks; e2e: create (1 screen) → deposit → engine enters a pool
-  added to the registry after the account was created, with no signature → bridge to a chain route added later,
-  with no signature → withdraw (1 signature).
-- **T7:** deploy (Ot's GO in the deploying session): registry + V4 on Base and Monad, `/ops` #296, beta with
-  Brais's account (migration via What's new), then prod with every account offered the migration.
+- **T6** operator #293 and app #295 on forks. End-to-end:
+  1. create (one screen);
+  2. deposit;
+  3. the engine enters a pool added after the account existed, with no signature;
+  4. bridge to a chain route added later, with no signature;
+  5. withdraw (one signature).
+- **T7** deploy (Ot's GO in the deploying session): registry, V4 and gas policy on Base and Monad; `/ops` #296;
+  beta with Brais's account; then prod.
