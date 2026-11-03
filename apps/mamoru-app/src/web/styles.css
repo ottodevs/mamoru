@@ -1449,7 +1449,7 @@
 }
 .wc-row {
   display: grid;
-  grid-template-columns: 3.3rem minmax(0, 1fr) minmax(9rem, auto) 8.5rem 7.5rem 7.5rem;
+  grid-template-columns: 4.4rem minmax(0, 1fr) minmax(9rem, auto) 8.5rem 7.5rem 7.5rem;
   column-gap: 1.25rem;
   align-items: start;
   padding: 1.15rem 0;
@@ -1476,6 +1476,10 @@
   display: flex;
   align-items: center;
   padding-top: 0.2rem;
+}
+/* otto/mamoru#350 (Brais, 3 Nov): larger marks, the second one tucked under the first. */
+.wc-mark-next {
+  margin-left: -0.8rem;
 }
 .wc-name {
   display: flex;
@@ -1522,29 +1526,6 @@
   letter-spacing: 0.04em;
   color: var(--color-stone);
   white-space: nowrap;
-}
-.wc-bar {
-  display: block;
-  height: 0.3rem;
-  margin-top: 0.35rem;
-  background: var(--color-wash);
-}
-.wc-bar {
-  position: relative;
-}
-.wc-bar > span {
-  display: block;
-  height: 100%;
-  background: var(--color-emerald);
-}
-/* otto/mamoru#216: the bucket's target, a tick on the bar. */
-.wc-bar-target {
-  position: absolute;
-  top: -0.2rem;
-  bottom: -0.2rem;
-  width: 2px;
-  margin-left: -1px;
-  background: var(--color-ink);
 }
 .wc-target {
   display: block;
@@ -1615,7 +1596,7 @@
     margin-top: 0.75rem;
   }
   .wc-row {
-    grid-template-columns: 2.3rem minmax(0, 1fr) auto;
+    grid-template-columns: 2.9rem minmax(0, 1fr) auto;
     column-gap: 0.75rem;
     row-gap: 0.3rem;
     padding: 1rem 0;
@@ -1629,10 +1610,15 @@
     grid-row: 1 / span 2;
     padding-top: 0.15rem;
   }
+  /* The mark's box carries its desktop size inline; it shrinks with the glyph so the overlap holds. */
+  .wc-marks > span > span,
   .wc-marks img,
   .wc-marks svg {
-    width: 22px;
-    height: 22px;
+    width: 28px !important;
+    height: 28px !important;
+  }
+  .wc-mark-next {
+    margin-left: -0.6rem;
   }
   .wc-rate {
     display: none;
@@ -1648,6 +1634,10 @@
   .wc-venue {
     font-size: 0.7rem;
     line-height: 1.5;
+  }
+  /* A long venue (a vault's name) wraps inside its column instead of running under the share. */
+  .wc-venue .seg {
+    white-space: normal;
   }
   /* The value and its legs are placed on their own, so the legs sit under the name. */
   .wc-amount {
@@ -1679,11 +1669,6 @@
     font-family: var(--font-mono);
     font-size: 0.78rem;
     letter-spacing: 0.04em;
-  }
-  .wc-bar {
-    width: 2.6rem;
-    margin-top: 0;
-    height: 0.22rem;
   }
   .wc-rates-m {
     display: block;
@@ -1898,20 +1883,6 @@
   transform: rotate(-90deg) translateY(2px);
 }
 
-/* Share bars grow in from the left the first time they show. */
-.wc-bar > span {
-  transform-origin: left;
-  transition: width 900ms var(--ease-out);
-}
-.panel.is-open .wc-bar > span {
-  animation: bar-in 900ms var(--ease-out) both;
-  animation-delay: calc(180ms + var(--i, 0) * 55ms);
-}
-@keyframes bar-in {
-  from {
-    transform: scaleX(0);
-  }
-}
 .wc-unit {
   font-size: 0.75em;
   letter-spacing: 0.08em;

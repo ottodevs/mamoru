@@ -388,8 +388,8 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
     <li data-testid="position" className="wc-row" style={{ ['--i' as string]: i }}>
       <span className="wc-marks" aria-hidden="true">
         {tokens.map((t, i) => (
-          <span key={t} className={i > 0 ? '-ml-[0.55rem]' : undefined}>
-            <TokenMark symbol={t} size={28} />
+          <span key={t} className={i > 0 ? 'wc-mark-next' : undefined}>
+            <TokenMark symbol={t} size={40} />
           </span>
         ))}
       </span>
@@ -450,10 +450,6 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
             {homeCopy.target(Math.round(r.targetPct))}
           </span>
         ) : null}
-        <span className="wc-bar" aria-hidden="true">
-          <span style={{ width: `${Math.min(100, Math.max(0, shown ?? 0))}%` }} />
-          {r.targetPct !== null && r.accountPct !== null ? <i className="wc-bar-target" style={{ left: `${Math.min(100, r.targetPct)}%` }} /> : null}
-        </span>
       </span>
       {/* Desktop cells and the compact mobile line are never shown together (CSS), so each carries its own
           visually hidden labels and screen readers get the rates at every width. */}
