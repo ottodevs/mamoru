@@ -19,7 +19,7 @@ import { L1Bundler, MAX_CONSTANT_FEE, PaymasterError, RATE_SLACK_BPS, RpcRefused
 import { Lock } from './lock.ts'
 import { HttpError } from './operator.ts'
 import { logErr } from './metrics.ts'
-import { readinessMismatch, stepReady, userOpOutcome, type AnnounceAnswer, type OpOutcome, type ReadyFlow, type ReadyPorts, type SentOp } from './readiness.ts'
+import { readinessMismatch, stepReady, userOpOutcome, type AnnounceAnswer, type OnSigned, type OpOutcome, type ReadyFlow, type ReadyPorts, type SendAnswer, type SentOp } from './readiness.ts'
 
 // Bridge-out (otto/mamoru#133, first instance of the routing layer). USDC that reached a Mamoru account's address on
 // Ethereum, where the account has never been deployed (otto/mamoru#117), goes to the same account on Base. The owner
@@ -375,6 +375,8 @@ export type StoredSibling = {
    * Circle's attestation, relayMessage here by the sibling's session. Absent: ready, or not started.
    */
   ready?: ReadyFlow
+  /** #348 (review r1 of #253): failed readiness relays of the day, apart from legFails. */
+  relayFails?: { day: string; n: number }
   at: string
 }
 
@@ -1464,7 +1466,7 @@ export class BridgeOut {
    * #348 (A1), set by boot from the Base operator: the home's announceReady to its sibling here (its own session, lane 1),
    * and where such an op stands on Base. Unset: nothing is announced, so no sibling becomes ready.
    */
-  home: { announce: (accountKey: string) => Promise<AnnounceAnswer>; outcome: (op: SentOp) => Promise<OpOutcome> } | null = null
+  home: { announce: (accountKey: string, onSigned: OnSigned) => Promise<AnnounceAnswer>; outcome: (op: SentOp) => Promise<OpOutcome> } | null = null
   private readonly preparedSibling = new Map<string, PreparedSibling>()
 
   private get keyFile(): string {
@@ -1912,7 +1914,7 @@ export class BridgeOut {
     const key = this.siblingSessionKey(accountKey)
     if (!d || !key) return
     const now = this.now()
-    if (c.legAt && now - Date.parse(c.legAt) < (c.leg?.state === 'failed' ? SIBLING_LEG_RETRY_MS : SIBLING_IDLE_MS)) return
+    if (c.legAt && now - Date.parse(c.legAt) < (c.leg?.state === 'failed' && c.leg.kind !== 'relay' ? SIBLING_LEG_RETRY_MS : SIBLING_IDLE_MS)) return
     if (c.legFails?.day === this.day() && c.legFails.n >= SIBLING_LEG_FAILS) return
     if (this.inFlight || this.bundling.size > 0 || (await this.blocking(this.journal.routes[accountKey]))) return
     c.legAt = new Date(now).toISOString()
@@ -2004,7 +2006,7 @@ export class BridgeOut {
    * (#348). Returns the op's hash once its leg is on the journal and its send reached signing; null when nothing left this
    * host (not built, provider behind, simulation refused, the send refused before signing).
    */
-  private async sendLeg(accountKey: string, c: StoredSibling, kind: SiblingLeg['kind'], intents: A1Intent[], amount: bigint, at: { policy: Address; key: Hex; nonce: bigint; block: { number: bigint | null; timestamp: bigint }; maxFee: bigint; prio: bigint; now: number }): Promise<Hex | null> {
+  private async sendLeg(accountKey: string, c: StoredSibling, kind: SiblingLeg['kind'], intents: A1Intent[], amount: bigint, at: { policy: Address; key: Hex; nonce: bigint; block: { number: bigint | null; timestamp: bigint }; maxFee: bigint; prio: bigint; now: number }, onSigned?: OnSigned): Promise<SendAnswer> {
     const { key, nonce, block, maxFee, prio, now } = at
     const d = { policy: at.policy }
     const safe = c.safe
@@ -2016,7 +2018,7 @@ export class BridgeOut {
       callData = buildA1CallData({ chainId: ETHEREUM_CHAIN_ID, account: safe, policy: d.policy, t: block.timestamp }, intents).callData
     } catch (e) {
       logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} not built, nothing signed:`, e instanceof Error ? e.message : e)
-      return null
+      return { fault: `not built: ${e instanceof Error ? e.message.slice(0, 120) : e}` }
     }
     const gas = SIBLING_GAS[kind]
     const draft = draftUserOp(safe, nonce, callData, { ...gas, maxFeePerGas: maxFee, maxPriorityFeePerGas: prio })
@@ -2029,7 +2031,7 @@ export class BridgeOut {
     // Never backwards: a nonce below the ledger's is a provider behind the chain (a higher one went to recoverNonce above).
     if (c.opNonce && nonce < BigInt(c.opNonce.nonce)) {
       logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: provider behind (nonce ${nonce} < ${c.opNonce.nonce}), nothing signed`, undefined)
-      return null
+      return { wait: 'provider behind' }
     }
     if (!c.opNonce) {
       c.opNonce = { nonce: nonce.toString(), from: block.number!.toString(), scan: block.number!.toString() }
@@ -2040,24 +2042,37 @@ export class BridgeOut {
       await this.l1.call({ account: ep, to: safe, data: op.callData })
       await this.l1.call({ account: this.relayer.address, to: ep, data, gas: txGas })
     } catch (e) {
-      logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} simulation refused, nothing sent:`, e instanceof Error ? e.message.split('\n')[0] : e)
-      return null
+      const why = e instanceof Error ? (e.message.split('\n')[0] ?? 'reverts') : String(e)
+      logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} simulation refused, nothing sent:`, why)
+      return { fault: `simulation refused: ${why.slice(0, 120)}` }
     }
     const prev = c.leg
     const leg: SiblingLeg = { kind, userOpHash: hash, nonce: nonce.toString(), nonceFrom: c.opNonce.from, amount: amount.toString(), state: 'sending', at: new Date(now).toISOString(), validUntil: a1ExpiresAt(block.timestamp).toString() }
     c.leg = leg
     this.save()
+    const sent: SentOp = { userOpHash: hash, fromBlock: block.number!.toString(), t: block.timestamp.toString() }
+    // #348 (review r1 of #253, P1-2): the caller's own write of the op (the readiness flow, a synchronous journal write),
+    // once the relayer signed the transaction that carries it and before its broadcast; a send refused before signing
+    // never reaches it (P1-1: a passing refusal, not the message's fault).
+    let told = false
+    const tell = () => {
+      if (told) return
+      told = true
+      void onSigned?.(sent)
+    }
     try {
       await this.exclusive(async () => {
         const { receipt } = await this.chargedOp(
           { to: ep, data, gas: txGas },
           hash,
           (h) => {
+            tell()
             leg.l1Tx = h
             leg.state = 'unconfirmed'
             this.save()
           },
           (h) => {
+            tell()
             leg.l1Tx = h
             this.save()
           },
@@ -2078,7 +2093,7 @@ export class BridgeOut {
       this.save()
       logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} send:`, e instanceof Error ? e.message.split('\n')[0] : e)
     }
-    return c.leg === leg ? hash : null
+    return c.leg === leg ? { op: sent } : { wait: 'the send was refused before signing' }
   }
 
   // ---------------------------------------------------------------- #348 (A1): the home's readiness on Ethereum
@@ -2095,21 +2110,40 @@ export class BridgeOut {
     const d = oneAuthV4Deployment(ethereumRegistry)
     if (!c || c.state !== 'done' || !d || !this.home || !this.enabledFor(accountKey) || !this.siblingInScope({ accountKey } as AccountContext)) return
     const home = this.home
-    const ports: ReadyPorts = {
-      isReady: async () => (await this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [c.safe, CCTP_DOMAIN_BASE] })) as boolean,
-      announce: () => home.announce(accountKey),
-      outcome: (side, op) => (side === 'source' ? home.outcome(op) : userOpOutcome(this.l1, address('EntryPointV07', ethereumRegistry), op, { expiresAt: a1ExpiresAt(BigInt(op.t)), maxBlocks: 100n })),
-      attestations: (srcTx) => cctpAttestation(srcTx, this.fetcher, CCTP_DOMAIN_BASE),
-      reject: async (m, a) => readinessMismatch(m, { source: CCTP_DOMAIN_BASE, destination: CCTP_DOMAIN_ETHEREUM, v4: d.policy, home: c.safe, safe: c.safe }) ?? ((await attestationValid(this.l1, m, a)) ? null : 'not signed by the attesters enabled on Ethereum'),
-      relay: (message, attestation) => this.relayLeg(accountKey, c, d.policy, message, attestation),
+    const isReady = async () => (await this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [c.safe, CCTP_DOMAIN_BASE] })) as boolean
+    // Review r1 of #253 (P1-1): no announce (gas on Base, a round of the day) while the sibling could not pay the relay
+    // that must follow it, at the highest fee a sibling op pays.
+    if (!c.ready || c.ready.state === 'announce') {
+      const [eth, deposit] = await Promise.all([this.l1.getBalance({ address: c.safe }), this.l1.readContract({ address: address('EntryPointV07', ethereumRegistry), abi: entryPointV07Abi, functionName: 'balanceOf', args: [c.safe] })])
+      if (eth + deposit < opGasOf('relay') * SIBLING_MAX_FEE) {
+        if (c.ready && (await isReady())) {
+          delete c.ready
+          this.save()
+        }
+        return
+      }
     }
-    const step = await stepReady(c.ready, ports, this.now())
-    if (step.note) console.log(`[bridge-out] sibling ${accountKey.slice(0, 8)} readiness: ${step.note}`)
-    if (step.changed) {
-      if (step.flow) c.ready = step.flow
+    const persist = (flow: ReadyFlow | undefined) => {
+      if (flow) c.ready = flow
       else delete c.ready
       this.save()
     }
+    const ports: ReadyPorts = {
+      isReady,
+      announce: (_again, onSigned) => home.announce(accountKey, onSigned),
+      outcome: (side, op) => (side === 'source' ? home.outcome(op) : userOpOutcome(this.l1, address('EntryPointV07', ethereumRegistry), op, { expiresAt: a1ExpiresAt(BigInt(op.t)), maxBlocks: 100n })),
+      attestations: (srcTx) => cctpAttestation(srcTx, this.fetcher, CCTP_DOMAIN_BASE),
+      reject: async (m, a) => {
+        // P1-3: the owners hash V4 here requires now: the sibling's own (its owners on Ethereum).
+        const ownersHash = (await this.l1.readContract({ address: v4Children(d.policy).helper, abi: mamoruV4HelperAbi, functionName: 'ownersHashOf', args: [c.safe] })) as Hex
+        return readinessMismatch(m, { source: CCTP_DOMAIN_BASE, destination: CCTP_DOMAIN_ETHEREUM, v4: d.policy, home: c.safe, safe: c.safe, ownersHash }) ?? ((await attestationValid(this.l1, m, a)) ? null : { why: 'not signed by the attesters enabled on Ethereum' })
+      },
+      relay: (message, attestation, onSigned) => this.relayLeg(accountKey, c, d.policy, message, attestation, onSigned),
+      persist,
+    }
+    const step = await stepReady(c.ready, ports, this.now())
+    if (step.note) console.log(`[bridge-out] sibling ${accountKey.slice(0, 8)} readiness: ${step.note}`)
+    if (step.changed) persist(step.flow)
   }
 
   /**
@@ -2117,11 +2151,12 @@ export class BridgeOut {
    * under the engine's guards: nothing beside another send or a move to Base being minted, an outstanding nonce read
    * first, the day's failed ops, Ethereum's fee ceiling, the op's prefund from the sibling's own ETH, and the simulation.
    */
-  private async relayLeg(accountKey: string, c: StoredSibling, policy: Address, message: Hex, attestation: Hex): Promise<{ op: SentOp } | { wait: string }> {
+  private async relayLeg(accountKey: string, c: StoredSibling, policy: Address, message: Hex, attestation: Hex, onSigned: OnSigned): Promise<SendAnswer> {
     const key = this.siblingSessionKey(accountKey)
     if (!key) return { wait: 'no sibling session key' }
     if (c.leg?.state === 'sending' || c.leg?.state === 'unconfirmed') return { wait: 'another sibling op in flight' }
-    if (c.legFails?.day === this.day() && c.legFails.n >= SIBLING_LEG_FAILS) return { wait: `${c.legFails.n} failed sibling ops today` }
+    // Review r1 of #253 (P2): the relay's own count of failed ops (the engine's swap and bridge keep theirs).
+    if (c.relayFails?.day === this.day() && c.relayFails.n >= SIBLING_LEG_FAILS) return { wait: `${c.relayFails.n} failed relays today` }
     if (this.inFlight || this.bundling.size > 0 || (await this.blocking(this.journal.routes[accountKey]))) return { wait: 'a move from Ethereum is under way' }
     const nonce = await this.siblingNonce(c.safe)
     if (c.opNonce && nonce > BigInt(c.opNonce.nonce)) {
@@ -2139,10 +2174,13 @@ export class BridgeOut {
     const maxFee = 2n * base + prio < SIBLING_MAX_FEE ? 2n * base + prio : SIBLING_MAX_FEE
     if (eth + deposit < opGasOf('relay') * maxFee) return { wait: 'the sibling holds too little ETH for the relay' }
     const now = this.now()
-    c.legAt = new Date(now).toISOString()
-    const hash = await this.sendLeg(accountKey, c, 'relay', [{ kind: 'relayMessage', message, attestation }], 0n, { policy, key, nonce, block, maxFee, prio, now })
-    if (!hash) return { wait: 'relay not sent (built, simulated or sent: refused)' }
-    return { op: { userOpHash: hash, fromBlock: block.number!.toString(), t: block.timestamp.toString() } }
+    const r = await this.sendLeg(accountKey, c, 'relay', [{ kind: 'relayMessage', message, attestation }], 0n, { policy, key, nonce, block, maxFee, prio, now }, onSigned)
+    // Review r1 of #253 (P1-5): the engine's clock moves only for an op that left this host.
+    if ('op' in r) {
+      c.legAt = new Date(now).toISOString()
+      this.save()
+    }
+    return r
   }
 
   private async siblingNonce(safe: Address): Promise<bigint> {
@@ -2187,7 +2225,7 @@ export class BridgeOut {
     // Not pending and no receipt of ours: once the window has passed it can never run, so the next op signs that nonce.
     if (receipt || dead || this.now() - Date.parse(leg.at) > UNCONFIRMED_GIVEUP_MS) {
       leg.state = 'failed'
-      this.legFailed(accountKey, c)
+      this.legFailed(accountKey, c, leg.kind)
       this.save()
     }
   }
@@ -2241,7 +2279,7 @@ export class BridgeOut {
     c.opNonce = undefined
     if (!mine.success) {
       leg.state = 'failed'
-      this.legFailed(accountKey, c)
+      this.legFailed(accountKey, c, leg.kind)
       this.save()
       return
     }
@@ -2311,7 +2349,13 @@ export class BridgeOut {
     return r
   }
 
-  private legFailed(accountKey: string, c: StoredSibling): void {
+  private legFailed(accountKey: string, c: StoredSibling, kind: SiblingLeg['kind'] = 'swap'): void {
+    if (kind === 'relay') {
+      // Review r1 of #253 (P2): a failed relay is counted apart; it neither stops nor delays the engine's swap and bridge.
+      const day = this.day()
+      c.relayFails = { day, n: c.relayFails?.day === day ? c.relayFails.n + 1 : 1 }
+      return
+    }
     const day = this.day()
     c.legFails = { day, n: c.legFails?.day === day ? c.legFails.n + 1 : 1 }
     c.legAt = new Date(this.now()).toISOString() // the retry wait runs from the failure

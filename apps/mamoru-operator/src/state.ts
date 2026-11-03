@@ -199,6 +199,8 @@ export type AccountState = {
   releasesDone?: ReleaseState[]
   /** otto/mamoru#348: on a V4 remote Safe, its announceReady to its home's chain (readiness.ts peerAnnounce). */
   readyAnnounce?: AnnounceRecord
+  /** otto/mamoru#348 (review r1 of #253): the last lane-1 V4 session op signed (its nonce and A1 window end, seconds), on disk before it is sent. */
+  lane1Open?: { nonce: string; expiresAt: string }
 }
 
 export type RemoteSafeRecord = { chainId: number; address: Hex; spec: RemoteSpec; permissionIds: Hex[]; ready?: boolean; lastCode?: string; checkedAt?: string }

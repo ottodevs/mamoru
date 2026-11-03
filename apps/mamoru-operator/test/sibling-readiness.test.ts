@@ -41,7 +41,7 @@ async function attest(m: Hex, key: Hex): Promise<Hex> {
   return concat([s.r, s.s, numberToHex(s.v ?? (s.yParity === 1 ? 28n : 27n), { size: 1 })])
 }
 
-type Chain = { ready: boolean; eth: bigint; usdc: bigint; nonce: bigint; logs: { args: { userOpHash: Hex; success: boolean; nonce: bigint; sender: string }; transactionHash: Hex }[]; head: bigint; relayLands: boolean }
+type Chain = { ready: boolean; eth: bigint; usdc: bigint; nonce: bigint; logs: { args: { userOpHash: Hex; success: boolean; nonce: bigint; sender: string }; transactionHash: Hex }[]; head: bigint; relayLands: boolean; ownersHash?: Hex; refuseSend?: boolean }
 
 function make(chain: Chain, now: () => number, o: { inScope?: boolean; iris?: () => { message: Hex; attestation: Hex }[]; c?: Partial<StoredSibling>; dir?: string } = {}) {
   const dir = o.dir ?? mkdtempSync(join(tmpdir(), 'mamoru-sib-ready-'))
@@ -64,6 +64,7 @@ function make(chain: Chain, now: () => number, o: { inScope?: boolean; iris?: ()
       if (functionName === 'isReady') return chain.ready
       if (functionName === 'getNonce') return chain.nonce
       if (functionName === 'signatureThreshold') return 1n
+      if (functionName === 'ownersHashOf') return chain.ownersHash ?? `0x${'0c'.repeat(32)}`
       if (functionName === 'isEnabledAttester') return (args![0] as string).toLowerCase() === privateKeyToAccount(ATTESTER).address.toLowerCase()
       throw new Error(functionName)
     },
@@ -76,6 +77,7 @@ function make(chain: Chain, now: () => number, o: { inScope?: boolean; iris?: ()
   const relayer = {
     address: '0x0000000000000000000000000000000000000001' as const,
     send: async (tx: { data?: Hex }, onSent?: (h: Hex) => void, _s?: unknown, onSigned?: (h: Hex, n: number) => void) => {
+      if (chain.refuseSend) throw new Error('nonce too low (refused before signing)')
       const op = decodeFunctionData({ abi: handleOpsAbi, data: tx.data! }).args[0][0]!
       const j = JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8'))
       const leg = j.siblings.k.leg
@@ -228,4 +230,77 @@ describe('#348 the home readiness on its Ethereum sibling (BridgeOut)', () => {
     expect(chain.ready).toBe(true)
     expect(m.sent.map((s) => s.kind)).toEqual(['relay', 'relay'])
   })
+
+  test('review r1 of #253, P1-1: no announce while the sibling could not pay the relay at the highest fee', async () => {
+    const chain: Chain = { ready: false, eth: 2n * 10n ** 14n, usdc: 0n, nonce: 0n, logs: [], head: 100n, relayLands: true }
+    const m = make(chain, () => T0)
+    await m.bo.tick()
+    expect(m.announced).toEqual([])
+    expect(m.journal().siblings.k.ready).toBeUndefined()
+    chain.eth = 3n * 10n ** 14n // 880k gas at 0.25 gwei is 2.2e14
+    await m.bo.tick()
+    expect(m.announced).toEqual(['k'])
+  })
+
+  test('review r1 of #253, P1-1 / P1-5: a relay refused before signing is a wait (not counted), and leaves the engine clock alone', async () => {
+    const chain: Chain = { ready: false, eth: 5n * 10n ** 14n, usdc: 0n, nonce: 0n, logs: [], head: 100n, relayLands: true, refuseSend: true }
+    let now = T0
+    const msg = readiness()
+    const att = await attest(msg, ATTESTER)
+    // the engine's own pass is held by its clock (a legAt ahead), so only the relay could move it
+    const legAt = new Date(T0 + 86_400_000).toISOString()
+    const m = make(chain, () => now, { iris: () => [{ message: msg, attestation: att }], c: { legAt } })
+    for (let i = 0; i < 3; i++) {
+      await m.bo.tick()
+      now += 60_000
+    }
+    expect(m.journal().siblings.k.ready?.state).toBe('relay')
+    for (let i = 0; i < 6; i++) {
+      await m.bo.tick()
+      now += 30 * 60_000
+    }
+    const j = m.journal().siblings.k
+    expect(m.sent).toEqual([])
+    expect(j.ready?.state).toBe('relay')
+    expect(j.ready?.relayTries ?? 0).toBe(0)
+    expect(j.ready?.message).toBe(msg)
+    expect(j.legAt).toBe(legAt)
+    expect(j.leg).toBeUndefined()
+    expect([...m.announced]).toEqual(['k'])
+  })
+
+  test('review r1 of #253, P1-3: an attestation for owners that are not the sibling\'s current ones is never relayed: announced again', async () => {
+    const chain: Chain = { ready: false, eth: 5n * 10n ** 14n, usdc: 0n, nonce: 0n, logs: [], head: 100n, relayLands: true, ownersHash: `0x${'0d'.repeat(32)}` }
+    let now = T0
+    const msg = readiness()
+    const att = await attest(msg, ATTESTER)
+    const m = make(chain, () => now, { iris: () => [{ message: msg, attestation: att }] })
+    for (let i = 0; i < 3; i++) {
+      await m.bo.tick()
+      now += 60_000
+    }
+    const j = m.journal().siblings.k
+    expect(j.ready?.state).toBe('announce')
+    expect(j.ready?.again).toBe(BASE_TX)
+    expect(j.ready?.why).toContain('stale')
+    expect(m.sent).toEqual([])
+  })
+
+  test('review r1 of #253, P2: a reverted relay counts in relayFails, not in the engine\'s legFails, and does not hold the bridge back', async () => {
+    const chain: Chain = { ready: false, eth: 5n * 10n ** 14n, usdc: 0n, nonce: 0n, logs: [], head: 100n, relayLands: false }
+    let now = T0
+    const msg = readiness()
+    const att = await attest(msg, ATTESTER)
+    const m = make(chain, () => now, { iris: () => [{ message: msg, attestation: att }] })
+    for (let i = 0; i < 4; i++) {
+      await m.bo.tick()
+      now += 60_000
+    }
+    const j = m.journal().siblings.k
+    expect(m.sent.map((x) => x.kind)).toEqual(['relay'])
+    expect(j.leg?.state).toBe('failed')
+    expect(j.relayFails?.n).toBe(1)
+    expect(j.legFails).toBeUndefined()
+  })
 })
+

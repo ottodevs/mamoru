@@ -652,6 +652,11 @@ describe.skipIf(!RUN)('#348 A1 end to end on Base and Monad forks (gate of T8)',
     remoteAcc.ctx = remoteCtx
     ;(monadOp as unknown as { store: StateStore }).store.state.accounts['home.v4'] = remoteAcc
     ;(monadOp as unknown as { cfg: OperatorConfig }).cfg.homeClient = base.lab.client
+    // the Monad operator announces only for a home in the one_auth_v4 scope (review r1 of #253)
+    ;(monadOp as unknown as { cfg: OperatorConfig }).cfg.opsScopedFlags = () => ({ one_auth_v4: [home.toLowerCase()] })
+    // the flows' clock, moved past each short wait (a peer on its way is asked again a minute later)
+    let clock = Date.now()
+    for (const o of [baseOp, monadOp]) (o as unknown as { readyNow: () => number }).readyNow = () => clock
     ;(baseOp as unknown as { store: StateStore }).store.state.accounts[homeAcc.accountKey] = homeAcc
     const attested: { message?: Hex; sent?: Hex } = {}
     ;(baseOp as unknown as { cfg: OperatorConfig }).cfg.irisFetch = async (url: string) => {
@@ -678,6 +683,7 @@ describe.skipIf(!RUN)('#348 A1 end to end on Base and Monad forks (gate of T8)',
     for (let i = 0; i < 8 && !(await base.lab.client.readContract({ address: D.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [home, DOMAIN_MONAD] })); i++) {
       await step()
       states.push(homeAcc.oneAuth?.remoteReady?.state ?? 'none')
+      clock += 120_000
       await monad.lab.rpc('evm_mine')
       await base.lab.rpc('evm_mine')
     }

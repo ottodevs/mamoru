@@ -6,7 +6,7 @@ import { describe, expect, test } from 'bun:test'
 import { concat, encodeAbiParameters, getAddress, pad, toHex, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { RemotePeer } from '../src/remote-peer.ts'
-import { decodeReadinessMessage, peerAnnounce, READY_ATTEST_GIVEUP_MS, READY_RELAY_TRIES, READY_ROUNDS_PER_DAY, readinessMismatch, readyBackoffMs, stepReady, userOpOutcome, type AnnounceRecord, type OpOutcome, type ReadyFlow, type ReadyPorts, type SentOp } from '../src/readiness.ts'
+import { decodeReadinessMessage, peerAnnounce, READY_ATTEST_GIVEUP_MS, READY_RELAY_TRIES, READY_ROUNDS_PER_DAY, readinessMismatch, readyBackoffMs, stepReady, userOpOutcome, type AnnounceRecord, type OpOutcome, type ReadyFlow, type ReadyPorts, type Rejection, type SentOp } from '../src/readiness.ts'
 
 const V4: Address = '0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8'
 const HOME: Address = '0x00000000000000000000000000000000000a0e01'
@@ -33,8 +33,10 @@ class World {
   announceEnds: OpOutcome = { txHash: h(1), success: true }
   /** Circle: complete messages for a source tx, null when down. */
   iris: { message: Hex; attestation: Hex }[] | null = []
-  rejectWhy: string | null = null
-  relayAs: 'op' | 'wait' = 'op'
+  rejectWhy: Rejection | null = null
+  relayAs: 'op' | 'wait' | 'fault' | 'throwAfterSign' = 'op'
+  /** What was written, in order (`persist`), and what the bundler saw: the write always comes first. */
+  log: string[] = []
   relayEnds: OpOutcome = { txHash: h(2), success: true }
   /** A successful relay makes it ready (V4's handler writes it), unless the owners changed since. */
   relayMakesReady = true
@@ -42,11 +44,15 @@ class World {
   ports(): ReadyPorts {
     return {
       isReady: async () => this.ready,
-      announce: async (again) => {
+      announce: async (again, onSigned) => {
         this.againSeen.push(again)
         if (this.announceAs === 'wait') return { wait: 'lane 1 busy' }
         this.announces++
-        return this.announceAs === 'tx' ? { txHash: h(100 + this.announces) } : { op: { userOpHash: h(200 + this.announces), fromBlock: '10', t: String(T0 / 1000) } }
+        if (this.announceAs === 'tx') return { txHash: h(100 + this.announces) }
+        const op = { userOpHash: h(200 + this.announces), fromBlock: '10', t: String(T0 / 1000) }
+        await onSigned(op)
+        this.log.push(`bundler ${op.userOpHash}`)
+        return { op }
       },
       outcome: async (side) => {
         if (side === 'source') return this.announceEnds
@@ -56,10 +62,18 @@ class World {
       },
       attestations: async () => this.iris,
       reject: async () => this.rejectWhy,
-      relay: async () => {
-        if (this.relayAs === 'wait') return { wait: 'simulation refused' }
+      relay: async (_m, _a, onSigned) => {
+        if (this.relayAs === 'wait') return { wait: 'another op in flight' }
+        if (this.relayAs === 'fault') return { fault: 'simulation refused' }
         this.relays++
-        return { op: { userOpHash: h(300 + this.relays), fromBlock: '20', t: String(T0 / 1000) } }
+        const op = { userOpHash: h(300 + this.relays), fromBlock: '20', t: String(T0 / 1000) }
+        await onSigned(op)
+        if (this.relayAs === 'throwAfterSign') throw new Error('bundler timed out')
+        this.log.push(`bundler ${op.userOpHash}`)
+        return { op }
+      },
+      persist: (f) => {
+        this.log.push(`persist ${f.state} ${f.state === 'relayed' ? f.relayed?.userOpHash : f.announced?.userOpHash}`)
       },
     }
   }
@@ -115,16 +129,18 @@ describe('#348 readiness flow: the happy path, a restart between every step', ()
     expect(r.flow?.srcTx).toBe(h(101))
   })
 
-  test("the peer's announce still on its way: asked again next step, no failure, no backoff, no round", async () => {
+  test("the peer's announce still on its way: asked again after READY_PENDING_POLL_MS, no failure, no round unless sent", async () => {
     const w = new World()
     const ports = w.ports()
     let n = 0
     ports.announce = async () => (++n < 3 ? { pending: 'ANNOUNCE_SENT' } : { txHash: h(7) })
     let s = await stepReady(undefined, ports, T0)
-    expect([s.flow?.state, s.flow?.fails, s.flow?.nextAt, s.flow?.rounds]).toEqual(['announce', 0, undefined, 0])
+    expect([s.flow?.state, s.flow?.fails, s.flow?.nextAt, s.flow?.rounds]).toEqual(['announce', 0, new Date(T0 + 60_000).toISOString(), 0])
     s = await stepReady(s.flow, ports, T0 + 1)
     expect(s.changed).toBe(false)
-    s = await stepReady(s.flow, ports, T0 + 2)
+    expect(n).toBe(1)
+    s = await stepReady(s.flow, ports, T0 + 60_000)
+    s = await stepReady(s.flow, ports, T0 + 120_000)
     expect([s.flow?.state, s.flow?.srcTx, s.flow?.rounds]).toEqual(['attesting', h(7), 1])
   })
 
@@ -177,7 +193,7 @@ describe('#348 readiness flow: Circle', () => {
     const w = new World()
     w.announceAs = 'tx'
     w.iris = [{ message: msg, attestation: ATT }]
-    w.rejectWhy = 'not signed by the attesters enabled on Base'
+    w.rejectWhy = { why: 'not signed by the attesters enabled on Base' }
     let r = await run(w, undefined, T0, 3)
     expect(r.flow?.state).toBe('attesting')
     expect(r.flow?.why).toContain('attesters')
@@ -216,7 +232,7 @@ describe('#348 readiness flow: failures', () => {
       expect(r.flow?.state).toBe('relayed')
       r = await run(w, r.flow, (at += 1)) // reverted
       expect(r.flow?.state).toBe('relay')
-      expect(r.flow?.fails).toBe(i)
+      expect(r.flow?.relayTries).toBe(i)
       expect(r.flow?.message).toBe(msg)
     }
     r = await run(w, r.flow, (at += 3_600_000))
@@ -227,11 +243,11 @@ describe('#348 readiness flow: failures', () => {
     expect(w.relays).toBe(READY_RELAY_TRIES)
   })
 
-  test('a relay refused before sending (simulation, lane busy) counts the same; never sent', async () => {
+  test('a relay the simulation refuses (a message fault) counts the same; never sent', async () => {
     const w = new World()
     w.announceAs = 'tx'
     w.iris = [{ message: msg, attestation: ATT }]
-    w.relayAs = 'wait'
+    w.relayAs = 'fault'
     let r = await run(w, undefined, T0, 2)
     let at = T0
     for (let i = 0; i < READY_RELAY_TRIES; i++) r = await run(w, r.flow, (at += 3_600_000))
@@ -295,13 +311,18 @@ describe('#348 readiness flow: failures', () => {
 
 describe('#348 the announcing peer (Monad): idempotent', () => {
   const op: SentOp = { userOpHash: h(5), fromBlock: '1', t: '1' }
-  const ports = (o: { outcome?: OpOutcome; ready?: boolean; sends?: { n: number }; wait?: boolean }) => ({
+  const ports = (o: { outcome?: OpOutcome; ready?: boolean; sends?: { n: number }; wait?: boolean; log?: string[]; throwAfterSign?: boolean }) => ({
     ...(o.ready !== undefined ? { alreadyReady: async () => o.ready! } : {}),
-    send: async () => {
+    send: async (onSigned: (op: SentOp) => Promise<void> | void) => {
       if (o.sends) o.sends.n++
-      return o.wait ? { wait: 'ANNOUNCE_NOT_SENT' } : { op }
+      if (o.wait) return { wait: 'ANNOUNCE_NOT_SENT' }
+      await onSigned(op)
+      if (o.throwAfterSign) throw new Error('bundler timed out')
+      o.log?.push('bundler')
+      return { op }
     },
     outcome: async () => o.outcome ?? 'pending',
+    persist: (r: AnnounceRecord) => void o.log?.push(`persist ${r.op?.userOpHash ?? ''} n=${r.n}`),
   })
 
   test('first ask sends; while out it is read, never sent beside; once it ran its tx is answered again and again', async () => {
@@ -324,13 +345,10 @@ describe('#348 the announcing peer (Monad): idempotent', () => {
     expect(sends.n).toBe(2)
   })
 
-  test('an op that reverted or never ran is sent again; already ready there: nothing sent', async () => {
+  test('already ready there: nothing sent', async () => {
     const sends = { n: 0 }
-    const rec: AnnounceRecord = { op, day: '2026-11-04', n: 1, at: new Date(T0).toISOString() }
-    expect((await peerAnnounce(rec, undefined, ports({ sends, outcome: 'gone' }), T0)).answer.state).toBe('pending')
-    expect(sends.n).toBe(1)
     expect((await peerAnnounce(undefined, undefined, ports({ sends, ready: true }), T0)).answer).toEqual({ state: 'ready' })
-    expect(sends.n).toBe(1)
+    expect(sends.n).toBe(0)
   })
 
   test(`at most ${READY_ROUNDS_PER_DAY} sends a day`, async () => {
@@ -340,20 +358,168 @@ describe('#348 the announcing peer (Monad): idempotent', () => {
   })
 })
 
+describe('review r1 of #253, P1-4: the peer backs off, counts every op it sent, and keeps its last good transaction', () => {
+  const op: SentOp = { userOpHash: h(5), fromBlock: '1', t: '1' }
+  const mk = (o: { outcome?: OpOutcome; sends: { n: number }; wait?: boolean }) => ({
+    send: async (onSigned: (op: SentOp) => Promise<void> | void) => {
+      o.sends.n++
+      if (o.wait) return { wait: 'ANNOUNCE_NOT_SENT' }
+      await onSigned(op)
+      return { op }
+    },
+    outcome: async () => o.outcome ?? 'pending',
+    persist: () => {},
+  })
+  test('an op that never ran or reverted: backed off (not resent at once), counted in n; resent after the backoff', async () => {
+    for (const end of ['gone' as const, { txHash: h(8), success: false }]) {
+      const sends = { n: 0 }
+      const rec: AnnounceRecord = { op, txHash: h(6), day: '2026-11-04', n: 1, at: new Date(T0).toISOString() }
+      let a = await peerAnnounce(rec, h(6), mk({ sends, outcome: end }), T0)
+      expect(a.answer).toEqual({ state: 'pending', code: 'ANNOUNCE_BACKOFF' })
+      expect(sends.n).toBe(0)
+      expect([a.record?.n, a.record?.txHash, a.record?.fails, a.record?.op]).toEqual([1, h(6), 1, undefined])
+      expect(Date.parse(a.record!.nextAt!)).toBe(T0 + readyBackoffMs(1))
+      // inside the backoff, asked again: nothing sent
+      a = await peerAnnounce(a.record, h(6), mk({ sends }), T0 + 1)
+      expect(sends.n).toBe(0)
+      // after it: sent, n counts it, the last good transaction is kept while it is out
+      a = await peerAnnounce(a.record, h(6), mk({ sends }), T0 + readyBackoffMs(1))
+      expect(a.answer).toEqual({ state: 'pending', code: 'ANNOUNCE_SENT' })
+      expect([sends.n, a.record?.n, a.record?.txHash]).toEqual([1, 2, h(6)])
+    }
+  })
+  test('an op not sent (gas, lane busy) backs off too', async () => {
+    const sends = { n: 0 }
+    const a = await peerAnnounce(undefined, undefined, mk({ sends, wait: true }), T0)
+    expect(a.answer).toEqual({ state: 'pending', code: 'ANNOUNCE_NOT_SENT' })
+    expect([a.record?.fails, a.record?.n]).toEqual([1, 0])
+    expect((await peerAnnounce(a.record, undefined, mk({ sends }), T0 + 1)).answer).toEqual({ state: 'pending', code: 'ANNOUNCE_BACKOFF' })
+  })
+  test('the ops a day are capped across gone ones too', async () => {
+    const sends = { n: 0 }
+    let rec: AnnounceRecord | undefined
+    let at = T0
+    for (let i = 0; i < 3 * READY_ROUNDS_PER_DAY; i++) {
+      rec = (await peerAnnounce(rec, undefined, mk({ sends, outcome: 'gone' }), (at += 3_600_000 / 2))).record
+    }
+    expect(sends.n).toBe(READY_ROUNDS_PER_DAY)
+  })
+  test("Base counts the peer's send as a round", async () => {
+    const w = new World()
+    const ports = w.ports()
+    ports.announce = async () => ({ pending: 'ANNOUNCE_SENT', sent: true })
+    const s = await stepReady(undefined, ports, T0)
+    expect([s.flow?.rounds, s.flow?.fails]).toEqual([1, 0])
+    expect(Date.parse(s.flow!.nextAt!)).toBe(T0 + 60_000)
+  })
+})
+
+describe('review r1 of #253, P1-2: an op is on disk before it leaves this host', () => {
+  test('stepReady writes `announced` / `relayed` with the op before the bundler sees it', async () => {
+    const w = new World()
+    w.iris = [{ message: msg, attestation: ATT }]
+    let r = await run(w, undefined, T0, 3)
+    expect(r.flow?.state).toBe('relay')
+    r = await run(w, r.flow, T0)
+    expect(w.log).toEqual([`persist announced ${h(201)}`, `bundler ${h(201)}`, `persist relayed ${h(301)}`, `bundler ${h(301)}`])
+  })
+  test('a send that throws after the write is the op sent: `relayed`, read back next step, never sent again', async () => {
+    const w = new World()
+    w.announceAs = 'tx'
+    w.iris = [{ message: msg, attestation: ATT }]
+    w.relayAs = 'throwAfterSign'
+    let r = await run(w, undefined, T0, 3)
+    expect(r.flow?.state).toBe('relayed')
+    expect(r.flow?.relayed?.userOpHash).toBe(h(301))
+    w.relayEnds = 'pending'
+    r = await run(w, r.flow, T0 + 1, 3)
+    expect(w.relays).toBe(1)
+  })
+  test('the peer writes its op before the bundler sees it; a throw after that is the op sent', async () => {
+    const log: string[] = []
+    const op: SentOp = { userOpHash: h(5), fromBlock: '1', t: '1' }
+    const send = (throws: boolean) => async (onSigned: (o: SentOp) => Promise<void> | void) => {
+      await onSigned(op)
+      if (throws) throw new Error('bundler timed out')
+      log.push('bundler')
+      return { op }
+    }
+    const persist = (r: AnnounceRecord) => void log.push(`persist ${r.op?.userOpHash} n=${r.n}`)
+    await peerAnnounce(undefined, undefined, { send: send(false), outcome: async () => 'pending', persist }, T0)
+    expect(log).toEqual([`persist ${h(5)} n=1`, 'bundler'])
+    const a = await peerAnnounce(undefined, undefined, { send: send(true), outcome: async () => 'pending', persist }, T0)
+    expect(a.answer).toEqual({ state: 'pending', code: 'ANNOUNCE_SENT' })
+    expect(a.record?.op?.userOpHash).toBe(h(5))
+  })
+})
+
+describe('review r1 of #253, P1-1: only message faults count against the message', () => {
+  test('a relay that waits (another op in flight, prefund short, gas, lane busy) backs off for ever, never drops the message', async () => {
+    const w = new World()
+    w.announceAs = 'tx'
+    w.iris = [{ message: msg, attestation: ATT }]
+    w.relayAs = 'wait'
+    let r = await run(w, undefined, T0, 2)
+    let at = T0
+    for (let i = 0; i < 4 * READY_RELAY_TRIES; i++) r = await run(w, r.flow, (at += 3_600_000))
+    expect(r.flow?.state).toBe('relay')
+    expect(r.flow?.message).toBe(msg)
+    expect(r.flow?.relayTries ?? 0).toBe(0)
+    expect(w.announces).toBe(1)
+    // then it can be sent: it goes on with the same message
+    w.relayAs = 'op'
+    r = await run(w, r.flow, (at += 3_600_000), 2)
+    expect(r.ready).toBe(true)
+  })
+  test('waits and faults mixed: only the faults count', async () => {
+    const w = new World()
+    w.announceAs = 'tx'
+    w.iris = [{ message: msg, attestation: ATT }]
+    let r = await run(w, undefined, T0, 2)
+    let at = T0
+    for (const kind of ['fault', 'wait', 'wait', 'fault', 'wait'] as const) {
+      w.relayAs = kind
+      r = await run(w, r.flow, (at += 3_600_000))
+    }
+    expect([r.flow?.state, r.flow?.relayTries]).toEqual(['relay', 2])
+    w.relayAs = 'fault'
+    r = await run(w, r.flow, (at += 3_600_000))
+    expect(r.flow?.state).toBe('announce')
+  })
+})
+
+describe('review r1 of #253, P1-3: a stale owners hash is never relayed', () => {
+  test('stepReady: a stale attestation restarts the round at once (again = its tx), no relay', async () => {
+    const w = new World()
+    w.announceAs = 'tx'
+    w.iris = [{ message: msg, attestation: ATT }]
+    w.rejectWhy = { why: 'owners hash 0x0b.., V4 requires 0x0c..', stale: true }
+    const r = await run(w, undefined, T0, 2)
+    expect([r.flow?.state, r.flow?.again, r.flow?.message]).toEqual(['announce', h(101), undefined])
+    expect(w.relays).toBe(0)
+  })
+})
+
 describe('#348 the readiness message', () => {
-  const want = { source: 15, destination: 6, v4: V4, home: HOME, safe: REMOTE }
+  const want = { source: 15, destination: 6, v4: V4, home: HOME, safe: REMOTE, ownersHash: OH }
   test('decodes the header and the body (home, safe, ownersHash)', () => {
     const d = decodeReadinessMessage(msg)
     expect([d.sourceDomain, d.destinationDomain, d.minFinality, d.finalityExecuted, d.home, d.safe, d.ownersHash]).toEqual([15, 6, 2000, 2000, HOME, REMOTE, OH])
     expect(readinessMismatch(msg, want)).toBeNull()
   })
   test('refused: other domains, not V4 to V4, a destination caller, Fast finality, another Safe, not a readiness body', () => {
-    expect(readinessMismatch(readinessMessage({ source: 6, destination: 0 }), want)).toContain('domains')
-    expect(readinessMismatch(readinessMessage({ sender: '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d' }), want)).toBe('not from V4 to V4')
-    expect(readinessMismatch(readinessMessage({ caller: pad('0x01', { size: 32 }) }), want)).toBe('destination caller set')
-    expect(readinessMismatch(readinessMessage({ executed: 1000 }), want)).toContain('finality')
-    expect(readinessMismatch(readinessMessage({ safe: HOME }), want)).toContain('for')
-    expect(readinessMismatch(concat([msg, '0x00']), want)).toContain('length')
+    expect(readinessMismatch(readinessMessage({ source: 6, destination: 0 }), want)?.why).toContain('domains')
+    expect(readinessMismatch(readinessMessage({ sender: '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d' }), want)?.why).toBe('not from V4 to V4')
+    expect(readinessMismatch(readinessMessage({ caller: pad('0x01', { size: 32 }) }), want)?.why).toBe('destination caller set')
+    expect(readinessMismatch(readinessMessage({ executed: 1000 }), want)?.why).toContain('finality')
+    expect(readinessMismatch(readinessMessage({ safe: HOME }), want)?.why).toContain('for')
+    expect(readinessMismatch(concat([msg, '0x00']), want)?.why).toContain('length')
+    for (const m of [readinessMessage({ source: 6, destination: 0 }), readinessMessage({ safe: HOME })]) expect(readinessMismatch(m, want)?.stale).toBeUndefined()
+  })
+  test('P1-3: another owners hash than the one V4 requires now is stale', () => {
+    const r = readinessMismatch(msg, { ...want, ownersHash: `0x${'0c'.repeat(32)}` })
+    expect(r?.stale).toBe(true)
+    expect(r?.why).toContain('owners hash')
   })
 })
 

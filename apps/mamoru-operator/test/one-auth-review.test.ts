@@ -354,3 +354,60 @@ describe('review of #247 (P2): lane-1 session ops (registerRemote now, announceR
     expect(s.sent).toHaveLength(0)
   })
 })
+
+describe('review r1 of #253 (P1-2): a lane-1 op is on disk before it is sent; the ledger survives a restart', () => {
+  type SentOp = { userOpHash: Hex; fromBlock: string; t: string }
+  type Lane1At = { sendV4SessionOpAt(a: AccountState, i: unknown[], onSigned?: (op: SentOp) => Promise<void> | void): Promise<{ op: SentOp } | { wait: string } | { fault: string }>; lane1Bundler: () => { sendUserOperation: (op: unknown) => Promise<Hex> } }
+  function setup(o: { revert?: boolean; baseFee?: bigint } = {}) {
+    const w = world(0n, scoped)
+    const acc = onV4(w)
+    const c = priv(w.op).client as unknown as Record<string, unknown>
+    const real = (c.readContract as (a: unknown) => Promise<unknown>).bind(c)
+    c.getBlock = async () => ({ number: 500n, timestamp: 1_800_000_000n, baseFeePerGas: o.baseFee ?? 5_000_000n, hash: `0x${'aa'.repeat(32)}` })
+    c.readContract = async (a: { functionName: string }) => (a.functionName === 'getNonce' ? 0n : real(a))
+    c.call = async () => {
+      if (o.revert) throw new Error('execution reverted: BadMessage(5)')
+      return { data: '0x' }
+    }
+    return { w, acc, lane1: w.op as unknown as Lane1At }
+  }
+  const intents = [{ kind: 'relayMessage', message: `0x${'01'.repeat(244)}`, attestation: `0x${'02'.repeat(65)}` }]
+
+  test('the ledger and the caller\'s write happen before the bundler sees the op; a bundler that throws after is the op sent', async () => {
+    const { acc, lane1 } = setup()
+    const log: string[] = []
+    lane1.lane1Bundler = () => ({
+      sendUserOperation: async () => {
+        log.push(`bundler (ledger nonce ${acc.lane1Open?.nonce})`)
+        throw new Error('bundler timed out')
+      },
+    })
+    const r = await lane1.sendV4SessionOpAt(acc, intents, (op) => void log.push(`persist ${op.userOpHash.slice(0, 6)}`))
+    expect('op' in r).toBe(true)
+    expect(log).toEqual([`persist ${(r as { op: SentOp }).op.userOpHash.slice(0, 6)}`, 'bundler (ledger nonce 0)'])
+    expect(acc.lane1Open?.nonce).toBe('0')
+  })
+
+  test('after a restart (a new operator on the same state) the open op still holds lane 1: nothing signed beside it', async () => {
+    const a = setup()
+    let sent = 0
+    a.lane1.lane1Bundler = () => ({ sendUserOperation: async () => (sent++, `0x${'bb'.repeat(32)}` as Hex) })
+    expect('op' in (await a.lane1.sendV4SessionOpAt(a.acc, intents))).toBe(true)
+    const b = setup()
+    b.w.state.accounts.k = JSON.parse(JSON.stringify(a.acc)) as AccountState
+    b.lane1.lane1Bundler = () => ({ sendUserOperation: async () => (sent++, `0x${'bb'.repeat(32)}` as Hex) })
+    const r = await b.lane1.sendV4SessionOpAt(b.w.state.accounts.k!, intents)
+    expect(r).toEqual({ wait: 'lane-1 op with nonce 0 still open' })
+    expect(sent).toBe(1)
+  })
+
+  test('P1-1: the simulation refusing it is a fault; gas over the ceiling is a wait; neither signs anything', async () => {
+    const f = setup({ revert: true })
+    f.lane1.lane1Bundler = () => ({ sendUserOperation: async () => { throw new Error('never') } })
+    const r = await f.lane1.sendV4SessionOpAt(f.acc, intents)
+    expect('fault' in r).toBe(true)
+    expect(f.acc.lane1Open).toBeUndefined()
+    const g = setup({ baseFee: 10n ** 12n })
+    expect(await g.lane1.sendV4SessionOpAt(g.acc, intents)).toEqual({ wait: 'gas over the ceiling' })
+  })
+})

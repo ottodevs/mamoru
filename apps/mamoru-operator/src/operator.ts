@@ -32,15 +32,15 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
-import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, smartSessionV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
+import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReturnHome } from './return-home.ts'
 import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
 import { baseStepLines, monadStepLines, readEligiblePools, readHeldPools, readPaused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
 import { attestationValid, cctpAttestation } from './cctp.ts'
-import { peerAnnounce, readinessMismatch, stepReady, userOpOutcome, type AnnounceAnswer, type AnnouncePorts, type OpOutcome, type PeerAnnounceAnswer, type ReadyPorts, type SentOp } from './readiness.ts'
-import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
+import { peerAnnounce, readinessMismatch, stepReady, userOpOutcome, type AnnounceAnswer, type AnnouncePorts, type AnnounceRecord, type OnSigned, type ReadyFlow, type OpOutcome, type PeerAnnounceAnswer, type ReadyPorts, type SendAnswer, type SentOp } from './readiness.ts'
+import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, userOpHash, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
@@ -318,6 +318,8 @@ const RELAYABLE_KINDS = new Set<string>(['activate', 'renew', 'migrate-v4'])
 const REREGISTER_MS = 600_000
 /** otto/mamoru#348: Ethereum, the chain of a V4 home's sibling (CCTP domain 0). */
 const ETHEREUM_CHAIN_ID = 1
+/** otto/mamoru#348: what the readiness step asks of the Monad operator. */
+type RemoteReadyPeer = NonNullable<NonNullable<OperatorConfig['remotePeers']>[number]>
 /**
  * otto/mamoru#348: reading a lane-1 op back from the EntryPoint's logs: blocks per eth_getLogs (Monad's RPCs serve 100),
  * and at most this many blocks from the one it was signed at (its A1 window, T + 300 s, at the chain's block time, twice).
@@ -6524,16 +6526,18 @@ export class Operator {
     await this.tickReturns().catch((e) => logErr('[return] tick:', e))
     for (const acc of Object.values(this.store.state.accounts)) {
       if (!acc.active || !this.onV4(acc) || acc.policyId === ONE_AUTH_V4_REMOTE) continue
-      await this.lock(acc.accountKey)
+      const job = await this.lock(acc.accountKey)
         .run(() => this.oneAuthRemote(acc))
         .catch((e) => logErr(`[v4] ${acc.accountKey} remote:`, e))
+      // #348: the remote's readiness step, outside the account lock (review r1 of #253, P2: iris and the peer are network calls).
+      if (job) await this.stepRemoteReady(acc, job.ctx, job.peer).catch((e) => logErr(`[v4] ${acc.accountKey} remote readiness:`, e))
     }
   }
 
   /** When the remote was last (re-)registered by this operator, per account: at most once per REREGISTER_MS. */
   private readonly registeredAt = new Map<string, number>()
 
-  private async oneAuthRemote(acc: AccountState): Promise<void> {
+  private async oneAuthRemote(acc: AccountState): Promise<{ ctx: AccountContext; peer: RemoteReadyPeer } | void> {
     const d = this.cfg.oneAuth
     if (!d || !this.v4PolicyOf(acc).remoteBuckets?.length) return
     const domain = V4_DOMAIN_BY_CHAIN[BRIDGE_MONAD_CHAIN_ID]!
@@ -6578,13 +6582,14 @@ export class Operator {
     }
     // #348 (A1): a provisioned remote is proven ready by its own V4 on Monad (announceReady, sent by the Monad operator from
     // the remote's session), a CCTP message Circle attests, relayed here by the home's own session (relayMessage). Until
-    // Base's V4 holds it ready, nothing is bridged to it (remoteOf reads `ready` from the chain).
+    // Base's V4 holds it ready, nothing is bridged to it (remoteOf reads `ready` from the chain). The step itself runs
+    // outside the account lock (review r1 of #253, P2: it calls iris and the peer), from tickOneAuth.
     if (!now0.ready && peer) {
       // Review of #202 (P0-3): with a design-C Safe still under remoteAccountKey there, the V4 remote has a key of its own.
       const ctx: AccountContext = { accountKey: acc.oneAuth!.remote!.accountKey!, chainId: BRIDGE_MONAD_CHAIN_ID, address: now0.remote, owners: acc.ctx.owners, saltNonce: acc.ctx.saltNonce, passkey: acc.ctx.passkey, remote: target.spec }
       const res = await peer.provision(ctx)
       if (res.state !== 'active') logErr(`[v4] ${acc.accountKey} remote ${now0.remote} not provisioned yet:`, res.code)
-      else if (this.oneAuthOnly(acc)) await this.stepRemoteReady(acc, ctx, peer)
+      else if (this.oneAuthOnly(acc)) return { ctx, peer }
     }
   }
 
@@ -6593,51 +6598,70 @@ export class Operator {
     return this.cfg.irisFetch ?? fetch
   }
 
+  /** otto/mamoru#348: the readiness flows' clock (a field so the fork E2E can move it past a backoff). */
+  private readyNow: () => number = Date.now
+  /** Accounts whose readiness step is running (one at a time each: the step runs outside the account lock). */
+  private readonly readyBusy = new Set<string>()
+
   /**
    * otto/mamoru#348, Base side: one step of the Monad remote's readiness flow (readiness.ts), persisted on the account
-   * (`oneAuth.remoteReady`) so a restart resumes it. The announce is the Monad operator's (`POST remote-announce`, the
-   * remote's own session there); the attestation is Circle's, checked here against Base's enabled attesters and V4's
-   * message shape; the relay is the home's own session op (lane 1). Readiness is read from Base's V4 first: ready, and
-   * nothing is sent.
+   * (`oneAuth.remoteReady`) so a restart resumes it; an op is on disk before it is sent (review r1 of #253, P1-2). The
+   * announce is the Monad operator's (`POST remote-announce`, the remote's own session there); the attestation is
+   * Circle's, checked here against V4's message shape, the owners hash V4 requires now (P1-3) and Base's enabled
+   * attesters; the relay is the home's own session op (lane 1). Readiness is read from Base's V4 first: ready, nothing
+   * is sent. Runs outside the account lock (iris and the peer are network calls): its writes are synchronous, and one
+   * step per account runs at a time.
    */
-  private async stepRemoteReady(acc: AccountState, ctx: AccountContext, peer: NonNullable<OperatorConfig['remotePeers']>[number]): Promise<void> {
+  private async stepRemoteReady(acc: AccountState, ctx: AccountContext, peer: RemoteReadyPeer): Promise<void> {
     const d = this.cfg.oneAuth
-    if (!d || !peer?.announce) return
-    const home = acc.ctx.address as Address
-    const remote = ctx.address as Address
-    const domain = V4_DOMAIN_BY_CHAIN[BRIDGE_MONAD_CHAIN_ID]!
-    const homeDomain = V4_DOMAIN_BY_CHAIN[this.cfg.chainId]!
-    // A flow for another remote (re-registered since) starts over.
-    let prev = acc.oneAuth?.remoteReady
-    if (prev && prev.target?.toLowerCase() !== remote.toLowerCase()) prev = undefined
-    const ports: ReadyPorts = {
-      isReady: async () => {
-        const r = await readV4Remote(this.client, d.policy, home, domain)
-        if (!r) throw new Error('V4 readiness unreadable')
-        return r.ready && r.remote.toLowerCase() === remote.toLowerCase()
-      },
-      announce: async (again) => {
-        const a = await peer.announce!(ctx, again)
-        if (a.state === 'announced') return { txHash: a.txHash }
-        if (a.state === 'pending' && (a.code === 'ANNOUNCE_SENT' || a.code === 'ANNOUNCE_PENDING')) return { pending: a.code }
-        return { wait: a.state === 'ready' ? 'the Monad operator reads it ready already' : a.code }
-      },
-      outcome: async (_side, op) => this.lane1Outcome(op),
-      attestations: (srcTx) => cctpAttestation(srcTx, this.iris(), domain),
-      reject: async (m, a) => readinessMismatch(m, { source: domain, destination: homeDomain, v4: d.policy, home, safe: remote }) ?? ((await attestationValid(this.client, m, a)) ? null : 'not signed by the attesters enabled on Base'),
-      relay: async (message, attestation) => {
-        const op = await this.sendV4SessionOpAt(acc, [{ kind: 'relayMessage', message, attestation }])
-        return op ? { op } : { wait: 'relay not sent (another lane-1 op open, gas over the ceiling, or the simulation refused it)' }
-      },
-    }
-    const step = await stepReady(prev, ports, Date.now())
-    if (step.note) console.log(`[v4] ${acc.accountKey} remote ${remote} readiness: ${step.note}`)
-    if (step.changed || prev !== acc.oneAuth?.remoteReady) {
-      const next = { ...acc.oneAuth }
-      if (step.flow) next.remoteReady = { ...step.flow, target: remote }
-      else delete next.remoteReady
-      acc.oneAuth = next
-      this.store.save()
+    if (!d || !peer?.announce || this.readyBusy.has(acc.accountKey)) return
+    this.readyBusy.add(acc.accountKey)
+    try {
+      const home = acc.ctx.address as Address
+      const remote = ctx.address as Address
+      const domain = V4_DOMAIN_BY_CHAIN[BRIDGE_MONAD_CHAIN_ID]!
+      const homeDomain = V4_DOMAIN_BY_CHAIN[this.cfg.chainId]!
+      // A flow for another remote (re-registered since) starts over.
+      let prev = acc.oneAuth?.remoteReady
+      if (prev && prev.target?.toLowerCase() !== remote.toLowerCase()) prev = undefined
+      const persist = (flow: ReadyFlow | undefined) => {
+        const next = { ...acc.oneAuth }
+        if (flow) next.remoteReady = { ...flow, target: remote }
+        else delete next.remoteReady
+        acc.oneAuth = next
+        this.store.save()
+      }
+      const ports: ReadyPorts = {
+        isReady: async () => {
+          const r = await readV4Remote(this.client, d.policy, home, domain)
+          if (!r) throw new Error('V4 readiness unreadable')
+          return r.ready && r.remote.toLowerCase() === remote.toLowerCase()
+        },
+        announce: async (again) => {
+          const a = await peer.announce!(ctx, again)
+          if (a.state === 'announced') return { txHash: a.txHash }
+          if (a.state === 'pending' && (a.code === 'ANNOUNCE_SENT' || a.code === 'ANNOUNCE_PENDING' || a.code === 'ANNOUNCE_BACKOFF')) return { pending: a.code, sent: a.code === 'ANNOUNCE_SENT' }
+          return { wait: a.state === 'ready' ? 'the Monad operator reads it ready already' : a.code }
+        },
+        outcome: async (_side, op) => this.lane1Outcome(op),
+        attestations: (srcTx) => cctpAttestation(srcTx, this.iris(), domain),
+        reject: async (m, a) => {
+          // P1-3: the owners hash V4 here requires now: the registered remote's, which must also be the home's current one.
+          const [reg, current] = await Promise.all([
+            this.client.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'remoteOf', args: [home, domain] }),
+            this.client.readContract({ address: v4Children(d.policy).helper, abi: mamoruV4HelperAbi, functionName: 'ownersHashOf', args: [home] }),
+          ])
+          if (reg.ownersHash.toLowerCase() !== current.toLowerCase()) return { why: "the registered remote's owners hash is not the home's current one (it is registered again first)" }
+          return readinessMismatch(m, { source: domain, destination: homeDomain, v4: d.policy, home, safe: remote, ownersHash: current }) ?? ((await attestationValid(this.client, m, a)) ? null : { why: 'not signed by the attesters enabled on Base' })
+        },
+        relay: (message, attestation, onSigned) => this.sendV4SessionOpAt(acc, [{ kind: 'relayMessage', message, attestation }], onSigned),
+        persist,
+      }
+      const step = await stepReady(prev, ports, this.readyNow())
+      if (step.note) console.log(`[v4] ${acc.accountKey} remote ${remote} readiness: ${step.note}`)
+      if (step.changed || prev !== acc.oneAuth?.remoteReady) persist(step.flow)
+    } finally {
+      this.readyBusy.delete(acc.accountKey)
     }
   }
 
@@ -6648,23 +6672,34 @@ export class Operator {
 
   /**
    * otto/mamoru#348, Base side, for BridgeOut: the home's announceReady to its Ethereum sibling (toDomain 0), from the
-   * home's own session (lane 1). Only an active V4 home (never a remote) in the one-authorization scope; otherwise not sent.
+   * home's own session (lane 1). Only an active V4 home (never a remote) in the one-authorization scope; otherwise not
+   * sent. `onSigned` is BridgeOut's write of the op, awaited before the op is sent (review r1 of #253, P1-2).
    */
-  async announceSiblingHome(accountKey: string): Promise<AnnounceAnswer> {
+  async announceSiblingHome(accountKey: string, onSigned: OnSigned): Promise<AnnounceAnswer> {
     const acc = this.store.state.accounts[accountKey]
     const g = acc?.grants[0]
     if (!acc || !acc.active || !this.onV4(acc) || acc.policyId === ONE_AUTH_V4_REMOTE || !this.oneAuthOnly(acc)) return { wait: 'not an active V4 home in scope' }
     if (!g?.grant.oneAuthV4 || !acc.sessionKey) return { wait: 'no V4 session' }
-    const op = await this.sendV4SessionOpAt(acc, [{ kind: 'announceReady', safe: acc.ctx.address as Address, toDomain: V4_DOMAIN_BY_CHAIN[ETHEREUM_CHAIN_ID]!, sessionKey: privateKeyToAccount(acc.sessionKey).address, permissionId: g.permissionId }])
-    return op ? { op } : { wait: 'announce not sent (another lane-1 op open, gas over the ceiling, or the simulation refused it)' }
+    return this.sendV4SessionOpAt(acc, [{ kind: 'announceReady', safe: acc.ctx.address as Address, toDomain: V4_DOMAIN_BY_CHAIN[ETHEREUM_CHAIN_ID]!, sessionKey: privateKeyToAccount(acc.sessionKey).address, permissionId: g.permissionId }], onSigned)
+  }
+
+  /**
+   * otto/mamoru#348 (review r1 of #253, P2): a V4 remote's home in the `one_auth_v4` scope. The scope lists home account
+   * keys and Safe addresses; the remote is named by its home's (its Base account key, and the home address its spec names).
+   */
+  private homeInScope(acc: AccountState, home: Address): boolean {
+    const scope = this.cfg.opsScopedFlags?.().one_auth_v4
+    if (scope === null) return this.cfg.opsFlags?.().one_auth_v4 === true
+    const baseKey = baseKeyOf(acc.accountKey, this.cfg.chainId)
+    return Array.isArray(scope) && ((!!baseKey && scope.includes(baseKey.toLowerCase())) || scope.includes(home.toLowerCase()))
   }
 
   /**
    * otto/mamoru#348, remote side (`POST remote-announce`, from the home's operator): the V4 remote Safe of this context
    * proves itself ready to its home's chain: announceReady from its own session (lane 1), toDomain its home domain.
    * Idempotent (readiness.ts peerAnnounce): the announce that ran is answered again, and a new one is sent only when the
-   * home names that one as unusable (`again`), or when none ran; at most READY_ROUNDS_PER_DAY a day. Persisted on the
-   * account (`readyAnnounce`), so a restart reads its op back from the chain.
+   * home names that one as unusable (`again`), or when none ran; failures back off; at most READY_ROUNDS_PER_DAY ops a
+   * day. The op is on disk (`readyAnnounce`) before it is sent, so a restart reads it back from the chain.
    */
   announceRemote(ctx: AccountContext, body: unknown): Promise<PeerAnnounceAnswer> {
     return this.lock(ctx.accountKey).run(async () => {
@@ -6673,23 +6708,23 @@ export class Operator {
       const g = acc.grants[0]
       const home = releaseHomeOf(acc)
       if (!d || !g?.grant.oneAuthV4 || !acc.sessionKey || !home) throw new HttpError(404, 'NOT_A_REMOTE', 'no running V4 remote Safe of this account here')
+      if (!this.homeInScope(acc, home.home)) throw new HttpError(404, 'NOT_A_REMOTE', 'no running V4 remote Safe of this account here')
       const raw = (body as { again?: unknown } | null)?.again
       if (raw !== undefined && (typeof raw !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(raw))) throw new HttpError(400, 'BAD_REQUEST', 'again must be a transaction hash')
       const safe = acc.ctx.address as Address
-      const ports: AnnouncePorts = {
-        ...(this.cfg.homeClient ? { alreadyReady: async () => ((await this.cfg.homeClient!.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [home.home as Address, V4_DOMAIN_BY_CHAIN[this.cfg.chainId]!] }).catch(() => false)) as boolean) } : {}),
-        send: async () => {
-          const op = await this.sendV4SessionOpAt(acc, [{ kind: 'announceReady', safe, toDomain: home.homeDomain, sessionKey: privateKeyToAccount(acc.sessionKey!).address, permissionId: g.permissionId }])
-          return op ? { op } : { wait: 'ANNOUNCE_NOT_SENT' }
-        },
-        outcome: (op) => this.lane1Outcome(op),
-      }
-      const r = await peerAnnounce(acc.readyAnnounce, raw as Hex | undefined, ports, Date.now())
-      if (r.changed) {
-        if (r.record) acc.readyAnnounce = r.record
+      const persist = (record: AnnounceRecord | undefined) => {
+        if (record) acc.readyAnnounce = record
         else delete acc.readyAnnounce
         this.store.save()
       }
+      const ports: AnnouncePorts = {
+        ...(this.cfg.homeClient ? { alreadyReady: async () => ((await this.cfg.homeClient!.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [home.home as Address, V4_DOMAIN_BY_CHAIN[this.cfg.chainId]!] }).catch(() => false)) as boolean) } : {}),
+        send: (onSigned) => this.sendV4SessionOpAt(acc, [{ kind: 'announceReady', safe, toDomain: home.homeDomain, sessionKey: privateKeyToAccount(acc.sessionKey!).address, permissionId: g.permissionId }], onSigned),
+        outcome: (op) => this.lane1Outcome(op),
+        persist,
+      }
+      const r = await peerAnnounce(acc.readyAnnounce, raw as Hex | undefined, ports, this.readyNow())
+      if (r.changed) persist(r.record)
       if (r.answer.state !== 'pending' || r.answer.code === 'ANNOUNCE_SENT') console.log(`[v4] ${acc.accountKey} announceReady to domain ${home.homeDomain}: ${r.answer.state === 'announced' ? `ran in ${r.answer.txHash}` : r.answer.state === 'ready' ? 'already ready there' : `userOp ${r.record?.op?.userOpHash}`}`)
       return r.answer
     })
@@ -6741,40 +6776,57 @@ export class Operator {
    * the simulation refused).
    */
   private async sendV4SessionOp(acc: AccountState, intents: A1Intent[]): Promise<Hex | null> {
-    return (await this.sendV4SessionOpAt(acc, intents))?.userOpHash ?? null
+    const r = await this.sendV4SessionOpAt(acc, intents)
+    return 'op' in r ? r.op.userOpHash : null
   }
 
-  /** sendV4SessionOp, with the block the op was signed at and its claimed time T (the readiness flow reads it back from there). */
-  private async sendV4SessionOpAt(acc: AccountState, intents: A1Intent[]): Promise<SentOp | null> {
+  /**
+   * sendV4SessionOp, for the readiness flow (#348): the block the op was signed at and its claimed time T (it is read back
+   * from there), and why nothing was sent: `fault` when the op would revert (the simulation refused it), `wait` for a
+   * passing reason (no V4 session, another lane-1 op open, gas over the ceiling). Review r1 of #253 (P1-2): the lane-1
+   * ledger (the op's nonce and A1 window) is on disk before the op is sent, and `onSigned` (the caller's own write) is
+   * awaited before it is handed to the bundler: after a crash the op is read back from the chain, never sent twice. A
+   * bundler call that throws after that is the op sent (its outcome comes from the chain).
+   */
+  private async sendV4SessionOpAt(acc: AccountState, intents: A1Intent[], onSigned?: OnSigned): Promise<SendAnswer> {
     let lock = this.lane1Locks.get(acc.accountKey)
     if (!lock) this.lane1Locks.set(acc.accountKey, (lock = new Lock()))
-    return lock.run(async () => {
+    return lock.run(async (): Promise<SendAnswer> => {
       const d = this.cfg.oneAuth!
       const g = acc.grants[0]
-      if (!g?.grant.oneAuthV4 || !acc.sessionKey) return null
+      if (!g?.grant.oneAuthV4 || !acc.sessionKey) return { wait: 'no V4 session' }
       const account = acc.ctx.address as Address
       const block = await this.client.getBlock()
       const key = sessionNonceKey(1, address('SmartSession', this.cfg.registry))
       const nonce = (await this.client.readContract({ address: address('EntryPointV07', this.cfg.registry), abi: entryPointV07Abi, functionName: 'getNonce', args: [account, key], blockNumber: block.number })) as bigint
-      const open = this.lane1Sent.get(acc.accountKey)
-      if (open && nonce <= open.nonce && block.timestamp <= open.expiresAt) {
+      const open = acc.lane1Open
+      if (open && nonce <= BigInt(open.nonce) && block.timestamp <= BigInt(open.expiresAt)) {
         console.log(`[v4] ${acc.accountKey} lane-1 op with nonce ${open.nonce} still open (until ${open.expiresAt}): nothing signed`)
-        return null
+        return { wait: `lane-1 op with nonce ${open.nonce} still open` }
       }
       const { callData } = buildA1CallData({ chainId: this.cfg.chainId, account, policy: d.policy, t: block.timestamp }, intents)
       const kind = intents.length === 1 && (intents[0]!.kind === 'registerRemote' || intents[0]!.kind === 'announceReady' || intents[0]!.kind === 'relayMessage') ? intents[0]!.kind : null
       const gas = kind ? v4EngineGas(kind, this.cfg.chainId, block.baseFeePerGas ?? 0n, GAS_CAPS_V2_BY_CHAIN[this.cfg.chainId]) : engineGas(block.baseFeePerGas ?? 0n, GAS_CAPS_V2_BY_CHAIN[this.cfg.chainId])
-      if (!gas) return null
+      if (!gas) return { wait: 'gas over the ceiling' }
       try {
         await this.client.call({ account: address('EntryPointV07', this.cfg.registry), to: account, data: callData, blockNumber: block.number })
       } catch (e) {
-        logErr(`[v4] ${acc.accountKey} lane-1 op (${intents.map((i) => i.kind).join(', ')}) would revert, nothing signed:`, e instanceof Error ? e.message.split('\n')[0] : e)
-        return null
+        const why = e instanceof Error ? (e.message.split('\n')[0] ?? 'reverts') : String(e)
+        logErr(`[v4] ${acc.accountKey} lane-1 op (${intents.map((i) => i.kind).join(', ')}) would revert, nothing signed:`, why)
+        return { fault: `would revert: ${why.slice(0, 120)}` }
       }
       const op = await signSessionUserOp(draftUserOp(account, nonce, callData, gas), this.cfg.chainId, g.permissionId, privateKeyToAccount(acc.sessionKey), this.cfg.registry)
-      this.lane1Sent.set(acc.accountKey, { nonce, expiresAt: a1ExpiresAt(block.timestamp) })
-      const userOpHash = await this.lane1Bundler().sendUserOperation(op)
-      return { userOpHash, fromBlock: block.number!.toString(), t: block.timestamp.toString() }
+      const sent: SentOp = { userOpHash: userOpHash(op, this.cfg.chainId, this.cfg.registry), fromBlock: block.number!.toString(), t: block.timestamp.toString() }
+      acc.lane1Open = { nonce: nonce.toString(), expiresAt: a1ExpiresAt(block.timestamp).toString() }
+      this.store.save()
+      await onSigned?.(sent)
+      try {
+        await this.lane1Bundler().sendUserOperation(op)
+      } catch (e) {
+        if (!onSigned) throw e
+        logErr(`[v4] ${acc.accountKey} lane-1 op ${sent.userOpHash}: the bundler call failed, its outcome is read from the chain:`, e instanceof Error ? e.message.split('\n')[0] : e)
+      }
+      return { op: sent }
     })
   }
 
@@ -6783,9 +6835,8 @@ export class Operator {
     return new BundlerClient({ url: this.cfg.bundlerUrl, mode: 'live', chainId: this.cfg.chainId, signingChainIds: [this.cfg.chainId], registry: this.cfg.registry })
   }
 
-  /** Review of #247: one lane-1 sender per account at a time, and the last lane-1 op signed (its nonce and A1 window). */
+  /** Review of #247: one lane-1 sender per account at a time (the last lane-1 op signed is on the account, `lane1Open`). */
   private readonly lane1Locks = new Map<string, Lock>()
-  private readonly lane1Sent = new Map<string, { nonce: bigint; expiresAt: bigint }>()
 
   /**
    * A confirmed migration step: the account's grants are its one V4 session from here on (home on Base; on Monad the
