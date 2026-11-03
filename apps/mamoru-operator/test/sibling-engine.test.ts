@@ -1,7 +1,7 @@
 // otto/mamoru#309 (c): the sibling's engine on Ethereum, its edges. The happy path (wrap + swap under V4, then the burn
-// home as a CCTP route) runs on a fork in e2e-ethereum-sibling.ts; here, on a fake chain: what is never sent, what an
+// home as a CCTP route) ran on a fork in e2e-ethereum-sibling.ts against T7 (deleted with T7, #348; an A1 fork E2E comes with the operator's A1 batch shape); here, on a fake chain: what is never sent, what an
 // op that may or may not have run becomes, the day's limit on failed ops, and the burn's checks before a route exists.
-import { describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,12 +11,16 @@ import { address, ethereumRegistry } from '@mamoru/registry'
 import { oneAuthV4Deployment } from '@mamoru/policy'
 import { BridgeOut, L1_USDC, SIBLING_IDLE_MS, SIBLING_LEG_FAILS, SIBLING_LEG_RETRY_MS, UNCONFIRMED_GIVEUP_MS, type SiblingLeg, type StoredSibling } from '../src/bridge-out.ts'
 import { MESSAGE_TRANSMITTER_V2, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
+import { pinTestA1 } from './v4-pin.ts'
 
 const SAFE = '0x0000000000000000000000000000000000000aaa' as const
 const TX = `0x${'ab'.repeat(32)}` as Hex
 const OTHER_TX = `0x${'cd'.repeat(32)}` as Hex
 const T0 = Date.parse('2026-11-05T20:00:00Z')
 const EP = address('EntryPointV07', ethereumRegistry)
+// #348: A1 is undeployed on Ethereum; a test A1 stack is pinned in memory for these tests.
+const unpin = pinTestA1(ethereumRegistry)
+afterAll(unpin)
 const V4 = oneAuthV4Deployment(ethereumRegistry)!.policy
 const epAbi = parseAbi(['event BeforeExecution()', 'event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)'])
 const v4Abi = parseAbi(['event Bridged(address indexed account, uint32 indexed domain, address indexed recipient, address token, uint256 amount)'])
@@ -92,16 +96,15 @@ function make(fake: Fake, now: () => number, leg?: Partial<SiblingLeg>, extra: P
     readContract: async ({ functionName, address: at, args }: { functionName: string; address: string; args?: readonly unknown[] }) => {
       if (functionName === 'balanceOf' && at.toLowerCase() === EP.toLowerCase()) return 0n
       if (functionName === 'balanceOf') return at.toLowerCase() === L1_USDC.toLowerCase() ? fake.usdc : (fake.weth ?? 0n)
-      if (functionName === 'HELPER') return '0x00000000000000000000000000000000000000e1'
-      if (functionName === 'poolOf') return { ratioBps: 10_000 }
-      if (functionName === 'budgetLeft') return [fake.room ?? 10n ** 12n, 10n ** 12n, 10n ** 12n, 10n ** 12n, 10n ** 12n]
-      if (functionName === 'swapBounds') return [1n, 0n]
-      if (functionName === 'poolInfo') return { token0: L1_USDC, token1: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', fee: 500, in1: false, stablePair: false }
+      // A1: MamoruV4Helper.priced is V4's eligibility check; it gives the pool, its class entry and the sub-bucket key (WETH)
+      if (functionName === 'priced') return [{ token0: L1_USDC, token1: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', fee: 500, in1: false, stablePair: false }, { twapWindow: 720, twapShortWindow: 180, bandTicks: 100, anchorTick: 0, anchorBand: 0, ratioBps: 10_000, active: true }, '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2']
+      if (functionName === 'budgetLeft') return [fake.room ?? 10n ** 12n, 10n ** 12n, 10n ** 12n, 10n ** 12n]
+      if (functionName === 'swapBoundsAt') return [1n, 0n]
       // V4 values WETH at its band's edge: 4% above the quote here
       if (functionName === 'swapValue') return (args![4] as bigint) * 2_600n * 10n ** 6n / 10n ** 18n
       if (functionName === 'latestRoundData') return [0n, 2_500n * 10n ** 8n, 0n, BigInt(Math.floor(now() / 1000)), 0n]
       if (functionName === 'isReady') return fake.ready
-      if (functionName === 'isPaused') return fake.paused
+      if (functionName === 'isPaused') throw new Error('V4 has no pause (A1): never read')
       if (functionName === 'getNonce') return fake.nonce
       throw new Error(functionName)
     },
@@ -159,14 +162,11 @@ describe('the sibling engine (#309 c)', () => {
     expect(m.journal().routes.k).toBeUndefined()
   })
 
-  test('not ready, no ETH beyond the reserve: nothing signed; V4 pause: nothing signed', async () => {
+  test('not ready, no ETH beyond the reserve: nothing signed (A1 has no pause: V4 is never asked for one)', async () => {
     const a = make({ ...ready, ready: false, eth: 10n ** 15n }, () => T0)
     await a.bo.tick()
     expect(a.sent).toEqual([])
     expect(a.journal().siblings.k.leg).toBeUndefined()
-    const b = make({ ...ready, paused: true }, () => T0)
-    await b.bo.tick()
-    expect(b.sent).toEqual([])
   })
 
   test('gas above the caps: nothing signed', async () => {

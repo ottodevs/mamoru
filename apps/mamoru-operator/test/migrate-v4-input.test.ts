@@ -18,15 +18,15 @@ import type { AccountState } from '../src/state.ts'
 import { withPinnedV6Base } from '../../../packages/account/remote/fixture.ts'
 import { ctx, world } from './owner-world.ts'
 
-const D: OneAuthV4Deployment = { registry: '0x00000000000000000000000000000000000000a1', policy: '0x00000000000000000000000000000000000000a2', gasPolicy: '0x00000000000000000000000000000000000000a3', migrationCheck: '0x00000000000000000000000000000000000000a4' }
+const D: OneAuthV4Deployment = { table: '0x00000000000000000000000000000000000000a1', policy: '0x00000000000000000000000000000000000000a2', gasPolicy: '0x00000000000000000000000000000000000000a3', migrationCheck: '0x00000000000000000000000000000000000000a4' }
 const KEY = `0x${'5'.repeat(64)}` as Hex
 const reg6 = withPinnedV6Base()
 const v6 = resolveV6Policy('base', { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: `0x${'11'.repeat(20)}`, MAMORU_ACTION_POLICY_V2_ADDRESS: `0x${'33'.repeat(20)}`, MAMORU_GAS_POLICY_ADDRESS: `0x${'22'.repeat(20)}` }, reg6)!
 
 /** A registry with the V4 stack pinned (what the base.json / monad.json pin does). */
 function pinned(r: Registry): Registry {
-  const names = ['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'] as const
-  const at = [D.registry, D.policy, D.gasPolicy, D.migrationCheck]
+  const names = ['MamoruV4Table', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'] as const
+  const at = [D.table, D.policy, D.gasPolicy, D.migrationCheck]
   return { ...r, undeployed: [], entries: [...r.entries.filter((e) => !(names as readonly string[]).includes(e.name)), ...names.map((name, i) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: at[i]!, codeHash: null }) as never)] }
 }
 const base6 = pinned(reg6)

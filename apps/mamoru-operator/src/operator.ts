@@ -36,7 +36,7 @@ import { buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, smartSessionV4Abi
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReturnHome } from './return-home.ts'
 import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
-import { baseStepLines, monadStepLines, readRegistryPools, readV4Paused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
+import { baseStepLines, monadStepLines, readEligiblePools, readPaused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
 import { draftUserOp, executeCallData, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
@@ -543,9 +543,9 @@ export type OperatorConfig = {
   /** otto/mamoru#251: the registry a remote Safe is derived against, by chain. Absent: the pinned one (`registryFor`). */
   remoteRegistry?: (chainId: number) => Registry
   /**
-   * otto/mamoru#293 (spec 010): the V4 stack of this chain (MamoruRegistry, MamoruActionPolicyV4, MamoruGasPolicyV2,
-   * MamoruMigrationCheck), from the chain's registry file (boot.ts `oneAuthV4Deployment`). Absent while any of the four is
-   * undeployed: nothing of V4 is offered or run, whatever the `one_auth_v4` flag says.
+   * otto/mamoru#293 (spec 010 A1): the V4 stack of this chain (MamoruActionPolicyV4, MamoruGasPolicyV2,
+   * MamoruMigrationCheck, MamoruV4Table), from the chain's registry file (boot.ts `oneAuthV4Deployment`). Absent while any
+   * of the four is undeployed (all of A1 is, until T8; T7 is retired, #348): nothing of V4 is offered or run, whatever the `one_auth_v4` flag says.
    */
   oneAuth?: OneAuthV4Deployment
   /** otto/mamoru#293: blocks per SessionCreated page of the migration inventory. Default 2,000. */
@@ -4617,7 +4617,7 @@ export class Operator {
       }
       // otto/mamoru#309 (a): a V4 activation whose funds sit at the account's own address on Ethereum (its sibling, #307)
       // deploys on Base without USDC there yet: the USDC arrives only through the sibling's bridge home, which needs this
-      // Safe deployed (the guardian reads it back, #310). Counted from Ethereum, read on chain (siblingHoldingsUsdc).
+      // Safe deployed (V4's announceReady reads it back, A1; #348: announceReady by the operator, noema-d3). Counted from Ethereum, read on chain (siblingHoldingsUsdc).
       if (!deployed && usdc < MIN_DEPLOY_USDC && !(p.kind === 'activate' && p.grants?.[0]?.grant.oneAuthV4 && ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) >= MIN_SIBLING_DEPLOY_USDC)) return { code: 'BELOW_DEPLOY_MINIMUM' }
       // otto/mamoru#140 (part2 #6): a Safe-paid transaction needs the ETH its fee was quoted at, or the relayer pays a revert (GS011).
       if (p.tx.refund && p.feeWei && (await this.client.getBalance({ address: live.safe })) < BigInt(p.feeWei)) return { code: 'SAFE_FEE_UNFUNDED' }
@@ -5736,7 +5736,7 @@ export class Operator {
     if (!bridge || !(policy.remoteBuckets ?? []).some((b) => b.chainId === BRIDGE_MONAD_CHAIN_ID)) return {}
     // Every remote bucket must be one this leg serves: a bucket on another chain would be counted as nothing.
     if ((policy.remoteBuckets ?? []).some((b) => b.chainId !== BRIDGE_MONAD_CHAIN_ID)) return {}
-    // otto/mamoru#293: a V4 home bridges only to the remote V4 registered and the guardian marked ready, with no end (no
+    // otto/mamoru#293: a V4 home bridges only to the remote V4 registered and holds ready (A1: announceReady), with no end (no
     // REMOTE_BRIDGE_STOP: the remote's session does not expire). Not ready yet: no remote (the bucket waits).
     if (this.onV4(acc)) {
       const v = acc.oneAuth?.remote
@@ -5778,11 +5778,11 @@ export class Operator {
   /** The registry pool key each V4 account's engine was started on: a change restarts the loop on the new pools. */
   private readonly v4LoopKey = new Map<string, string>()
 
-  /** MamoruRegistry's active pools on this chain, one read per minute for every V4 account; null without the V4 stack. */
+  /** The pools V4's rules make eligible on this chain (A1), one read per minute for every V4 account; null without the V4 stack. */
   private v4Pools(): RegistryPoolsCache | null {
     const d = this.cfg.oneAuth
     if (!d) return null
-    return (this.v4PoolsCache ??= new RegistryPoolsCache(() => readRegistryPools(this.client, d.registry)))
+    return (this.v4PoolsCache ??= new RegistryPoolsCache(() => readEligiblePools(this.client, d, this.cfg.chainId)))
   }
 
   /** The account runs on MamoruActionPolicyV4 (home or remote). */
@@ -5797,7 +5797,7 @@ export class Operator {
   }
 
   /**
-   * The engine's V4 policy, registry and sessions: the account's buckets served by MamoruRegistry's active pools (the
+   * The engine's V4 policy, registry and sessions: the account's buckets served by the pools V4 makes eligible (the
    * last read; before the first, none: the engine idles until the tick reads them and restarts the loop), and one engine
    * session per pool template, all the account's one V4 permission.
    */
@@ -5891,7 +5891,7 @@ export class Operator {
     return V4_MIGRATES_FROM_ONE_AUTH.has(cur.policyId) && cur.chain === this.cfg.policy.chain
   }
 
-  /** Paused now (the V2/V3 guardian on a v5/v6 account, V4's guardian, breaker or review on a V4 one), from the last read. */
+  /** Paused now (the V2/V3 guardian on a v5/v6 account; never on V4, which has no pause, A1), from the last read. */
   private pausedNow(acc: AccountState): boolean {
     return this.chainUsage.get(acc.accountKey)?.paused === true || acc.oneAuth?.paused === true
   }
@@ -6150,9 +6150,9 @@ export class Operator {
     }
   }
 
-  /** The account's pause now: V4's on a V4 account; MamoruActionPolicyV2/V3's guardian on a v5/v6 one; false before; null unreadable. */
+  /** The account's pause now: MamoruActionPolicyV2/V3's guardian on a v5/v6 one; false on V4 (no pause, A1) and before; null unreadable. */
   private async pauseRead(acc: AccountState): Promise<boolean | null> {
-    if (this.onV4(acc)) return readV4Paused(this.client, this.cfg.oneAuth!.policy, acc.ctx.address as Address)
+    if (this.onV4(acc)) return false
     let ap: PolicyVersion['actionPolicy']
     try {
       ap = this.policyOf(acc).actionPolicy
@@ -6160,7 +6160,7 @@ export class Operator {
       return null
     }
     if (!ap || (ap.contractVersion !== 2 && ap.contractVersion !== 3)) return false
-    return readV4Paused(this.client, ap.address, acc.ctx.address as Address)
+    return readPaused(this.client, ap.address, acc.ctx.address as Address)
   }
 
   /** Typed refusals of the move (never the generic "try again"). */
@@ -6265,10 +6265,7 @@ export class Operator {
     const homeCfg = await this.cfg.homeClient.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'configOf', args: [home] }).catch(() => null)
     if (!homeCfg) throw new HttpError(503, 'HOME_UNAVAILABLE', 'your Safe on Base could not be read just now: nothing was changed, try again in a minute')
     if (!homeCfg.set) this.refuseMigrate('ONE_AUTH_STEP_ORDER', 'the Base step of the update must be confirmed first')
-    // Review of #202 (P1-7): an unreadable pause is not "not paused" (fail closed, retryable).
-    const homePaused = await readV4Paused(this.cfg.homeClient, d.policy, home)
-    if (homePaused === null) throw new HttpError(503, 'PAUSE_STATE_UNAVAILABLE', 'whether Mamoru is paused on your Safe could not be read just now: nothing was changed, try again in a minute')
-    if (homePaused) this.refuseMigrate('ONE_AUTH_PAUSED', 'Mamoru is paused on your Safe: the update waits until the pause ends')
+    // Spec 010 A1: V4 has no pause, so the home's V4 config is the only thing step 1 waits for.
     const priv = this.store.state.remoteKeys?.[baseKey]
     if (!priv) throw new HttpError(409, 'REMOTE_KEY_UNKNOWN', 'this Safe names a session key this operator did not give')
     const sessionKey = privateKeyToAccount(priv).address
@@ -6375,19 +6372,20 @@ export class Operator {
   }
 
 
-  /** Monad side: whether the prepared step 1's home account has its V4 config set on Base and is paused there; null unreadable. */
+  /** Monad side: whether the prepared step 1's home account has its V4 config set on Base (never paused there: A1); null unreadable. */
   private async homeMigrated(ctx: AccountContext, body: { prepareId?: unknown }): Promise<{ migrated: boolean; paused: boolean | null } | null> {
     const d = this.cfg.oneAuth
     const p = typeof body?.prepareId === 'string' ? this.prepared.get(body.prepareId) : undefined
     if (!d || !this.cfg.homeClient || !p || p.accountKey !== ctx.accountKey || !p.home) return { migrated: false, paused: null }
     const c = await this.cfg.homeClient.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'configOf', args: [p.home] }).catch(() => null)
     if (!c) return null
-    return { migrated: c.set === true, paused: await readV4Paused(this.cfg.homeClient, d.policy, p.home) }
+    return { migrated: c.set === true, paused: false }
   }
 
   /**
    * Base side, on a timer: a V4 home with a remote bucket registers its remote on Monad (a session userOp,
-   * V4.registerRemote, lane 1), asks the Monad operator to deploy and run it, and follows V4's readiness (the guardian's);
+   * V4.registerRemote, lane 1), asks the Monad operator to deploy and run it, and follows V4's readiness (A1: announceReady
+   * on Monad, a CCTP message to Base; #348: announceReady by the operator, noema-d3);
    * a step 1 forwarded to Monad is settled from its status there.
    */
   async tickOneAuth(): Promise<void> {
@@ -6429,7 +6427,7 @@ export class Operator {
     const target = this.v4RemoteTarget(acc, now0.sessionKey, now0.capUsd)
     if (!target || target.address.toLowerCase() !== now0.remote.toLowerCase()) {
       // Review of #202 r2 (Opus 6): after an owner rotation the registered remote no longer matches the keys and is not
-      // ready: registered again (V4 derives it from the current owners), which the guardian then reads back.
+      // ready: registered again (V4 derives it from the current owners), which announceReady then proves (#348: announceReady by the operator, noema-d3).
       if (!now0.ready) return reregister('the registered remote is not the one the current keys give')
       logErr(`[alert] ${acc.accountKey} V4 registered remote ${now0.remote}, the account's keys give ${target?.address ?? 'nothing'}: nothing is bridged`, undefined)
       return
@@ -6442,6 +6440,7 @@ export class Operator {
       // ready, restarts the loop so the bridge follows V4's readiness.
       if (acc.active && (rec?.ready === true) !== now0.ready) this.startLoop(acc)
     }
+    // #348: announceReady by the operator, noema-d3 (until then a provisioned remote stays not ready and nothing is bridged).
     if (!now0.ready && peer) {
       // Review of #202 (P0-3): with a design-C Safe still under remoteAccountKey there, the V4 remote has a key of its own.
       const res = await peer.provision({ accountKey: acc.oneAuth!.remote!.accountKey!, chainId: BRIDGE_MONAD_CHAIN_ID, address: now0.remote, owners: acc.ctx.owners, saltNonce: acc.ctx.saltNonce, passkey: acc.ctx.passkey, remote: target.spec })
@@ -6899,8 +6898,8 @@ export class Operator {
         // otto/mamoru#61: off Base the engine reads the chain's registry, prices gas on its native pool and, where the
         // chain charges the gas limit, sizes each userOp from its simulation. On Base none of these is set (as before).
         ...(this.offBase() ? { registry: this.cfg.registry, nativePricePool: nativePricePool(this.cfg.registry), gasModel: chainOf(this.cfg.registry.chainId).gasModel } : {}),
-        // otto/mamoru#293: the registry the V4 policy's pools resolve in (the chain's, plus MamoruRegistry's pools), and the
-        // remote V4 mints to once the guardian marked it ready (the bridge's only recipient).
+        // otto/mamoru#293: the registry the V4 policy's pools resolve in (the chain's, plus V4's eligible pools), and the
+        // remote V4 mints to once V4 holds it ready (announceReady, A1; the bridge's only recipient).
         ...(v4 ? { registry: v4.registry, v4BridgeRecipient: () => (acc.oneAuth?.remote?.ready ? (acc.oneAuth.remote.address as Address) : undefined) } : {}),
         // otto/mamoru#278: a V4 remote Safe bridges only home (V4 pins it on chain), and only for its home's open release.
         ...(v4 && acc.policyId === ONE_AUTH_V4_REMOTE ? { v4BridgeRecipient: () => (releaseObs(acc) ? releaseHomeOf(acc)?.home : undefined), release: () => this.releaseForReview(acc) } : {}),

@@ -498,7 +498,7 @@ export const fixtureClient: ApiClient = {
           ...fixtureTx([
             `Lets Mamoru move what your Safe on Ethereum holds (${Number(liveState.ethereumEth) / 1e18} ETH) to your own Safe on Base, the same address, with no further signature`,
             'Mamoru may only turn ETH into USDC there (Uniswap, under the same price limits as on Base) and send the USDC to your Safe on Base. It can send it nowhere else',
-            "At most 125 USDC of value a day, and nothing leaves until Mamoru's guardian has checked your Safe on Base",
+            'At most 125 USDC of value a day, and nothing leaves until the contract has checked on chain that your Safe on Base is ready',
             'Mamoru pays the Ethereum gas to set this up; the moves after it are paid from the ETH in this Safe',
           ]),
           chainId: 1,

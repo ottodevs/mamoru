@@ -1,19 +1,20 @@
 // otto/mamoru#293 (spec 010, one authorization): the operator's side of MamoruActionPolicyV4 that does not need the
 // Operator's own state: the "What's new" view, the plain-language lines of each signed step (#41), the engine's view of
-// the account's one V4 session, and MamoruRegistry's active pools read on chain (cached per review). Everything here is
-// reached only for an account in the `one_auth_v4` scope on a chain whose registry pins the V4 stack, or for an account
-// that already runs on V4.
+// the account's one V4 session, and the pools V4's rules make eligible, read on chain (cached per review; spec 010 A1:
+// MamoruV4Table's classes checked by MamoruV4Helper.priced, no registry). Everything here is reached only for an account
+// in the `one_auth_v4` scope on a chain whose registry pins the V4 stack, or for an account that already runs on V4.
 import { keccak256, toHex, zeroAddress, type Hex, type PublicClient } from 'viem'
 import type { Address, WhatsNew } from '@mamoru/domain'
 import { address, type Registry } from '@mamoru/registry'
 import { ONE_AUTH_V4, V4_CAP30_MULTIPLE, registryPoolsKey, V4_USAGE_LIMIT, V4_VALID_UNTIL, type OneAuthV4Deployment, type RegistryPool, type SessionGrant } from '@mamoru/policy'
-import { mamoruActionPolicyV4Abi, mamoruRegistryAbi } from '@mamoru/account/one-auth'
+import { mamoruActionPolicyV4Abi, mamoruV4HelperAbi, mamoruV4TableAbi, v4Children, V4_FEE_BITS } from '@mamoru/account/one-auth'
+import { mamoruActionPolicyV2Abi } from '@mamoru/registry'
 
 /** The reasons the screen gives, one line each (#295 renders 1-4). */
 export const WHATS_NEW_POINTS: readonly string[] = [
-  'Mamoru can use new pools and chains without asking you again',
+  'Mamoru can use new pools that pass its on-chain rules without asking you again',
   'Safer price limits',
-  'Emergency pause. It never moves money.',
+  'Nobody can pause or steer your account: its limits are code on chain',
   'No more renewals: you sign again only to take money out',
 ]
 
@@ -26,9 +27,9 @@ export type OneAuthState = {
   /** C (USD units, 6 decimals) and generation of the account's V4 Init. */
   capUsd?: string
   generation?: string
-  /** The home's remote on Monad as V4 registered it (registerRemote), and whether the guardian marked it ready. */
+  /** The home's remote on Monad as V4 registered it (registerRemote), and whether V4 holds it ready (announceReady, A1). */
   remote?: { domain: number; address: Hex; sessionKey: Hex; ready?: boolean; registeredAt?: string; tx?: Hex; accountKey?: string; capUsd?: string }
-  /** The account's pause from the last read: V4's (guardian, breaker or review) on V4, the V2/V3 guardian's before. */
+  /** The account's pause from the last read: the V2/V3 guardian's before V4 (V4 has no pause, A1: always false there). */
   paused?: boolean
 }
 
@@ -54,8 +55,8 @@ export function baseStepLines(p: { remove: number; revoke: number; capUsd: bigin
   // its home's C from V4 itself (registerRemote), so the line says the same limit applies there.
   const lines = [
     `Removes Mamoru's ${p.remove} current permission${p.remove === 1 ? '' : 's'} on your Safe, and cancels any unused ones (${p.revoke} in all)`,
-    'Gives Mamoru one permission that does not expire. It may only swap, provide liquidity and use savings vaults in the pools, vaults and chains of Mamoru\'s public list, where each addition waits 72 hours in public',
-    `On this Safe Mamoru may move at most ${usd(p.capUsd)} USDC of value a day (each swap and each deposit into a pool counts), and ${usd(p.capUsd * V4_CAP30_MULTIPLE)} USDC in any 30 days. Past that it pauses by itself`,
+    'Gives Mamoru one permission that does not expire. It may only swap, provide liquidity and use savings vaults in pools that pass rules written in the contract (official Uniswap pools of listed tokens, with enough history and in line with a reference pool) and in the vaults and chains the contract lists. Nobody can add to that list: a change is a new version, which you would choose to adopt',
+    `On this Safe Mamoru may move at most ${usd(p.capUsd)} USDC of value a day (each swap and each deposit into a pool counts), and ${usd(p.capUsd * V4_CAP30_MULTIPLE)} USDC in any 30 days. Past that each move is refused until the window frees up again`,
     ...(p.remoteChain ? [`Your Safe on ${p.remoteChain}, when Mamoru creates it, has the same limits of its own (${usd(p.capUsd)} USDC a day, ${usd(p.capUsd * V4_CAP30_MULTIPLE)} USDC in 30 days)`] : []),
     `Money only ever goes to your own Safes${p.remoteChain ? ` (this one, and yours on ${p.remoteChain})` : ''}. Taking money out still needs your signature`,
   ]
@@ -104,25 +105,58 @@ const poolIdentityAbi = [
   { type: 'function', name: 'tickSpacing', stateMutability: 'view', inputs: [], outputs: [{ type: 'int24' }] },
 ] as const
 
-/** MamoruRegistry's active pools with their entries and identities, read at `blockNumber` (or the head). */
-export async function readRegistryPools(client: PublicClient, registryAddress: Address, blockNumber?: bigint): Promise<RegistryPool[]> {
+/**
+ * The pools V4 makes eligible on this chain now (spec 010 A1 "Eligibility rules"): for every pair with a class in
+ * MamoruV4Table, every pool of the chain's factory at a fee tier of the class's set, kept only when MamoruV4Helper.priced
+ * accepts it (factory, pinned tokens, fee set, observation ring, agreement with the reference pool), with the entry V4
+ * itself prices it with. A pool `priced` refuses is not eligible now and is left out; a read that fails otherwise throws
+ * (the cache keeps the last good set).
+ */
+export async function readEligiblePools(client: PublicClient, deployment: Pick<OneAuthV4Deployment, 'policy' | 'table'>, chainId: number, blockNumber?: bigint): Promise<RegistryPool[]> {
   const at = blockNumber !== undefined ? { blockNumber } : {}
-  const pools = (await client.readContract({ address: registryAddress, abi: mamoruRegistryAbi, functionName: 'activePools', ...at })) as Address[]
-  return Promise.all(
-    pools.map(async (pool) => {
-      const [e, token0, token1, fee, tickSpacing] = await Promise.all([
-        client.readContract({ address: registryAddress, abi: mamoruRegistryAbi, functionName: 'poolOf', args: [pool], ...at }),
-        client.readContract({ address: pool, abi: poolIdentityAbi, functionName: 'token0', ...at }),
-        client.readContract({ address: pool, abi: poolIdentityAbi, functionName: 'token1', ...at }),
-        client.readContract({ address: pool, abi: poolIdentityAbi, functionName: 'fee', ...at }),
-        client.readContract({ address: pool, abi: poolIdentityAbi, functionName: 'tickSpacing', ...at }),
-      ])
-      return { address: pool, token0, token1, fee: Number(fee), tickSpacing: Number(tickSpacing), entry: { twapWindow: e.twapWindow, twapShortWindow: e.twapShortWindow, bandTicks: e.bandTicks, anchorTick: e.anchorTick, anchorBand: e.anchorBand, ratioBps: e.ratioBps, active: e.active } }
-    }),
-  )
+  const { helper } = v4Children(deployment.policy)
+  const [chain, pairs] = await Promise.all([
+    client.readContract({ address: deployment.table, abi: mamoruV4TableAbi, functionName: 'chain', args: [BigInt(chainId)], ...at }),
+    client.readContract({ address: deployment.table, abi: mamoruV4TableAbi, functionName: 'pairsOf', args: [BigInt(chainId)], ...at }),
+  ])
+  if (chain.chainId !== BigInt(chainId)) throw new Error(`MamoruV4Table has no row for chain ${chainId}`)
+  const candidates = new Set<Address>()
+  for (const [a, b] of pairs) {
+    const cls = await client.readContract({ address: deployment.table, abi: mamoruV4TableAbi, functionName: 'classOf', args: [BigInt(chainId), a, b], ...at })
+    if (BigInt(cls.ref) === 0n) continue
+    for (const [fee, bit] of V4_FEE_BITS) {
+      if ((cls.feeMask & bit) === 0) continue
+      const pool = (await client.readContract({ address: chain.factory, abi: factoryGetPoolAbi, functionName: 'getPool', args: [a, b, fee], ...at })) as Address
+      if (BigInt(pool) !== 0n) candidates.add(pool)
+    }
+  }
+  const out: RegistryPool[] = []
+  for (const pool of candidates) {
+    let priced: readonly [{ token0: Address; token1: Address; fee: number }, { twapWindow: number; twapShortWindow: number; bandTicks: number; anchorTick: number; anchorBand: number; ratioBps: number; active: boolean }, Address]
+    try {
+      priced = (await client.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'priced', args: [pool], ...at })) as typeof priced
+    } catch (e) {
+      if (isRevert(e)) continue // not eligible now (NotEligible, NotPinned, ...): left out
+      throw e
+    }
+    const [p, e] = priced
+    const tickSpacing = await client.readContract({ address: pool, abi: poolIdentityAbi, functionName: 'tickSpacing', ...at })
+    out.push({ address: pool, token0: p.token0, token1: p.token1, fee: Number(p.fee), tickSpacing: Number(tickSpacing), entry: { twapWindow: e.twapWindow, twapShortWindow: e.twapShortWindow, bandTicks: e.bandTicks, anchorTick: e.anchorTick, anchorBand: e.anchorBand, ratioBps: e.ratioBps, active: e.active } })
+  }
+  return out
 }
 
-/** One read of the registry per TTL for every V4 account of the process (each review asks; a failed read keeps the last). */
+const factoryGetPoolAbi = [
+  { type: 'function', name: 'getPool', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'address' }, { type: 'uint24' }], outputs: [{ type: 'address' }] },
+] as const
+
+/** A contract revert (viem ContractFunctionRevertedError somewhere in the cause chain), not a transport failure. */
+function isRevert(e: unknown): boolean {
+  for (let c = e as { name?: string; cause?: unknown } | undefined; c; c = c.cause as typeof c) if (c.name === 'ContractFunctionRevertedError') return true
+  return false
+}
+
+/** One read of the eligible pools per TTL for every V4 account of the process (each review asks; a failed read keeps the last). */
 export class RegistryPoolsCache {
   private last: { at: number; pools: RegistryPool[]; key: string } | null = null
   private inflight: Promise<RegistryPool[]> | null = null
@@ -132,7 +166,7 @@ export class RegistryPoolsCache {
     private readonly now: () => number = Date.now,
   ) {}
 
-  /** The active pools, at most `ttlMs` old. Throws only when no read has ever succeeded. */
+  /** The eligible pools, at most `ttlMs` old. Throws only when no read has ever succeeded. */
   async get(): Promise<{ pools: RegistryPool[]; key: string }> {
     if (this.last && this.now() - this.last.at < this.ttlMs) return this.last
     this.inflight ??= this.read().finally(() => (this.inflight = null))
@@ -151,10 +185,13 @@ export class RegistryPoolsCache {
   }
 }
 
-/** V4's pause of `account` (guardian, breaker or review); null when unreadable. */
-export async function readV4Paused(client: PublicClient, policy: Address, account: Address): Promise<boolean | null> {
+/**
+ * MamoruActionPolicyV2/V3's guardian pause of `account`; null when unreadable. Never for V4: spec 010 A1 has no pause
+ * (callers return false for a V4 account without reading).
+ */
+export async function readPaused(client: PublicClient, policy: Address, account: Address): Promise<boolean | null> {
   try {
-    return (await client.readContract({ address: policy, abi: mamoruActionPolicyV4Abi, functionName: 'isPaused', args: [account] })) as boolean
+    return (await client.readContract({ address: policy, abi: mamoruActionPolicyV2Abi, functionName: 'isPaused', args: [account] })) as boolean
   } catch {
     return null
   }

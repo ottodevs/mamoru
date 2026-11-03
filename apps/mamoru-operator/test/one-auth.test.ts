@@ -2,19 +2,20 @@
 // pinned) is byte-identical to today for a v6 account; on, a clean inventory offers approval.whatsNew in the shape #295
 // builds against; never while paused; a V4 account never renews; step 1 waits for step 0.
 import { describe, expect, test } from 'bun:test'
-import type { Hex } from 'viem'
+import { BaseError, ContractFunctionRevertedError, type Hex, type PublicClient } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseRegistry } from '@mamoru/registry'
 import { grantKey, ONE_AUTH_V4, oneAuthV4Live, staticPool, withRegistryPools, type OneAuthV4Deployment } from '@mamoru/policy'
 import { resolveV4Policy, resolveV5Policy, resolveV6Policy } from '../src/boot.ts'
 import { encodeFunctionData, erc20Abi } from 'viem'
 import { HttpError, movedTo, type Operator } from '../src/operator.ts'
-import { v4StoredGrant, WHATS_NEW_POINTS, RegistryPoolsCache } from '../src/one-auth.ts'
+import { readEligiblePools, readPaused, v4StoredGrant, WHATS_NEW_POINTS, RegistryPoolsCache } from '../src/one-auth.ts'
+import { v4Children } from '@mamoru/account/one-auth'
 import type { AccountState } from '../src/state.ts'
 import { withPinnedV6Base } from '../../../packages/account/remote/fixture.ts'
 import { ctx, world } from './owner-world.ts'
 
-const D: OneAuthV4Deployment = { registry: '0x00000000000000000000000000000000000000A1', policy: '0x00000000000000000000000000000000000000A2', gasPolicy: '0x00000000000000000000000000000000000000A3', migrationCheck: '0x00000000000000000000000000000000000000A4' }
+const D: OneAuthV4Deployment = { table: '0x00000000000000000000000000000000000000A1', policy: '0x00000000000000000000000000000000000000A2', gasPolicy: '0x00000000000000000000000000000000000000A3', migrationCheck: '0x00000000000000000000000000000000000000A4' }
 const env = { MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: `0x${'11'.repeat(20)}`, MAMORU_ACTION_POLICY_V2_ADDRESS: `0x${'33'.repeat(20)}`, MAMORU_GAS_POLICY_ADDRESS: `0x${'22'.repeat(20)}` }
 const reg6 = withPinnedV6Base()
 const v4 = resolveV4Policy('base', env)!
@@ -156,10 +157,10 @@ describe('a V4 account stops renewing', () => {
   })
 })
 
-describe('engine pools from MamoruRegistry', () => {
+describe('engine pools from V4 eligibility (spec 010 A1)', () => {
   const pool = (name: string, ratioBps = 5000) => ({ ...staticPool(name, baseRegistry), entry: { twapWindow: 1800, twapShortWindow: 300, bandTicks: 100, anchorTick: 0, anchorBand: name.includes('USDT') ? 40 : 0, ratioBps, active: true } })
 
-  test('stable pairs to stables, the rest to Balance; a pool listed after creation joins with no signature', () => {
+  test('stable pairs to stables, the rest to Balance; a pool eligible after creation joins with no signature', () => {
     const before = withRegistryPools(oneAuthV4Live, D, [pool('pool:USDC/USDT/100'), pool('pool:WETH/USDC/3000')], baseRegistry)
     expect(before.policy.buckets.map((b) => [b.id, b.pools])).toEqual([['stables', ['pool:USDC/USDT/100']], ['risk', ['pool:WETH/USDC/3000']]])
     const after = withRegistryPools(oneAuthV4Live, D, [pool('pool:USDC/USDT/100'), pool('pool:WETH/USDC/3000'), pool('pool:USDC/cbBTC/500')], baseRegistry)
@@ -173,6 +174,56 @@ describe('engine pools from MamoruRegistry', () => {
     const eurc = { ...pool('pool:WETH/USDC/3000'), address: '0x00000000000000000000000000000000000E0C00' as const, token0: '0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42' as const }
     const r = withRegistryPools(oneAuthV4Live, D, [{ ...pool('pool:USDC/USDT/100'), entry: { ...pool('pool:USDC/USDT/100').entry, active: false } }, eurc], baseRegistry)
     expect(r.pools).toEqual([])
+  })
+
+  test('readEligiblePools: every factory pool of each class fee tier that MamoruV4Helper.priced accepts, with its entry', async () => {
+    const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+    const USDT = '0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2'
+    const WETH = '0x4200000000000000000000000000000000000006'
+    const FACTORY = '0x33128a8fC17869897dcE68Ed026d694621f6FDfD'
+    const P = { stable: '0x00000000000000000000000000000000000000b1', weth500: '0x00000000000000000000000000000000000000b2', weth3000: '0x00000000000000000000000000000000000000b3' } as const
+    const helper = v4Children(D.policy).helper
+    const entry = { twapWindow: 1800, twapShortWindow: 300, bandTicks: 100, anchorTick: 0, anchorBand: 0, ratioBps: 1500, active: true }
+    const calls: string[] = []
+    let transportDown = false
+    const client = {
+      readContract: async (a: { address: string; functionName: string; args?: readonly unknown[] }) => {
+        calls.push(`${a.functionName}@${a.address}`)
+        if (a.functionName === 'chain') return { chainId: 8453n, factory: FACTORY }
+        if (a.functionName === 'pairsOf') return [[USDC, USDT], [USDC, WETH]]
+        if (a.functionName === 'classOf') return a.args![2] === USDT ? { ref: P.stable, feeMask: 1 } : { ref: P.weth3000, feeMask: 2 | 4 }
+        if (a.functionName === 'getPool') return a.args![2] === 100 ? P.stable : a.args![2] === 500 ? P.weth500 : a.args![2] === 3000 ? P.weth3000 : '0x0000000000000000000000000000000000000000'
+        if (a.functionName === 'priced') {
+          if (transportDown) throw new BaseError('fetch failed')
+          // the 0.05 % pool disagrees with the reference pool now: NotEligible(pool, 7)
+          if (a.args![0] === P.weth500) throw new BaseError('reverted', { cause: new ContractFunctionRevertedError({ abi: [], functionName: 'priced' }) })
+          const [t0, t1, fee] = a.args![0] === P.stable ? [USDC, USDT, 100] : [WETH, USDC, 3000]
+          return [{ token0: t0, token1: t1, fee, in1: t0 === WETH, stablePair: a.args![0] === P.stable }, { ...entry, anchorBand: a.args![0] === P.stable ? 40 : 0 }, t0 === WETH ? WETH : `0x${'5'.repeat(40)}`]
+        }
+        if (a.functionName === 'tickSpacing') return a.address === P.stable ? 1 : 60
+        throw new Error(`unexpected ${a.functionName}`)
+      },
+    } as unknown as PublicClient
+    const pools = await readEligiblePools(client, D, 8453)
+    expect(pools.map((p) => [p.address, p.fee, p.tickSpacing, p.entry.anchorBand])).toEqual([
+      [P.stable, 100, 1, 40],
+      [P.weth3000, 3000, 60, 0],
+    ])
+    // only the class's fee tiers are asked of the factory (no 0.3 % for the stable pair, no 1 % for WETH/USDC), and every
+    // eligibility read is MamoruV4Helper's (V4's child), never a registry
+    expect(calls.filter((c) => c.startsWith('getPool'))).toHaveLength(3)
+    expect(calls.filter((c) => c.startsWith('priced')).every((c) => c.endsWith(helper))).toBe(true)
+    expect(calls.some((c) => c.startsWith('activePools') || c.startsWith('poolOf'))).toBe(false)
+    // a failure that is not a revert (an RPC down) is not "not eligible": it throws, and the cache keeps the last good set
+    transportDown = true
+    await expect(readEligiblePools(client, D, 8453)).rejects.toThrow('fetch failed')
+  })
+
+  test('V4 has no pause (A1): a V4 account never reads one; readPaused is the V2/V3 guardian read only', async () => {
+    const seen: string[] = []
+    const client = { readContract: async (a: { functionName: string }) => (seen.push(a.functionName), false) } as unknown as PublicClient
+    expect(await readPaused(client, `0x${'33'.repeat(20)}`, ctx.address)).toBe(false)
+    expect(seen).toEqual(['isPaused'])
   })
 
   test('the cache reads once per TTL and keeps the last good read', async () => {

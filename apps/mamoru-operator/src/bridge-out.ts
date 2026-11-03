@@ -5,7 +5,7 @@ import { encodeFunctionData, getAddress, pad, parseAbi, parseAbiItem, parseEvent
 import type { UserOperation } from 'viem/account-abstraction'
 import type { AccountContext, Address, BridgeOutRoute, BridgeOutToSign, BridgeOutView, EthConvert, EthConvertToSign, MigrateV4Input, OwnerSignature } from '@mamoru/domain'
 import { address, baseRegistry, entryPointV07Abi, erc20Abi, ethereumRegistry } from '@mamoru/registry'
-import { buildMigrateV4, mamoruActionPolicyV4Abi, mamoruRegistryAbi, mamoruV4HelperAbi, smartSessionV4Abi } from '@mamoru/account/one-auth'
+import { buildMigrateV4, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children } from '@mamoru/account/one-auth'
 import { GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment } from '@mamoru/policy'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { chmodSync, closeSync, fsyncSync, openSync, writeSync } from 'node:fs'
@@ -94,7 +94,7 @@ export const SIBLING_STUCK_POLL_MS = 10 * 60_000
 
 // #309 (c): the sibling's own session userOps on Ethereum, bundled by the relayer (handleOps, beneficiary itself).
 /**
- * Each op's limits, under GasPolicyV2's Ethereum caps. Measured on the fork (e2e-ethereum-sibling): the wrap + approve +
+ * Each op's limits, under GasPolicyV2's Ethereum caps. Measured on the fork against T7 (e2e-ethereum-sibling, gone with T7 in #348; to re-measure on A1): the wrap + approve +
  * V4.swap batch takes ~0.91M from the EntryPoint (cold), the approve + V4.bridge ~0.15M, validation (SmartSession,
  * V4.checkAction, gas policy) ~0.3M.
  */
@@ -122,7 +122,7 @@ export const SIBLING_LEG_RETRY_MS = 30 * 60_000
 export const SIBLING_LEG_FAILS = 3
 /** A swap's deadline from its signing: an op that runs later reverts in V4.swap (Expired). */
 export const SIBLING_SWAP_DEADLINE_SEC = 600
-/** The listed WETH/USDC pool the sibling swaps on (V4's registry lists it on Ethereum). */
+/** The WETH/USDC pool the sibling swaps on: V4's reference pool for that pair on Ethereum (MamoruV4Classes, A1). */
 export const SIBLING_POOL: Address = address('pool:USDC/WETH/500', ethereumRegistry)
 /** CCTP domain of Base: a sibling's only home. */
 export const SIBLING_HOME_DOMAIN = 6
@@ -172,7 +172,7 @@ export function siblingStepLines(p: { capUsd: bigint; eth: bigint; usdc: bigint 
   return [
     `Lets Mamoru move what your Safe on Ethereum holds (${held || 'nothing yet'}) to your own Safe on Base, the same address, with no further signature`,
     'Mamoru may only turn ETH into USDC there (Uniswap, under the same price limits as on Base) and send the USDC to your Safe on Base. It can send it nowhere else',
-    `At most ${usd(p.capUsd)} USDC of value a day, and nothing leaves until Mamoru's guardian has checked your Safe on Base`,
+    `At most ${usd(p.capUsd)} USDC of value a day, and nothing leaves until the contract has checked on chain that your Safe on Base is ready`,
     'Mamoru pays the Ethereum gas to set this up; the moves after it are paid from the ETH in this Safe',
   ]
 }
@@ -1490,7 +1490,9 @@ export class BridgeOut {
     this.on(ctx.accountKey)
     if (!this.siblingInScope(ctx)) throw new HttpError(404, 'SIBLING_NOT_OFFERED', 'Mamoru on Ethereum is not available for this account yet')
     const deployment = oneAuthV4Deployment(ethereumRegistry)
-    if (!deployment) throw new HttpError(503, 'SIBLING_UNAVAILABLE', 'Mamoru on Ethereum is not available yet')
+    // #243 / #348: with no V4 pinned on Ethereum (A1 undeployed until T8) the sibling is not offered: 404
+    // SIBLING_NOT_OFFERED, which the one-approval screen reads as "Base alone" (plain Start), never a retry note.
+    if (!deployment) throw new HttpError(404, 'SIBLING_NOT_OFFERED', 'Mamoru on Ethereum is not available for this account yet')
     const live = this.live(ctx)
     if (this.siblingBlocking(ctx.accountKey)) throw new HttpError(409, 'SIBLING_IN_PROGRESS', 'your Safe on Ethereum is already set up or being set up')
     const cap = this.siblingCapUsd(ctx)
@@ -1539,6 +1541,7 @@ export class BridgeOut {
   }
 
   async submitSibling(ctx: AccountContext, body: OwnerSignature): Promise<SiblingView> {
+    if (!oneAuthV4Deployment(ethereumRegistry)) throw new HttpError(404, 'SIBLING_NOT_OFFERED', 'Mamoru on Ethereum is not available for this account yet')
     if (this.inFlight || this.bundling.size > 0) throw new HttpError(503, 'BRIDGE_BUSY', 'another move from Ethereum is being sent, try again in a minute')
     const p = body && typeof body.prepareId === 'string' ? this.preparedSibling.get(body.prepareId) : undefined
     if (!p || p.accountKey !== ctx.accountKey) throw new HttpError(404, 'PREPARE_NOT_FOUND', 'that approval is not known, tap again')
@@ -1845,14 +1848,14 @@ export class BridgeOut {
    * The sibling's engine, one session userOp at a time, signed by its V4 session key (never the owner) and bounded by V4
    * on chain:
    * - ETH beyond its gas reserve is wrapped and swapped to USDC on the listed WETH/USDC pool, sized to V4's room (so its
-   *   budget never reverts and its breaker never trips), at no less than V4's own bound nor the Chainlink-checked quote;
-   * - once the guardian has read the Base home back (V4.isReady), all its USDC is bridged home by V4.bridge (CCTP, the
+   *   budget and its 24 h cap never refuse it), at no less than V4's own bound nor the Chainlink-checked quote;
+   * - once V4 holds the Base home ready (V4.isReady: announceReady on Base, a CCTP message here, A1; #348: announceReady
+   *   by the operator, noema-d3), all its USDC is bridged home by V4.bridge (CCTP, the
    *   account itself the recipient), and the burn becomes an ordinary CCTP route that tick() mints on Base.
    * The relayer bundles it (EntryPoint.handleOps, beneficiary the relayer): the account pays its gas from its own ETH, no
    * paymaster. Its nonce (SmartSession lane 0) is the ledger: nothing new is signed while an op with the outstanding
    * nonce ran and was not read yet (review r1 of #238), so no op that ran, a late copy included, goes unsettled.
-   * Simulated before anything is signed for broadcast; never beside another send, a move to Base still being minted, or
-   * V4's pause.
+   * Simulated before anything is signed for broadcast; never beside another send or a move to Base still being minted.
    */
   private async driveSibling(accountKey: string): Promise<void> {
     const c = this.journal.siblings?.[accountKey]
@@ -1872,16 +1875,14 @@ export class BridgeOut {
     const nonce = await this.siblingNonce(safe)
     // An op with the outstanding nonce ran (ours, an earlier one with that nonce, or a copy): read it first.
     if (c.opNonce && nonce > BigInt(c.opNonce.nonce)) return this.recoverNonce(accountKey, c)
-    const [eth, weth, usdcHeld, ready, paused, deposit, block] = await Promise.all([
+    const [eth, weth, usdcHeld, ready, deposit, block] = await Promise.all([
       this.l1.getBalance({ address: safe }),
       this.l1.readContract({ address: L1_WETH, abi: erc20Abi, functionName: 'balanceOf', args: [safe] }),
       this.usdcAt(safe),
       this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [safe, CCTP_DOMAIN_BASE] }),
-      this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isPaused', args: [safe] }),
       this.l1.readContract({ address: ep, abi: entryPointV07Abi, functionName: 'balanceOf', args: [safe] }),
       this.l1.getBlock({ blockTag: 'latest' }),
     ])
-    if (paused) return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: V4 has ${safe} paused, nothing sent`, undefined)
     const prio = GAS_CAPS_V2_BY_CHAIN[ETHEREUM_CHAIN_ID]!.maxPriorityFeePerGas
     const base = block.baseFeePerGas ?? 0n
     if (base + prio > SIBLING_MAX_FEE) return
@@ -1910,18 +1911,18 @@ export class BridgeOut {
       let minOut: bigint
       let limit: bigint
       try {
-        const helper = (await this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'HELPER' })) as Address
-        // Review r1/r2 of #238: never more value than V4's room (account bucket, the pool's sub-bucket, 30 days, the 24 h
-        // breaker, the review threshold), as V4 itself values the swap (MamoruV4Helper.swapValue: the band's edge, not the
-        // quote): over it V4 reverts, or trips its breaker and pauses the account.
-        const entry = (await this.l1.readContract({ address: d.registry, abi: mamoruRegistryAbi, functionName: 'poolOf', args: [SIBLING_POOL] })) as { twapWindow: number; twapShortWindow: number; bandTicks: number; anchorTick: number; anchorBand: number; ratioBps: number; active: boolean }
-        const info = (await this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'poolInfo', args: [SIBLING_POOL] })) as { token0: Address; token1: Address; fee: number; in1: boolean; stablePair: boolean }
-        const left = (await this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'budgetLeft', args: [safe, SIBLING_POOL, entry.ratioBps] })) as readonly bigint[]
+        const { helper } = v4Children(d.policy)
+        // Review r1/r2 of #238: never more value than V4's room (account bucket, the class's sub-bucket, 30 days, 24 h), as
+        // V4 itself values the swap (MamoruV4Helper.swapValue: the band's edge, not the quote): over it V4 refuses the op.
+        // A1: `priced` is V4's own eligibility check of the pool (it reverts when the pool is not eligible now) and gives
+        // the class entry and the sub-bucket key budgetLeft is keyed by.
+        const [info, entry, subKey] = (await this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'priced', args: [SIBLING_POOL] })) as readonly [{ token0: Address; token1: Address; fee: number; in1: boolean; stablePair: boolean }, { twapWindow: number; twapShortWindow: number; bandTicks: number; anchorTick: number; anchorBand: number; ratioBps: number; active: boolean }, Address]
+        const left = (await this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'budgetLeft', args: [safe, subKey, entry.ratioBps] })) as readonly bigint[]
         // Kept SIBLING_ROOM_MARGIN_BPS under it: the band can move before the op runs (deadline SIBLING_SWAP_DEADLINE_SEC).
         const room = (left.reduce((m, x) => (x < m ? x : m)) * (10_000n - SIBLING_ROOM_MARGIN_BPS)) / 10_000n
         const zeroForOne = getAddress(info.token0) === getAddress(L1_WETH)
         const valued = async (a: bigint) => {
-          const b = await this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'swapBounds', args: [SIBLING_POOL, L1_WETH, a] })
+          const b = await this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'swapBoundsAt', args: [SIBLING_POOL, info, entry, zeroForOne, a] })
           const v = await this.l1.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'swapValue', args: [SIBLING_POOL, info, entry, zeroForOne, a, b[0], b[1]] })
           return { bound: b, v }
         }
@@ -1942,7 +1943,7 @@ export class BridgeOut {
         minOut = bound[0] > checked ? bound[0] : checked
         limit = bound[1]
       } catch (e) {
-        // Not listed yet (V4's registry, after its delay), out of V4's band, or the price unchecked: nothing signed.
+        // Not eligible now (V4's rules), out of V4's band, or the price unchecked: nothing signed.
         return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: no swap now:`, e instanceof Error ? e.message.split('\n')[0] : e)
       }
       calls = [

@@ -1,19 +1,21 @@
 // otto/mamoru#309 (b), security review of #227: after a failed enable, a new prepare + submit installs the new row (its
 // l1Tx and every signed id), and the sibling gates hold inside the send path too.
-import { describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
 import { randomBytes } from 'node:crypto'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { toHex, type Hex } from 'viem'
 import type { AccountContext, OwnerSignature } from '@mamoru/domain'
-import { address, baseRegistry } from '@mamoru/registry'
+import { address, baseRegistry, ethereumRegistry } from '@mamoru/registry'
+import { oneAuthV4Deployment } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
 import { webAuthnSigner } from '@mamoru/account/safe'
 import { P256_N } from '@mamoru/account/live'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { BridgeOut, type StoredSibling } from '../src/bridge-out.ts'
 import { HttpError } from '../src/operator.ts'
+import { pinTestA1 } from './v4-pin.ts'
 
 const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
 const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
@@ -84,8 +86,34 @@ function world(prior?: Partial<StoredSibling>) {
   return { bo, sent, journal: () => JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8')).siblings.k as StoredSibling, setHash: (h: Hex) => { sentHash = h } }
 }
 
-describe('sibling submit', () => {
-  test('after a failed enable, prepare + submit installs the new row: its l1Tx, and every signed id kept', async () => {
+describe('#243 / #348: no V4 pinned on Ethereum (A1 undeployed until T8)', () => {
+  test('the ethereum-sibling endpoints answer SIBLING_NOT_OFFERED (404), so the one-approval screen falls back to plain Start', async () => {
+    expect(oneAuthV4Deployment(ethereumRegistry)).toBeNull()
+    const w = world({})
+    expect(w.bo.siblingView('k', ctx)).toEqual({ state: 'failed', offered: false, safe: ctx.address, sessionKey: '0x0000000000000000000000000000000000000bbb' })
+    expect(new BridgeOut({} as never, { address: '0x0000000000000000000000000000000000000001', send: async () => { throw new Error('never') } } as never, mkdtempSync(join(tmpdir(), 'mamoru-sib-none-')), fetch, Date.now, undefined, () => true).siblingView('k', ctx)).toEqual({ state: 'none', offered: false })
+    for (const call of [() => w.bo.prepareSibling(ctx), () => w.bo.submitSibling(ctx, { prepareId: 'x', authenticatorData: '', clientDataJSON: '', signature: '' })]) {
+      const err = await call().then(() => null, (e) => e)
+      expect(err).toBeInstanceOf(HttpError)
+      expect((err as HttpError).status).toBe(404)
+      expect((err as HttpError).code).toBe('SIBLING_NOT_OFFERED')
+    }
+    expect(w.sent).toEqual([])
+  })
+})
+
+describe('sibling submit (a test A1 stack pinned on Ethereum)', () => {
+  let unpin = () => {}
+  const pinned = <T>(f: () => Promise<T>) => async () => {
+    unpin = pinTestA1(ethereumRegistry)
+    try {
+      return await f()
+    } finally {
+      unpin()
+    }
+  }
+  afterAll(() => unpin())
+  test('after a failed enable, prepare + submit installs the new row: its l1Tx, and every signed id kept', pinned(async () => {
     const w = world({})
     const p = await w.bo.prepareSibling(ctx)
     w.setHash(p.safeTxHash)
@@ -97,12 +125,12 @@ describe('sibling submit', () => {
     expect(row.signedIds).toContain(`0x${'aa'.repeat(32)}`)
     expect(row.signedIds!.length).toBe(2)
     expect(w.sent.length).toBe(2) // deploy, then the enable
-  })
+  }))
 
-  test('a live row blocks the send path itself, not only the prepare', async () => {
+  test('a live row blocks the send path itself, not only the prepare', pinned(async () => {
     const w = world({ state: 'unconfirmed', l1Tx: TX })
     const err = await w.bo.prepareSibling(ctx).then(() => null, (e) => e)
     expect(err).toBeInstanceOf(HttpError)
     expect((err as HttpError).code).toBe('SIBLING_IN_PROGRESS')
-  })
+  }))
 })

@@ -13,11 +13,11 @@ import { baseStepLines, v4StoredGrant } from '../src/one-auth.ts'
 import type { AccountState } from '../src/state.ts'
 import { ctx, passkey, world } from './owner-world.ts'
 
-const D: OneAuthV4Deployment = { registry: '0x00000000000000000000000000000000000000a1', policy: '0x00000000000000000000000000000000000000a2', gasPolicy: '0x00000000000000000000000000000000000000a3', migrationCheck: '0x00000000000000000000000000000000000000a4' }
+const D: OneAuthV4Deployment = { table: '0x00000000000000000000000000000000000000a1', policy: '0x00000000000000000000000000000000000000a2', gasPolicy: '0x00000000000000000000000000000000000000a3', migrationCheck: '0x00000000000000000000000000000000000000a4' }
 const KEY = `0x${'5'.repeat(64)}` as Hex
 const pinned = (r: Registry): Registry => {
-  const names = ['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'] as const
-  const at = [D.registry, D.policy, D.gasPolicy, D.migrationCheck]
+  const names = ['MamoruV4Table', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'] as const
+  const at = [D.table, D.policy, D.gasPolicy, D.migrationCheck]
   return { ...r, undeployed: [], entries: [...r.entries.filter((e) => !(names as readonly string[]).includes(e.name)), ...names.map((name, i) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: at[i]!, codeHash: null }) as never)] }
 }
 const base = pinned(baseRegistry)
@@ -91,13 +91,22 @@ describe('P1-7: step 1 never stuck in flight; Monad pause fails closed; one subm
     expect(acc.ops.find((o) => o.opId === 'own-2-migrate-v4')).toMatchObject({ state: 'failed', code: 'OWNER_TX_REVERTS' })
   })
 
-  test('Monad: an unreadable home pause refuses the submit (PAUSE_STATE_UNAVAILABLE), never sends', async () => {
-    const homeClient = { readContract: async (a: { functionName: string }) => (a.functionName === 'configOf' ? { set: true } : (() => { throw new Error('down') })()) }
+  test('Monad (A1): the home has no pause, only its V4 config is read; an unreadable config refuses (HOME_UNAVAILABLE)', async () => {
+    const read: string[] = []
+    let down = true
+    const homeClient = { readContract: async (a: { functionName: string }) => (read.push(a.functionName), a.functionName === 'configOf' && !down ? { set: true } : (() => { throw new Error('down') })()) }
     const w = world(0n, { ...scoped, chainId: 143, homeClient: homeClient as never })
     const c143 = { ...ctx, chainId: 143 }
-    priv(w.op).prepared.set('p1', { prepareId: 'p1', accountKey: 'k', kind: 'migrate-v4', step: 1, home: ctx.address, expires: Date.now() + 60_000, safeTxHash: '0x01', tx: { nonce: 0n } })
+    const prep = () => priv(w.op).prepared.set('p1', { prepareId: 'p1', accountKey: 'k', kind: 'migrate-v4', step: 1, home: ctx.address, expires: Date.now() + 60_000, safeTxHash: '0x01', tx: { nonce: 0n } })
+    prep()
     const e = await w.op.submitMigrateV4(c143, { prepareId: 'p1', authenticatorData: '', clientDataJSON: '', signature: '', step: 1 }).catch((x) => x)
-    expect((e as HttpError).code).toBe('PAUSE_STATE_UNAVAILABLE')
+    expect((e as HttpError).code).toBe('HOME_UNAVAILABLE')
+    down = false
+    prep()
+    const f = await w.op.submitMigrateV4(c143, { prepareId: 'p1', authenticatorData: '', clientDataJSON: '', signature: '', step: 1 }).catch((x) => x)
+    expect((f as HttpError | undefined)?.code).not.toBe('PAUSE_STATE_UNAVAILABLE')
+    expect((f as HttpError | undefined)?.code).not.toBe('ONE_AUTH_PAUSED')
+    expect(read.every((n) => n === 'configOf')).toBe(true)
   })
 
   test('two submits at once: the second is refused (ONE_AUTH_STEP_IN_FLIGHT)', async () => {

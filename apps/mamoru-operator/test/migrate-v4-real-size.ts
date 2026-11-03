@@ -1,8 +1,8 @@
 // otto/mamoru#259 (spec 010, "Migration (v2-v6 -> V4)"): the move to V4 is ONE owner Safe transaction at the REAL size of a
-// production account, not only the synthetic 12-session v2 account of e2e-one-auth.ts phase D.
+// production account (the synthetic 12-session v2 account of the T7-era e2e-one-auth.ts phase D is gone with T7, #348).
 //
-// Target: Brais' Base Safe (v6, design C), forked at the latest block. The V4 stack is deployed on the fork as e2e-one-auth
-// does (CREATE2 through the deterministic deployer, ModuleRegistry self-attestation, pinned in the registry in memory).
+// Target: Brais' Base Safe (v6, design C), forked at the latest block. The A1 V4 stack is deployed on the fork
+// (CREATE2 through the deterministic deployer, ModuleRegistry self-attestation, pinned in the registry in memory).
 // The inventory is read with the production path the operator's planMigration uses (sessionCreatedIds from the Safe's
 // deployment block, readSessionState, inventoryOf), the admit list from the Safe's real positions (readSafe + the same
 // sizing filter), and the transaction is buildMigrateV4's. Executed on the fork as the owner would:
@@ -84,16 +84,20 @@ async function startFork(envVar: string, chainId: number, name: string, reg: Reg
 const artifact = (file: string, name = file): Hex => JSON.parse(readFileSync(join(OUT, `${file}.sol`, `${name}.json`), 'utf8')).bytecode.object as Hex
 const create2 = (initCode: Hex): Address => getAddress(`0x${keccak256(concat(['0xff', DETERMINISTIC_DEPLOYER, SALT, keccak256(initCode)])).slice(26)}`)
 
-/** The V4 stack on `lab`, as e2e-one-auth deploys it (CREATE2 through the deterministic deployer + ModuleRegistry self-attestation). */
-async function deployStack(lab: Lab, deployer: Address, admin: Address, guardian: Address): Promise<Record<(typeof ONE_AUTH_V4_CONTRACTS)[number], Address>> {
-  const gasInit = concat([artifact('MamoruGasPolicyV2'), encodeAbiParameters([{ type: 'address' }], [guardian])])
-  const regInit = concat([artifact('MamoruRegistry'), encodeAbiParameters([{ type: 'address' }, { type: 'address' }, { type: 'uint256' }], [admin, guardian, 48n * 3600n])])
+/**
+ * The A1 stack on `lab` (spec 010 A1, contracts/action-policy/script/DeployV4.s.sol: the table, then the gas policy and V4
+ * taking its address; no registry, no guardian), CREATE2 through the deterministic deployer + ModuleRegistry
+ * registration (the fork stands in for DeployV4's ModuleRegistry.deployModule).
+ */
+async function deployStack(lab: Lab, deployer: Address): Promise<Record<(typeof ONE_AUTH_V4_CONTRACTS)[number], Address>> {
+  const tableInit = artifact('MamoruV4Table')
+  const table = create2(tableInit)
+  const gasInit = concat([artifact('MamoruGasPolicyV2'), encodeAbiParameters([{ type: 'address' }], [table])])
   const gasPolicy = create2(gasInit)
-  const registry = create2(regInit)
-  const v4Init = concat([artifact('MamoruActionPolicyV4'), encodeAbiParameters([{ type: 'address' }, { type: 'address' }, { type: 'address' }], [registry, gasPolicy, guardian])])
+  const v4Init = concat([artifact('MamoruActionPolicyV4'), encodeAbiParameters([{ type: 'address' }, { type: 'address' }], [gasPolicy, table])])
   const checkInit = artifact('MamoruMigrationCheck')
-  const out = { MamoruGasPolicyV2: gasPolicy, MamoruRegistry: registry, MamoruActionPolicyV4: create2(v4Init), MamoruMigrationCheck: create2(checkInit) }
-  for (const init of [gasInit, regInit, v4Init, checkInit]) {
+  const out = { MamoruV4Table: table, MamoruGasPolicyV2: gasPolicy, MamoruActionPolicyV4: create2(v4Init), MamoruMigrationCheck: create2(checkInit) }
+  for (const init of [tableInit, gasInit, v4Init, checkInit]) {
     const r = await lab.sendAs(deployer, DETERMINISTIC_DEPLOYER, concat([SALT, init]))
     if (!r.ok) throw new Error(`deterministic deploy failed on ${lab.chainId}`)
   }
@@ -171,12 +175,10 @@ try {
   const head = await base.client.getBlockNumber()
   log(`Base fork at ${head}`)
 
-  // --- the V4 stack, as T7 deploys it ---------------------------------------------------------------------------------------
+  // --- the V4 stack, as T8 deploys A1 ---------------------------------------------------------------------------------------
   const deployer = privateKeyToAccount(generatePrivateKey()).address
-  const admin = privateKeyToAccount(generatePrivateKey()).address
-  const guardian = privateKeyToAccount(generatePrivateKey()).address
-  for (const a of [deployer, admin, guardian]) await base.setBalance(a, 10n ** 21n)
-  const stack = await deployStack(base, deployer, admin, guardian)
+  await base.setBalance(deployer, 10n ** 21n)
+  const stack = await deployStack(base, deployer)
   await pin(base, baseRegistry, stack)
   const d = oneAuthV4Deployment(baseRegistry)!
   check(!!d && d.policy === stack.MamoruActionPolicyV4, 'the V4 stack is deployed on the fork and pinned in the Base registry (in memory)', d?.policy)
