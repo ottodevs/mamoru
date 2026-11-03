@@ -35,17 +35,43 @@ const PUBLIC_FALLBACKS_BY_CHAIN: Readonly<Record<number, string>> = {
   8453: BASE_PUBLIC_FALLBACKS,
 }
 
+/** A JSON-RPC chain id answer: hex, above zero. Anything else is no answer. */
+function chainIdAnswer(result: unknown): number | null {
+  if (typeof result !== 'string' || !/^0x[0-9a-f]+$/i.test(result)) return null
+  const n = Number(result)
+  return Number.isSafeInteger(n) && n > 0 ? n : null
+}
+
 /**
- * otto/mamoru#261: the chain the first of these RPCs to answer eth_chainId is on, or null when none answers. Never
- * throws, never names a URL.
+ * otto/mamoru#261: the chain these RPCs (the upstream and the trusted ones) are on, asked of each until one answers,
+ * `attempts` times with a doubling pause, and the URLs that answered it. Two that answer different chains are a
+ * misconfiguration and throw; none answering is null. Never names a URL.
  */
-export async function chainIdOf(urls: readonly string[], send: (url: string, init: RequestInit) => Promise<Response> = fetch, timeoutMs = 8_000): Promise<number | null> {
-  for (const url of urls) {
-    const n = await send(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_chainId', params: [] }), signal: AbortSignal.timeout(timeoutMs) })
-      .then((r) => r.json() as Promise<{ result?: unknown }>)
-      .then((j) => (typeof j?.result === 'string' ? Number(j.result) : null))
-      .catch(() => null)
-    if (n !== null && Number.isSafeInteger(n)) return n
+export async function proveChain(
+  urls: readonly string[],
+  o: { send?: (url: string, init: RequestInit) => Promise<Response>; timeoutMs?: number; attempts?: number; pauseMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<{ chainId: number; proven: string[] } | null> {
+  const send = o.send ?? fetch
+  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  const attempts = o.attempts ?? 4
+  let pause = o.pauseMs ?? 1_000
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) {
+      await sleep(pause)
+      pause *= 2
+    }
+    const answers = await Promise.all(
+      urls.map((url) =>
+        send(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_chainId', params: [] }), signal: AbortSignal.timeout(o.timeoutMs ?? 8_000) })
+          .then((r) => r.json() as Promise<{ result?: unknown }>)
+          .then((j) => chainIdAnswer(j?.result))
+          .catch(() => null),
+      ),
+    )
+    const chains = new Set(answers.filter((n): n is number => n !== null))
+    if (chains.size > 1) throw new Error('the upstream and trusted RPCs answer different chains')
+    const [chainId] = chains
+    if (chainId !== undefined) return { chainId, proven: urls.filter((_, j) => answers[j] === chainId) }
   }
   return null
 }
@@ -227,6 +253,8 @@ export type RpcProxyOptions = {
   idleTimeoutSec?: number
   /** Every provider must answer this chain id before it is used (otto/mamoru#285); unset: no check (Base, as before). */
   chainId?: number
+  /** URLs already proven on `chainId` (otto/mamoru#261: the boot probe), not asked again. */
+  proven?: readonly string[]
   /** Per provider attempt; default 30 s. Shorter than the caller's budget, so a hung provider leaves time for the next (otto/mamoru#285). */
   providerTimeoutMs?: number
   /** How long a trusted block hash may witness a log range; default WITNESS_TTL_MS. Tests shorten it. */
@@ -269,7 +297,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const rawSend = opts.fetch ?? fetch
   // otto/mamoru#285: with `chainId`, every provider proves its chain before its first use. Another chain shuts it
   // out for good (the proxy fails over as for an outage); no answer leaves it unproven, to be asked again next time.
-  const proven = new Map<string, Promise<boolean>>()
+  const proven = new Map<string, Promise<boolean>>((opts.proven ?? []).map((url) => [url, Promise.resolve(true)]))
   const onChain = (url: string): Promise<boolean> => {
     if (opts.chainId === undefined) return Promise.resolve(true)
     let p = proven.get(url)

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { BASE_PUBLIC_FALLBACKS, chainIdOf, fallbacksFromEnv, L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, startRpcProxy, trustedFromEnv } from '../src/rpc-proxy.ts'
+import { BASE_PUBLIC_FALLBACKS, fallbacksFromEnv, proveChain, L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, startRpcProxy, trustedFromEnv } from '../src/rpc-proxy.ts'
 
 const PRIMARY = 'https://base-mainnet.g.alchemy.com/v2/test-key'
 const saved = process.env.MAMORU_RPC_FALLBACKS
@@ -78,29 +78,36 @@ describe('rpc proxy configuration', () => {
     expect(fallbacksFromEnv({ MAMORU_RPC_FALLBACKS: 'https://x.example/rpc' }, 143)).toEqual(['https://x.example/rpc'])
   })
 
-  test('chainIdOf: the first RPC that answers names the chain; none answering is null', async () => {
-    const send = (answers: Record<string, unknown>) => async (url: string) => {
-      const a = answers[url]
+  test('proveChain: retries until one answers, takes the URLs that answered, refuses two chains (otto/mamoru#261)', async () => {
+    const send = (answers: Record<string, unknown[]>) => async (url: string) => {
+      const a = answers[url]!.length > 1 ? answers[url]!.shift() : answers[url]![0]
       if (a instanceof Error) throw a
       return Response.json(a)
     }
-    expect(await chainIdOf(['https://a', 'https://b'], send({ 'https://a': { result: '0x8f' }, 'https://b': { result: '0x2105' } }))).toBe(143)
-    expect(await chainIdOf(['https://a', 'https://b'], send({ 'https://a': new Error('down'), 'https://b': { result: '0x2105' } }))).toBe(8453)
-    expect(await chainIdOf(['https://a'], send({ 'https://a': { error: { code: 429 } } }))).toBeNull()
-    expect(await chainIdOf([], send({}))).toBeNull()
+    const sleep = async () => {}
+    const base = { result: '0x2105' }
+    // Upstream rate limited at first, answers on the second try; the trusted one never answers.
+    expect(await proveChain(['https://up', 'https://tr'], { sleep, send: send({ 'https://up': [{ error: { code: 429 } }, base], 'https://tr': [new Error('down')] }) })).toEqual({ chainId: 8453, proven: ['https://up'] })
+    expect(await proveChain(['https://up', 'https://tr'], { sleep, send: send({ 'https://up': [base], 'https://tr': [base] }) })).toEqual({ chainId: 8453, proven: ['https://up', 'https://tr'] })
+    await expect(proveChain(['https://up', 'https://tr'], { sleep, send: send({ 'https://up': [base], 'https://tr': [{ result: '0x8f' }] }) })).rejects.toThrow('different chains')
+    // Not an answer: an error, an empty or zero id, a non-hex string.
+    expect(await proveChain(['https://up'], { sleep, attempts: 3, send: send({ 'https://up': [{ result: '' }, { result: '0x0' }, { result: '8453' }] }) })).toBeNull()
+    expect(await proveChain([], { sleep })).toBeNull()
   })
 
   test('with a chain id and no MAMORU_RPC_FALLBACKS, a log read falls back only to that chain\'s public RPCs', async () => {
     delete process.env.MAMORU_RPC_FALLBACKS
     delete process.env.MAMORU_RPC_TRUSTED
     const calls: string[] = []
+    const asked: string[] = []
     const upstream = async (url: string, init: RequestInit) => {
       calls.push(url)
       const body = JSON.parse(String(init.body))
+      asked.push(`${url} ${body.method}`)
       if (body.method === 'eth_chainId') return Response.json({ jsonrpc: '2.0', id: body.id, result: '0x8f' })
       return Response.json({ jsonrpc: '2.0', id: body.id, error: { code: 429, message: 'request limit reached' } }, { status: 429 })
     }
-    const proxy = startRpcProxy('https://monad-primary.example/rpc', { fetch: upstream, chainId: 143, providerTimeoutMs: 1_000 })
+    const proxy = startRpcProxy('https://monad-primary.example/rpc', { fetch: upstream, chainId: 143, proven: ['https://monad-primary.example/rpc'], providerTimeoutMs: 1_000 })
     try {
       await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ fromBlock: '0x1', toBlock: '0x2' }] }) }).catch(() => null)
     } finally {
@@ -109,6 +116,8 @@ describe('rpc proxy configuration', () => {
     const monad = new Set(['https://monad-primary.example/rpc', ...MONAD_PUBLIC_FALLBACKS.split(',')])
     expect(calls.length).toBeGreaterThan(1)
     expect(calls.every((u) => monad.has(u))).toBe(true)
+    // The upstream proved its chain at boot: the proxy does not ask it again.
+    expect(asked.filter((a) => a === 'https://monad-primary.example/rpc eth_chainId')).toEqual([])
   })
 
   test('a loopback upstream (anvil) never falls back to a remote provider', async () => {
