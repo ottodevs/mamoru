@@ -41,8 +41,9 @@ export function totalScopeNote(f: FundingView | undefined, otherChain: boolean):
   if (!f) return null
   if (!f.money) return otherChain || isMultichainTarget(f.approval?.policyId) ? moneyCopy.baseOnly : null
   const notes: string[] = []
-  // One line per transfer on its way (not arrived, not failed): already counted in the total, absent from Working and Idle.
-  for (const t of f.money.inFlight.filter((t) => t.stage !== 'minted' && t.stage !== 'failed')) notes.push(moneyCopy.moving(usd(t.amountUsdc), chainLabel(t.from), chainLabel(t.to)))
+  // One line per transfer the total counts outside Working and Idle: on its way, or minted before the destination's read
+  // catches up (#350 review r9). A failed one is not in the total and says nothing here.
+  for (const t of f.money.inFlight.filter((t) => t.stage !== 'failed')) notes.push(moneyCopy.moving(usd(t.amountUsdc), chainLabel(t.from), chainLabel(t.to)))
   const unread = unreadChains(f.money)
   if (unread.length) notes.push(moneyCopy.incomplete(names(unread, f.money.chains)))
   // A chain never read is stale too; it is said once, as unread.
