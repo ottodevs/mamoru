@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { encodeFunctionResult, getAddress, toFunctionSelector, toHex, type Hex, type PublicClient } from 'viem'
-import type { AccountContext, MoneyMap } from '@mamoru/domain'
+import { overCap, type AccountContext, type MoneyMap } from '@mamoru/domain'
 import { address, baseRegistry, monadRegistry, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
@@ -136,10 +136,18 @@ function setup(o: { downAtStart?: boolean; v4?: boolean } = {}) {
     clock.t += advanceMs
     return op.funding(ctx)
   }
-  /** The cap's outputs (exposure, overCap) with and without the bridge leg: they must be byte-identical in every phase. */
-  const capSame = async (f: { exposure?: unknown; overCap?: unknown }) => {
+  /**
+   * The cap's outputs (exposure, overCap) against an operator without the bridge leg: otto/mamoru#332 adds the burns the
+   * journal still counts and nothing else. No peer operator here, so no Monad read covers a minted burn: every burn not
+   * failed or dropped counts until it is pruned.
+   */
+  const capSame = async (f: { exposure?: { totalUsdc: string; capUsdc: string; overUsdc: string; peerUnavailable?: boolean }; overCap?: unknown; active?: boolean }) => {
     const base = await plain.funding(ctx)
-    expect(JSON.stringify({ exposure: f.exposure, overCap: f.overCap })).toBe(JSON.stringify({ exposure: base.exposure, overCap: base.overCap }))
+    const burns = bridge.capUsdc([ctx.address], () => undefined)
+    const total = BigInt(base.exposure!.totalUsdc) + burns
+    const cap = BigInt(base.exposure!.capUsdc)
+    const want = { exposure: { ...base.exposure, totalUsdc: total.toString(), overUsdc: (total > cap ? total - cap : 0n).toString() }, overCap: f.active ? null : overCap(total, cap) }
+    expect(JSON.stringify({ exposure: f.exposure, overCap: f.overCap })).toBe(JSON.stringify(want))
   }
   return { plain, capSame, store, dir, op, acc, bridge, clock, monad, chain, home, journal, update, signing, fund, cfg }
 }
@@ -168,7 +176,7 @@ describe('the money map follows Brais through his bridge (otto/mamoru#269)', () 
       expect(m.complete).toBe(true)
       expect(m.inFlight.length).toBe(want.inFlight)
       if (want.stage) expect(m.inFlight[0]!.stage as string).toBe(want.stage)
-      // The cap is untouched: its outputs are those of an operator without the bridge leg, in every phase.
+      // The cap: an operator without the bridge leg, plus the burns the journal still counts (otto/mamoru#332), in every phase.
       await s.capSame(f)
       seen.push({ phase, total: BigInt(m.totalUsdc) })
       return m

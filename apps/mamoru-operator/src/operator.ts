@@ -54,7 +54,7 @@ import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, POSITION_DUST_USDC, amountsForLiquidity, idleTokens, inUsdc, livePool, nativePricePool, positionUsdc, positionView, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
 import { balanceMoves, DEPOSIT_CONFIRM_BLOCKS, DEPOSIT_PAGE_BLOCKS, depositId, depositOpView, depositRange, depositsOf, mergeDeposits, readTransfersIn, type DepositRow } from './deposits.ts'
-import { elsewhereOf, exposureOf, joinReads, totalOf, type ChainExposure, type ExposureWire, type PeerExposure, type PeerRead } from './exposure.ts'
+import { exposureOf, joinReads, totalOf, type ChainExposure, type Covered, type ExposureWire, type PeerExposure, type PeerRead } from './exposure.ts'
 import { closeCalls, planReduce, planVaultExit, routeOf, swapBackCalls, vaultExitCalls, type SwapBack, type VaultExit } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
 import { ONE_ACTION_GAS_UNITS, gasReserveAlertOverrideFromEnv, gasReserveAlertWei, reserveRefillWei } from './gas-reserve.ts'
@@ -154,6 +154,8 @@ const SCAN_PAGES_PER_PASS = 20
 /** otto/mamoru#163: blocks above the evidence a settlement waits for (~24 s on Base), and the evidence block still canonical. */
 const SETTLE_CONFIRMATIONS = 12n
 /** The Safe tx that spent an op's Safe nonce, read from the spending block's own logs. */
+/** otto/mamoru#212/#332: what this chain holds for the account, and the read of its Safe it comes from. */
+type LocalTotal = { total: bigint; safe: Address; block: bigint }
 type SpentBy = { safeTxHash: Hex; tx: Hex; block: bigint; ours: boolean; success: boolean }
 const EXECUTION_SUCCESS_EVENT = parseAbiItem('event ExecutionSuccess(bytes32 indexed txHash, uint256 payment)')
 /** How far past an owner op's send block its ExecutionSuccess is searched for (about a day of Base blocks), and per request. */
@@ -533,7 +535,7 @@ export type OperatorConfig = {
    * account's engine reads its remote value from it and records every bridge-out in it before signing. Absent: no
    * account has a remote value, and no bridge-out is ever signed.
    */
-  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs'>
+  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs' | 'capUsdc'>
   /** otto/mamoru#278 (Base): a V4 home's returns from its remote Safe, followed to the mint here. Absent: none asked. */
   returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'floor' | 'open' | 'request' | 'lastClosedAt'>
   /**
@@ -1409,15 +1411,15 @@ export class Operator {
    * otto/mamoru#212: everything the account's owner holds outside this chain's Safe: the same address on the peer
    * chains, and any other Safe of the owner here and on the peer chains. Never throws: a failure reads `ok: false`.
    */
-  private async peerRead(acc: AccountState, maxAgeMs: number): Promise<PeerRead> {
+  private async peerRead(acc: AccountState, maxAgeMs: number, covered?: Covered): Promise<PeerRead> {
     const peers = this.cfg.peers
     const others = this.otherSafes(acc)
     let out: PeerRead = { ok: true, chains: [] }
     try {
-      for (const address of peers?.configured ? [acc.ctx.address as Address, ...others] : []) out = joinReads(out, await peers!.read(address, maxAgeMs))
+      for (const address of peers?.configured ? [acc.ctx.address as Address, ...others] : []) out = joinReads(out, await peers!.read(address, maxAgeMs, covered))
       for (const address of others) {
         const sibling = Object.values(this.store.state.accounts).find((a) => a.ctx.address.toLowerCase() === address)
-        const r = sibling ? await this.readSafeCached(sibling, getAddress(address), maxAgeMs <= PEER_START_MAX_AGE_MS) : await readSafe(this.client, getAddress(address), this.cfg.registry)
+        const r = sibling ? await this.readSafeCached(sibling, getAddress(address), maxAgeMs <= PEER_START_MAX_AGE_MS) : await this.readUnowned(getAddress(address))
         // otto/mamoru#352: a vault of that Safe that could not be valued is an unread leg (caught below: ok false).
         if (r.vaultsUnread?.length) throw new Error(`${address}: vault ${r.vaultsUnread.join(', ')} unreadable`)
         out = joinReads(out, { ok: true, chains: [this.localExposure(sibling, r)] })
@@ -1429,9 +1431,15 @@ export class Operator {
     }
   }
 
+  /** otto/mamoru#212: a Safe no account here uses (an owner's other Safe, a peer's question), read from the chain, kept nowhere. */
+  private readUnowned(safe: Address): Promise<SafeRead> {
+    return readSafe(this.client, safe, this.cfg.registry)
+  }
+
   /** otto/mamoru#212: what this chain holds for the account now (a live read), for the Start checks after prepare. */
-  private async localTotal(acc: AccountState, safe: Address): Promise<bigint> {
-    return this.capTotal(acc, await this.readOf(acc, safe))
+  private async localTotal(acc: AccountState, safe: Address): Promise<LocalTotal> {
+    const r = await this.readOf(acc, safe)
+    return { total: this.capTotal(acc, r), safe, block: r.block }
   }
 
   /**
@@ -1444,39 +1452,91 @@ export class Operator {
   }
 
   /**
-   * otto/mamoru#212: the account's total across chains for a Start check, `local` being what this chain holds. A peer
-   * that cannot be read refuses the Start (CAP_CHECK_UNAVAILABLE): nothing new is placed on a guess.
+   * otto/mamoru#332: the read of this chain's Safe a total uses, sent to the peers so the Base operator stops counting a
+   * burn minted to that Safe once this read holds it. Only the Monad operator sends it (the burns' destination); any
+   * other chain sends none, and the Base operator counts every burn not yet in its own peer read (burnsOf).
    */
-  private async startTotal(acc: AccountState, local: bigint): Promise<{ total: bigint; across: boolean }> {
-    const peers = await this.peerRead(acc, PEER_START_MAX_AGE_MS)
-    if (!peers.ok) throw capCheckUnavailable()
-    const elsewhere = peers.chains.reduce((s, e) => s + totalOf(e), 0n)
-    return { total: local + elsewhere, across: elsewhere > 0n }
+  private coverOf(safe: Address, block: bigint): Covered | undefined {
+    return this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? { chainId: this.cfg.chainId, safe: safe.toLowerCase(), block } : undefined
   }
 
-  /** otto/mamoru#212: the cap an engine review places within (`Observation.cap`), from the read taken before it. */
-  private engineCap(acc: AccountState): NonNullable<Observation['cap']> {
+  /**
+   * otto/mamoru#332, Base: the CCTP burns to Monad this account's cap still counts (the journal is the only record of them
+   * between the burn and the mint): those that left its own Safe or any of the owner's other Safes, the Safes this total
+   * reads here (peerRead). By source Safe, so a sibling's burn is counted once, here, and never under another account
+   * key. A minted one stops counting only when `peers` holds a read of its recipient Safe on Monad at or after its
+   * mintedBlock; a failed peer read covers nothing. 0 where there is no bridge journal.
+   */
+  private burnsOf(acc: AccountState, peers: PeerRead): bigint {
+    const bridge = this.cfg.bridgeMonad
+    if (!bridge) return 0n
+    const reads = peers.ok ? peers.chains.filter((e) => e.chainId === BRIDGE_MONAD_CHAIN_ID && e.at) : []
+    return bridge.capUsdc([acc.ctx.address, ...this.otherSafes(acc)], (recipient) => {
+      let at: bigint | undefined
+      for (const e of reads) if (e.at!.safe.toLowerCase() === recipient.toLowerCase() && (at === undefined || e.at!.block > at)) at = e.at!.block
+      return at
+    })
+  }
+
+  /** otto/mamoru#212/#332: what the account holds outside this chain's Safe: the peers' reads and its burns not yet in them. Null when a peer could not be read. */
+  private elsewhereOf(acc: AccountState, peers: PeerRead): bigint | null {
+    if (!peers.ok) return null
+    return peers.chains.reduce((s, e) => s + totalOf(e), 0n) + this.burnsOf(acc, peers)
+  }
+
+  /**
+   * otto/mamoru#212: the account's total across chains for a Start check, `local` being what this chain holds (and the
+   * read it came from, otto/mamoru#332). A peer that cannot be read refuses the Start (CAP_CHECK_UNAVAILABLE): nothing
+   * new is placed on a guess.
+   */
+  private async startTotal(acc: AccountState, local: LocalTotal): Promise<{ total: bigint; across: boolean }> {
+    const elsewhere = this.elsewhereOf(acc, await this.peerRead(acc, PEER_START_MAX_AGE_MS, this.coverOf(local.safe, local.block)))
+    if (elsewhere === null) throw capCheckUnavailable()
+    return { total: local.total + elsewhere, across: elsewhere > 0n }
+  }
+
+  /**
+   * otto/mamoru#212: the cap an engine review places within (`Observation.cap`), from the read taken before it.
+   * otto/mamoru#332, Monad: the peers are read here, after the review's observation, with that observation's block as the
+   * covered read: the Base operator then leaves out exactly the mints that observation holds, and the review counts its
+   * own Safe at that same block. (Read before it, as on other chains, a lagging observation could miss a mint the cover
+   * already left out.)
+   */
+  private async engineCap(acc: AccountState, observedBlock: bigint): Promise<NonNullable<Observation['cap']>> {
+    if (this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID && this.readsElsewhere(acc)) this.enginePeers.set(acc.accountKey, await this.peerRead(acc, PEER_ENGINE_MAX_AGE_MS, this.coverOf(getAddress(acc.ctx.address), observedBlock)))
     const peers: PeerRead = this.readsElsewhere(acc) ? (this.enginePeers.get(acc.accountKey) ?? { ok: false, chainId: 0 }) : { ok: true, chains: [] }
-    return { capUsdc: this.effectiveCap(acc), elsewhereUsdc: elsewhereOf(peers) }
+    return { capUsdc: this.effectiveCap(acc), elsewhereUsdc: this.elsewhereOf(acc, peers) }
   }
 
   /**
    * otto/mamoru#212: GET /internal/exposure/<address>, what a peer operator counts of this Safe on this chain. Read only:
    * an address no account here uses is read from the chain and stored nowhere.
    */
-  async exposureFor(address: Address): Promise<ExposureWire> {
+  async exposureFor(address: Address, covered?: Covered): Promise<ExposureWire> {
     const safe = getAddress(address)
     // otto/mamoru#250: PeerExposure.check() probes with the zero address, which is no Safe and holds nothing; reading
     // it reverts (the position manager is ERC-721: balanceOf(0) reverts). The block read still proves this chain's RPC.
     if (/^0x0{40}$/.test(safe)) return { chainId: this.cfg.chainId, address: safe.toLowerCase(), block: (await this.client.getBlockNumber()).toString(), idleUsdc: '0', placedUsdc: '0', active: false }
     const acc = Object.values(this.store.state.accounts).find((a) => a.ctx.address.toLowerCase() === safe.toLowerCase())
     // A read at most FUNDING_FRESH_READ_MS old: the caller's own cache age then bounds how old the balances are.
-    const r = acc ? await this.readSafeCached(acc, safe, true) : await readSafe(this.client, safe, this.cfg.registry)
+    const r = acc ? await this.readSafeCached(acc, safe, true) : await this.readUnowned(safe)
     // otto/mamoru#352: a vault that could not be valued answers 503 (CAP_CHECK_UNAVAILABLE): the peer reads this chain as
     // unread and places nothing new, never a total that leaves the vault out.
     if (r.vaultsUnread?.length) throw capCheckUnavailable()
     const e = this.localExposure(acc, r)
-    return { chainId: this.cfg.chainId, address: safe.toLowerCase(), block: r.block.toString(), idleUsdc: e.idleUsdc.toString(), placedUsdc: e.placedUsdc.toString(), active: e.active }
+    // otto/mamoru#332 (Base): the account's burns to Monad not yet in the caller's own read (`covered`, the Safe and Monad
+    // block the caller's total uses), as idle USDC on its way. Asked without one (the older path): every burn not failed.
+    // By source Safe: the burns that left this very address, whether or not an account here still names it.
+    const burns = this.burnsCoveredBy(safe, covered)
+    return { chainId: this.cfg.chainId, address: safe.toLowerCase(), block: r.block.toString(), idleUsdc: (e.idleUsdc + burns).toString(), placedUsdc: e.placedUsdc.toString(), active: e.active }
+  }
+
+  /** otto/mamoru#332: burnsOf for a peer's total, covered by the peer's own read of a Safe on Monad (if any). */
+  private burnsCoveredBy(source: Address, covered: Covered | undefined): bigint {
+    const bridge = this.cfg.bridgeMonad
+    if (!bridge) return 0n
+    const c = covered && covered.chainId === BRIDGE_MONAD_CHAIN_ID ? covered : undefined
+    return bridge.capUsdc([source], (recipient) => (c && c.safe.toLowerCase() === recipient.toLowerCase() ? c.block : undefined))
   }
 
   settingsStatus(): (ReturnType<EngineSettingsSource['status']> & { capRefused: string[] }) | null {
@@ -1921,10 +1981,13 @@ export class Operator {
     // otto/mamoru#269 (display only): the Monad Safes are read alongside the reads below, never ahead of them.
     const deadline = Date.now() + (this.cfg.bridgeMonad?.legBudgetMs() ?? 0)
     const legs = this.remoteLegs(acc, deadline)
-    const [r, peers] = await Promise.all([this.fundingRead(acc, live.safe, fresh), this.peerRead(acc, PEER_FUNDING_MAX_AGE_MS)])
-    // otto/mamoru#212: the cap holds the account's total across every chain, idle and placed.
+    // otto/mamoru#332: on Monad the peers are asked with this very read (its block), so the read comes first there.
+    const rP = this.fundingRead(acc, live.safe, fresh)
+    const [r, peers] = await Promise.all([rP, this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? rP.then((x) => this.peerRead(acc, PEER_FUNDING_MAX_AGE_MS, this.coverOf(live.safe, x.block))) : this.peerRead(acc, PEER_FUNDING_MAX_AGE_MS)])
+    // otto/mamoru#212: the cap holds the account's total across every chain, idle and placed; #332: and the burns on
+    // their way to Monad (all of them when a peer could not be read).
     // otto/mamoru#352: a vault that could not be valued leaves the total a floor; funding still answers and says so.
-    const total = totalOf(this.localExposure(acc, r)) + (peers.ok ? peers.chains.reduce((s, e) => s + totalOf(e), 0n) : 0n)
+    const total = totalOf(this.localExposure(acc, r)) + (this.elsewhereOf(acc, peers) ?? this.burnsOf(acc, peers))
     const cap = this.effectiveCap(acc)
     const engine = this.engineView(acc)
     // Display only: a failure here never fails the balance.
@@ -3401,7 +3464,7 @@ export class Operator {
     // value, so a settings pull in the middle cannot make them disagree.
     const cap = this.capFor(acc)
     // otto/mamoru#212: what the account holds here and on every other chain, idle and placed.
-    const start = await this.startTotal(acc, this.capTotal(acc, r))
+    const start = await this.startTotal(acc, { total: this.capTotal(acc, r), safe: live.safe, block: r.block })
     // otto/mamoru#309 (a) / #333: an account in the one-authorization scope never gets a v1-v6 grant set: its Start IS
     // the V4 activation. What it holds at its own address on Ethereum (its sibling, still to come home) counts toward the
     // cap and toward the deploy minimum (review r1 of #235).
@@ -5020,15 +5083,16 @@ export class Operator {
     if (usdc < MIN_DEPLOY_USDC && !(await readSafeNonce(this.client, live.safe)).deployed) return
     const cap = this.activationCap(acc, a.capUsdc)
     // otto/mamoru#212: counted across chains. The other chains unreadable: the approval waits, kept.
-    const peers = await this.peerRead(acc, PEER_START_MAX_AGE_MS)
-    if (!peers.ok) {
+    // The whole of this chain (other tokens, positions, USDC in flight), read now; unreadable: the approval waits. Read
+    // before the peers: on Monad they are asked with its block (otto/mamoru#332).
+    const local = await this.localTotal(acc, live.safe).catch((e: unknown) => (logErr(`[armed] ${acc.accountKey} ${a.opId} held: Safe unreadable for the cap check`, e), null))
+    if (local === null) return this.park(acc, ARM_RETRY_MS)
+    const elsewhere = this.elsewhereOf(acc, await this.peerRead(acc, PEER_START_MAX_AGE_MS, this.coverOf(local.safe, local.block)))
+    if (elsewhere === null) {
       logErr(`[armed] ${acc.accountKey} ${a.opId} held: the other chains could not be read (CAP_CHECK_UNAVAILABLE)`, undefined)
       return this.park(acc, ARM_RETRY_MS)
     }
-    // The whole of this chain (other tokens, positions, USDC in flight), read now; unreadable: the approval waits.
-    const local = await this.localTotal(acc, live.safe).catch((e: unknown) => (logErr(`[armed] ${acc.accountKey} ${a.opId} held: Safe unreadable for the cap check`, e), null))
-    if (local === null) return this.park(acc, ARM_RETRY_MS)
-    const total = local + peers.chains.reduce((s, e) => s + totalOf(e), 0n)
+    const total = local.total + elsewhere
     if (total > cap) {
       const shown = acc.ops.find((o) => o.opId === a.opId)
       if (shown?.amountUsdc !== total.toString() || shown.capUsdc !== cap.toString()) this.patchOp(acc, a.opId, { amountUsdc: total.toString(), capUsdc: cap.toString() })
@@ -7013,7 +7077,7 @@ export class Operator {
         ...(this.poolDepth ? { poolDepth: () => this.poolDepth!.get() } : {}),
         onEntering: (pool) => this.markEntering(acc, pool),
         // otto/mamoru#212: new money is placed only within the cap, counted across chains.
-        cap: () => this.engineCap(acc),
+        cap: (observedBlock) => this.engineCap(acc, observedBlock),
         // otto/mamoru#210: v7's USDC/USDT is wound down only for an account in the `stables_lp_exit` scope (opt-in).
         exitOptIn: () => this.inScope(acc, 'stables_lp_exit'),
         ...this.remoteOf(acc),
@@ -7126,7 +7190,8 @@ export class Operator {
           }
           if (runner.stopped || !acc.active) return
           // otto/mamoru#212: the other chains as this review counts them (a failed read: nothing new is placed).
-          if (this.readsElsewhere(acc)) this.enginePeers.set(acc.accountKey, await this.peerRead(acc, PEER_ENGINE_MAX_AGE_MS))
+          // otto/mamoru#332: on Monad the peers are read inside the review, with its observation's block (engineCap).
+          if (this.readsElsewhere(acc) && this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID) this.enginePeers.set(acc.accountKey, await this.peerRead(acc, PEER_ENGINE_MAX_AGE_MS))
           if (runner.stopped || !acc.active) return
           // otto/mamoru#293: MamoruRegistry listed, removed or re-parametrized a pool since this loop started: it restarts on them.
           if (this.onV4(acc)) {

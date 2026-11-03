@@ -12,6 +12,8 @@ export type ChainExposure = {
   placedUsdc: bigint
   /** The engine runs this account on that chain. */
   active: boolean
+  /** otto/mamoru#332: a peer's answer only: the Safe and the block of that chain it was read at. */
+  at?: { safe: string; block: bigint }
 }
 
 export function totalOf(e: Pick<ChainExposure, 'idleUsdc' | 'placedUsdc'>): bigint {
@@ -86,11 +88,56 @@ export function parsePeerOperators(v: string | undefined, ownChainId: number): P
 /** The internal read a peer operator answers: the account at `address` on its chain, signed like GET /metrics. */
 export const EXPOSURE_PATH = '/internal/exposure/'
 
+/**
+ * otto/mamoru#332: the caller's own read of its Safe on its chain, used in the same total as the peer's answer. The Base
+ * operator stops counting a CCTP burn minted to `safe` on `chainId` once this read is at or after the mint's block.
+ */
+export type Covered = { chainId: number; safe: string; block: bigint }
+
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/
+
+/**
+ * otto/mamoru#332: `/internal/exposure/<address>`, or with the caller's read `/internal/exposure/<address>/<chainId>/<safe>/<block>`.
+ * The covered read is in the path, so the pathname signature covers it. A peer running older code answers 400 to the
+ * longer shape: the Base operator deploys first (it accepts both), then the Monad operator, the only one that sends it.
+ */
+export function exposurePath(address: string, covered?: Covered): string {
+  return covered ? `${EXPOSURE_PATH}${address}/${covered.chainId}/${covered.safe.toLowerCase()}/${covered.block}` : `${EXPOSURE_PATH}${address}`
+}
+
+/** The Safe and the covered read of an exposure path; null when it is not one of the two shapes. */
+export function parseExposurePath(pathname: string): { safe: string; covered?: Covered } | null {
+  if (!pathname.startsWith(EXPOSURE_PATH)) return null
+  const parts = pathname.slice(EXPOSURE_PATH.length).split('/')
+  const safe = parts[0]!
+  if (!ADDRESS.test(safe)) return null
+  if (parts.length === 1) return { safe }
+  if (parts.length !== 4) return null
+  const [, chainId, coveredSafe, block] = parts as [string, string, string, string]
+  if (!/^[0-9]{1,10}$/.test(chainId) || !ADDRESS.test(coveredSafe) || !/^[0-9]{1,20}$/.test(block)) return null
+  return { safe, covered: { chainId: Number(chainId), safe: coveredSafe.toLowerCase(), block: BigInt(block) } }
+}
+
+/**
+ * otto/mamoru#332: whether an answer the peer gave for `had` may stand for a read asked with `want`. An answer computed
+ * without a covered read counts every burn minted (never less than asked). One computed for a covered read counts the
+ * burns minted after it: it stands only for a read of the same Safe at the same or a later block (a later read holds
+ * those mints already; an earlier one may not).
+ */
+export function coversAsked(had: Covered | undefined, want: Covered | undefined): boolean {
+  if (had === undefined) return true
+  if (want === undefined) return false
+  return had.chainId === want.chainId && had.safe.toLowerCase() === want.safe.toLowerCase() && had.block <= want.block
+}
+
 /** What GET /internal/exposure/<address> answers. Amounts are base-unit strings. */
 export type ExposureWire = { chainId: number; address: string; block: string; idleUsdc: string; placedUsdc: string; active: boolean }
 
 export type PeerRead = { ok: true; chains: ChainExposure[] } | { ok: false; chainId: number }
 
+type CacheEntry = { at: number; done: number; value: PeerRead; covered?: Covered }
+/** Answers kept per Safe: one per cover a caller is using at once (funding, Start, the engine) is plenty. */
+const CACHE_PER_SAFE = 4
 /** How long a failed read of a peer is answered from memory before the peer is asked again. */
 const FAILED_TTL_MS = 5_000
 const UINT = /^[0-9]{1,40}$/
@@ -102,8 +149,14 @@ const UINT = /^[0-9]{1,40}$/
  * back a withdrawal, a stop or the re-range of what is already placed.
  */
 export class PeerExposure {
-  private readonly cache = new Map<string, { at: number; value: PeerRead }>()
-  private readonly inFlight = new Map<string, Promise<PeerRead>>()
+  /**
+   * A few answers per Safe (otto/mamoru#332 r2): `at` when the read started (its age), `done` when it completed (which of
+   * two answers is newer), `covered` the read it was asked with. Reads with different covers can complete in any order:
+   * an answer is dropped only by one at least as broad (coversAsked) and completed later, so a narrower or older answer
+   * never replaces a broader or newer one.
+   */
+  private readonly cache = new Map<string, CacheEntry[]>()
+  private readonly inFlight = new Map<string, { covered?: Covered; p: Promise<PeerRead> }>()
 
   constructor(
     readonly peers: readonly PeerOperator[],
@@ -117,42 +170,72 @@ export class PeerExposure {
     return this.peers.length > 0
   }
 
-  /** The last read of `address` if it is at most `maxAgeMs` old (a failed one at most FAILED_TTL_MS), else undefined. */
-  cached(address: string, maxAgeMs: number): PeerRead | undefined {
-    const c = this.cache.get(address.toLowerCase())
-    if (!c) return undefined
-    const age = this.now() - c.at
-    return age < (c.value.ok ? maxAgeMs : Math.min(maxAgeMs, FAILED_TTL_MS)) ? c.value : undefined
+  /**
+   * The last read of `address` if it is at most `maxAgeMs` old (a failed one at most FAILED_TTL_MS) and was asked with a
+   * covered read that stands for `covered` (coversAsked; a failed one always does), else undefined.
+   */
+  cached(address: string, maxAgeMs: number, covered?: Covered): PeerRead | undefined {
+    const now = this.now()
+    let best: CacheEntry | undefined
+    for (const c of this.cache.get(address.toLowerCase()) ?? []) {
+      if (now - c.at >= (c.value.ok ? maxAgeMs : Math.min(maxAgeMs, FAILED_TTL_MS))) continue
+      if (c.value.ok && !coversAsked(c.covered, covered)) continue
+      // The newest usable answer; a failure newer than every success wins (fail closed).
+      if (!best || c.done > best.done) best = c
+    }
+    return best?.value
   }
 
-  /** Every peer's exposure for `address`, at most `maxAgeMs` old. No peers: an empty, successful read. */
-  async read(address: string, maxAgeMs: number): Promise<PeerRead> {
+  /** Keeps `e` beside the answers it does not supersede (see `cache`); at most CACHE_PER_SAFE, the oldest dropped. */
+  private remember(address: string, e: CacheEntry): void {
+    const broader = (a: CacheEntry, b: CacheEntry) => !a.value.ok || (b.value.ok && coversAsked(a.covered, b.covered))
+    const list = this.cache.get(address) ?? []
+    // Superseded: an answer at least as broad and completed no earlier is already there.
+    if (list.some((x) => broader(x, e) && x.done >= e.done)) return
+    const kept = list.filter((x) => !(broader(e, x) && e.done >= x.done))
+    kept.push(e)
+    kept.sort((x, y) => y.done - x.done)
+    this.cache.delete(address)
+    this.cache.set(address, kept.slice(0, CACHE_PER_SAFE))
+    if (this.cache.size > 5_000) this.cache.delete(this.cache.keys().next().value!)
+  }
+
+  /**
+   * Every peer's exposure for `address`, at most `maxAgeMs` old. No peers: an empty, successful read. `covered`
+   * (otto/mamoru#332): the caller's own read of its Safe in the same total, sent in the path.
+   */
+  async read(address: string, maxAgeMs: number, covered?: Covered): Promise<PeerRead> {
     if (!this.configured) return { ok: true, chains: [] }
     const key = address.toLowerCase()
-    const hit = this.cached(key, maxAgeMs)
+    const hit = this.cached(key, maxAgeMs, covered)
     if (hit) return hit
     const running = this.inFlight.get(key)
-    if (running) return running
-    const p = this.readAll(key).finally(() => this.inFlight.delete(key))
-    this.inFlight.set(key, p)
+    if (running && coversAsked(running.covered, covered)) return running.p
+    const p: Promise<PeerRead> = this.readAll(key, covered).finally(() => {
+      if (this.inFlight.get(key)?.p === p) this.inFlight.delete(key)
+    })
+    this.inFlight.set(key, { ...(covered ? { covered } : {}), p })
     return p
   }
 
   /**
    * Boot check: every peer answers a signed read (of the zero address) with its own chain id. One line per peer that
    * does not, saying why: unreachable, refused (401: OPERATOR_SECRET differs, or the peer runs code without the route:
-   * 404), or another chain. Never throws and never blocks the boot: reads fail closed on their own.
+   * 404), or another chain. Never throws and never blocks the boot: reads fail closed on their own. `covered`: probe the
+   * path shape this operator's reads use (otto/mamoru#332: the Monad operator's, with a covered read; 400 from a peer
+   * that runs older code).
    */
-  async check(): Promise<{ chainId: number; ok: boolean; why?: string }[]> {
+  async check(covered?: Covered): Promise<{ chainId: number; ok: boolean; why?: string }[]> {
     const zero = `0x${'0'.repeat(40)}`
     return Promise.all(
       this.peers.map(async (peer) => {
-        const path = `${EXPOSURE_PATH}${zero}`
+        const path = exposurePath(zero, covered)
         try {
           const sig = await metricsSignature(this.secret, 'GET', path, Math.floor(this.now() / 60_000))
           const res = await this.fetchFn(`${peer.url}${path}`, { method: 'GET', headers: { 'x-mamoru-sig': sig, accept: 'application/json' }, signal: AbortSignal.timeout(this.timeoutMs * 3) })
           if (res.status === 401) return { chainId: peer.chainId, ok: false, why: 'refused (401): OPERATOR_SECRET differs' }
           if (res.status === 404) return { chainId: peer.chainId, ok: false, why: 'no /internal/exposure route (404): the peer runs older code' }
+          if (res.status === 400 && covered) return { chainId: peer.chainId, ok: false, why: 'refuses the covered-read path (400): the peer runs older code' }
           if (!res.ok) return { chainId: peer.chainId, ok: false, why: `answered ${res.status}` }
           const w = (await res.json()) as Partial<ExposureWire>
           return w.chainId === peer.chainId ? { chainId: peer.chainId, ok: true } : { chainId: peer.chainId, ok: false, why: `answers for chain ${String(w.chainId)}` }
@@ -163,18 +246,17 @@ export class PeerExposure {
     )
   }
 
-  private async readAll(address: string): Promise<PeerRead> {
+  private async readAll(address: string, covered: Covered | undefined): Promise<PeerRead> {
     const at = this.now()
-    const results = await Promise.all(this.peers.map((peer) => this.readOne(peer, address)))
+    const results = await Promise.all(this.peers.map((peer) => this.readOne(peer, address, covered)))
     const failed = results.findIndex((r) => r === null)
     const value: PeerRead = failed >= 0 ? { ok: false, chainId: this.peers[failed]!.chainId } : { ok: true, chains: results as ChainExposure[] }
-    this.cache.set(address, { at, value })
-    if (this.cache.size > 5_000) this.cache.delete(this.cache.keys().next().value!)
+    this.remember(address, { at, done: this.now(), value, ...(covered ? { covered } : {}) })
     return value
   }
 
-  private async readOne(peer: PeerOperator, address: string): Promise<ChainExposure | null> {
-    const path = `${EXPOSURE_PATH}${address}`
+  private async readOne(peer: PeerOperator, address: string, covered: Covered | undefined): Promise<ChainExposure | null> {
+    const path = exposurePath(address, covered)
     try {
       const sig = await metricsSignature(this.secret, 'GET', path, Math.floor(this.now() / 60_000))
       const res = await this.fetchFn(`${peer.url}${path}`, { method: 'GET', headers: { 'x-mamoru-sig': sig, accept: 'application/json' }, signal: AbortSignal.timeout(this.timeoutMs) })
@@ -183,11 +265,11 @@ export class PeerExposure {
         return null
       }
       const w = (await res.json()) as Partial<ExposureWire>
-      if (w.chainId !== peer.chainId || typeof w.address !== 'string' || w.address.toLowerCase() !== address || typeof w.idleUsdc !== 'string' || !UINT.test(w.idleUsdc) || typeof w.placedUsdc !== 'string' || !UINT.test(w.placedUsdc) || typeof w.active !== 'boolean') {
+      if (w.chainId !== peer.chainId || typeof w.address !== 'string' || w.address.toLowerCase() !== address || typeof w.idleUsdc !== 'string' || !UINT.test(w.idleUsdc) || typeof w.placedUsdc !== 'string' || !UINT.test(w.placedUsdc) || typeof w.active !== 'boolean' || typeof w.block !== 'string' || !UINT.test(w.block)) {
         console.log(`[peer] chain ${peer.chainId} exposure read malformed`)
         return null
       }
-      return { chainId: peer.chainId, idleUsdc: BigInt(w.idleUsdc), placedUsdc: BigInt(w.placedUsdc), active: w.active }
+      return { chainId: peer.chainId, idleUsdc: BigInt(w.idleUsdc), placedUsdc: BigInt(w.placedUsdc), active: w.active, at: { safe: address, block: BigInt(w.block) } }
     } catch (e) {
       // Fixed text only: an error may quote the URL.
       console.log(`[peer] chain ${peer.chainId} exposure read failed (${e instanceof Error && e.name === 'TimeoutError' ? 'timeout' : 'unreachable'})`)

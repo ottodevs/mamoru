@@ -145,7 +145,7 @@ describe('reading the peer operator', () => {
     const calls: string[] = []
     const reader = new PeerExposure([{ chainId: 143, url: p.url }], SECRET, (u, i) => (calls.push(u), fetch(u, i)))
     const r = await reader.read(SAFE.toUpperCase().replace('0X', '0x'), 30_000)
-    expect(r).toEqual({ ok: true, chains: [{ chainId: 143, idleUsdc: 300n * USDC, placedUsdc: 450n * USDC, active: true }] })
+    expect(r).toEqual({ ok: true, chains: [{ chainId: 143, idleUsdc: 300n * USDC, placedUsdc: 450n * USDC, active: true, at: { safe: SAFE, block: 1n } }] })
     expect(p.asked).toEqual([SAFE])
     await reader.read(SAFE, 30_000)
     expect(calls).toHaveLength(1)
@@ -163,7 +163,7 @@ describe('reading the peer operator', () => {
     expect(await down.read(SAFE, 0)).toEqual({ ok: false, chainId: 143 })
     const ok = peer(() => wire())
     expect(await new PeerExposure([{ chainId: 143, url: ok.url }], 'another-secret').read(SAFE, 0)).toEqual({ ok: false, chainId: 143 })
-    for (const bad of [wire({ chainId: 8453 }), wire({ address: '0x2222222222222222222222222222222222222222' }), wire({ idleUsdc: '-1' }), wire({ placedUsdc: '1.5' }), { chainId: 143 }]) {
+    for (const bad of [wire({ block: undefined }), wire({ block: '0x1' }), wire({ chainId: 8453 }), wire({ address: '0x2222222222222222222222222222222222222222' }), wire({ idleUsdc: '-1' }), wire({ placedUsdc: '1.5' }), { chainId: 143 }]) {
       const p = peer(() => bad)
       expect(await new PeerExposure([{ chainId: 143, url: p.url }], SECRET).read(SAFE, 0)).toEqual({ ok: false, chainId: 143 })
     }

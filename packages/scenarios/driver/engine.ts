@@ -368,7 +368,7 @@ export type EngineConfig = {
    * otto/mamoru#212: the account's cap and what it has placed on its other chains (`Observation.cap`), read at every
    * review. Absent: no cap (backtest, lab); the operator always sets it.
    */
-  cap?: () => Observation['cap']
+  cap?: (observedBlock: bigint) => Observation['cap'] | Promise<Observation['cap']>
   /**
    * otto/mamoru#210: whether the account opted in to the exit of its policy's `exitOptIn` buckets (v7's USDC/USDT), read
    * at every review (`Observation.exitOptIn`). Absent: never, those buckets are held.
@@ -858,7 +858,8 @@ export class Engine {
     if (obs.block.number < floor) {
       return { kind: 'observation-failed', code: 'EHG_OBSERVATION_STALE', detail: `observed at block ${obs.block.number}, the last operation is in block ${floor}` }
     }
-    const cap = this.cfg.cap?.()
+    // otto/mamoru#332: with the observation's block, so a peer read for the cap can be pinned to this very read.
+    const cap = await this.cfg.cap?.(obs.block.number)
     const weekAgo = obs.block.timestamp - 7n * 86_400n
     const recent = this.reranges.filter((r) => r.at > weekAgo)
     obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}), ...(this.cfg.exitOptIn?.() === true ? { exitOptIn: true } : {}) }

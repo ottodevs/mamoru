@@ -365,6 +365,43 @@ export class MonadBridge {
   }
 
   /**
+   * otto/mamoru#332: what a cap counts of the burns that left the Base Safes `sources`, raw USDC. A burn belongs to the
+   * Safe its USDC left (`account`: under V4 too, V4 pulls the amount from it before it burns), never to an account key:
+   * a Safe's burns are then counted once wherever that Safe is counted, whether or not an account here still names it.
+   * Every burn that is not failed or dropped counts until a read of its recipient used in the same total
+   * (`readAt(recipient)`: the Monad block of that read, undefined when the total holds none) is at or after its
+   * mintedBlock. A minted burn without mintedBlock (old entries: `tick` backfills it from the mint's receipt) counts
+   * until pruned. A burn to a Safe no total reads keeps counting until pruned: its money is counted nowhere else. A
+   * 'sending' burn may still be in the Base Safe too (counted twice: the cap only places less). No chain read here.
+   */
+  capUsdc(sources: readonly string[], readAt: (recipient: Address) => bigint | undefined): bigint {
+    const from = new Set(sources.map((a) => a.toLowerCase()))
+    let sum = 0n
+    for (const b of this.burns()) {
+      if (!from.has(b.account.toLowerCase())) continue
+      if (IN_FLIGHT.has(b.state)) sum += BigInt(b.amount)
+      else if (b.state === 'minted') {
+        const at = readAt(b.recipient)
+        if (b.mintedBlock === undefined || at === undefined || BigInt(b.mintedBlock) > at) sum += BigInt(b.amount)
+      }
+    }
+    return sum
+  }
+
+  /**
+   * otto/mamoru#332: a burn minted before mintedBlock was recorded (old entries) gets it from its mint's receipt on Monad,
+   * so the cap stops counting it at the first read that holds the mint. Without a mint hash, or while the receipt cannot
+   * be read, it keeps counting (until pruned). `updatedAt` is left as it was: the prune's age is unchanged.
+   */
+  private async backfillMinted(b: BridgeBurn): Promise<void> {
+    if (b.state !== 'minted' || b.mintedBlock !== undefined || !b.mintTx) return
+    const rc = await this.monad.getTransactionReceipt({ hash: b.mintTx }).catch(() => null)
+    if (rc?.status !== 'success') return
+    b.mintedBlock = rc.blockNumber.toString()
+    this.save()
+  }
+
+  /**
    * Review of #144: the burns of the account that inFlightOf would count but the chain shows are already in one of the
    * two reads. A 'sending' burn whose EntryPoint nonce is unmoved at `baseBlock` has not landed there: its USDC is still
    * in the local balances read at that block. A burn minted at a block the journal only bounds from above (a mint by
@@ -738,11 +775,12 @@ export class MonadBridge {
   /** One pass: settle every 'sending' burn from Base, mint every 'burned' one on Monad. Never throws. */
   tick(): Promise<void> {
     return this.lock.run(async () => {
-      const monadOk = this.burns().some((b) => b.state === 'burned') ? await this.monadVerified() : this.verified
+      const monadOk = this.burns().some((b) => b.state === 'burned' || (b.state === 'minted' && b.mintedBlock === undefined && b.mintTx)) ? await this.monadVerified() : this.verified
       for (const b of this.burns()) {
         try {
           if (b.state === 'sending') await this.settleSending(b)
           if (b.state === 'burned' && monadOk) await this.mint(b)
+          if (b.state === 'minted' && monadOk) await this.backfillMinted(b)
         } catch (e) {
           logErr(`[bridge-monad] ${b.account.slice(0, 10)} ${b.id.slice(0, 10)}:`, e)
         }

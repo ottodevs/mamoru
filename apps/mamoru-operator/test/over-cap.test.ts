@@ -3771,7 +3771,7 @@ describe('otto/mamoru#212: the cap counts what the account holds on every chain'
     return asked
   }
   const monad = (idleUsdc: bigint, placedUsdc = 0n, active = false): PeerReadT => ({ ok: true, chains: [{ chainId: 143, idleUsdc, placedUsdc, active }] })
-  type Internals = { engineCap(a: AccountState): { capUsdc: bigint; elsewhereUsdc: bigint | null }; enginePeers: Map<string, PeerReadT> }
+  type Internals = { engineCap(a: AccountState, observedBlock: bigint): Promise<{ capUsdc: bigint; elsewhereUsdc: bigint | null }>; enginePeers: Map<string, PeerReadT> }
 
   test('Start is refused on the total across chains, with DEPOSIT_OVER_CAP and the total in its amounts', async () => {
     const w = world(20_000_000n)
@@ -3872,24 +3872,24 @@ describe('otto/mamoru#212: the cap counts what the account holds on every chain'
     acc.signedCapUsdc = '100000000'
     const op = w.op as unknown as Internals
     // No read taken before a review yet: fail closed.
-    expect(op.engineCap(acc)).toEqual({ capUsdc: 100_000_000n, elsewhereUsdc: null })
+    expect(await op.engineCap(acc, 0n)).toEqual({ capUsdc: 100_000_000n, elsewhereUsdc: null })
     op.enginePeers.set(acc.accountKey, monad(900_000_000n, 40_000_000n, true))
     // Everything Monad holds counts, idle (committed to Monad) and placed.
-    expect(op.engineCap(acc)).toEqual({ capUsdc: 100_000_000n, elsewhereUsdc: 940_000_000n })
+    expect(await op.engineCap(acc, 0n)).toEqual({ capUsdc: 100_000_000n, elsewhereUsdc: 940_000_000n })
     op.enginePeers.set(acc.accountKey, { ok: false, chainId: 143 })
-    expect(op.engineCap(acc).elsewhereUsdc).toBeNull()
+    expect((await op.engineCap(acc, 0n)).elsewhereUsdc).toBeNull()
     // Funding says how far over the cap the account is, so the app can say what stays idle.
     const f = await w.op.funding(ctx)
     expect(f.exposure).toEqual({ totalUsdc: '960000000', capUsdc: '100000000', overUsdc: '860000000' })
     expect(f.overCap).toBeNull()
   })
 
-  test('without peers the chain counts alone: an engine is held to its own cap', () => {
+  test('without peers the chain counts alone: an engine is held to its own cap', async () => {
     const w = world(20_000_000n)
     const { acc } = w.op.account(ctx)
     acc.active = true
     acc.signedCapUsdc = '100000000'
-    expect((w.op as unknown as Internals).engineCap(acc)).toEqual({ capUsdc: 100_000_000n, elsewhereUsdc: 0n })
+    expect(await (w.op as unknown as Internals).engineCap(acc, 0n)).toEqual({ capUsdc: 100_000_000n, elsewhereUsdc: 0n })
   })
 })
 

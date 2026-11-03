@@ -686,7 +686,8 @@ export async function bootOperator(o: BootOptions) {
     // otto/mamoru#212: a peer that cannot be read stops new placements and Starts here: said loudly at boot (and again
     // in a minute, for a peer restarting at the same time), never silently.
     const checkPeers = () =>
-      void peers.check().then((rs) => {
+      // otto/mamoru#332: the Monad operator reads with a covered read in the path; its check probes that same shape.
+      void peers.check(chainId === BRIDGE_MONAD_CHAIN_ID ? { chainId, safe: `0x${'0'.repeat(40)}`, block: 0n } : undefined).then((rs) => {
         for (const r of rs) if (!r.ok) logErr('[alert]', `peer operator of chain ${r.chainId} ${r.why}: new placements and Starts wait until it answers (MAMORU_PEER_OPERATORS)`)
       })
     checkPeers()
