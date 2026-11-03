@@ -7,9 +7,12 @@ import { resetOperatorHealth } from '../../src/api/sleeves.ts'
 import { upsertActivity } from '../../src/api/accounts/activity.ts'
 import { harness, ORIGIN, PASSKEY_A, register, sessionCookie } from './helpers.ts'
 
-// otto/mamoru#67, #64: Monad sleeves behind the `monad_sleeves` ops flag, honored on beta.mamoru.lol only.
+// otto/mamoru#67, #64: Monad sleeves behind the `monad_sleeves` ops flag, honored on app.mamoru.lol and beta.mamoru.lol
+// (general rollout; it was beta only before), never on any other host.
 
 const BETA = 'https://beta.mamoru.lol'
+/** A host that is neither prod nor beta (a Cloudflare preview): envOfHostname refuses it. */
+const PREVIEW = 'https://mamoru-app.ottodevs.workers.dev'
 const OPERATOR_SECRET = 'operator-secret-for-tests-only-0123456789'
 
 function flag(h: ReturnType<typeof harness>, on: 0 | 1) {
@@ -71,13 +74,36 @@ describe('the monad_sleeves gate', () => {
     expect((await at(h, BETA, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })).status).toBe(404)
   })
 
-  test('flag on, prod host: still off, whatever the shared row says', async () => {
-    const h = harness()
+  test('flag on, a host that is neither prod nor beta: still off, whatever the shared row says', async () => {
+    const { h } = monadHarness()
     flag(h, 1)
     const { cookie, base } = await owner(h)
+    seedSleeve(h, base)
+    const session = (await (await at(h, PREVIEW, '/api/session', cookie)).json()) as SessionView
+    expect(session).toEqual({ userId: session.userId, accountKey: base.accountKey })
+  })
+
+  test('flag off on prod: the session is what it was', async () => {
+    const { h } = monadHarness()
+    const { cookie, base } = await owner(h)
+    seedSleeve(h, base)
     const session = (await (await at(h, ORIGIN, '/api/session', cookie)).json()) as SessionView
     expect(session).toEqual({ userId: session.userId, accountKey: base.accountKey })
-    expect((await at(h, ORIGIN, '/api/sleeves', cookie, { method: 'POST', body: JSON.stringify({ chainId: 143 }) })).status).toBe(404)
+  })
+})
+
+describe('a Monad sleeve on prod (general rollout)', () => {
+  test('flag on, app.mamoru.lol: the session lists the Monad sleeve beside Base and its routes reach OPERATOR_URL_143', async () => {
+    const { h, calls } = monadHarness()
+    flag(h, 1)
+    const { cookie, base } = await owner(h)
+    const sleeve = seedSleeve(h, base)
+    const session = (await (await at(h, ORIGIN, '/api/session', cookie)).json()) as SessionView
+    expect(session.accountKey).toBe(base.accountKey)
+    expect(session.sleeves).toEqual([{ accountKey: base.accountKey, chainId: 8453, chain: 'Base', address: base.address as SleeveView['address'] }, sleeve])
+    calls.length = 0
+    expect((await at(h, ORIGIN, `/api/accounts/${sleeve.accountKey}/funding`, cookie)).status).toBe(200)
+    expect(calls.filter((c) => !c.url.endsWith('/health')).map((c) => c.url)).toEqual([`${MONAD_OPERATOR}/api/accounts/${sleeve.accountKey}/funding`])
   })
 })
 
@@ -160,8 +186,14 @@ describe('review of PR #115: a Monad sleeve only where someone can operate it, f
     expect((session.sleeves ?? []).map((s) => s.chainId)).not.toContain(143)
   }
 
-  test('prod host: the Monad account is hidden on every route, and nothing is forwarded', async () => {
+  test('a host that is neither prod nor beta: the Monad account is hidden on every route, and nothing is forwarded', async () => {
     const t = await withSleeve()
+    await hidden(t.h, t.calls, PREVIEW, t.cookie, t.base, t.sleeve)
+  })
+
+  test('flag turned off: hidden on prod too', async () => {
+    const t = await withSleeve()
+    t.db.raw.query(`INSERT INTO ops_flag_changes (flag, enabled, author, reason, created_at) VALUES ('monad_sleeves', 0, 'ot', 'test', '2026-10-23T01:00:00Z')`).run()
     await hidden(t.h, t.calls, ORIGIN, t.cookie, t.base, t.sleeve)
   })
 

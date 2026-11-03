@@ -60,7 +60,10 @@ function decodeContext(header: string): AccountContext {
 }
 
 // bridge-out and eth-convert (#133, #211): answered by BridgeOut, 404 when the operator has no Ethereum RPC.
-const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop|renew\/prepare|renew|bridge-out\/prepare|bridge-out|eth-convert\/prepare|eth-convert|ethereum-sibling\/prepare|ethereum-sibling|remote-key|provision|remote-announce|migrate-v4\/prepare|migrate-v4\/status|migrate-v4|one-auth-key|one-auth-start)$/
+// release, release/status, release/cancel (#278, #354): a V4 remote Safe's return home, asked by its home's operator
+// (RemotePeer), signed like every other account route. Before #354 they were dispatched but not listed here, so a
+// return-home release got the generic 404.
+const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop|renew\/prepare|renew|bridge-out\/prepare|bridge-out|eth-convert\/prepare|eth-convert|ethereum-sibling\/prepare|ethereum-sibling|remote-key|provision|remote-announce|release\/status|release\/cancel|release|migrate-v4\/prepare|migrate-v4\/status|migrate-v4|one-auth-key|one-auth-start)$/
 
 // Amounts are base-unit strings on the wire; a bigint that slips into a view is sent as its decimal string.
 const wire = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)

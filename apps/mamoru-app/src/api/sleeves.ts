@@ -8,7 +8,7 @@ import { ownedAccount, sleevesOfUser, type AccountRow } from './accounts/store.t
 
 /**
  * otto/mamoru#67: sleeves per chain. An owner's Base account is the default sleeve; with the `monad_sleeves` ops flag
- * on, an owner signed in on beta.mamoru.lol sees a second sleeve on Monad (143). The sleeve is another accounts
+ * on, an owner signed in on app.mamoru.lol or beta.mamoru.lol sees a second sleeve on Monad (143). The sleeve is another accounts
  * row: same user, same passkey, same owners and saltNonce, its own account_key, chain_id, address and `remote_json`.
  * Everything that already routes by account (operator context, yield ledger, D1 projection) then carries the chain on
  * its own. otto/mamoru#251: the app does not create it; the Worker upserts it (remote.ts) when the Base operator
@@ -20,11 +20,12 @@ export const BASE = 8453
 export const SLEEVE_CHAINS: readonly number[] = [143]
 
 /**
- * The flag is one row in the D1 that prod and beta share, so prod would see it too: only the beta host honors it.
- * Any other host (app.mamoru.lol, a preview, local) answers off, whatever the row says.
+ * The flag is one row in the D1 that prod and beta share, and both hosts honor it: turning it on offers Monad sleeves on
+ * app.mamoru.lol and beta.mamoru.lol at once (general rollout; before it, beta only). Any other host (a preview, local,
+ * a spoofed Host) answers off, whatever the row says (envOfHostname fails closed).
  */
 export async function sleevesOn(c: Context<AppEnv>): Promise<boolean> {
-  if (envOfHostname(new URL(c.req.url).hostname) !== 'beta') return false
+  if (envOfHostname(new URL(c.req.url).hostname) === null) return false
   return (await readOpsFlags(c.env.DB)).monad_sleeves
 }
 
@@ -59,7 +60,7 @@ async function operatorServes(c: Context<AppEnv>, url: string, chainId: number):
 
 /**
  * Review of PR #115 (P1 1, 2): a sleeve off Base exists for the owner only while all of this holds, and every route
- * that resolves an account (session, operator, dashboard, yield, kit) asks it, failing closed: the beta host, the
+ * that resolves an account (session, operator, dashboard, yield, kit) asks it, failing closed: a known host, the
  * `monad_sleeves` flag, live funds with an operator secret, OPERATOR_URL_<chain> set, and that operator's /health
  * reporting this very chain. Otherwise nobody could operate the sleeve, so its address is never offered for a deposit.
  */

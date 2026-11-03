@@ -35,22 +35,23 @@ export const OPS_FLAGS = {
   },
   /**
    * otto/mamoru#67, default off: a signed-in owner can open a second sleeve of the same account on Monad (chain 143)
-   * and Home shows it next to the Base one. Honored ONLY on beta.mamoru.lol: app.mamoru.lol reads it as off whatever
-   * the row says (apps/mamoru-app/src/api/sleeves.ts), since prod and beta share this D1 and its flags.
+   * and Home shows it next to the Base one. Honored on app.mamoru.lol and beta.mamoru.lol alike (prod and beta share this
+   * D1 and its flags), never on any other host (apps/mamoru-app/src/api/sleeves.ts). Not scopable: on means every owner.
    */
   monad_sleeves: {
-    label: 'Monad sleeves (beta only)',
-    description: 'Beta only: owners can add a Monad (143) sleeve, deposit USDC there and see its WMON/USDC positions (otto/mamoru#67). Prod ignores it.',
+    label: 'Monad sleeves',
+    description: 'Owners on app.mamoru.lol and beta.mamoru.lol can have a Monad (143) sleeve, deposit USDC there and see its WMON/USDC positions (otto/mamoru#67). On means every owner, prod and beta.',
   },
   /**
    * otto/mamoru#214, default off: offers running v2/v3/v4/v5 accounts on Base the renewal that moves them to
    * conservadorLiveV6 (stables 50 / Balance 35 / BTC exit-only, growth 15 % on the owner's Monad sleeve). Only where
    * the operator has `MAMORU_PAUSE_GATE_ADDRESS` as well; takes precedence over `onchain_action_policy_v5` while on.
-   * The Worker refuses the renewal until the owner's Monad sleeve is active.
+   * The renewal itself provisions the owner's Safe on Monad (otto/mamoru#251); the Worker shows that Safe as a sleeve only
+   * while `monad_sleeves` is on, so turn both on together.
    */
   multichain_v6: {
     label: 'Multichain (v6: Base + Monad growth)',
-    description: 'Offers running Base accounts the renewal that moves them to conservadorLiveV6: growth 15 % on the owner\'s Monad sleeve, bridge-out behind MamoruPauseGate (otto/mamoru#214). Refused until the Monad sleeve is active.',
+    description: 'Offers running Base accounts the renewal that moves them to conservadorLiveV6: growth 15 % on the owner\'s Monad sleeve, bridge-out behind MamoruPauseGate (otto/mamoru#214). The renewal provisions the owner\'s Monad Safe; turn on monad_sleeves with it so the app shows it. Scopable to accounts.',
   },
   /**
    * otto/mamoru#231, default off, scoped like multichain_v6: a Start of an account in scope activates it directly on
@@ -63,15 +64,18 @@ export const OPS_FLAGS = {
     description: 'A Start activates the account directly on conservadorLiveV6 (Base + its own Safe on Monad, growth 15 %) instead of the default policy (otto/mamoru#231). Scope it to test accounts until #259, #272 and #278 are done.',
   },
   /**
-   * otto/mamoru#293 (spec 010, one authorization), default off, scoped like multichain_v6: an account in scope on a v2-v6
-   * policy is offered the move to MamoruActionPolicyV4 (the "What's new" screen: one owner Safe transaction on Base, a
-   * second on Monad for a design-C remote Safe), and its renewals stop once it runs on V4. Honoured only where the
-   * chain's registry pins MamoruRegistry, MamoruActionPolicyV4, MamoruGasPolicyV2 and MamoruMigrationCheck: with any of
-   * them unset the operator offers nobody V4, whatever the flag says. Accounts already on V4 stay on it.
+   * otto/mamoru#293 (spec 010 A1, one authorization), default off, scoped like multichain_v6: an account in scope on a
+   * v2-v6 policy is offered the move to MamoruActionPolicyV4 (the "What's new" screen: one owner Safe transaction on Base,
+   * a second on Monad for a design-C remote Safe), and its renewals stop once it runs on V4. A1 has no registry, no admin
+   * and no guardian: which pools and vaults V4 allows is fixed in code and in the immutable MamoruV4Table, deployed as T8
+   * (otto/mamoru#348). Honoured only where the chain's registry file pins all four of MamoruActionPolicyV4,
+   * MamoruGasPolicyV2, MamoruMigrationCheck and MamoruV4Table: with any of them unset the operator offers nobody V4,
+   * whatever the flag says. Accounts already on V4 stay on it. Keep it scoped to a list of accounts, never everyone,
+   * until per-account non-exportable session keys (spec 009 KEY-01) are done.
    */
   one_auth_v4: {
     label: 'One authorization (V4)',
-    description: 'Offers accounts in scope the move to MamoruActionPolicyV4: the owner signs once, no renewals, new pools and chains from the timelocked MamoruRegistry (otto/mamoru#293, spec 010). Inert until the four V4 contracts are pinned in the registry.',
+    description: 'Offers accounts in scope the move to MamoruActionPolicyV4 (spec 010 A1, otto/mamoru#293): the owner signs once and has no more renewals; pools and vaults are fixed in code and in the immutable T8 contracts, with no registry and no admin. Inert until the four V4 contracts are pinned. Scope it to a list of accounts until KEY-01 (per-account session keys) is done.',
   },
   /**
    * otto/mamoru#210, default off: offers running Base accounts (v2-v6) the renewal that moves them to conservadorLiveV7: v6

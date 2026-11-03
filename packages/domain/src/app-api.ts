@@ -20,7 +20,7 @@ export type SessionView = {
   accountKey?: string
   /**
    * otto/mamoru#67: every sleeve of this owner, Base first, each with its chain. Present only where Monad sleeves are
-   * on (the `monad_sleeves` ops flag, beta host only); absent, the SPA behaves exactly as with Base alone.
+   * on (the `monad_sleeves` ops flag, app and beta hosts); absent, the SPA behaves exactly as with Base alone.
    */
   sleeves?: SleeveView[]
 }
