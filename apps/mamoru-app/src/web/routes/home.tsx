@@ -2,7 +2,7 @@ import type { ApyView, FundingView, Hex0x, OpView, OverCap, PriceDivergenceWarni
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { depositArrived, FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useEthereumSibling, useFreshFunding, useFunding, useOps, useOtherChains, usePools, useSession, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
+import { depositArrived, FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useEthereumSibling, useFreshFunding, useFunding, useOps, usePools, useSession, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
 import { WithdrawReview } from '../components/withdraw-review.tsx'
@@ -24,7 +24,7 @@ import { localTime } from '../lib/time.ts'
 import { BASE_SLEEVE, explorerAddress, explorerTx, knownChain, sleeveChain, useChain } from '../lib/chain.tsx'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
-import { BRIDGE_CHAIN_ID, fundsElsewhere, WrongNetwork } from '../components/other-chain-notice.tsx'
+import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { OneApprovalStart } from '../components/one-approval.tsx'
 import { useOneApproval, type OneApproval } from '../lib/one-approval.ts'
 import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
@@ -1274,25 +1274,26 @@ export function ActivateScope({ summary }: { summary: string[] }) {
 }
 
 function StartRow({ accountKey, funded, one }: { accountKey: string; funded: boolean; one: OneApproval }) {
-  // otto/mamoru#311: with funds on Ethereum that Mamoru can take over, Start is the one approval for Base and Ethereum.
-  // Review of #243 (GPT-6 P1): Start waits until both reads have answered (or failed), so Base is never approved alone
-  // while the Ethereum offer is still unknown; then the choice is kept for this mount, so a later poll never swaps the
-  // flow between its two taps. The last answer counts after a failed poll (react-query keeps it).
+  // otto/mamoru#311: when the operator offers the Ethereum part, Start is the one approval for Base and Ethereum (with
+  // nothing there, its prepare answers SIBLING_NOTHING and the approval is Base alone). Reviews of #243 (GPT-6 P1, r1-r2):
+  // - Start waits until the offer is known: an answer, or a 404 (an operator without Ethereum offers nothing). Any other
+  //   failure keeps it waiting (the read retries every minute), so Base is never approved alone on an unknown offer.
+  // - The flow follows the latest answer until the first tap, then stays: a poll never swaps it between two taps.
+  // - The last answer counts after a failed poll (react-query keeps it).
   const sibling = useEthereumSibling(accountKey)
-  const other = useOtherChains(accountKey)
-  const settled = !sibling.isPending && !other.isPending
-  const offered = !!sibling.data?.offered && fundsElsewhere(other.data).some((c) => c.chainId === BRIDGE_CHAIN_ID)
-  const [mode, setMode] = useState<'one' | 'plain' | null>(() => (settled ? (offered ? 'one' : 'plain') : null))
-  useEffect(() => {
-    if (mode === null && settled) setMode(offered ? 'one' : 'plain')
-  }, [mode, settled, offered])
-  if (one.parts || mode === 'one') return <OneApprovalStart flow={one} title={funded ? homeCopy.notRunning : homeCopy.armFirst} startLabel={funded ? homeCopy.start : 'Approve'} />
-  return <PlainStartRow accountKey={accountKey} funded={funded} waiting={mode === null} />
+  const known = sibling.data !== undefined || (sibling.error instanceof ApiRequestError && sibling.error.status === 404)
+  const [tapped, setTapped] = useState<'one' | 'plain' | null>(null)
+  const mode = tapped ?? (one.parts || one.busy ? 'one' : !known ? null : sibling.data?.offered ? 'one' : 'plain')
+  if (mode === 'one') return <OneApprovalStart flow={one} title={funded ? homeCopy.notRunning : homeCopy.armFirst} startLabel={funded ? homeCopy.start : 'Approve'} />
+  return <PlainStartRow accountKey={accountKey} funded={funded} waiting={mode === null} onTap={() => setTapped('plain')} />
 }
 
-function PlainStartRow({ accountKey, funded, waiting = false }: { accountKey: string; funded: boolean; waiting?: boolean }) {
+function PlainStartRow({ accountKey, funded, waiting = false, onTap }: { accountKey: string; funded: boolean; waiting?: boolean; onTap?: () => void }) {
   const flow = useOwnerAction(accountKey, 'activate')
-  const tap = () => void (flow.prepared ? flow.approve() : flow.prepare())
+  const tap = () => {
+    onTap?.()
+    void (flow.prepared ? flow.approve() : flow.prepare())
+  }
   if (flow.result) return null
   return (
     <section className="card flex flex-wrap items-center justify-between gap-3" data-testid="start">

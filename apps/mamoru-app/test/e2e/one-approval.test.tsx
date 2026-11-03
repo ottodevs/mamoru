@@ -4,7 +4,7 @@ import { describe, expect, test } from 'bun:test'
 import type { EthereumSiblingView, FundingView, OtherChainsView } from '@mamoru/domain'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router'
-import { ApiContext } from '../../src/web/api/client.ts'
+import { ApiContext, ApiRequestError } from '../../src/web/api/client.ts'
 import { queryKeys } from '../../src/web/api/queries.ts'
 import { ethereumCopy } from '../../src/web/components/one-approval.tsx'
 import { ethereumTakeover, otherChainCopy, WrongNetwork } from '../../src/web/components/other-chain-notice.tsx'
@@ -111,6 +111,21 @@ describe('Start as the one approval (#311)', () => {
     expect(html).toContain('data-testid="start"')
     expect(html).not.toContain('data-approval="one"')
     expect(html).toMatch(/<button[^>]*class="act"[^>]*disabled=""[^>]*>Preparing/)
+  })
+
+  test('an operator without Ethereum (404) offers nothing: the plain Start, ready; any other failure keeps Start waiting', async () => {
+    const failed = (status: number) => {
+      const qc = client(undefined)
+      // A static render cannot run the retry a mount would start; the error state is what the poll leaves between tries.
+      qc.setQueryDefaults(queryKeys.ethereumSibling(FIXTURE_ACCOUNT_KEY), { retryOnMount: false })
+      qc.getQueryCache().build(qc, { queryKey: queryKeys.ethereumSibling(FIXTURE_ACCOUNT_KEY) }).setState({ status: 'error', error: new ApiRequestError(status, { error: 'x' }), fetchStatus: 'idle' })
+      return qc
+    }
+    const none = await home(failed(404))
+    expect(none.html).not.toContain('data-approval="one"')
+    expect(none.html).not.toMatch(/<button[^>]*class="act"[^>]*disabled=""/)
+    const down = await home(failed(503))
+    expect(down.html).toMatch(/<button[^>]*class="act"[^>]*disabled=""[^>]*>Preparing/)
   })
 
   test('not offered: the plain Start, unchanged', async () => {
