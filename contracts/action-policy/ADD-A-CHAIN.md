@@ -18,7 +18,8 @@ The chain qualifies only if every item holds; each is read on chain, never assum
    owner.
 4. **CCTP V2** at the canonical `TokenMessengerV2` and `MessageTransmitterV2` with the pinned code hash, a domain
    (`localDomain()`), and a USDC burn limit above 0 on the messenger's `localMinter`. A chain without CCTP V2 cannot
-   bridge or prove readiness in this version.
+   bridge or prove readiness in this version. Check Circle's Standard-transfer fee on the chain: it must fit under the
+   row's `cctpFeeCapBps` (10 bps today, hard bound `MAX_CCTP_FEE_CAP_BPS` = 100), or every burn there is refused.
 5. **Uniswap v3** factory, NonfungiblePositionManager and SwapRouter02 that report that factory and the chain's wrapped
    native (WETH9-style `deposit` / `withdraw`, simulated from a Safe).
 6. **Tokens**: the stables (6 decimals, counted 1:1 as USD units) and the assets the chain's classes use.
@@ -32,7 +33,7 @@ The chain qualifies only if every item holds; each is read on chain, never assum
 
 1. **Data**, in one commit:
    - a row in `src/MamoruV4Chains.sol` (`byChainId`, `chainOf`) with every address above, and the chain's
-     `gasPerWindow`, `gasWindow` and `remoteCaps`;
+     `gasPerWindow`, `gasWindow`, `remoteCaps` and `cctpFeeCapBps` (#345);
    - the chain's classes and reference pools in `src/MamoruV4Classes.sol` (`classOf`), and its vaults, if any, by exact
      address (`vaultOf`);
    - the TypeScript twins: `packages/policy/src/one-auth-v4.ts` (`GAS_CAPS_V2_BY_CHAIN`, `V4_DOMAIN_BY_CHAIN`,
@@ -52,7 +53,12 @@ The chain qualifies only if every item holds; each is read on chain, never assum
    0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0` on **every** chain of the new table (the new version must exist on every
    chain an account uses, since readiness only passes between identical V4 instances). The script refuses a chain
    outside the table, a moved address, and bytecode with a guardian, pause or admin selector.
-6. **Adoption**: the app's "What's new" offers the new version; an owner adopts it on every chain of the account at
+6. **Verify on each chain, live** (#345 P2-3): after the broadcast, `forge script script/DeployV4.s.sol --sig
+   "verify()" --rpc-url <chain>` against that chain's real RPC, not a fork. It is `check(predict())` with the pinned
+   addresses: code at each address, the wiring, no forbidden selector, the table's rows and reference pools, the
+   ModuleRecords. `run()`'s own check ran inside forge's simulation; only this read proves what the chain holds. A
+   chain where it fails is not announced and not offered for adoption.
+7. **Adoption**: the app's "What's new" offers the new version; an owner adopts it on every chain of the account at
    once (one prompt per chain until #116). Accounts that do not stay on the old version, which keeps working.
 
 ## What never changes for a chain

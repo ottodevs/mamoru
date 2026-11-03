@@ -94,6 +94,7 @@ the same code on every EVM chain, so a policy on Base can reason about what live
     rules").
   - The **vault list**: exact vault addresses, each with its asset and ratio (see "Eligibility rules").
   - The gas parameters of `MamoruGasPolicyV2`.
+  - The CCTP fee cap: the most a burn's `maxFee` may be, in bps of the amount (`cctpFeeCapBps`, #345).
   - Chains: Base, Monad and Ethereum. A chain outside the table refuses everything (fail closed). Adding Arbitrum,
     Optimism or Unichain is a new V4 version.
 - **Hard bounds:** V3's band, window and anchor limits (`MIN/MAX_TWAP_WINDOW`, `MIN_SHORT_WINDOW`,
@@ -110,8 +111,10 @@ re-parameterize an entry.
   1. `factory.getPool(t0, t1, fee) == pool`, with the chain's pinned factory;
   2. one token is a pinned stable (the budget token) and the other a pinned stable or a pinned asset;
   3. `fee` is in the pinned fee set of the pair's class;
-  4. the pool can serve `observe` over the class's `twapWindow` (enough observation cardinality; a pool that cannot
-     makes the TWAP read revert, so it fails closed);
+  4. the pool can serve `observe` over the class's `twapWindow`: its filled observation ring (slot0's
+     `observationCardinality`, not `observationCardinalityNext`, which one call raises before any slot is written;
+     #345) holds at least `twapWindow` slots, and a pool that cannot serve the window makes the TWAP read revert, so it
+     fails closed;
   5. at the priced use, the in-band depth covers `DEPTH_MULTIPLE` × the call's value (I2);
   6. for a stable/stable pool, the anchor check holds (the price is within `anchorBand` of 1:1);
   7. **the pool agrees with the pair's reference pool**: its long TWAP is within the class's `bandTicks` of the
@@ -138,7 +141,14 @@ re-parameterize an entry.
 - **Exits are never gated by eligibility.** `decrease`, `collect` and `burn` of an admitted position, and `redeem`
   from a listed vault, stay allowed whatever the pool's or vault's eligibility is now (V3's LeftClaw M-6: the anchor
   never locks an exit). `checkExit` (I9) checks only that the decrease minimums are within the band of the pool's
-  TWAP, never eligibility or the anchor, so a crash or a depeg does not block the exit. Converting the proceeds back to
+  TWAP, never eligibility or the anchor, so a crash or a depeg does not block the exit. The band is V3's range (the
+  intersection of the bands around the long and the short TWAP) while it is not empty. After a fast move the two TWAPs
+  are more than about 2 x band apart and that range is empty; V3 then refused every exit for up to the long window
+  (30 min). V4 then prices the exit on the **union** of the two bands (#345, `MamoruV4Helper.exitRange`): the spot near
+  the short TWAP is inside it, and it still never accepts a spot more than one band past both TWAPs, which a one-block
+  sandwich cannot move (it moves the 5 min TWAP by a few ticks, so it can neither open the union nor push its edges).
+  The band around the long TWAP alone would leave the crash blocked by the position manager's own minimum check; the
+  short TWAP's alone would not cover a rebound. Entries keep the intersection and the anchor. Converting the proceeds back to
   the budget token is a priced swap: it needs an eligible pool of that pair and is **charged** to the bucket like any
   swap. If there is no eligible pool, the tokens stay in the user's Safe, where the owner can always move them.
 - **Swaps are single-hop** (`exactInputSingle` on the pinned router), in either direction, and every swap is charged
@@ -214,8 +224,13 @@ re-parameterize an entry.
        one) passes only for the address V4 itself computes as `remoteOf`, the user's own deterministic Safe, which
        anyone can deploy with the constant initializer. Circle forging it gains nothing it could not already do as
        issuer (spec 009 WLK-06).
-   - **Every burn** pins `destinationCaller = 0`, `minFinalityThreshold = 2000` and `maxFee = 0`, with `mintRecipient`
-     as above.
+   - **Every burn** pins `destinationCaller = 0` and `minFinalityThreshold = 2000` (Standard), with `mintRecipient` as
+     above. `maxFee` is the caller's, at most the chain's pinned `cctpFeeCapBps` of the amount (10 bps on every chain,
+     hard bound 100; #345). Standard transfers carry no fee today and the engine passes 0; pinning 0, as r2 did, would
+     revert every burn, bridge-back included, the day Circle adds a Standard fee, until a new V4. The fee goes to
+     Circle, never to the session's controller; a non-zero `maxFee` is still charged in full to the account bucket and
+     the 24 h and 30-day caps, so a leaked key cannot burn value to Circle hop after hop beyond C per 24 h. `maxFee = 0`
+     charges nothing.
    - The setup itself is **T1b**, run before any V4 code: the exact canonical initializer, with the
      self-attestation *inside* setup, deployed on a fork after funds were sent to its address.
 
@@ -274,7 +289,9 @@ re-parameterize an entry.
 8. **Nothing to add or remove.** Eligibility is by rule (above). A token, vault or chain outside the table, or a
    different class parameter, is a new V4 version, adopted only by an owner signature.
 9. **ERC-7562-compliant validation** (spec 009 POL-12). V4's `checkAction` reads only storage keyed by the account
-   and does no external reads: targets, selectors and decoded recipients, one call at a time. The price, depth, budget
+   and no other state: targets, selectors and decoded recipients, one call at a time. Its one external call is
+   `MamoruV4Table.chain(block.chainid)`, a `pure` function of a contract with no storage: it reads only code, the same
+   for every account, and ERC-7562 allows a call into a contract that has code (#345). The price, depth, budget
    and position checks run in execution, inside V4's own entry points, which are the guard spec 009 POL-12 requires.
    - **Batch shape is checked on the whole batch, by the userOp policy.** `MamoruGasPolicyV2` sees the whole
      `userOp.callData` at validation, so it checks, statelessly and per op: batch mode with the default exec type
@@ -438,6 +455,13 @@ guardian or the registry, A1 replaces it:
 | r4 P0 | Readiness checked only by the operator | Guardian writes `readyOf` | CCTP message from the destination V4 writes `readyOf` |
 | r4 P1 | No cumulative stop on gas | Guardian-reset `GAS_REVIEW` | GCRA rate (I6) |
 | r5 P1 | A userOp policy cannot count gas actually paid | Charge at validation from capped fields | Unchanged, charged into the GCRA |
+
+PR #228 review (Opus, otto/mamoru#345), all fixed before T7: P2-1 a fast crash blocked the exit for up to the long
+window (V3 M-6's empty range): the exit prices on the union of the two TWAP bands when their intersection is empty.
+P2-2 rule 4 read `observationCardinalityNext`: it reads the filled ring. P2-3 the deploy script's checks ran only in
+simulation: `DeployV4.s.sol verify()` runs `check(predict())` against each chain's live RPC after the broadcast. P2-4
+I9 said "no external reads" while `checkAction` calls `TABLE.chain`: stated as a code-only call. P2-5 `bridge` pinned
+CCTP `maxFee = 0`: the caller names it, capped per chain and charged.
 
 ## Open questions
 
