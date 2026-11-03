@@ -417,8 +417,8 @@ function PositionRow({ p, r, i, readFromChain = false, hold, safe = null }: { p:
     <li data-testid="position" className="wc-row" style={{ ['--i' as string]: i }}>
       <span className="wc-marks" aria-hidden="true">
         {tokens.map((t, i) => (
-          <span key={t} className={i > 0 ? '-ml-[0.55rem]' : undefined}>
-            <TokenMark symbol={t} size={28} />
+          <span key={t} className={i > 0 ? 'wc-mark-next' : undefined}>
+            <TokenMark symbol={t} size={40} />
           </span>
         ))}
       </span>
@@ -438,14 +438,6 @@ function PositionRow({ p, r, i, readFromChain = false, hold, safe = null }: { p:
           <span className="seg" data-testid="position-chain">
             {known ? chain.name : chainLabel(p.chainId!)}
           </span>
-          {safeHref ? (
-            <>
-              {' · '}
-              <a className="seg" href={safeHref} target="_blank" rel="noreferrer" aria-label={homeCopy.safeLabel(chain.name, safe!)} data-testid="position-safe">
-                {homeCopy.safe} {shortHex(safe!)}
-              </a>
-            </>
-          ) : null}
           {/* Out of range the gauge alone follows, and it is decorative: the separator is too. */}
           {p.vault ? null : p.inRange ? ' · ' : p.range ? <span aria-hidden="true"> · </span> : null}
           {!p.vault && (p.inRange || p.range) ? (
@@ -455,6 +447,12 @@ function PositionRow({ p, r, i, readFromChain = false, hold, safe = null }: { p:
             </span>
           ) : null}
         </span>
+        {/* otto/mamoru#350 (Brais, 3 Nov): the Safe that holds it, on its own line under the venue. */}
+        {safeHref ? (
+          <a className="wc-safe" href={safeHref} target="_blank" rel="noreferrer" aria-label={homeCopy.safeLabel(chain.name, safe!)} data-testid="position-safe">
+            {homeCopy.safe} {shortHex(safe!)}
+          </a>
+        ) : null}
       </span>
       <span className="wc-amount">
         <span className="wc-num">

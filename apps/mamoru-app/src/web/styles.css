@@ -1449,7 +1449,7 @@
 }
 .wc-row {
   display: grid;
-  grid-template-columns: 3.3rem minmax(0, 1fr) minmax(9rem, auto) 8.5rem 7.5rem 7.5rem;
+  grid-template-columns: 4.4rem minmax(0, 1fr) minmax(9rem, auto) 8.5rem 7.5rem 7.5rem;
   column-gap: 1.25rem;
   align-items: start;
   padding: 1.15rem 0;
@@ -1477,6 +1477,10 @@
   align-items: center;
   padding-top: 0.2rem;
 }
+/* otto/mamoru#350: larger marks, the second one tucked under the first. */
+.wc-mark-next {
+  margin-left: -0.8rem;
+}
 .wc-name {
   display: flex;
   flex-direction: column;
@@ -1496,6 +1500,18 @@
   text-decoration: none;
 }
 .wc-venue a:hover {
+  color: var(--color-emerald);
+}
+/* otto/mamoru#350: the Safe holding the position, a quiet line under the venue. */
+.wc-safe {
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--color-stone);
+  text-decoration: none;
+}
+.wc-safe:hover {
   color: var(--color-emerald);
 }
 .wc-amount,
@@ -1615,7 +1631,7 @@
     margin-top: 0.75rem;
   }
   .wc-row {
-    grid-template-columns: 2.3rem minmax(0, 1fr) auto;
+    grid-template-columns: 2.9rem minmax(0, 1fr) auto;
     column-gap: 0.75rem;
     row-gap: 0.3rem;
     padding: 1rem 0;
@@ -1629,10 +1645,15 @@
     grid-row: 1 / span 2;
     padding-top: 0.15rem;
   }
+  /* The mark's box carries its desktop size inline; it shrinks with the glyph so the overlap holds. */
+  .wc-marks > span > span,
   .wc-marks img,
   .wc-marks svg {
-    width: 22px;
-    height: 22px;
+    width: 28px !important;
+    height: 28px !important;
+  }
+  .wc-mark-next {
+    margin-left: -0.6rem;
   }
   .wc-rate {
     display: none;
@@ -1648,6 +1669,13 @@
   .wc-venue {
     font-size: 0.7rem;
     line-height: 1.5;
+  }
+  .wc-safe {
+    font-size: 0.68rem;
+  }
+  /* A long venue (a vault's name) wraps inside its column instead of running under the share. */
+  .wc-venue .seg {
+    white-space: normal;
   }
   /* The value and its legs are placed on their own, so the legs sit under the name. */
   .wc-amount {

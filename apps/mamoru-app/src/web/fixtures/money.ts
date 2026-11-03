@@ -137,3 +137,44 @@ export function withMonadPosition(f: FundingView, valueUsdc: string): FundingVie
   f.money!.totalUsdc = (f.money!.chains.reduce((a, c) => a + BigInt(c.totalUsdc), 0n) + f.money!.inFlight.filter((t) => t.stage !== 'failed').reduce((a, t) => a + BigInt(t.amountUsdc), 0n)).toString()
   return f
 }
+
+/**
+ * otto/mamoru#350: Brais's account as on 3 Nov: the Stable half lent to Morpho, Balanced in WETH/USDC on Base, Growth in
+ * WMON/USDC on Monad (conservador-live-v7), a few cents idle on each chain. Dev (?braismoney=today) and tests.
+ */
+export function braisToday(now: number = Date.now()): FundingView {
+  const vault = {
+    tokenId: 'vault:gtUSDCp', pool: 'vault:gtUSDCp', liquidity: '80000000000000000000', inRange: true, amountUsdc: '89090000', amountCbbtc: '0', valueUsdc: '89090000',
+    amounts: [{ token: 'USDC', amount: '89090000', decimals: 6, valueUsdc: '89090000' }],
+    vault: { name: 'vault:gtUSDCp', label: 'Morpho · Gauntlet USDC Prime', shares: '80000000000000000000', withdrawableUsdc: '89090000' },
+  } satisfies FundingView['positions'][number]
+  const weth = {
+    tokenId: '6436365', pool: 'pool:WETH/USDC/3000', liquidity: '1', inRange: true, amountUsdc: '28310000', amountCbbtc: '0', valueUsdc: '60550000',
+    range: { lower: -199000, upper: -197000, tick: -198000 },
+    amounts: [
+      { token: 'WETH', amount: '14301000000000000', decimals: 18, valueUsdc: '32240000' },
+      { token: 'USDC', amount: '28310000', decimals: 6, valueUsdc: '28310000' },
+    ],
+  } satisfies FundingView['positions'][number]
+  const wmon = {
+    tokenId: '49233', chainId: 143, pool: 'pool:WMON/USDC/3000', liquidity: '1', inRange: true, amountUsdc: '3730000', amountCbbtc: '0', valueUsdc: '26440000',
+    range: { lower: -280000, upper: -270000, tick: -278000 },
+    amounts: [
+      { token: 'WMON', amount: '1300552900000000000000', decimals: 18, valueUsdc: '22710000' },
+      { token: 'USDC', amount: '3730000', decimals: 6, valueUsdc: '3730000' },
+    ],
+  } satisfies MoneyChain['positions'][number]
+  const baseIdle = 470_000n
+  const monadIdle = 10_000n
+  const base: MoneyChain = { ...baseChain(now, baseIdle), positions: [{ ...vault, chainId: 8453 }, { ...weth, chainId: 8453 }], totalUsdc: (baseIdle + 89_090_000n + 60_550_000n).toString() }
+  const monad: MoneyChain = { ...monadChain(now, { block: 41_900_000, at: at(now, 0), stale: false }, monadIdle), positions: [wmon], totalUsdc: (monadIdle + 26_440_000n).toString() }
+  const total = BigInt(base.totalUsdc) + BigInt(monad.totalUsdc)
+  return {
+    address: FIXTURE_ADDRESS, deployed: true, block: 36_000_000, eth: '0', cbbtc: '0', gasReserveWei: '300000000000000', active: true, capUsdc: '500000000', engine: { placing: false, nextReviewAt: null },
+    approval: { validUntil: 2_000_000_000, renewDue: false, expired: false, policyId: 'conservador-live-v7' },
+    usdc: baseIdle.toString(),
+    idle: idleOf(baseIdle),
+    positions: [vault, weth],
+    money: { totalUsdc: total.toString(), complete: true, chains: [base, monad], inFlight: [] },
+  }
+}
