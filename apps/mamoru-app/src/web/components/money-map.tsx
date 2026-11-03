@@ -1,7 +1,7 @@
 import type { BridgeStuckReason, FundingView, MoneyChain, MoneyInFlight, MoneyMap } from '@mamoru/domain'
 import { WALKAWAY_URL } from '../lib/signin.ts'
-import { shortHex } from '../lib/format.ts'
 import { sleeveChain, txLink } from '../lib/chain.tsx'
+import { shortHex } from '../lib/format.ts'
 import { chainLabel } from '../lib/positions.ts'
 import { clockTime } from '../lib/time.ts'
 import { isMultichainTarget } from './monad-consent.tsx'
@@ -38,7 +38,11 @@ export function unreadChains(m: MoneyMap): MoneyChain[] {
   return m.chains.filter((c) => c.read.at === null)
 }
 
-const names = (cs: MoneyChain[]) => [...new Set(cs.map((c) => chainLabel(c.chainId)))].join(', ')
+/** A chain by name; a Safe by chain and address when the chain has more than one Safe (#350 review r4). */
+function names(cs: MoneyChain[], all: MoneyChain[]): string {
+  const label = (c: MoneyChain) => (all.filter((o) => o.chainId === c.chainId).length > 1 ? `${chainLabel(c.chainId)} Safe ${shortHex(c.safe)}` : chainLabel(c.chainId))
+  return [...new Set(cs.map(label))].join(', ')
+}
 
 /**
  * The line under the balance when the total is not the whole, fresh account: an operator that sends no money map while
@@ -50,15 +54,15 @@ export function totalScopeNote(f: FundingView | undefined, otherChain: boolean):
   if (!f.money) return otherChain || isMultichainTarget(f.approval?.policyId) ? moneyCopy.baseOnly : null
   const notes: string[] = []
   const unread = unreadChains(f.money)
-  if (unread.length) notes.push(moneyCopy.incomplete(names(unread)))
+  if (unread.length) notes.push(moneyCopy.incomplete(names(unread, f.money.chains)))
   // A chain never read is stale too; it is said once, as unread.
   const stale = f.money.chains.filter((c) => c.read.stale && c.read.at !== null)
   if (stale.length) {
     const at = clockTime(stale.map((c) => c.read.at!).sort()[0]!)
-    notes.push(at ? moneyCopy.stale(names(stale), at) : moneyCopy.staleNoTime(names(stale)))
+    notes.push(at ? moneyCopy.stale(names(stale, f.money.chains), at) : moneyCopy.staleNoTime(names(stale, f.money.chains)))
   }
   const partial = f.money.chains.filter((c) => c.partial)
-  if (partial.length) notes.push(moneyCopy.partial(names(partial)))
+  if (partial.length) notes.push(moneyCopy.partial(names(partial, f.money.chains)))
   if (f.money.inFlight.some((t) => t.unsure)) notes.push(moneyCopy.confirming)
   // Incomplete for a reason none of the above names: still never presented as the whole money.
   if (!f.money.complete && notes.length === 0) notes.push(moneyCopy.incomplete('A chain'))
