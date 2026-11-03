@@ -115,5 +115,8 @@ export function withMonadPosition(f: FundingView, valueUsdc: string): FundingVie
   const monad = f.money!.chains.find((c) => c.chainId === 143)!
   monad.positions = [{ tokenId: '9001', chainId: 143, pool: 'pool:WMON/USDC/3000', liquidity: '1', inRange: true, amountUsdc: '1000000', amountCbbtc: '0', valueUsdc, amounts: [{ token: 'WMON', amount: '1000000000000000000', decimals: 18, valueUsdc: '1000000' }, { token: 'USDC', amount: '1000000', decimals: 6, valueUsdc: '1000000' }] }]
   monad.idle = []
+  // Totals follow: the chain holds only the position now, and the account total is the chains plus what is in flight.
+  monad.totalUsdc = valueUsdc
+  f.money!.totalUsdc = (f.money!.chains.reduce((a, c) => a + BigInt(c.totalUsdc), 0n) + f.money!.inFlight.filter((t) => t.stage !== 'failed').reduce((a, t) => a + BigInt(t.amountUsdc), 0n)).toString()
   return f
 }

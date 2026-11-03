@@ -70,6 +70,23 @@ describe('Working names each chain\'s Safe, largest position first', () => {
     expect(rows.filter((r) => r.includes(`monadscan.com/address/${BRAIS_MONAD_SAFE}`)).length).toBe(1)
   })
 
+  test('two Safes on one chain, one unread: the note names that Safe, not the whole chain', () => {
+    const f = braisFunding('minted', NOW)
+    const retired = '0x1111111111111111111111111111111111111111'
+    const monad = f.money!.chains.find((c) => c.chainId === 143)!
+    f.money!.chains.push({ ...structuredClone(monad), safe: retired, positions: [], idle: [], totalUsdc: '0', read: { block: 0, at: null, stale: true } })
+    f.money!.complete = false
+    const note = totalScopeNote(f, true)!
+    expect(note).toContain('Monad Safe 0x1111')
+    expect(note).not.toMatch(/^Monad could not/)
+  })
+
+  test('the mixed fixture adds up: Working + Idle + in flight = Total', () => {
+    const f = withMonadPosition(braisFunding('minted', NOW), '2000000')
+    const { s } = wholeMoney(f)
+    expect(s.working + s.idle + counted(f)).toBe(moneyTotal(f))
+  })
+
   test('an old operator without the money map links the home Safe', () => {
     const f = withoutMoney(braisFunding('minted', NOW))
     const html = render(<Working f={f} s={split(f, null)} onStop={null} />).html
