@@ -319,6 +319,12 @@ The risk page states the gap: the limit is a target and a fast move can pass it.
 simulator today, not yet in the domain list), `EXIT_LOSS_CONTROL` (ExitRequest cause),
 `EXIT_PARTIAL_IMPACT`, `EXIT_SWAP_WAIT_TWAP`, `BUCKET_FROZEN`, `BUCKET_PARKED`, `BUCKET_REENTERED`.
 
+Phase 4 (shadow only): `RISK_VAULT_SHARE_DIP`, `RISK_VAULT_SHARE_LOSS`, `RISK_VAULT_TVL_DROP`,
+`RISK_VAULT_EXIT_LIQUIDITY`, `RISK_VAULT_POSITION_RATIO`, `RISK_VAULT_PAUSED`, `RISK_VAULT_FROZEN`, `RISK_VAULT_UNREAD`, `RISK_VAULT_BOOTSTRAP` (a re-validation label only).
+
+Phase 3 (shadow only): `RISK_RERANGE_BUDGET_SPENT`, `RISK_ACTION_BUDGET_SPENT`, `RISK_ACTION_BUDGET_UNREAD`, `REENTRY_COOLDOWN_SHADOW`,
+`REENTRY_REVALIDATION_SHADOW`, `RISK_PURGA_RECHECK_FAILED`, `RISK_PURGA_RECHECK_UNREAD`.
+
 ## Lab plan
 
 The simulator replays production `decide`, so each rule is tested by enabling it in a `chain: 'fork'` policy
@@ -389,6 +395,11 @@ A variant: `bun packages/backtest/cli/sweep.ts --policy conservador-lab-guards-v
 | LC-T7 | `conservador-live-v3` with `guards.mode = 'shadow'`; two weeks of would-be codes on live | `/ops` shows them |
 | LC-T8 | App: bucket state lines, history with trigger and threshold, risk page copy (#58) | UI scenario per state |
 | LC-T9 | `guards.mode = 'enforce'` after Ot's GO on the Lab table and the shadow log, and only once D5 is resolved | Ot GO |
+| LC-T10 | Phase 3 shadow rows (section above): `Observation.rotation` filled by the operator; `includedAt` on every counted op kind; `GET /internal/engine-ops/<safe>` on both operators and `actionBudgetShadowRisk` after `decide` (after the send) over the union (`RISK_ACTION_BUDGET_UNREAD` when a configured peer cannot be read); the re-range row while `maxPerWeek` is unset or above 2; the per-account shadow files `shadow-vaults/rotation/<account>.json` (attempts) and `purga.json`; `purga-reviews.json` for every policy pool of both registries and both v7 vaults and the Purga row with its alert; cooldown and re-validation wired to the `left` records once LC-T4 lands | decide unit tests per code; `actionBudgetShadowRisk` tests: 5 counted ops hold the 6th; an entry, an idle convert, an exit leg and an owner withdrawal do not count; a reduce and a ratio convert do; an op in flight counts and a failed one is dropped; a re-range dated by `rerangeAt` counts; a configured peer that answers 401 gives the unread row, a peer answering the empty body for a Safe it does not run is a clean read, a body without `ops` is unread, no peer counts the local list; a held proposal is not an attempt; a replayed review writes no second attempt; two accounts attempting the same pool in one block both get their attempt; a pool held with `purgaReviewedAt` 91 days old gives the row on every review, no exit, and the Purga step posts once at the start and once more 7 days later, never per account; identity missing with a fresh date gives the unread row and the step marks nothing, an account review with identity missing and a 91-day date gives both the unread and the failed row, and the step still starts `failingSince` and posts; a start post that failed is posted after the pool passes again; the step and sender run on the Monad operator; an entry into a failing pool the account never held carries the row; re-validation with an unreadable identity or a `left` code without an evaluator does not pass and names it; `premiseHash`, `decisionId`, bucket state and proposal unchanged with every row present; a throwing shadow write and a peer that hangs leave the send on time; a phase 3 throw inside `decide` gives the decision without `rotation`; an unparsable date in `purga-reviews.json` fails that pool by date and shows in `/ops`; on a first run the first Purga alert is posted, also when the first post fails, nothing was due at the first step, or the process dies between the first step and the first post |
+| LC-T11 | Lab: replay `base-2025-10-crash-10m`, `base-2025-02-crash-10m` and `sep2026` with the phase 3 rows (`rotation` from the simulator's own run, no peer); `range.maxPerWeek` = 2 against no cap (an engineering setting, so the Lab may enforce it), and the would-be `RISK_ACTION_BUDGET_SPENT` codes in shadow, reported as an upper bound (held ops are still sent and counted); drawdown, gas and return per window | Lab note |
+| LC-T12 | Monad: a data source for WMON/USDC (GeckoTerminal now lists it on network `monad`; PR #205 reads it on the Monad operator, own TVL series for the lookbacks), then datasets and the oracle choice; the phase 1 and 2 rows on the Monad operator | dataset id; phase 1-2 rows readable on Monad |
+| LC-T13 | Incident exits: a producer for `RISK_INCIDENT_EXIT` (spec 001) from pool pause, oracle pause, bridge or admin change, upgrade and exploit feeds (Packaging section F), plus the manual `IncidentFlag`. Shadow first like every Packaging row (gate `packaging:incident`); acting needs D5 resolved and Ot's GO on its shadow log | own ticket |
+| LC-T14 | Phase 4 vault rows in shadow on the v7 Stable vaults: hourly vault reads in the Base operator (share value at `10^vault.decimals()`, the TVL measures, payable liquidity, waBasUSDC deficit and pause state); the phase 4 shadow store `shadow-vaults/` with one file and one writer per part (`vaults.json` from `vaultShadowStep` once per read: series, payable liquidity, `mark`, `deficitBase`, `indexAtBase`, episode fields, `bootstrappedAt`, `rebasedAt`, `appliedRebaseId` per vault, `alertsDue` (no stored entry block: it is derived from the firing rows); `accounts/<account>.json` from each review: `exitShortSince` per vault; `alerts.json` from the sender; these by atomic rename; `rebase.jsonl` appended by the `/ops/vault-rebase` route under its mutex inside the phase 4 lock), outside bucket state and the premise hash; the D14 internal alert on an episode opening or a latch, live operator only (`alertsDue` in the vault part, `alerts.json` written by the sender after each post); the `/ops` re-base action; `/ops` marks the exempt pool rows of a `stables-lp` position as informational, never depeg, incident or vault rows (D12) | decide unit tests per code: a share value 2 bp under (dip), still 2 bp under 5 days later (same episode, no loss), 0.5 bp under (episode still open, dip row still active), deepening to 12 bp (loss, latched), a second 2 bp episode opened 20 days after the first one opened and closed (loss); a waBasUSDC deficit rising by 2 bp of supply (dip), then closing once the reserve's interest since the base passes 2 bp, and again when the deficit is covered; re-base clears the latch and `lastDipOpenedAt` (a dip 12 days after an accepted one is a first episode), waits on an unread step, and is rejected when the fresh read is more than 1 bp under its accepted baseline (a re-base followed by a 40 bp loss latches and alerts); two accounts in one hour produce one alert; exit liquidity short for 5 h does not fire, 6 h does; an unread read changes no state; an entry block on gtUSDCp leaves waBasUSDC open; a frozen reserve gives `RISK_VAULT_FROZEN` (deposit block) and no `RISK_VAULT_PAUSED`; a TVL window not yet covered emits nothing; a D12 test where a `stables-lp` position proposes nothing on its pool rows while a depeg still freezes; operator tests: an `/ops` re-base appended while a step runs is applied by the next step; two re-bases at once get two ids; a re-base of gtUSDCp applies while waBasUSDC is unread and the waBasUSDC one waits; a torn last line is ignored without a reset; a crash mid-append followed by an append leaves the earlier complete request and the new one readable; a complete line without its newline is not applied, and no applied id is ever reused; with the log lost and `vaults.json` intact the next re-base gets an id above every counter and is applied; a second instance on the same state directory starts without phase 4, writes no phase 4 file and says so, and takes over at its next step after the holder is killed; a `vaults.json` of the wrong shape for its version leaves the live decision and `premiseHash` unchanged, is not rewritten, and shows a store error; a `vaults.json` written by the previous version is migrated with its latch intact; one of a newer version (rollback) is left untouched; a replayed re-base (same nonce) is refused, a signed request with a changed body is refused, and the route refuses on a non-holder and while `vaults.json` is contained; an `alerts.json` of a newer version is neither rebuilt nor posted from; a contained account file skips only that account; the takeover test runs with a child process spawned by the holder (the lock fd is `O_CLOEXEC`); after a reset old requests are not re-processed; a failed post is retried next hour; a crash between post and record re-posts once; a fork read of both vaults confirming the 2 Nov facts (MetaMorpho v1.0 without `lostAssets`, Pool revision 11 getters, static aToken `paused()` and its `maxWithdraw` against the virtual balance); `premiseHash` unchanged with the store present; a v7 holder with both vault dates fresh gets no Purga row; an operator test where one instance running v7 computes both phase 3 and phase 4 rows on one lock handle; vault re-validation tests: an uncovered TVL window gives `RISK_VAULT_TVL_DROP:<window>`, a `left` record older than the bootstrap gives `RISK_VAULT_BOOTSTRAP` until an applied re-base, a rejected re-base does not lift it; a re-entry of 1,000 USDC into a recovered vault the account holds 0 shares of passes exit liquidity (payable liquidity, not `maxWithdraw`); USDC transferred straight to the MetaMorpho contract while its markets are illiquid adds nothing to payable liquidity; a frozen reserve read before a restart still gives `RISK_VAULT_FROZEN` in the first review after it (the latest read is persisted in `vaultShadow`); a failed first read leaves the vault unbootstrapped and unread, and the next ok read bootstraps it; a persisted ok read 3 h old gives `RISK_VAULT_UNREAD`; a persisted read 3 h old is also an unreadable identity for the Purga step (`RISK_PURGA_RECHECK_UNREAD`, no alert, `failingSince` unchanged) unless the date is over 90 days |
 
 ## Packaging shadow rules (phase 1, otto/mamoru#101)
 
@@ -445,6 +456,432 @@ pool's in-range liquidity is read, and 0 (drained) makes that size null; anythin
 curve not overwritten and the pool is retried after 5 min. Base operator only; Monad pools
 are not read. Reaches `decide` as `Observation.poolDepth`, read only by the shadow rules.
 
+## Packaging shadow rules (phase 3: rotation and re-entry, otto/mamoru#101)
+
+Source: Packaging §5.3 (global rotation limit, per-bucket cooldowns, re-entry). Same contract as phases 1 and 2: shadow
+only, every row writes to `Decision.shadowRisk` outside the premise hash, nothing acts (constitution VI), and no
+acceptance row depends on a Packaging number changing behaviour. Gate: the policy lists `packaging:rotation` in
+`policy.shadow` (the same switch as `packaging:tvl`, not `guards.mode`, so LC-T9 flipping `guards.mode` to `enforce`
+leaves these rows in shadow).
+
+The Packaging caps activity: at most 2 rebalances per week, at most 5 portfolio actions per month (exits not counted),
+at most 1 re-entry attempt per pool per cooldown. On the October 2025 replay the live policy made 12 re-ranges in one
+week, each one selling the fall ("Measured exposure"): a re-range budget is the cheapest form of "do not chase".
+
+| Rule | Condition (would hold the proposal) | Code | `window` |
+|---|---|---|---|
+| Action budget | the decision proposes a countable op (below) and the account already has 5 counted ops in the 30 days before the review's block timestamp. `pool`: the proposal's pool | `RISK_ACTION_BUDGET_SPENT` | `30d` |
+| Action budget unread | a peer operator is configured and its list could not be read (below) | `RISK_ACTION_BUDGET_UNREAD` | `30d` |
+| Re-range budget, cap unset | a re-range is proposed, `range.maxPerWeek` is absent or above 2, and the pool already has 2 re-ranges in the rolling 7 days before the review (`recentReranges`, the same list and window as #218's `DECIDE_RANGE_WEEKLY_CAP`, merges excluded) | `RISK_RERANGE_BUDGET_SPENT` | `7d` |
+| Cooldown | an entry is proposed into a pool the bucket left on a rule, less than the cooldown after it left (stables 7 d, btc-usdc 4 d, risk 10 d), or less than the cooldown after the previous attempt into that pool | `REENTRY_COOLDOWN_SHADOW` | none |
+| Re-validation | not in cooldown, an entry is proposed into a pool the bucket left on a rule, and at least one check of the closed set below does not pass. `label`: the codes that do not pass, sorted, comma separated | `REENTRY_REVALIDATION_SHADOW` | none |
+| Purga while invested (D11) | the pool fails Purga: `purgaIdentity` gives `NO_GO`, or its `purgaReviewedAt` in the registry is absent or more than 90 days before the review. Fires for a pool the account holds a position in, and for any entry or increase proposed into a failing pool, held or not | `RISK_PURGA_RECHECK_FAILED` | none |
+
+### Inputs and where each rule runs
+
+`decide` stays pure. Phase 3 reads one new shadow-only field, `Observation.rotation`, supplied by the operator for a
+policy that lists `packaging:rotation`, never hashed (same rule as `poolStats` and `poolDepth`: the premise body never
+sees it, so nothing in it can move `premiseHash` or `decisionId`):
+
+```ts
+rotation?: {
+  ops: { chain: number; opId: string; kind: 'rerange' | 'reduce' | 'ratio-convert'; at: bigint }[] // this chain, counted ops, 30 days
+  left: { bucket: string; pool: string; at: bigint; code: string }[] // pools a bucket left on a rule (LC-T4), with the exit's inclusion time
+  attempts: { pool: string; at: bigint }[] // re-entry attempts, 30 days
+  purgaReviewedAt: Record<string, string> // pool name -> ISO date of its last Purga review
+}
+```
+
+- Re-range budget, cooldown, re-validation and Purga while invested are computed inside `decide` from the observation.
+- The action budget is computed after `decide`, by a pure function `actionBudgetShadowRisk(decision, rotation, peerOps)`
+  that the engine calls only when the decision proposes a countable op, after the proposal has gone to the send path
+  (never before it: the send does not wait for the peer read), and whose rows the engine logs as a follow-up shadow
+  record keyed by the `decisionId`. The peer list is read only for those reviews (below), so a review
+  that proposes nothing countable makes no peer call, and `decide` never does I/O.
+- Lab and backtest: the simulator fills `rotation` from its own run (its journal of ops and exits) and has no peer, so
+  `peerOps` is the empty list of a successful read. With no peer configured the local list is the account's whole
+  history: correct for a single-chain account, and the reason the unread row exists only where a peer is configured.
+
+### Counting the action budget
+
+- Counted ops (D16): the engine's rebalancing decisions only: `rerange`, reduce and ratio convert. An entry or idle
+  convert never counts: it places money the owner deposited (the Packaging's BOP exception) or re-enters a pool, and
+  re-entry has its own cooldown and re-validation rows. Exit legs (`close_position` or a vault withdrawal with an exit
+  cause, `exit_convert`), harvests, bridge legs and owner withdrawals (an exit leg with the owner as its cause) never
+  count. A vault withdrawal without an exit cause is a reduce and counts. The two converts differ by what they move:
+  an idle convert places idle USDC (a deposit, harvest proceeds, an exit's USDC) toward its bucket's target and never
+  counts; a ratio convert swaps value already placed between assets to restore a target ratio and counts. A deposit
+  arrives as idle USDC, so it is only ever placed by an entry or an idle convert: a depositor never spends the budget
+  by depositing, on either chain, and no deposit has to be tracked.
+- Where counted ops live: `includedAt` is a field of the stored engine op in the operator's journal, like `rerangeAt`
+  today; the premise never hashes the journal.
+- An op counts from the moment it is sent, dated by the review's block timestamp, until it is confirmed (then dated by
+  its inclusion: `includedAt`, added by LC-T10 to every counted kind; a re-range stored before the field uses its
+  `rerangeAt`) or fails, is refused or is pre-empted (then it is dropped). Counting the op in flight is what keeps two
+  quick proposals, or one on each chain, from both seeing 4.
+- The rest of the residual: two operators sending an op in the same 2 s, each before the other's list shows it, can
+  reach 6. The same bound as the exposure cap of #212, accepted there.
+- A row stored before LC-T10 with neither `includedAt` nor `rerangeAt` is skipped: the budget under-counts for at most
+  30 days after the field ships, never over-counts.
+- Reading the shadow log: in shadow the ops the budget would have held are still sent, and they count, so after a
+  first hold the log can show more `RISK_ACTION_BUDGET_SPENT` rows than enforce would. LC-T11 reports the same rows as
+  an upper bound; a faithful count of what enforce would hold needs a Lab variant that enforces the budget, which
+  constitution VI does not allow for a Packaging number until #56, so it is out of scope here.
+
+Across chains (the Packaging counts the portfolio): each operator answers `GET /internal/engine-ops/<safe>?since=<unix>`
+with one body, `{ ops: { chain, opId, kind, at }[] }`: its counted ops for that Safe with `at` at or after `since`.
+The empty answer is `{ "ops": [] }`; a body without `ops` is malformed. Same address on every chain (the CREATE2 Safe
+of #212), same authentication as `/internal/exposure`: an operator-to-operator read signed like `GET /metrics` with the
+shared `OPERATOR_SECRET` (`metricsSignature` over method, path and the unix minute; the path carries the Safe, the
+`since` query is not signed: a replay inside the minute reads the same Safe, as with #212), never an owner signature. The engine reads it through
+the same reader as #212's `PeerExposure`: at most 2 s old, 5 s timeout. It counts the union of both lists,
+deduplicated by `chain` + `opId`. A Safe the peer runs nothing for, or has no counted ops for, is `200` with the empty body, a
+successful empty read (most accounts have no Monad sleeve). Unread is only: unreachable, 401, a 404 for the route
+itself (a peer on older code), 5xx, timeout or a malformed body. Those give `RISK_ACTION_BUDGET_UNREAD`, never a
+local-only count reported as the account's.
+
+### Re-entry
+
+- A pool "left on a rule" is a `left` record: written by the exit path (LC-T4) when a bucket's exit leg confirms, with
+  that leg's inclusion time and the rule's code. Before LC-T4 no bucket leaves a pool on a rule, so the cooldown and
+  re-validation rows have nothing to read and stay silent. A record is dropped once its bucket re-enters the pool.
+- An attempt is a decision that proposes an entry into a pool or vault with a `left` record and that no row holding the
+  proposal held: any phase 3 or phase 4 row that would hold it (cooldown, re-validation, Purga, and on a vault the dip,
+  latch, paused, frozen and unread rows) or the depeg freeze. An entry is never countable (D16) and a decision carries
+  one proposal, so the budget rows never apply to it; the attempt is written right after the decision is logged: the
+  op an enforcing engine would have sent. A held proposal is not an attempt, so in enforce mode a
+  held proposal never restarts its own cooldown. The engine writes `{ pool, at }` with the review's
+  block timestamp after it logs the decision, in that account's file; the same `(account, pool, at)` is never written
+  twice, so a restart or a replayed review adds nothing, and two accounts attempting the same pool in one block are
+  both recorded.
+- The closed set for re-validation, on the pool being entered:
+  - the phase 1 and 2 rows that would exit (`RISK_POOL_TVL_DROP`, `RISK_POOL_VOLUME_LOW`, `RISK_POOL_EEL_LOW`,
+    `RISK_EXIT_SLIPPAGE`, `RISK_POSITION_RATIO`), on every pool including USDC/USDT: D12 lets a held `stables-lp`
+    position stay, it never lets new money back in;
+  - their unread rows (`RISK_POOL_STATS_UNREAD`, `RISK_POOL_DEPTH_UNREAD`): missing data does not pass (D8);
+  - `purgaIdentity` and the pool's `purgaReviewedAt`, as in the Purga row; here an unreadable identity
+    (`RISK_PURGA_RECHECK_UNREAD`) does not pass either (D8);
+  - the condition of the `left` record's own code, evaluated on this observation. A code with no evaluator on a single
+    observation (`EXIT_LOSS_CONTROL`, account-level and history-dependent, or any code phase 3 does not know) does not
+    pass and is listed by its own code: such a pool comes back only through the owner or a later rule change.
+
+  `RISK_EXIT_SLIPPAGE` and `RISK_POSITION_RATIO` on a pool the account holds nothing in are evaluated at the proposed
+  entry's size (the non-USDC leg it would buy, and that size over EEL), the size a later full exit would sell.
+
+  On a vault (phase 4) the pool rows above are absent and the set is instead: every phase 4 vault row
+  (`RISK_VAULT_SHARE_DIP`, `RISK_VAULT_SHARE_LOSS` while latched, `RISK_VAULT_TVL_DROP`, `RISK_VAULT_EXIT_LIQUIDITY`,
+  `RISK_VAULT_POSITION_RATIO`, `RISK_VAULT_PAUSED`, `RISK_VAULT_FROZEN`, `RISK_VAULT_UNREAD`) must not fire, exit
+  liquidity and position ratio evaluated at the proposed entry's size added to the holding, instantly (the 6 h hold is
+  for a held position, not for a check before entering), and against the vault's payable liquidity only: `maxWithdraw`
+  is capped by what the account already holds (ERC-4626), so it never counts money not yet deposited; the vault's Purga as in the
+  Purga section; and the `left` code, a `RISK_VAULT_*` code being evaluated by its own row. So a vault left on
+  `RISK_VAULT_SHARE_LOSS` passes only once re-based (`lossLatchedAt` null), and one left on a TVL drop passes once the
+  drop no longer holds. Missing data does not pass here either (D8): a TVL window the series does not cover yet, an
+  unreadable identity, and a `left` record older than the vault's last bootstrap (`bootstrappedAt` in `vaults.json`: a
+  lost store forgets the latch, so such a record passes only while the vault's `rebasedAt` is set, the time of a re-base
+  applied after that bootstrap; a rejected request never sets it). In the `label` these appear as
+  `RISK_VAULT_TVL_DROP:<window>` for an uncovered window and `RISK_VAULT_BOOTSTRAP` for a record older than the
+  bootstrap.
+
+  It never includes phase 3 rows (no circularity) or the account-level action budget. A pool whose phase 1 and 2 rows do
+  not run (no stats source) passes those two items as absent, not as failed. Once LC-T12 (PR #205) merges every policy pool
+  has one, and before LC-T4 no `left` record exists, so the case does not arise on live.
+- Cooldown and re-validation are checked in that order. A proposal in cooldown gets only the cooldown row.
+
+### Purga while invested (D11)
+
+- Runs on every review of both operators, for every pool the account holds a position in. It needs no I/O:
+  `purgaIdentity` reads the observation's pool identity against the registry, and `purgaReviewedAt` is the ISO date of
+  the last Purga review by Ot or Brais, per pool, kept in `packages/registry/purga-reviews.json` beside the registry,
+  not in its entries (so writing a date never moves a registry, policy or premise hash). The operator passes the dates
+  in as `rotation.purgaReviewedAt`; LC-T10 fills the file for every policy pool and both v7 vaults from the review notes.
+- A vault is in scope like a pool. Its identity check is the vault's own: code at the registry address and `asset()`
+  equal to the registry's USDC, both in the hourly vault reads (Data, phase 4). A failed read is
+  `RISK_PURGA_RECHECK_UNREAD` here and `RISK_VAULT_UNREAD` in phase 4; it does not pass re-validation. Re-checking the identity catches a registry or pool change; the date catches the slow criteria (audits, age,
+  team, DeFiSafety, L2Beat) that no code reads: a pool nobody has re-reviewed in 90 days fails.
+- An identity that cannot be checked (`PURGA_IDENTITY_INCOMPLETE`, the observation lacks the pool's identity) is
+  `RISK_PURGA_RECHECK_UNREAD`, not a failure, and sends no alert.
+- Would-be action: no new money into a failing pool. Every entry or increase proposed into it carries the row, whether
+  the account holds a position there or not, so the shadow log and the Lab count every deposit it would have held. Never an exit by itself: an exit comes from
+  an incident (LC-T13) or another rule. Today, with LC-T13 in shadow too, a pool failing Purga has no exit path, and that
+  is the intended default.
+- Real, also in shadow: an internal alert per pool, never per account. The Purga step (State, below) posts one line to
+  `ops-mamoru` and shows an `/ops` row (pool, failed check, time) when a policy pool or vault starts failing, then one
+  every 7 days while it keeps failing, whether or not an account holds it. The owner sees nothing. The account review's
+  row is unchanged (it reads its own observation); only the alert moved out of it.
+
+### State
+
+Everything phase 3 remembers per account (`attempts`) lives in the operator's shadow store
+(`shadow-vaults/rotation/<account>.json`, one file per account (Safe), written only by that account's review, never
+shared between accounts),
+never in the bucket state and never in the premise. `left` comes from the
+bucket state LC-T4 writes, read only. "No state or proposal change with the rows present" (LC-T10) refers to the bucket
+state, the premise and the proposal; the shadow store is the rows' own memory.
+
+Purga step: a pure function in `decide`, `purgaShadowStep(store, checks, reviewedAt, now, sentAlertIds) -> store`, run once an hour
+on every operator whose policy lists `packaging:rotation`, before the account reviews of that hour, over every policy
+pool and vault of that operator (`checks`: the identity of each, read once for the step). Its file,
+`shadow-vaults/purga.json`, has it as the only writer: per pool `failingSince` (null while it passes) and `alertsDue`,
+with ids `<pool>:purga:<failingSince>:<n>`, `n` the whole 7-day periods since `failingSince` (0 at the start).
+The date half needs no read and is always evaluated: a pool with `purgaReviewedAt` absent or older than 90 days fails
+whatever its identity read. An unreadable identity only stops the identity half from starting or clearing
+`failingSince`; an identity read more than 2 h before the step is unreadable too, the same staleness rule as the
+review's. `alertsDue` drops an id only once it is in `alerts.json` (the `sentAlertIds` input, the vault step's
+rule), so a start alert whose post failed is still posted after the pool passes again. The alert sender posts them
+like phase 4's.
+
+Containment: every phase 3 failure (building `Observation.rotation`, loading `purga-reviews.json`, the four rows
+inside `decide`, an attempt write, the budget step, the peer read, the Purga step) is caught at operator
+level, shown in `/ops`, and leaves the live decision and its send untouched: a throw inside `decide` from phase 3
+re-runs `decide` without `rotation`. `purga-reviews.json` is validated on load; an entry whose date does not parse as
+an ISO date is treated as absent for that pool (so it fails Purga by date) and `/ops` names it; an attempt that cannot
+be written goes unrecorded (a cooldown may be missed, shadow only). LC-T10 tests a throwing shadow write and a peer
+that hangs: the send happens on time in both.
+
+One writer: the `rotation/` files sit in `shadow-vaults/` with the phase 4 files and follows phase 4's single-holder
+rule (below): only the instance holding that directory's lock writes it, reloading it from disk when it takes the lock.
+The process has one lock handle for `shadow-vaults/`, shared by the phase 3 step, the vault step and the re-base
+route: whichever runs first tries that one handle (at start and at every step, without blocking), and once acquired it
+is held for the life of the process and serves all three. On acquisition the process reloads every file in the
+directory, the `rotation/` files included. This runs on every operator and for any policy that lists
+`packaging:rotation`, whether or not it lists `packaging:vaults`: the Monad operator, and a Base policy without
+vaults, have a `shadow-vaults/` holding only the `rotation/` files, `purga.json` and `alerts.json`. A missing or unparsable account file starts empty and `/ops`
+shows it once with its time (its attempts are forgotten, so a cooldown since an attempt may be missed for that
+account; the budget itself reads the journal and is unaffected);
+the file is written whole and renamed and carries a schema `version`, with the same migration and contained-error rules.
+An instance without the lock computes no phase 3 rows for that step (shown in `/ops`), so two instances during an
+overlapping deploy never both rewrite the attempts or the alert files.
+
+### Notes
+
+- **Re-range budget: already built.** The Packaging's "2 rebalances per week" is the weekly re-range cap of #218
+  (`range.maxPerWeek` in the engine settings, per pool, enforced, `DECIDE_RANGE_WEEKLY_CAP`, rolling 7 days). It is an
+  engineering setting set from `/ops`; the Packaging value for it is 2. The row above reports what a cap of 2 would have
+  held while `/ops` leaves it unset or above 2, and goes silent once it is set to 2 or less.
+- After the stables bucket moves to an ERC-4626 vault (#210, PR #174) it has no range and makes no re-range; its
+  deposits never count in the action budget (entries) and its withdrawals count as reduces unless they carry an exit
+  cause or pay the owner (as above).
+- Monad: the counters and the Purga row need no outside source and run on both operators. The phase 1 and 2 pool rows
+  run on the Monad operator from LC-T12 (PR #205).
+
+## Packaging shadow rules (phase 4: the Stable bucket in ERC-4626 vaults, otto/mamoru#101)
+
+Context: `conservador-live-v7` (#210, PR #174) puts the Stable bucket in two USDC vaults on Base, `vault:gtUSDCp`
+(MetaMorpho) and `vault:waBasUSDC` (Aave static aToken), and keeps the USDC/USDT position as `stables-lp`, held until
+the owner opts in to its exit. The pool rules of phases 1 and 2 read pools; a vault has no range, no swap and no
+volume, so most of them do not apply to it. Live today, the Packaging rows that fire are on USDC/USDT (EEL about 103k
+against 600k; its 0.21M TVL was under the 2M floor, which D15 removes for our pools along with the phase 1 floor row,
+`RISK_POOL_TVL_FLOOR`, in the same change that drops it from `decide`). Those rows do not move it out (D12, Brais
+1 Nov): the position stays as it is until the vault replaces it. Same contract as the other phases: shadow only, `Decision.shadowRisk` outside the premise
+hash, nothing acts (constitution VI). Gate: the policy lists `packaging:vaults` in `policy.shadow` (v7 does), never
+`guards.mode`, so LC-T9 flipping `guards.mode` to `enforce` leaves the vault rows in shadow; the operator supplies
+`Observation.vaultShadow` only to such a policy.
+
+Facts read on Base at block 53,424,812 (2 Nov 2026), which the rows below rely on:
+
+- `vault:gtUSDCp` (`0xeE8F…4b61`): MetaMorpho v1.0. `lostAssets()` reverts (it is a v1.1 getter), so a market's
+  realized bad debt lowers that market's `totalSupplyAssets`, the vault's `totalAssets()` and its share value: the
+  share value is this vault's loss signal. Shares have 18 decimals (`convertToAssets(1e18)` = 1,118,199, 1.118 USDC);
+  `totalAssets()` 401.48M USDC; 8 markets in `withdrawQueue`; timelock 7 days; no `paused()` getter (MetaMorpho has no
+  pause).
+- `vault:waBasUSDC` (`0xC768…DBD6`): static aToken v2 on aBasUSDC. Shares have 6 decimals; `paused()` exists (false);
+  `totalAssets()` 234,199 USDC, the wrapper's own holders only. Its rate is the reserve's normalized income. The Aave
+  Pool (`0xA238…d1c5`, `POOL_REVISION` 11) books bad debt as a reserve deficit (`getReserveDeficit(USDC)` = 30.88 USDC),
+  not through the index, so this vault's share value does not fall on a loss: its loss signal is the deficit. The
+  reserve runs virtual accounting: `getVirtualUnderlyingBalance(USDC)` = 15,589,686 USDC against
+  `USDC.balanceOf(aToken)` = 15,590,003 USDC (the difference is donated USDC that cannot be withdrawn). aUSDC
+  `totalSupply()` 189.96M. Configuration: active, not frozen, not paused.
+
+Which pool rule applies to a vault:
+
+| Phase 1-2 rule | On a vault |
+|---|---|
+| TVL floor | no: removed for every pool and vault Mamoru chose (D15, Brais 2 Nov) |
+| TVL change 1d/7d/30d | yes, on the money the vault is exposed to: gtUSDCp `totalAssets()`; waBasUSDC the reserve's aUSDC `totalSupply()` (the wrapper's own 234k moves with one holder). Same thresholds as the stables bucket (`RISK_VAULT_TVL_DROP`) |
+| Volume, V/TVL | no: a vault has no trading volume |
+| EEL, exit slippage | no: a redeem pays the vault's rate, without price impact. Exit liquidity below replaces them |
+| Position ratio | yes, against the liquidity the vault can pay out now (below), with its own code `RISK_VAULT_POSITION_RATIO` |
+| Depeg (`RISK_DEPEG_SAVINGS`) | unchanged: the vaults hold USDC, so a USDC depeg is the account's savings asset |
+
+Loss in bp, per vault, at each read:
+
+- gtUSDCp: `s = convertToAssets(10^vault.decimals())` (`10^18`, never the asset's `10^6`, which rounds to 0 or 1
+  wei); `loss = (mark - s) / mark` in bp, where `mark` is the highest `s` seen.
+- waBasUSDC: the larger of the same share-value loss (zero while Aave keeps the index rising) and the net deficit
+  loss: `(deficit - deficitBase) / aUSDC.totalSupply()` in bp, minus the interest the reserve paid since `deficitBase`
+  was set (`getReserveNormalizedIncome(USDC)` now over `indexAtBase`, in bp), floored at 0. When the net deficit loss is
+  0 (the deficit was covered, or interest earned it back, as gtUSDCp's share value does), `deficitBase` and
+  `indexAtBase` move to the current values. So the same loss clears at the same pace on both vaults. The deficit and
+  aUSDC supply are both in USDC base units (6 decimals; 30,875,031 = 30.88 USDC on 2 Nov).
+- Bootstrap: `mark`, `deficitBase` and `indexAtBase` are per vault, not per account, and start at the first phase 4
+  read of that vault (a sibling no account has deposited into has them too), and that read's time is stored as the
+  vault's `bootstrappedAt`. Existing v7 holders need no history before that read. A missing `vaults.json`, or one that is not valid JSON, bootstraps again and `/ops` shows it once as a store reset
+  (any latch it held, and any alert it still had due, is gone, so the reset is visible, not silent; with a lost
+  `alerts.json`, below, these are two of the three cases where a due alert is not posted, the third a reset `purga.json`). After a reset each vault's `appliedRebaseId` starts at the log's last id, so old
+  requests are not processed again.
+
+Episodes (D14): an episode opens at the first read with loss above 1 bp and closes at the first read with loss at 0 or
+below; every read in between belongs to it, whatever its depth, so a dip that lasts days is one episode. When an
+episode opens, the engine compares the previous `lastDipOpenedAt` (the value before this read) with now, then stores
+now in it. Episode state is per vault: `dipOpenSince` (null when no episode is open), `lastDipOpenedAt`,
+`lossLatchedAt` (null when not latched).
+
+Vault rows (every row is keyed by vault id, e.g. `vault:gtUSDCp`, never by bucket):
+
+| Rule | Condition | Would-be action | Code | `window` |
+|---|---|---|---|---|
+| Share value dip | `dipOpenSince` not null and not latched (the whole episode, including reads between 0 and 1 bp) | no new deposits into that vault (an entry block on that vault id; the sibling keeps taking deposits); an internal alert when the episode opens: one `ops-mamoru` post and an `/ops` row with vault, loss in bp and time. Nothing to the owner (D14) | `RISK_VAULT_SHARE_DIP` | `30d` |
+| Share value loss | latches when a read has loss of 10 bp or more, or an episode opens less than 30 days after the previous one opened. Latched until re-based (below) | EXIT the vault: `vault_redeem` of the account's whole holding to idle USDC or the healthy sibling; no deposit into it while latched; the same alert | `RISK_VAULT_SHARE_LOSS` | `30d` |
+| TVL change | the measure above now vs 1, 7, 30 days ago at or under -12%, -20%, -30%. A window the series does not cover yet (after a bootstrap) is not evaluated and emits nothing; it is not unread | EXIT the vault | `RISK_VAULT_TVL_DROP` | `1d`, `7d`, `30d` |
+| Exit liquidity | the account's holding `convertToAssets(shares)` exceeds `min(maxWithdraw, payable liquidity)` by more than max(1 bp of the holding, 1 USDC) for 6 h: the vault cannot pay the whole holding now. The tolerance absorbs ERC-4626 rounding; payable liquidity is taken alongside `maxWithdraw` because a static aToken may report `maxWithdraw` without checking the reserve's cash | EXIT the vault (what cannot be paid waits, as v7's `DECIDE_WAIT_VAULT_LIQUIDITY`) | `RISK_VAULT_EXIT_LIQUIDITY` | `6h` |
+| Position ratio | the account's holding over the vault's payable liquidity above 1,000 bps | EXIT the vault | `RISK_VAULT_POSITION_RATIO` | none |
+| Paused | waBasUSDC only: the reserve's configuration has active = 0 or paused = 1, or the wrapper's `paused()` is true. MetaMorpho has no pause: a market that cannot pay shows in exit liquidity, a market removed with a loss in the share value | no new deposits; the exit waits until a redeem is possible | `RISK_VAULT_PAUSED` | none |
+| Frozen | waBasUSDC only: the reserve's frozen bit is set. Withdraw and repay still work, supply reverts | no new deposits only, never an exit | `RISK_VAULT_FROZEN` | none |
+| Unreadable | any read above failed or is older than 2 h | no new deposits, no exit; an unread read never opens, closes or latches an episode, never moves `mark`, `deficitBase` or `indexAtBase`, and leaves `exitShortSince` as it was | `RISK_VAULT_UNREAD` | none |
+
+Re-base (clearing a latch, or a dip we accept): a realized loss leaves the share value under the old mark for days or
+months, so the latch never clears by itself. In shadow, an `/ops` action "re-base vault" (operator side, Ot or Brais)
+sends a signed operator route (`POST /ops/vault-rebase`) carrying the baseline
+it accepts: the vault's share value, deficit and index of the latest read shown in `/ops`, and that read's block. Under
+an in-process mutex, taken inside the phase 4 lock below, the operator truncates the log back to its last newline (dropping a line torn by a crash), takes
+`id` = 1 + the largest of the log's last parseable id and every vault's `appliedRebaseId` in `vaults.json` (a lost or emptied log never hands out an id the step would skip), and appends `{ id, nonce, vault, by, at, accepted }`, so two requests at once get two ids.
+The next vault step first evaluates the vault's fresh read as usual (episodes, latch and `alertsDue` move first), then
+takes each request whose id is above that vault's own `appliedRebaseId` (one counter per vault). It applies it only
+when the fresh read's loss against the accepted baseline is at most 1 bp and the request is under 24 h old: `mark` to
+the share value of that read, `deficitBase` and `indexAtBase` to its deficit and index, and `lossLatchedAt`,
+`dipOpenSince` and `lastDipOpenedAt` cleared and `rebasedAt` set to the time it is applied (accepting a loss starts the 30-day count again). A
+request that fails the check is rejected, with the reason shown in `/ops`, so a later loss is never absorbed by an
+older re-base. Applied or rejected, that vault's `appliedRebaseId` rises to the request's id. A vault whose read is
+unreadable takes no request and keeps its counter, while the other vault takes its own; `/ops` shows the waiting
+ones. A newline-terminated line that does not parse is skipped and shown in `/ops`, wherever it is in the log. When the rows leave shadow (D5, #56), the owner's resume of that vault does the same; that action is
+specified with LC-T9.
+
+Would-be action and re-entry (D4, Brais 1 Nov: "sal de ese pool que se está poniendo feo, quédate en idle buscando otro
+similar o espera a que ese mejore"):
+
+- Every vault row is specific to one vault, so its share may go to the other vault of the bucket when that one passes
+  every row (the rule of "Interaction with #127": pool-specific cause, healthy sibling). Both vaults failing, or a
+  market cause (`RISK_DEPEG_SAVINGS`), keeps the share as idle USDC in the Safe until re-entry.
+- A redeem the vault cannot pay waits, as in v7 (`DECIDE_WAIT_VAULT_LIQUIDITY`); the shadow row records how much
+  would have been stuck.
+- Re-entry into a vault left on a rule: the phase 3 cooldown (stables 7 d) and re-validation apply, keyed by the vault
+  id like the entry block, and `RISK_VAULT_SHARE_LOSS` additionally needs the re-base above.
+
+State and side effects: a phase 4 shadow store of its own in the operator's state directory (`shadow-vaults/`), in
+four parts (phase 3's `rotation/` files and `purga.json` live beside them under the same rules), each its own file with
+exactly one writer, written only by the instance holding the lock below. The JSON
+files are written whole to a temporary file and renamed (atomic); each carries a schema `version`:
+
+- Vault part (`vaults.json`): the series (share value, deficit, index, the TVL measures, 31 days like the pool TVL
+  series), the latest payable liquidity per vault, `mark`, `deficitBase`, `indexAtBase`, the episode fields, `bootstrappedAt` and `rebasedAt` per vault (`rebasedAt` null at
+  bootstrap, and null when migrating a version without it), `appliedRebaseId` per vault and `alertsDue`. The entry block is not stored: it holds exactly while the dip,
+  latch, paused, frozen or unread row fires for that vault, or one of its exit rows (TVL change, exit liquidity,
+  position ratio) fires, since no new money goes into a vault the bucket would leave; so closing an episode lifts it. An alert id is `<vault>:<open|latch>:<block of the read>`, unique and the same
+  after any reset; `alertsDue` drops an id only once it is in `alerts.json`. Written
+  only by the vault step, a
+  pure function in `decide` (`vaultShadowStep(store, reads, requests, sentAlertIds) -> store`), run once per hourly vault read,
+  before any account review uses that read. It alone opens and closes episodes, latches, applies re-base requests and
+  marks the alert due, so an episode alerts once, not once per account.
+- Account part (`accounts/<account>.json`, one file per account): `exitShortSince` per vault for the 6 h
+  exit-liquidity hold (null when the holding is payable). Written only by that account's review, which gets the vault part read-only in the observation
+  (`Observation.vaultShadow`) and returns its own entry next to `Decision.shadowRisk`.
+- The vault part keeps the latest read of each vault with the rest (persisted, so a restart does not lose a pause or an
+  identity state), and the account review receives it, never hashed:
+
+  ```ts
+  vaultShadow?: {
+    vaults: Record<string, {                       // vault id, e.g. 'vault:gtUSDCp'
+      read: { at: bigint; block: bigint; ok: boolean; // ok false: some read failed; values below are absent then
+        shareValue?: bigint; deficit?: bigint; index?: bigint; tvlMeasure?: bigint; payableLiquidity?: bigint;
+        paused?: boolean; frozen?: boolean; active?: boolean;   // waBasUSDC only
+        identity: { code: boolean; asset: string } | null }   // null: identity read failed
+      mark?: bigint; deficitBase?: bigint; indexAtBase?: bigint // absent before bootstrap
+      dipOpenSince: bigint | null; lastDipOpenedAt: bigint | null; lossLatchedAt: bigint | null
+      bootstrappedAt: bigint | null; rebasedAt: bigint | null   // bootstrappedAt null: no ok read yet
+      tvlAgo: { '1d'?: bigint; '7d'?: bigint; '30d'?: bigint } // absent: the series does not cover that window yet
+    }>
+    account: { exitShortSince: Record<string, bigint | null> } // from accounts/<account>.json, the previous review's
+  }
+  ```
+
+  Every v7 vault has an entry from the first step on, bootstrapped or not. Bootstrap happens only on a read with
+  `ok: true`; until then the entry has `bootstrappedAt: null` and no bases, and the review gives `RISK_VAULT_UNREAD`
+  (no new deposits, no exit). The review, not the step, decides staleness: a read whose `at` is more than 2 h before
+  the review's block timestamp is unread whatever its `ok`, so a vault step that stopped running cannot leave an old
+  read looking fresh. A vault missing from `vaultShadow` altogether is unread too.
+- Re-base log (`rebase.jsonl`): appended only by the operator's `/ops/vault-rebase` route; the vault step reads it and
+  never writes it. The step takes only lines that end in a newline: an unterminated last line (an append in progress,
+  or one cut by a crash) is not read, and the route's truncation drops it before the next append, so no id is ever
+  applied and then reused. No line of the log ever resets anything.
+
+Single holder and containment: every phase 4 writer (vault step, account part writes, re-base route, alert sender)
+runs only in the instance holding an OS advisory lock on `shadow-vaults/` (`flock(2)` through `bun:ffi`, fd opened
+with `O_CLOEXEC` so no child keeps it, on the operator host's local volume), released by the kernel when the process
+exits, so a crash leaves no stale lock. Every vault step and every re-base request first tries the lock without
+blocking; an instance that just acquired it reloads `vaults.json`, `purga.json`, `alerts.json`, the account files, the `rotation/` files and the log from
+disk before writing. An instance without the lock (an overlapping deploy, or any lock error, including a filesystem
+without `flock`) skips phase 4 for that step, writes no phase 4 file, says so in `/ops`, and runs everything else as
+usual; it never refuses to start, and it takes over at its next step once the holder exits. Any phase 4 error (lock,
+file read, a file that fails schema validation, the step, the observation build, the vault rows) is caught at the
+operator level: the account's live decision runs without vault rows and with `RISK_VAULT_UNREAD`, and `/ops` shows a
+store error. Files and versions: a missing file or one that is not valid JSON is the reset case above. A file of an
+older `version` is migrated on load by the new code, so a deploy keeps every latch, mark and counter. A file of a newer
+`version` than the running code knows (a rollback), or valid JSON that fails its own version's schema, is a contained
+error: the file is left untouched, phase 4 is skipped with `RISK_VAULT_UNREAD`, and `/ops` shows it until a forward
+deploy or a fix; it never resets. The holder keeps one lock fd for its whole life (a second `open` plus `flock` in the
+same process would contend with its own lock). The same file rule holds for `alerts.json`: a newer version or a
+schema failure is contained (nothing posted, nothing rebuilt), never the rebuild above. A contained error in one
+account file skips phase 4 for that account only; in `vaults.json` or `alerts.json`, for every account. A contained
+error in `purga.json` stops the Purga alerts only (the account rows still compute); in a `rotation/` file, phase 3 for
+that account only.
+
+Re-base route: `GET /metrics`'s signature (`packages/operator-auth`, HMAC over method, path and unix minute; checked
+2 Nov) does not cover a body, so the route gets a body-binding variant in `operator-auth`: hex HMAC-SHA256 of
+`POST /ops/vault-rebase <unixMinute> <sha256 of the body>` with `OPERATOR_SECRET`, current or previous minute accepted.
+The body carries `nonce`, `vault` and `accepted`, so none of them can be changed without the secret, and the route
+refuses a nonce already in the log. The route refuses the request (explicit error, nothing appended) on an instance
+without the lock, and while `vaults.json` is in a contained error (it cannot read the counters for the id).
+- Sent alerts (`alerts.json`): the ids of `alertsDue` already posted. Written only by the alert sender. Missing or not
+  valid JSON, and `vaults.json` or `purga.json` existed before this step (a lost file, not a first run), it is rebuilt as "every id now in `alertsDue` of `vaults.json` and `purga.json` sent" (and not rebuilt
+while either of them is in a contained error: the sender posts nothing until both read; a file that does not exist on
+that operator, such as `vaults.json` on Monad, reads as empty, not as an error), shown once in `/ops`, so a lost file never re-posts
+  history; on a first run (neither existed) an empty versioned `alerts.json` is written when the store is opened under the lock, before any step persists anything, so a later step never mistakes a first run for a lost file and the first alerts are posted, also after a failed first post.
+
+None of it is bucket state, and neither `premiseHash` nor `decisionId` reads it. Alerts: the sender runs on every
+operator whose policy lists `packaging:rotation` or `packaging:vaults`; after the vault part or `purga.json` is
+persisted, it posts every id in `alertsDue` that is not in `alerts.json` and records each one right after its
+post succeeds. A failed post (no crash) stays unsent and is tried again at the next step, every hour, until it
+succeeds. A crash between a post and its record re-posts that one alert once at restart. So an alert is lost only by a reset of `vaults.json`, `purga.json` or `alerts.json` (each shown in `/ops`) and
+repeats only after a crash. Alerts go out on the live operator only. The reset rule (a missing or unparsable file
+bootstraps again, shown once in `/ops`) applies to `vaults.json`, the account files, the `rotation/` files and
+`purga.json` only (a reset `purga.json` restarts `failingSince` at the next step, so a pool still failing posts once
+more, shown in `/ops`). A Lab replay starts from an empty store, bootstraps at
+its first read and sends nothing.
+
+Data (operator, Base): per vault, hourly, at one block: code at the vault address and `asset()` (the Purga identity),
+`totalAssets()`, `convertToAssets(10^vault.decimals())`, and
+per account `balanceOf`, `convertToAssets(shares)`, `maxWithdraw`, `maxRedeem` (the last four already read by v7's
+snapshot); for waBasUSDC also `paused()`, the Pool's `getReserveDeficit(USDC)`, `getReserveNormalizedIncome(USDC)`,
+`getConfiguration(USDC)` and aUSDC `totalSupply()`. Payable liquidity, in USDC:
+
+- MetaMorpho: for each market in its `withdrawQueue` (the idle market included: MetaMorpho v1.0 keeps idle funds as supply
+  in it, and a redeem withdraws only from markets, so USDC sent to the vault contract itself never pays out), the smaller of the vault's supply in
+  that market (`position(id, vault)` shares converted at the market's `totalSupplyAssets / totalSupplyShares`) and the
+  market's free liquidity (`totalSupplyAssets - totalBorrowAssets` from `market(id)` on Morpho Blue).
+- Aave static aToken: `getVirtualUnderlyingBalance(USDC)` on the Pool, the cash the reserve can pay under virtual
+  accounting. Not `USDC.balanceOf(aToken)`, which counts donated USDC (316 USDC more on 2 Nov), and not
+  `getReserveData`, which carries no cash figure.
+
+No outside API.
+
+`stables-lp` while held: the phase 1-2 rows keep running on USDC/USDT and are recorded, but they are not an exit
+reason there. The exemption is keyed on the position kind `stables-lp`, not on the bucket, so the vault rows of the
+same bucket are never exempt. The TVL change, volume, EEL, exit slippage and position ratio pool rows never propose or
+offer an exit from a `stables-lp` position (D12, Brais 1 Nov: "deja el pool tal cual está [...] que no salga de los
+pools de stables"); `/ops` shows them as informational. Depeg (freeze) and incident rows still apply. The rows become
+moot once the vault holds the bucket.
+
 ## Decisions for Ot
 
 - **D1.** Account loss limit default: 10% of net deposits, owner resumes by hand. Or user-chosen at Start (#56).
@@ -463,7 +900,29 @@ are not read. Reaches `decide` as `Observation.poolDepth`, read only by the shad
 Provisional defaults for the Packaging rules (Ot, 27 Oct; discussion open with Brais). Shadow only until D5 resolves.
 
 - **D8.** Stale or missing data: FREEZE the bucket and alert, never exit on missing data (keeps FR-LC-007). Shadow today:
-  `RISK_POOL_STATS_UNREAD` and `RISK_POOL_TVL_UNREAD`.
+  `RISK_POOL_STATS_UNREAD` and `RISK_POOL_DEPTH_UNREAD` (`RISK_POOL_TVL_UNREAD` was the floor's unread row and goes
+  with it, D15, PR #213).
 - **D9.** IL / rally exit (Packaging's price rules): shadow only.
 - **D10.** ENY / APY exit: only once ENY leaves shadow.
-- **D11.** Safety Score: dropped. Covered by incidents plus the Purga re-run.
+- **D11.** Safety Score: dropped. Covered by incidents (LC-T13) plus the Purga re-run: before every re-entry
+  (`REENTRY_REVALIDATION_SHADOW`) and while invested (`RISK_PURGA_RECHECK_FAILED`: identity at every review, and a
+  Purga review by Ot or Brais older than 90 days fails; internal alert per pool at the start and every 7 days while it fails, no new deposits,
+  never an exit by itself; Ot 2 Nov, recommended default while Brais has not answered).
+- **D12.** Small pools and vaults (Brais, 1 Nov): a `stables-lp` position (USDC/USDT) is exempt from the Packaging
+  exit rows only (TVL change, volume, EEL, exit slippage, position ratio): they are recorded, the position stays as it
+  is, and the vault replaces it. Depeg (freeze) and incident exits (`RISK_INCIDENT_EXIT`) still apply to it (Brais,
+  1 Nov: "déjalo así"). EEL and exit slippage do not apply to vaults (a redeem has no price impact; exit liquidity
+  replaces them). The TVL floor is removed for our pools and vaults (D15).
+- **D13.** Re-range cap (proposed): `range.maxPerWeek = 2` on live (#218, engineering setting from `/ops`), the
+  Packaging's "2 rebalances per week". Lab-checked in LC-T11 before it is raised or removed.
+- **D14.** Vault share value (Brais, 1 Nov): graduated, not absolute, counted in episodes. A loss episode under
+  10 bp blocks new deposits into that vault and alerts us only (`ops-mamoru`, `/ops`), no owner-facing line; a loss of
+  10 bp or more, or a second episode opening within 30 days of the previous one, exits the vault. On waBasUSDC the loss
+  is the Aave reserve deficit, since its share value does not fall. Thresholds are Lab-checked before they leave shadow.
+- **D15.** TVL floor (Brais, 2 Nov): the 2M Packaging entry minimum is removed for every pool or vault Mamoru chose and
+  recommends (all policy pools, both v7 vaults), so no floor row is computed today. A pool not chosen by us (none
+  exists) would need the floor back as a new row. The TVL change rows stay.
+- **D16.** Action budget (Ot 2 Nov, recommended default): only rebalancing ops count (`rerange`, reduce, ratio
+  convert). Entries and idle converts never count: they place deposits (the Packaging's BOP exception) or re-enter a
+  pool, which the cooldown and re-validation rows already govern. Simpler than tracking each deposit to the op that
+  places it, and no data crosses chains for it.
