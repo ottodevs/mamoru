@@ -3,7 +3,7 @@
 // convert/sale of the volatile side) is `approve(V4) + V4.swap`, never SwapRouter02; mints and increases go through V4;
 // decrease/collect/burn go to the manager; a bridge is `approve(V4) + V4.bridge`. Each prepared batch also passes the
 // precheck mirror of V4's checkAction. Decide's proposal kinds: enter_swap (entries and converts), enter_mint,
-// increase_liquidity, harvest, rerange, reduce, bridge_out: all walked here.
+// increase_liquidity, harvest, rerange, reduce, bridge_out: all walked here. otto/mamoru#348: each in the A1 batch shape.
 import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, encodeFunctionResult, getAddress, toFunctionSelector, zeroAddress, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
@@ -13,6 +13,7 @@ import { oneAuthV4Live, staticPool, withRegistryPools, type RegistryPool, type S
 import { address, baseRegistry, entry, mamoruActionPolicyV2Abi } from '@mamoru/registry'
 import { precheck, SessionLedger } from '@mamoru/account/precheck'
 import { executeCallData, useModeSignature } from '@mamoru/account/sessions'
+import { checkA1Batch } from '@mamoru/account/one-auth'
 import type { Execution } from '@mamoru/account/safe'
 import { FakeChain, Revert } from '../../rpc/test/fake-chain.ts'
 import { Engine, type BridgeSigning, type EngineHooks, type EngineSession } from './engine.ts'
@@ -80,7 +81,12 @@ describe('V4: every engine step goes through V4 or the manager exits, never Swap
           expect(c.target.toLowerCase()).not.toBe(ROUTER)
           if (c.callData.startsWith('0x095ea7b3')) expect((decodeFunctionData({ abi: [{ type: 'function', name: 'approve', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'bool' }], stateMutability: 'nonpayable' }], data: c.callData }).args[0] as string).toLowerCase()).toBe(V4.toLowerCase())
         }
-        if (p.kind === 'enter_swap') expect(out.calls.at(-1)!.callData.startsWith(toFunctionSelector('function swap((address,address,uint256,uint256,uint160,uint256))'))).toBe(true)
+        // #348: the A1 shape, from the one builder: clock(prepare time) on V4 first, approvals reset and asserted,
+        // checkExit right before each decrease; then the action itself sits right before its reset.
+        expect(checkA1Batch(out.calls, { chainId: 8453, account: ACCOUNT, policy: V4, now: 1_790_002_000n })).toEqual({ ok: true, t: 1_790_002_000n })
+        expect(out.calls[0]!.target).toBe(getAddress(V4))
+        if (p.kind === 'enter_swap') expect(out.calls.at(-3)!.callData.startsWith(toFunctionSelector('function swap((address,address,uint256,uint256,uint160,uint256))'))).toBe(true)
+        if (p.kind === 'rerange' || p.kind === 'reduce') expect(out.calls[1]!.callData.startsWith(toFunctionSelector('function checkExit(uint256,uint128,uint256,uint256)'))).toBe(true)
         expect(passesV4Precheck(out.calls)).toMatchObject({ ok: true })
       })
     })

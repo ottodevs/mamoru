@@ -5,13 +5,13 @@ import { encodeFunctionData, getAddress, pad, parseAbi, parseAbiItem, parseEvent
 import type { UserOperation } from 'viem/account-abstraction'
 import type { AccountContext, Address, BridgeOutRoute, BridgeOutToSign, BridgeOutView, EthConvert, EthConvertToSign, MigrateV4Input, OwnerSignature } from '@mamoru/domain'
 import { address, baseRegistry, entryPointV07Abi, erc20Abi, ethereumRegistry } from '@mamoru/registry'
-import { buildMigrateV4, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children } from '@mamoru/account/one-auth'
+import { buildA1CallData, buildMigrateV4, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, type A1Intent } from '@mamoru/account/one-auth'
 import { GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment } from '@mamoru/policy'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { chmodSync, closeSync, fsyncSync, openSync, writeSync } from 'node:fs'
 import { browserOwnerSignature, deployCall, encodeWebAuthnSignature, liveAccountFromContext, ownerSafeTx, readSafeNonce, safeContractSignature, safeTxHashOf, verifyOwnerSignature, type LiveAccount } from '@mamoru/account/live'
-import { execTransactionData, type Execution, type SafeTx } from '@mamoru/account/safe'
-import { draftUserOp, executeCallData, handleOpsData, sessionNonceKey, signSessionUserOp, userOpHash } from '@mamoru/account/sessions'
+import { execTransactionData, type SafeTx } from '@mamoru/account/safe'
+import { draftUserOp, handleOpsData, sessionNonceKey, signSessionUserOp, userOpHash } from '@mamoru/account/sessions'
 import { maxGasCostWei, OWNER_NONCE_KEY, ownerUserOp, ownerUserOpSignature, safeOpHash, userOpLogs, type PaymasterFields, type UserOpGas } from '@mamoru/account/userop'
 import { attestationValid, burnMatches, CCTP_DOMAIN_BASE, cctpAttestation, cctpCalls, cctpMessageKey, FINALITY_FAST, FINALITY_STANDARD, cctpFees, cctpMaxFee, decodeCctpMessage, FAST_FILL_SEC, MESSAGE_TRANSMITTER_V2, messageTransmitterV2Abi, mintIsFor, receiveMessageData, STANDARD_FILL_SEC, type Burn } from './cctp.ts'
 import type { BundlerGuard } from './bundler.ts'
@@ -42,7 +42,6 @@ import { logErr } from './metrics.ts'
 /** The Safe's nonce, read at a pinned block in convert reconciliation (otto/mamoru#285). */
 const safeNonceAbi = parseAbi(['function nonce() view returns (uint256)'])
 /** WETH9's deposit (#309 c: the sibling wraps its ETH before V4 swaps it). */
-const wethAbi = parseAbi(['function deposit() payable'])
 
 export const ETHEREUM_CHAIN_ID = 1
 export const BASE_CHAIN_ID = 8453
@@ -1850,7 +1849,7 @@ export class BridgeOut {
    * - ETH beyond its gas reserve is wrapped and swapped to USDC on the listed WETH/USDC pool, sized to V4's room (so its
    *   budget and its 24 h cap never refuse it), at no less than V4's own bound nor the Chainlink-checked quote;
    * - once V4 holds the Base home ready (V4.isReady: announceReady on Base, a CCTP message here, A1; #348: announceReady
-   *   by the operator, noema-d3), all its USDC is bridged home by V4.bridge (CCTP, the
+   *   by the operator, noema-d3: the A1 builder's announceReady and relayMessage intents), all its USDC is bridged home by V4.bridge (CCTP, the
    *   account itself the recipient), and the burn becomes an ordinary CCTP route that tick() mints on Base.
    * The relayer bundles it (EntryPoint.handleOps, beneficiary the relayer): the account pays its gas from its own ETH, no
    * paymaster. Its nonce (SmartSession lane 0) is the ledger: nothing new is signed while an op with the outstanding
@@ -1889,16 +1888,14 @@ export class BridgeOut {
     const maxFee = 2n * base + prio < SIBLING_MAX_FEE ? 2n * base + prio : SIBLING_MAX_FEE
     let kind: SiblingLeg['kind']
     let amount: bigint
-    let calls: Execution[]
+    let intents: A1Intent[]
     if (ready && usdcHeld >= SIBLING_MIN_BRIDGE_USDC) {
       // The bridge leaves the account its ETH: only the op's prefund, less what it holds at the EntryPoint.
       if (eth + deposit < opGasOf('bridge') * maxFee) return
       kind = 'bridge'
       amount = usdcHeld
-      calls = [
-        { target: L1_USDC, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [d.policy, amount] }) },
-        { target: d.policy, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'bridge', args: [CCTP_DOMAIN_BASE, L1_USDC, amount, 0n] }) },
-      ]
+      // #345 P2-5: maxFee 0 (CCTP Standard carries no fee today).
+      intents = [{ kind: 'bridge', domain: CCTP_DOMAIN_BASE, token: L1_USDC, amount, maxFee: 0n }]
     } else {
       // This op's prefund, and the bridge home's at the highest fee a sibling op ever pays (review r1 of #238: a rise in
       // gas after the swap can never leave the USDC without the ETH to bridge it).
@@ -1946,14 +1943,18 @@ export class BridgeOut {
         // Not eligible now (V4's rules), out of V4's band, or the price unchecked: nothing signed.
         return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: no swap now:`, e instanceof Error ? e.message.split('\n')[0] : e)
       }
-      calls = [
-        ...(wrap > 0n ? [{ target: L1_WETH, value: wrap, callData: encodeFunctionData({ abi: wethAbi, functionName: 'deposit' }) }] : []),
-        { target: L1_WETH, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [d.policy, amount] }) },
-        { target: d.policy, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'swap', args: [{ pool: SIBLING_POOL, tokenIn: L1_WETH, amountIn: amount, amountOutMinimum: minOut, sqrtPriceLimitX96: limit, deadline: BigInt(nowSec + SIBLING_SWAP_DEADLINE_SEC) }] }) },
-      ]
+      intents = [...(wrap > 0n ? [{ kind: 'wrap', amount: wrap } as const] : []), { kind: 'swap', params: { pool: SIBLING_POOL, tokenIn: L1_WETH, amountIn: amount, amountOutMinimum: minOut, sqrtPriceLimitX96: limit, deadline: BigInt(nowSec + SIBLING_SWAP_DEADLINE_SEC) } }]
+    }
+    // #348: the A1 shape from the one builder (clock at this block's time first, the approval of V4 reset and asserted),
+    // checked by its validator before anything is signed.
+    let callData: Hex
+    try {
+      callData = buildA1CallData({ chainId: ETHEREUM_CHAIN_ID, account: safe, policy: d.policy, t: block.timestamp }, intents).callData
+    } catch (e) {
+      return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} not built, nothing signed:`, e instanceof Error ? e.message : e)
     }
     const gas = SIBLING_GAS[kind]
-    const draft = draftUserOp(safe, nonce, executeCallData(calls), { ...gas, maxFeePerGas: maxFee, maxPriorityFeePerGas: prio })
+    const draft = draftUserOp(safe, nonce, callData, { ...gas, maxFeePerGas: maxFee, maxPriorityFeePerGas: prio })
     const op = await signSessionUserOp(draft, ETHEREUM_CHAIN_ID, c.permissionId, privateKeyToAccount(key), ethereumRegistry)
     const hash = userOpHash(op, ETHEREUM_CHAIN_ID, ethereumRegistry)
     const data = handleOpsData([op], this.relayer.address)

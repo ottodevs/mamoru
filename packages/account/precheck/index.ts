@@ -3,39 +3,12 @@ import type { Address, ReasonCode } from '@mamoru/domain'
 import type { ResolvedParamRule, SessionGrant } from '@mamoru/policy'
 import type { RegistryName } from '@mamoru/registry'
 import { CALLTYPE_BATCH, CALLTYPE_SINGLE, EXECTYPE_DEFAULT, type Execution } from '../safe/index.ts'
+import { a1CallRefusal, checkA1Batch } from '../one-auth/batch.ts'
 import { checkActionPolicyCall, type ActionPolicyPoolConfig, type ActionPolicyReads, type ActionPolicySpend, type ActionPolicySpendAcc } from './action-policy.ts'
 
 export type { ActionPolicyPoolConfig, ActionPolicyReads, ActionPolicySpend } from './action-policy.ts'
 
 const SEL_EXECUTE = toFunctionSelector('function execute(bytes32,bytes)')
-/** otto/mamoru#293: MamoruActionPolicyV4's entry points a session may call (its `checkAction`), and the manager's exits. */
-const V4_ENTRY = new Set(
-  [
-    'function swap((address,address,uint256,uint256,uint160,uint256))',
-    'function mint((address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256))',
-    'function increase((uint256,uint256,uint256,uint256,uint256,uint256))',
-    'function deposit(address,uint256)',
-    'function redeem(address,uint256)',
-    'function bridge(uint32,address,uint256,uint256)',
-    'function registerRemote(uint32,address)',
-  ].map((s) => toFunctionSelector(s).toLowerCase()),
-)
-const V4_EXITS = new Set(['0x0c49ccbe', '0xfc6f7865', '0x42966c68'])
-const SEL_APPROVE = '0x095ea7b3'
-
-/**
- * otto/mamoru#293: V4's `checkAction` mirrored off chain for a V4 session (a fallback action, every call goes through
- * V4): its own entry points, an approval whose spender is V4 on any target but the position manager, the manager's
- * decrease/collect/burn (admission is V4's to check). Anything else would be refused at validation.
- */
-function v4CallRefusal(c: Execution, v4: NonNullable<SessionGrant['oneAuthV4']>): string | null {
-  if (size(c.callData) < 4) return 'empty call'
-  const sel = slice(c.callData, 0, 4).toLowerCase()
-  if (isAddressEqual(c.target, v4.policy)) return V4_ENTRY.has(sel) ? null : `V4 function ${sel}`
-  if (isAddressEqual(c.target, v4.npm)) return V4_EXITS.has(sel) ? null : `position manager function ${sel}`
-  if (sel === SEL_APPROVE && size(c.callData) === 68) return isAddressEqual(slice(c.callData, 16, 36) as Address, v4.policy) ? null : 'approval to a spender other than V4'
-  return `(${c.target}, ${sel}) is not a V4 action`
-}
 const SEL_EXECUTE_FROM_EXECUTOR = toFunctionSelector('function executeFromExecutor(bytes32,bytes)')
 const SEL_EXECUTE_USER_OP = toFunctionSelector(
   'function executeUserOp((address,uint256,bytes,bytes,bytes32,uint256,bytes32,bytes,bytes),bytes32)',
@@ -277,14 +250,19 @@ export function precheck(op: SessionUserOp, ctx: { chainId: number; now: number;
   const decoded = decodeExecute(op.callData)
   if ('code' in decoded) return deny(decoded.code, decoded.detail, permissionId)
 
+  // otto/mamoru#293, #348: a V4 session (a fallback action, every call goes through V4). Each call against V4's
+  // checkAction (static part: admission is V4's storage), then the whole batch against MamoruGasPolicyV2's A1 shape
+  // (clock first, approvals reset and asserted, checkExit before each decrease): `checkA1Batch`, the builder's own check.
   if (g.oneAuthV4) {
     if (!decoded.calls.length) return deny('POLICY_DENIED_TARGET', 'empty batch', permissionId)
+    const a1 = { chainId: g.chainId, account: g.account, policy: g.oneAuthV4.policy }
     for (const c of decoded.calls) {
-      if (c.value > 0n) return deny('POLICY_DENIED_VALUE', `native value to ${c.target}`, permissionId)
       if (isAddressEqual(c.target, g.account)) return deny('POLICY_DENIED_TARGET', 'call to the account itself', permissionId)
-      const why = v4CallRefusal(c, g.oneAuthV4)
-      if (why) return deny('POLICY_DENIED_TARGET', why, permissionId)
+      const why = a1CallRefusal(c, a1)
+      if (why) return deny(why.startsWith('native value') || why.startsWith('wrap') || why.startsWith('unwrap') ? 'POLICY_DENIED_VALUE' : 'POLICY_DENIED_TARGET', why, permissionId)
     }
+    const shape = checkA1Batch(op.callData, a1)
+    if (!shape.ok) return deny('POLICY_DENIED_CALLTYPE', `A1 batch shape: ${shape.reason}`, permissionId)
     return { ok: true, permissionId, calls: decoded.calls }
   }
 

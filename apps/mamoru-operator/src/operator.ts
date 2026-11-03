@@ -32,13 +32,13 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
-import { buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, smartSessionV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type MigrateV4Input } from '@mamoru/account/one-auth'
+import { buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, smartSessionV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReturnHome } from './return-home.ts'
 import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
 import { baseStepLines, monadStepLines, readEligiblePools, readPaused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
-import { draftUserOp, executeCallData, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
+import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
@@ -4617,7 +4617,7 @@ export class Operator {
       }
       // otto/mamoru#309 (a): a V4 activation whose funds sit at the account's own address on Ethereum (its sibling, #307)
       // deploys on Base without USDC there yet: the USDC arrives only through the sibling's bridge home, which needs this
-      // Safe deployed (V4's announceReady reads it back, A1; #348: announceReady by the operator, noema-d3). Counted from Ethereum, read on chain (siblingHoldingsUsdc).
+      // Safe deployed (V4's announceReady reads it back, A1; #348: announceReady by the operator, noema-d3: the A1 builder's { kind: 'announceReady' } intent, sent by sendV4SessionOp). Counted from Ethereum, read on chain (siblingHoldingsUsdc).
       if (!deployed && usdc < MIN_DEPLOY_USDC && !(p.kind === 'activate' && p.grants?.[0]?.grant.oneAuthV4 && ((await this.siblingHoldingsUsdc(acc.ctx).catch(() => null)) ?? 0n) >= MIN_SIBLING_DEPLOY_USDC)) return { code: 'BELOW_DEPLOY_MINIMUM' }
       // otto/mamoru#140 (part2 #6): a Safe-paid transaction needs the ETH its fee was quoted at, or the relayer pays a revert (GS011).
       if (p.tx.refund && p.feeWei && (await this.client.getBalance({ address: live.safe })) < BigInt(p.feeWei)) return { code: 'SAFE_FEE_UNFUNDED' }
@@ -6385,7 +6385,7 @@ export class Operator {
   /**
    * Base side, on a timer: a V4 home with a remote bucket registers its remote on Monad (a session userOp,
    * V4.registerRemote, lane 1), asks the Monad operator to deploy and run it, and follows V4's readiness (A1: announceReady
-   * on Monad, a CCTP message to Base; #348: announceReady by the operator, noema-d3);
+   * on Monad, a CCTP message to Base; #348: announceReady by the operator, noema-d3: the A1 builder's { kind: 'announceReady' } intent, sent by sendV4SessionOp);
    * a step 1 forwarded to Monad is settled from its status there.
    */
   async tickOneAuth(): Promise<void> {
@@ -6427,7 +6427,7 @@ export class Operator {
     const target = this.v4RemoteTarget(acc, now0.sessionKey, now0.capUsd)
     if (!target || target.address.toLowerCase() !== now0.remote.toLowerCase()) {
       // Review of #202 r2 (Opus 6): after an owner rotation the registered remote no longer matches the keys and is not
-      // ready: registered again (V4 derives it from the current owners), which announceReady then proves (#348: announceReady by the operator, noema-d3).
+      // ready: registered again (V4 derives it from the current owners), which announceReady then proves (#348: announceReady by the operator, noema-d3: the A1 builder's { kind: 'announceReady' } intent, sent by sendV4SessionOp).
       if (!now0.ready) return reregister('the registered remote is not the one the current keys give')
       logErr(`[alert] ${acc.accountKey} V4 registered remote ${now0.remote}, the account's keys give ${target?.address ?? 'nothing'}: nothing is bridged`, undefined)
       return
@@ -6440,7 +6440,8 @@ export class Operator {
       // ready, restarts the loop so the bridge follows V4's readiness.
       if (acc.active && (rec?.ready === true) !== now0.ready) this.startLoop(acc)
     }
-    // #348: announceReady by the operator, noema-d3 (until then a provisioned remote stays not ready and nothing is bridged).
+    // #348: announceReady by the operator, noema-d3 (until then a provisioned remote stays not ready and nothing is bridged):
+    // on Monad, the Monad operator's `sendV4SessionOp(remote account, [{ kind: 'announceReady', ... }])` (the A1 builder).
     if (!now0.ready && peer) {
       // Review of #202 (P0-3): with a design-C Safe still under remoteAccountKey there, the V4 remote has a key of its own.
       const res = await peer.provision({ accountKey: acc.oneAuth!.remote!.accountKey!, chainId: BRIDGE_MONAD_CHAIN_ID, address: now0.remote, owners: acc.ctx.owners, saltNonce: acc.ctx.saltNonce, passkey: acc.ctx.passkey, remote: target.spec })
@@ -6474,20 +6475,32 @@ export class Operator {
 
   /** V4.registerRemote(domain, sessionKey) as a session userOp of the account's V4 session (nonce lane 1, beside the engine's 0). */
   private async registerRemoteV4(acc: AccountState, domain: number, sessionKey: Address): Promise<void> {
+    const hash = await this.sendV4SessionOp(acc, [{ kind: 'registerRemote', domain, sessionKey }])
+    if (hash) console.log(`[v4] ${acc.accountKey} registerRemote(${domain}) userOp ${hash}`)
+  }
+
+  /**
+   * otto/mamoru#348: one userOp of the account's V4 session outside the engine (nonce lane 1, beside the engine's 0),
+   * built by the one A1 builder (`buildA1CallData`: clock at the block's time first, approvals reset and asserted) and
+   * checked by its validator before signing. registerRemote uses it; so does the operator's announceReady
+   * (#348: announceReady by the operator, noema-d3: `[{ kind: 'announceReady', safe, toDomain, sessionKey, permissionId }]`,
+   * or `[{ kind: 'relayMessage', message, attestation }]` to deliver the CCTP readiness message on the other chain).
+   * Returns the userOp hash, or null when nothing was sent (no V4 session, gas over the caps).
+   */
+  private async sendV4SessionOp(acc: AccountState, intents: A1Intent[]): Promise<Hex | null> {
     const d = this.cfg.oneAuth!
     const g = acc.grants[0]
-    if (!g?.grant.oneAuthV4 || !acc.sessionKey) return
+    if (!g?.grant.oneAuthV4 || !acc.sessionKey) return null
     const account = acc.ctx.address as Address
-    const callData = executeCallData([{ target: d.policy, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'registerRemote', args: [domain, sessionKey] }) }])
+    const block = await this.client.getBlock()
+    const { callData } = buildA1CallData({ chainId: this.cfg.chainId, account, policy: d.policy, t: block.timestamp }, intents)
     const key = sessionNonceKey(1, address('SmartSession', this.cfg.registry))
     const nonce = (await this.client.readContract({ address: address('EntryPointV07', this.cfg.registry), abi: entryPointV07Abi, functionName: 'getNonce', args: [account, key] })) as bigint
-    const block = await this.client.getBlock()
     const gas = engineGas(block.baseFeePerGas ?? 0n, GAS_CAPS_V2_BY_CHAIN[this.cfg.chainId])
-    if (!gas) return
+    if (!gas) return null
     const op = await signSessionUserOp(draftUserOp(account, nonce, callData, gas), this.cfg.chainId, g.permissionId, privateKeyToAccount(acc.sessionKey), this.cfg.registry)
     const bundler = new BundlerClient({ url: this.cfg.bundlerUrl, mode: 'live', chainId: this.cfg.chainId, signingChainIds: [this.cfg.chainId], registry: this.cfg.registry })
-    const hash = await bundler.sendUserOperation(op)
-    console.log(`[v4] ${acc.accountKey} registerRemote(${domain}) userOp ${hash}`)
+    return bundler.sendUserOperation(op)
   }
 
   /**

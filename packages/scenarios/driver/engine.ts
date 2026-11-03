@@ -26,6 +26,7 @@ import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck, type ActionPolicyPoolConfig } from '@mamoru/account/precheck'
 import { draftUserOp, executeCallData, handleOpsData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
 import type { Execution } from '@mamoru/account/safe'
+import { A1BatchError, buildA1Batch, type A1Intent } from '@mamoru/account/one-auth'
 import { policyIncrease, uniswapV3, type UniswapV3, type V3Call } from '@mamoru/uniswap-v3'
 import { minOut, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { diverges, swapMinimum, twapFloor as deviationFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
@@ -131,17 +132,13 @@ function atLeastV2(ap: PolicyVersion['actionPolicy'] | undefined): ap is NonNull
 /**
  * otto/mamoru#293 (spec 010): MamoruActionPolicyV4. Its price checks, pause, admission, mint through the policy and
  * increase are V3's (so every atLeastV2 path holds), but I1 sends every spending action through V4 itself: a swap is
- * `approve(V4) + V4.swap(.., deadline)` (no router call, no `multicall(deadline)`), a bridge `approve(V4) + V4.bridge`.
+ * V4.swap(.., deadline) (no router call, no `multicall(deadline)`), a bridge V4.bridge. otto/mamoru#348: every V4 batch
+ * comes from `buildA1Batch` (`Engine.a1`), in MamoruGasPolicyV2's A1 shape: clock(T) first, each approval of V4 reset to
+ * 0 and asserted, checkExit right before each decrease.
  */
 function isV4Policy(ap: PolicyVersion['actionPolicy'] | undefined): ap is NonNullable<PolicyVersion['actionPolicy']> {
   return ap?.contractVersion === 4
 }
-
-const v4SwapAbi = parseAbi([
-  'struct SwapParams { address pool; address tokenIn; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; uint256 deadline; }',
-  'function swap(SwapParams s) returns (uint256 amountOut)',
-  'function bridge(uint32 domain, address token, uint256 amount, uint256 maxFee)',
-])
 
 /** CCTP V2 Standard finality: attested at finality, no fee. The only threshold the bridge-out grant allows (>= 2000). */
 export const CCTP_STANDARD_FINALITY = 2000
@@ -1472,7 +1469,7 @@ export class Engine {
    * is halved, at most V4_SWAP_SIZE_DOWN_STEPS times, until the quote fills the whole input within the limit and meets
    * the bound. No size works: not sent (EHG_PRICE_DIVERGENCE). The prepared quote names the size sent.
    */
-  private async prepareV4Swap(p: Extract<Proposal, { kind: 'enter_swap' }>, blockNumber: bigint, session: EngineSession, deadline: bigint, v4: NonNullable<ReturnType<Engine['v4PoolConfig']>>): Promise<Prepared> {
+  private async prepareV4Swap(p: Extract<Proposal, { kind: 'enter_swap' }>, blockNumber: bigint, timestamp: bigint, session: EngineSession, deadline: bigint, v4: NonNullable<ReturnType<Engine['v4PoolConfig']>>): Promise<Prepared> {
     const oracle = await this.priceGuardV4(p.pool, blockNumber, v4.twapShortSeconds)
     const range = this.v4Range(p.pool, v4, oracle)
     const zeroForOne = entry(p.pool, this.registry).token0 === p.tokenIn
@@ -1485,7 +1482,7 @@ export class Engine {
         let amountOutMinimum = await this.swapMin({ ...p, amountIn }, q.amountOut, blockNumber, oracle.twapLong)
         if (bound.minOut > amountOutMinimum) amountOutMinimum = bound.minOut
         if (isV4Policy(this.cfg.policy.actionPolicy)) {
-          return { quote: { amountIn, amountOut: q.amountOut, amountOutMinimum }, calls: this.v4SwapCalls(p.pool, p.tokenIn, amountIn, amountOutMinimum, bound.sqrtPriceLimitX96, deadline), expiresAt: deadline }
+          return { quote: { amountIn, amountOut: q.amountOut, amountOutMinimum }, calls: this.v4SwapCalls(p.pool, p.tokenIn, amountIn, amountOutMinimum, bound.sqrtPriceLimitX96, deadline, timestamp), expiresAt: deadline }
         }
         const expiry = this.swapExpiry(session, deadline)
         return {
@@ -1509,7 +1506,7 @@ export class Engine {
    * the price strictly inside it, the divergence check and a non-empty policy range. Minimums as for a mint, from the
    * same quote over the position's range.
    */
-  private async prepareIncrease(p: Extract<Proposal, { kind: 'increase_liquidity' }>, blockNumber: bigint, deadline: bigint): Promise<Prepared> {
+  private async prepareIncrease(p: Extract<Proposal, { kind: 'increase_liquidity' }>, blockNumber: bigint, deadline: bigint, timestamp: bigint): Promise<Prepared> {
     const v4 = this.v4PoolConfig(p.pool)
     if (!v4 || !atLeastV2(this.cfg.policy.actionPolicy)) throw new ReasonError('SESSION_MISSING', `${p.grant}: no MamoruActionPolicyV2 covers ${p.pool}; no session may call the position manager's increaseLiquidity`)
     const oracle = await this.priceGuardV4(p.pool, blockNumber, v4.twapShortSeconds)
@@ -1528,6 +1525,10 @@ export class Engine {
     }
     if (!(p.tickLower < tick && tick < p.tickUpper)) throw new ReasonError('OP_DECISION_STALE', `${p.pool}: tick ${tick} is not inside [${p.tickLower}, ${p.tickUpper}]`)
     const q = quoteMint({ sqrtPriceX96, tickLower: p.tickLower, tickUpper: p.tickUpper, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, slippageBps: this.cfg.policy.execution.slippageBps })
+    if (isV4Policy(this.cfg.policy.actionPolicy)) {
+      const params = { tokenId: p.tokenId, amount0Desired: p.amount0Desired, amount1Desired: p.amount1Desired, amount0Min: q.amount0Min, amount1Min: q.amount1Min, deadline }
+      return { expiresAt: deadline, calls: this.a1([{ kind: 'increase', token0: address(pool.token0!, this.registry), token1: address(pool.token1!, this.registry), params }], timestamp) }
+    }
     return {
       expiresAt: deadline,
       calls: [
@@ -1565,34 +1566,37 @@ export class Engine {
    * on-chain expiry (CCTP has none): a late landing is a real burn, which the operator's bridge journal counts in flight
    * from before signing until the chain settles it.
    */
-  /** otto/mamoru#293: a V4 swap: approve V4 for exactly `amountIn`, then V4.swap (recipient the account, deadline on chain). */
-  private v4SwapCalls(pool: RegistryName, tokenIn: RegistryName, amountIn: bigint, amountOutMinimum: bigint, sqrtPriceLimitX96: bigint, deadline: bigint): Execution[] {
-    const v4 = this.cfg.policy.actionPolicy!.address
-    const token = address(tokenIn, this.registry)
-    return [
-      { target: token, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [v4, amountIn] }) },
-      { target: v4, value: 0n, callData: encodeFunctionData({ abi: v4SwapAbi, functionName: 'swap', args: [{ pool: entry(pool, this.registry).address, tokenIn: token, amountIn, amountOutMinimum, sqrtPriceLimitX96, deadline }] }) },
-    ]
+  /**
+   * otto/mamoru#348: the V4 session batch of `intents` at claimed time `t` (the prepare block's timestamp), from the one
+   * builder: clock(t), each approval of V4 reset and asserted, checkExit before each decrease. An intent V4 would refuse
+   * whatever the chain state is never prepared.
+   */
+  private a1(intents: A1Intent[], t: bigint): Execution[] {
+    try {
+      return buildA1Batch({ chainId: this.cfg.chainId, account: this.cfg.account, policy: this.cfg.policy.actionPolicy!.address, t }, intents)
+    } catch (e) {
+      if (e instanceof A1BatchError) throw new ReasonError('POLICY_DENIED_CALLTYPE', e.message)
+      throw e
+    }
+  }
+
+  /** otto/mamoru#293: a V4 swap: approve V4 for exactly `amountIn`, V4.swap (recipient the account, deadline on chain), reset. */
+  private v4SwapCalls(pool: RegistryName, tokenIn: RegistryName, amountIn: bigint, amountOutMinimum: bigint, sqrtPriceLimitX96: bigint, deadline: bigint, t: bigint): Execution[] {
+    return this.a1([{ kind: 'swap', params: { pool: entry(pool, this.registry).address, tokenIn: address(tokenIn, this.registry), amountIn, amountOutMinimum, sqrtPriceLimitX96, deadline } }], t)
   }
 
   /**
    * otto/mamoru#293: a V4 bridge-out: approve V4 for exactly `amount` of the savings token, then V4.bridge(domain, token,
    * amount). V4 mints only to the remote the guardian marked ready; the engine needs that address to check the burn.
    */
-  private prepareBridgeOutV4(p: Extract<Proposal, { kind: 'bridge_out' }>): Prepared {
+  private prepareBridgeOutV4(p: Extract<Proposal, { kind: 'bridge_out' }>, t: bigint): Prepared {
     const domain = CCTP_DOMAIN_BY_CHAIN[p.chainId]
     if (domain === undefined || p.chainId === this.cfg.chainId) throw new ReasonError('POLICY_DENIED_TARGET', `bridge_out to chain ${p.chainId}: no CCTP domain known for it, or this chain`)
     if (p.amount <= 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `bridge_out of ${p.amount}`)
     this.bridgeRecipient() // refuses when V4 has no ready remote (a home) or no home (a remote, #278)
-    const v4 = this.cfg.policy.actionPolicy!.address
     const token = address(this.cfg.policy.savingsAsset, this.registry)
-    return {
-      expiresAt: null,
-      calls: [
-        { target: token, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [v4, p.amount] }) },
-        { target: v4, value: 0n, callData: encodeFunctionData({ abi: v4SwapAbi, functionName: 'bridge', args: [domain, token, p.amount, 0n] }) },
-      ],
-    }
+    // #345 P2-5: maxFee 0 (CCTP Standard carries no fee today); the builder refuses one over the chain's cap.
+    return { expiresAt: null, calls: this.a1([{ kind: 'bridge', domain, token, amount: p.amount, maxFee: 0n }], t) }
   }
 
   private prepareBridgeOut(p: Extract<Proposal, { kind: 'bridge_out' }>): Prepared {
@@ -1626,7 +1630,7 @@ export class Engine {
    * No on-chain expiry: ERC-4626 has no deadline and the share price only moves with the vault's interest, so a late
    * landing deposits or redeems at that later price, within the grant's caps.
    */
-  private async prepareVault(p: Extract<Proposal, { kind: 'vault_deposit' | 'vault_redeem' }>, blockNumber: bigint): Promise<Prepared> {
+  private async prepareVault(p: Extract<Proposal, { kind: 'vault_deposit' | 'vault_redeem' }>, blockNumber: bigint, timestamp: bigint): Promise<Prepared> {
     const e = entry(p.vault, this.registry)
     if (e.kind !== 'vault') throw new ReasonError('POLICY_TARGET_NOT_IN_REGISTRY', `${p.vault} is not a vault of the ${this.registry.chain} registry`)
     if (!this.cfg.policy.buckets.some((b) => b.vaults?.includes(p.vault))) throw new ReasonError('POLICY_DENIED_TARGET', `${p.vault} is not a vault of ${this.cfg.policy.policyId}`)
@@ -1649,10 +1653,13 @@ export class Engine {
         // Live 2 Nov (b54dda3a, gtUSDCp): the simulation runs at a later block than this preview, where the vault's interest
         // has raised the share price, so it mints a few parts per billion fewer shares; every deposit was discarded.
         quote: { amountIn: p.assets, amountOut: shares, amountOutMinimum: vaultMinimumOf(shares) },
-        calls: [
-          { target: token, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [e.address, p.assets] }) },
-          { target: e.address, value: 0n, callData: encodeFunctionData({ abi: erc4626Abi, functionName: 'deposit', args: [p.assets, acct] }) },
-        ],
+        // #348: under V4 the deposit is V4.deposit (it pulls the assets and deposits them for the account, I1).
+        calls: isV4Policy(this.cfg.policy.actionPolicy)
+          ? this.a1([{ kind: 'deposit', vault: e.address, asset: token, assets: p.assets }], timestamp)
+          : [
+              { target: token, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [e.address, p.assets] }) },
+              { target: e.address, value: 0n, callData: encodeFunctionData({ abi: erc4626Abi, functionName: 'deposit', args: [p.assets, acct] }) },
+            ],
       }
     }
     if (p.shares <= 0n) throw new ReasonError('POLICY_DENIED_AMOUNT', `vault_redeem of ${p.shares} shares`)
@@ -1666,7 +1673,8 @@ export class Engine {
     return {
       expiresAt: null,
       quote: { amountIn: shares, amountOut: assets, amountOutMinimum: vaultMinimumOf(assets) },
-      calls: [{ target: e.address, value: 0n, callData: encodeFunctionData({ abi: erc4626Abi, functionName: 'redeem', args: [shares, acct, acct] }) }],
+      // #348: under V4 the redeem is V4.redeem (it pulls the shares, the assets go to the account).
+      calls: isV4Policy(this.cfg.policy.actionPolicy) ? this.a1([{ kind: 'redeem', vault: e.address, shares }], timestamp) : [{ target: e.address, value: 0n, callData: encodeFunctionData({ abi: erc4626Abi, functionName: 'redeem', args: [shares, acct, acct] }) }],
     }
   }
 
@@ -1698,11 +1706,11 @@ export class Engine {
     // Every priced call of the batch expires on chain at the same time (NonfungiblePositionManager and SwapRouter02).
     const deadline = timestamp + BigInt(this.cfg.policy.execution.observationTtlSeconds)
     await this.refuseWhilePaused(blockNumber)
-    if (p.kind === 'bridge_out') return isV4Policy(this.cfg.policy.actionPolicy) ? this.prepareBridgeOutV4(p) : this.prepareBridgeOut(p)
-    if (p.kind === 'vault_deposit' || p.kind === 'vault_redeem') return this.prepareVault(p, blockNumber)
+    if (p.kind === 'bridge_out') return isV4Policy(this.cfg.policy.actionPolicy) ? this.prepareBridgeOutV4(p, timestamp) : this.prepareBridgeOut(p)
+    if (p.kind === 'vault_deposit' || p.kind === 'vault_redeem') return this.prepareVault(p, blockNumber, timestamp)
     // MamoruActionPolicyV2 accounts (v5) quote their swaps with the price limit; the deployed V1's (v4) keep the path below.
     const v4Swap = p.kind === 'enter_swap' && atLeastV2(this.cfg.policy.actionPolicy) ? this.v4PoolConfig(p.pool) : undefined
-    if (p.kind === 'enter_swap' && v4Swap) return this.prepareV4Swap(p, blockNumber, session, deadline, v4Swap)
+    if (p.kind === 'enter_swap' && v4Swap) return this.prepareV4Swap(p, blockNumber, timestamp, session, deadline, v4Swap)
     if (p.kind === 'enter_swap' && isV4Policy(this.cfg.policy.actionPolicy)) throw new ReasonError('SESSION_MISSING', `${p.pool}: MamoruRegistry lists no parameters V4 could price it with`)
     if (p.kind === 'enter_swap') {
       const amountOut = await this.v3.quoteExactInputSingle(this.client, { tokenIn: address(p.tokenIn, this.registry), tokenOut: address(p.tokenOut, this.registry), fee: p.fee, amountIn: p.amountIn, blockNumber })
@@ -1773,6 +1781,7 @@ export class Engine {
         recipient: acct,
         deadline,
       }
+      if (isV4Policy(this.cfg.policy.actionPolicy)) return { expiresAt: deadline, calls: this.a1([{ kind: 'mint', params: mintParams }], timestamp) }
       const approveToPolicy = (tokenName: RegistryName, amount: bigint): Execution => ({
         target: address(tokenName, this.registry),
         value: 0n,
@@ -1817,14 +1826,23 @@ export class Engine {
           if (bound.amount0Min > amount0Min) amount0Min = bound.amount0Min
           if (bound.amount1Min > amount1Min) amount1Min = bound.amount1Min
         }
+        if (isV4Policy(this.cfg.policy.actionPolicy)) {
+          // #348 (I9): checkExit with the decrease's own arguments right before it, then collect (and burn).
+          return { calls: this.a1([{ kind: 'decrease', tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline, burn: p.kind === 'rerange' }], timestamp), expiresAt: deadline }
+        }
         calls.push(this.v3.decreaseLiquidity({ tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline }))
+      }
+      if (isV4Policy(this.cfg.policy.actionPolicy)) {
+        const intents: A1Intent[] = [{ kind: 'collect', tokenId: p.tokenId }]
+        if (p.kind === 'rerange') intents.push({ kind: 'burn', tokenId: p.tokenId })
+        return { calls: this.a1(intents, timestamp), expiresAt: null }
       }
       calls.push(this.v3.collect({ account: acct, tokenId: p.tokenId }))
       if (p.kind === 'rerange') calls.push(this.v3.burn(p.tokenId))
       // Without a decrease the batch prices nothing (collect and burn to the account): late, it is harmless.
       return { calls: calls.map(exec), expiresAt: liquidity > 0n ? deadline : null }
     }
-    if (p.kind === 'increase_liquidity') return this.prepareIncrease(p, blockNumber, deadline)
+    if (p.kind === 'increase_liquidity') return this.prepareIncrease(p, blockNumber, deadline, timestamp)
     // otto/mamoru#140: a harvest only collects, to the account. A conversion in the same batch swapped a fixed amount
     // checked against the simulated Collect only: if the fees were collected elsewhere before inclusion, it swapped
     // idle principal instead. The volatile fees stay in the account, where a later idle sell-back (priced at the
@@ -1832,6 +1850,7 @@ export class Engine {
     if (p.convert) throw new ReasonError('EHG_SIM_DELTA_MISMATCH', `harvest of ${p.tokenId} asks to convert ${p.convert.amount} ${p.convert.token}: harvests only collect`)
     const owedAt = await principalOwedBefore(this.client, [p.tokenId], this.historyFromBlock, { block: blockNumber + 1n, logIndex: 0 }, this.registry)
     const owed = owedAt.get(p.tokenId) ?? [0n, 0n]
+    if (isV4Policy(this.cfg.policy.actionPolicy)) return { calls: this.a1([{ kind: 'collect', tokenId: p.tokenId }], timestamp), owed, expiresAt: null }
     return { calls: [this.v3.collect({ account: acct, tokenId: p.tokenId })].map(exec), owed, expiresAt: null }
   }
 
