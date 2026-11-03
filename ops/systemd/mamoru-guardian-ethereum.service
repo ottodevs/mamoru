@@ -5,14 +5,15 @@
 #   MAMORU_GUARDIAN_RPC_URL_8453=<Base RPC>            where it reads the sibling's home back
 #   MAMORU_GUARDIAN_FROM_BLOCK_1=26328650              V4 deploy block on Ethereum (T7, 2 Nov, tx 0xbe41d070…)
 #   (state dir: set by this unit, below; an env file does not expand %h)
-#   MAMORU_GUARDIAN_KEY_FILE=<the guardian key, 0600>  V4.GUARDIAN 0xA8E6…; needs ETH on Ethereum for setReady
+#   MAMORU_GUARDIAN_KEYSTORE=<keystore, 0600> + MAMORU_GUARDIAN_KEYSTORE_PASSWORD_FILE=<0600>  (#338; or MAMORU_GUARDIAN_KEY_FILE)
+#                                                      V4.GUARDIAN 0xA8E6…; needs ETH on Ethereum for setReady
 #   MAMORU_GUARDIAN_WEBHOOK_FILE=...                    as the Base instance
 # V4, gas policy and registry come from packages/registry/ethereum.json once T7 is pinned (or the *_ADDRESS vars).
 # TEMPLATE user unit (systemctl --user), otto/mamoru#293 item 6 (spec 010 I4/I7). Not installed by anything in the repo.
 # Install at ~/.config/systemd/user/mamoru-guardian-ethereum.service, BESIDE the Base unit mamoru-guardian.service (never over
 # it); see ops/systemd/README.md and apps/mamoru-guardian/README.md.
 #
-# The guardian is a SEPARATE process from the operator: its own key (MAMORU_GUARDIAN_KEY_FILE, 0600, never in the env
+# The guardian is a SEPARATE process from the operator: its own key (an encrypted keystore or MAMORU_GUARDIAN_KEY_FILE, 0600, never in the env
 # file itself), its own state dir, no shared code path. The operator unit never reads this key or this env file.
 #
 # WorkingDirectory is a checkout of the repo with `bun install` done (adjust to wherever you keep it; unlike the operator
@@ -46,7 +47,7 @@ RestartPreventExitStatus=78
 # State file, key and webhook files are 0600; never create anything group/other-readable.
 UMask=0077
 
-# Secrets it reads: MAMORU_GUARDIAN_KEY_FILE and MAMORU_GUARDIAN_WEBHOOK_FILE (paths set in the env file above). It never
+# Secrets it reads: the keystore and its password file (or MAMORU_GUARDIAN_KEY_FILE) and MAMORU_GUARDIAN_WEBHOOK_FILE (paths set in the env file above). It never
 # reads ~/.config/mamoru-guardian-alert/. Reads the repo and those files, writes only its state dir.
 NoNewPrivileges=true
 PrivateTmp=true

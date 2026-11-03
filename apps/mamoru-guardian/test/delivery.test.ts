@@ -101,8 +101,13 @@ describe('config errors exit 78 (EX_CONFIG); transient ones exit 1', () => {
       ['MAMORU_GUARDIAN_FROM_BLOCK_8453: not a block number', { ...baseEnv(), MAMORU_GUARDIAN_FROM_BLOCK_8453: '-4' }],
       ['MAMORU_GUARDIAN_FROM_BLOCK_8453 is required on first start', { ...baseEnv(), MAMORU_GUARDIAN_FROM_BLOCK_8453: undefined }],
       ['answers another chain id', baseEnv(), onChain(1)],
-      ['MAMORU_GUARDIAN_KEY_FILE is required', { ...baseEnv(), MAMORU_GUARDIAN_DRY_RUN: undefined }],
+      ['MAMORU_GUARDIAN_KEY_FILE or MAMORU_GUARDIAN_KEYSTORE is required', { ...baseEnv(), MAMORU_GUARDIAN_DRY_RUN: undefined }],
       ['MAMORU_GUARDIAN_KEY_FILE: ENOENT', { ...baseEnv(), MAMORU_GUARDIAN_KEY_FILE: '/nonexistent/key' }],
+      // #338: the keystore and its password file go together, and never beside a plaintext key file
+      ['MAMORU_GUARDIAN_KEYSTORE: ENOENT', { ...baseEnv(), MAMORU_GUARDIAN_KEYSTORE: '/nonexistent/ks', MAMORU_GUARDIAN_KEYSTORE_PASSWORD_FILE: '/nonexistent/pass' }],
+      ['go together', { ...baseEnv(), MAMORU_GUARDIAN_KEYSTORE: '/nonexistent/ks' }],
+      ['go together', { ...baseEnv(), MAMORU_GUARDIAN_KEYSTORE_PASSWORD_FILE: '/nonexistent/pass' }],
+      ['not both', { ...baseEnv(), MAMORU_GUARDIAN_KEY_FILE: '/nonexistent/key', MAMORU_GUARDIAN_KEYSTORE: '/nonexistent/ks', MAMORU_GUARDIAN_KEYSTORE_PASSWORD_FILE: '/nonexistent/pass' }],
       ['MAMORU_GUARDIAN_STATE_DIR: not an absolute path', { ...baseEnv(), MAMORU_GUARDIAN_STATE_DIR: '%h/.local/state/mamoru-guardian-ethereum' }],
       ['MAMORU_GUARDIAN_STATE_DIR: not an absolute path', { ...baseEnv(), MAMORU_GUARDIAN_STATE_DIR: 'state' }],
     ]

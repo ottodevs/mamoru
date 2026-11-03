@@ -9,7 +9,7 @@ import { mamoruActionPolicyV4Abi } from '@mamoru/account/one-auth'
 import { oneAuthV4Deployment, V4_DOMAIN_BY_CHAIN } from '@mamoru/policy'
 import { registryFor } from '@mamoru/registry'
 import { ConsoleAlerter, MattermostAlerter, TeeAlerter, webhookUrlFromFile, type Alerter } from './alerts.ts'
-import { loadGuardianAccount } from './key.ts'
+import { loadGuardianAccount, loadGuardianKeystore } from './key.ts'
 import { StateStore } from './state.ts'
 import { readAllowlist, runPass, type ChainClient, type WatcherConfig } from './watcher.ts'
 
@@ -165,14 +165,20 @@ export async function run(env: Env, alerter: Alerter, makeClient: MakeClient = (
   let send: (a: { account: Address; domain: number; remote: Address }) => Promise<Hex>
   let clear: ((a: { account: Address; domain: number }) => Promise<Hex>) | undefined
   const keyFile = env.MAMORU_GUARDIAN_KEY_FILE
-  if (!keyFile && !dryRun) throw new ConfigError('MAMORU_GUARDIAN_KEY_FILE is required (or run with --dry-run)')
-  if (keyFile) {
+  const keystore = env.MAMORU_GUARDIAN_KEYSTORE
+  const keystorePass = env.MAMORU_GUARDIAN_KEYSTORE_PASSWORD_FILE
+  // #338: one source of the key, never both; a keystore always comes with its password file.
+  if (keyFile && keystore) throw new ConfigError('set MAMORU_GUARDIAN_KEY_FILE or MAMORU_GUARDIAN_KEYSTORE, not both')
+  if (!!keystore !== !!keystorePass) throw new ConfigError('MAMORU_GUARDIAN_KEYSTORE and MAMORU_GUARDIAN_KEYSTORE_PASSWORD_FILE go together')
+  if (!keyFile && !keystore && !dryRun) throw new ConfigError('MAMORU_GUARDIAN_KEY_FILE or MAMORU_GUARDIAN_KEYSTORE is required (or run with --dry-run)')
+  if (keyFile || keystore) {
     let account: ReturnType<typeof loadGuardianAccount>
+    const label = keyFile ? 'MAMORU_GUARDIAN_KEY_FILE' : 'MAMORU_GUARDIAN_KEYSTORE'
     try {
-      account = loadGuardianAccount(keyFile)
+      account = keyFile ? loadGuardianAccount(keyFile) : loadGuardianKeystore(keystore!, keystorePass!)
     } catch (e) {
-      // The messages of loadGuardianAccount never carry the key; a missing file says ENOENT without the content.
-      throw new ConfigError((e as NodeJS.ErrnoException).code ? `MAMORU_GUARDIAN_KEY_FILE: ${(e as NodeJS.ErrnoException).code}` : (e as Error).message)
+      // The loaders' messages never carry the key or the password; a missing file says ENOENT without the content.
+      throw new ConfigError((e as NodeJS.ErrnoException).code ? `${label}: ${(e as NodeJS.ErrnoException).code}` : (e as Error).message)
     }
     const guardian = (await home.readContract({ address: v4, abi: mamoruActionPolicyV4Abi, functionName: 'GUARDIAN' })) as Address
     if (guardian.toLowerCase() !== account.address.toLowerCase()) throw new ConfigError('the guardian key is not V4.GUARDIAN')
