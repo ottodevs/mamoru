@@ -224,22 +224,44 @@
       "role": "MamoruMigrationCheck: la comprobación final de la transacción de migración a V4 (solo queda la sesión V4); sin argumentos ni estado, CREATE2 con el deployer determinista (salt mamoru.v4.migration-check): la misma dirección que DeployV4.s.sol de A1 espera (EXPECTED_CHECK), así que T8 la reutiliza. Desplegado el 2026-11-02 con T7 (otto/mamoru#292/#307) por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0, misma dirección en Base, Monad y Ethereum; Sourcify exact_match; codeHash leído en el bloque 118824248, no en el del pin",
       "address": "0xc04046b4649471875372FA9e800143491cD4fB31",
       "codeHash": "0x57311ce323fd44ab4727b2c12aaeb5b9a2f6d0cd531978a659a4b5ed740ca769"
-    }
-  ],
-  "undeployed": [
-    {
-      "name": "MamoruActionPolicyV4",
-      "address": null
-    },
-    {
-      "name": "MamoruGasPolicyV2",
-      "address": null
     },
     {
       "name": "MamoruV4Table",
-      "address": null
+      "kind": "read",
+      "role": "MamoruV4Table de A1: la tabla sin admin de pools, bóvedas, rutas y topes de gas por cadena (MamoruV4Chains), fija en el bytecode; CREATE2 con el deployer determinista 0x4e59b44847b379578588920ca78fbf26c0b4956c, tx 0xd3a6a097a21fac2262fbf5195c482b668225640c3a7c14b874a81b4de1099793, bloque 119002953; desplegado el 2026-11-03 (T8, spec 010 A1, otto/mamoru#348) por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con script/DeployV4.s.sol en main 7d8139f8, misma dirección en Base, Ethereum y Monad; DeployV4.s.sol verify() sale 0 en las tres; codeHash leído en el bloque 119003507, no en el del pin",
+      "address": "0x1e3a8EA397941791A6E5bcB797CC207deF563Ad3",
+      "codeHash": "0x8c3bf4e20f30859b9bc9654de796632bbd6589e153873687fcba762db4880db5"
+    },
+    {
+      "name": "MamoruGasPolicyV2",
+      "kind": "smart-sessions-policy",
+      "role": "MamoruGasPolicyV2 de A1: la única userOp policy de la sesión V4 (topes por op, bucket y forma del lote, leídos de MamoruV4Table 0x1e3a8EA397941791A6E5bcB797CC207deF563Ad3); ModuleRegistry.deployModule, tx 0xeb0c5b39ca239c3182fd575ec50f3b8da40a64ac4bd1f73ddebf08b6c3cb2c27, bloque 119002959; desplegado el 2026-11-03 (T8, spec 010 A1, otto/mamoru#348) por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con script/DeployV4.s.sol en main 7d8139f8, misma dirección en Base, Ethereum y Monad; DeployV4.s.sol verify() sale 0 en las tres; codeHash leído en el bloque 119003507, no en el del pin",
+      "address": "0xEF86039BcCB06CDC1d16F3f424059D0084Da6C5C",
+      "codeHash": "0xa85f9c3f11ef515578c4dd41481646245abfde007ba1a7c9f4689d8707e0ada1"
+    },
+    {
+      "name": "MamoruActionPolicyV4",
+      "kind": "smart-sessions-policy",
+      "role": "MamoruActionPolicyV4 de A1 (una autorización, spec 010): la única action policy de la sesión V4 de cada cuenta, sin guardián ni admin; inmutables GAS_POLICY 0xEF86039BcCB06CDC1d16F3f424059D0084Da6C5C, TABLE 0x1e3a8EA397941791A6E5bcB797CC207deF563Ad3, HELPER 0x305cA9b816c3a3D8760c610352de60F091D9B31A y REMOTE_INIT 0x57f2B890A42F49E2994820d292623Ebf3061a41c (los dos últimos creados por su constructor); ModuleRegistry.deployModule, tx 0xa1bcf05b44884b31d887caa982a2a54e69d3bee3d0a168e8ba8e50ede8edd32d, bloque 119002966; desplegado el 2026-11-03 (T8, spec 010 A1, otto/mamoru#348) por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con script/DeployV4.s.sol en main 7d8139f8, misma dirección en Base, Ethereum y Monad; DeployV4.s.sol verify() sale 0 en las tres; codeHash leído en el bloque 119003507, no en el del pin",
+      "address": "0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8",
+      "codeHash": "0xf528a3695007591e38bfa96a01c55e588fb91a26d7af3aaffa3fa5f8d6236313"
+    },
+    {
+      "name": "MamoruV4Helper",
+      "kind": "read",
+      "role": "MamoruV4Helper de A1: creado por el constructor de MamoruActionPolicyV4 0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8 (su HELPER inmutable) en la tx 0xa1bcf05b44884b31d887caa982a2a54e69d3bee3d0a168e8ba8e50ede8edd32d, bloque 119002966; ningún código lo llama por nombre: fijado para que su código quede comprobado; desplegado el 2026-11-03 (T8, spec 010 A1, otto/mamoru#348) por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con script/DeployV4.s.sol en main 7d8139f8, misma dirección en Base, Ethereum y Monad; DeployV4.s.sol verify() sale 0 en las tres; codeHash leído en el bloque 119003507, no en el del pin",
+      "address": "0x305cA9b816c3a3D8760c610352de60F091D9B31A",
+      "codeHash": "0x950baa67a23a7d2d6d6439be9c185d6897a7b25e812697728b5435aa3a169e59"
+    },
+    {
+      "name": "MamoruRemoteInit",
+      "kind": "read",
+      "role": "MamoruRemoteInit de A1: creado por el constructor de MamoruActionPolicyV4 0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8 (su REMOTE_INIT inmutable) en la tx 0xa1bcf05b44884b31d887caa982a2a54e69d3bee3d0a168e8ba8e50ede8edd32d, bloque 119002966; ningún código lo llama por nombre: fijado para que su código quede comprobado; desplegado el 2026-11-03 (T8, spec 010 A1, otto/mamoru#348) por 0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0 con script/DeployV4.s.sol en main 7d8139f8, misma dirección en Base, Ethereum y Monad; DeployV4.s.sol verify() sale 0 en las tres; codeHash leído en el bloque 119003507, no en el del pin",
+      "address": "0x57f2B890A42F49E2994820d292623Ebf3061a41c",
+      "codeHash": "0xa25cf797c2f5afbaf601a82a0a52932ff43b4fc30a47ff082b793585b94afa1a"
     }
   ],
+  "undeployed": [],
   "retired": [
     {
       "name": "MamoruRegistry",

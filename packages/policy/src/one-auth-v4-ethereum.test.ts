@@ -62,10 +62,10 @@ describe('Ethereum in the V4 tables (otto/mamoru#307, #308)', () => {
     }
   })
 
-  test('the ethereum registry resolves; V4 is not pinned anywhere until T8 (#348: T7 retired, A1 undeployed)', () => {
+  test('the ethereum registry resolves; V4 is pinned as T8 at the same addresses on Ethereum, Base and Monad (#348)', () => {
     expect(registryFor(1)).toBe(ethereumRegistry)
-    expect(oneAuthV4Deployment(ethereumRegistry)).toBeNull()
-    expect(oneAuthV4Deployment(registryFor(8453))).toBeNull()
+    const t8 = { policy: '0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8', gasPolicy: '0xEF86039BcCB06CDC1d16F3f424059D0084Da6C5C', migrationCheck: '0xc04046b4649471875372FA9e800143491cD4fB31', table: '0x1e3a8EA397941791A6E5bcB797CC207deF563Ad3' } as const
+    for (const id of [1, 8453, 143]) expect(oneAuthV4Deployment(registryFor(id)), String(id)).toEqual(t8)
   })
 })
 

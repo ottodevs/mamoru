@@ -9,8 +9,10 @@ V4 is aligned with spec 009 (`specs/009-hermetic-infra`) before it goes on chain
 admin**. What A1 changes is listed in "Amendment A1" below; the sections that follow are already written as amended.
 Status: spec r2 + A1. T7, the guardian-era V4 stack (`MamoruRegistry`, `MamoruActionPolicyV4`, `MamoruGasPolicyV2`
 and `MamoruMigrationCheck`), was deployed on Base, Monad and Ethereum on 2 Nov and is retired unused (otto/mamoru#348):
-no account ever ran on it. A1 deploys as T8 at new addresses after #345. Until then `packages/registry/*.json` lists
-`MamoruActionPolicyV4`, `MamoruGasPolicyV2` and `MamoruV4Table` as undeployed, so every V4 path stays off.
+no account ever ran on it. A1 was deployed as T8 at new addresses on 3 Nov (Base, Ethereum and Monad, same addresses,
+`DeployV4.s.sol` `verify()` exits 0 on all three) and `packages/registry/*.json` pins `MamoruV4Table`,
+`MamoruGasPolicyV2`, `MamoruActionPolicyV4`, `MamoruV4Helper` and `MamoruRemoteInit` (results
+`t8-deploy-2026-11-03.md`). Each account is offered V4 only through the `one_auth_v4` flag.
 
 **T7 retired (otto/mamoru#348).** The three T7 contracts with a guardian or an admin are recorded under `retired` in each
 registry file, which refuses an entry at a retired address. Never pin them again:
@@ -492,7 +494,8 @@ CCTP `maxFee = 0`: the caller names it, capped per chain and charged.
    (`V4_OP_GAS`, `SIBLING_GAS`), since the rate charges limits, not use. T8's predicted addresses with this table
    (`DeployV4.s.sol` `EXPECTED_*`): MamoruV4Table `0x1e3a8EA397941791A6E5bcB797CC207deF563Ad3`, MamoruGasPolicyV2
    `0xEF86039BcCB06CDC1d16F3f424059D0084Da6C5C`, MamoruActionPolicyV4 `0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8`,
-   MamoruMigrationCheck `0xc04046b4649471875372FA9e800143491cD4fB31` (unchanged, reused).
+   MamoruMigrationCheck `0xc04046b4649471875372FA9e800143491cD4fB31` (unchanged, reused). Deployed at these addresses
+   on 3 Nov (results `t8-deploy-2026-11-03.md`).
 
 ## Tasks
 
@@ -537,4 +540,6 @@ CCTP `maxFee = 0`: the caller names it, capped per chain and charged.
   5. withdraw (one signature).
 - **T7** deploy (Ot's GO in the deploying session): V4, gas policy and migration check on Base, Monad and Ethereum;
   `/ops` #296; beta with Brais's account; then prod. Nothing with a guardian or a registry admin is deployed. The first
-  V4 grant waits for per-account non-exportable session keys (spec 009 KEY-01, T12).
+  V4 grant waits for per-account non-exportable session keys (spec 009 KEY-01, T12). T7 went out on 2 Nov before A1 and
+  is retired unused; **T8** deployed A1 on Base, Ethereum and Monad on 3 Nov and pinned it (otto/mamoru#348, results
+  `t8-deploy-2026-11-03.md`). `/ops`, beta and prod follow as written for T7.

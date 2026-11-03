@@ -159,11 +159,11 @@ describe('MamoruActionPolicyV2 (spec 007, otto/mamoru#151)', () => {
   test('is deployed on Base at the address and code hash read on chain; the guardian is an EOA, not an entry', () => {
     // otto/mamoru#213: MamoruPauseGate is named before its deployment (contracts/action-policy/script/DeployPauseGate.s.sol).
     // otto/mamoru#251: MamoruPauseGate re-deployed bound to V3 on Base 2026-11-01 (DeployPauseGate.s.sol, nonce 5) and pinned.
-    // otto/mamoru#293, #348: spec 010's T7 (deployed 2 Nov, guardian era) is retired unused; A1 is undeployed until T8.
-    expect(baseRegistry.undeployed).toEqual(['MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruV4Table'])
+    // otto/mamoru#293, #348: spec 010's T7 (deployed 2 Nov, guardian era) is retired unused; A1 is pinned as T8 (3 Nov).
+    expect(baseRegistry.undeployed).toEqual([])
     expect(address('MamoruPauseGate', baseRegistry)).toBe('0xf939c0FF7F095BA2ED7DDaaCD2D75da9A8cdF4e7')
     // otto/mamoru#214: deployed on Monad 2026-10-27 (DeployMonad.s.sol) and pinned.
-    expect(monadRegistry.undeployed).toEqual(['MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruV4Table'])
+    expect(monadRegistry.undeployed).toEqual([])
     expect(isDeployed('MamoruGasPolicy', monadRegistry)).toBe(true)
     expect(address('MamoruGasPolicy', monadRegistry)).toBe('0xD62ab993c37A0b48E4593d83aF6C3555fc1B34fe')
     expect(address('MamoruActionPolicyV2', monadRegistry)).toBe('0xc50408916C253B9E9EeBC0308813eD6B470466Ac')
@@ -224,17 +224,13 @@ describe('spec 010 T7, retired unused (otto/mamoru#348)', () => {
     MamoruGasPolicyV2: '0xe58dad8B381FF93A28Aa2A43De80acb96F535C7B',
   } as const
 
-  test('no chain pins a T7 address; each lists the three as retired, and A1 as undeployed', () => {
+  test('no chain pins a T7 address; each lists the three as retired', () => {
     for (const r of registries) {
       for (const [name, a] of Object.entries(T7)) {
         expect(nameOf(a, r), `${r.chain} ${name}`).toBeUndefined()
         expect(r.retired?.find((x) => x.address === a)?.name, `${r.chain} ${name}`).toBe(name)
       }
       expect(isDeployed('MamoruRegistry', r)).toBe(false)
-      for (const n of ['MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruV4Table']) {
-        expect(isDeployed(n, r), `${r.chain} ${n}`).toBe(false)
-        expect(r.undeployed, r.chain).toContain(n)
-      }
       // The migration check is A1's too: same source, same CREATE2 salt, DeployV4.s.sol EXPECTED_CHECK.
       expect(address('MamoruMigrationCheck', r)).toBe('0xc04046b4649471875372FA9e800143491cD4fB31')
     }
@@ -250,5 +246,35 @@ describe('spec 010 T7, retired unused (otto/mamoru#348)', () => {
   test('DeployV4.s.sol (A1) does not predict any T7 address', () => {
     const src = readFileSync(new URL('../../../contracts/action-policy/script/DeployV4.s.sol', import.meta.url), 'utf8').toLowerCase()
     for (const a of Object.values(T7)) expect(src.includes(a.toLowerCase().slice(2))).toBe(false)
+  })
+})
+
+describe('spec 010 A1 pinned as T8 (otto/mamoru#348)', () => {
+  // Deployed 2026-11-03 by DeployV4.s.sol at main 7d8139f8; code hashes read on each chain after the deploy.
+  const T8 = {
+    MamoruV4Table: ['0x1e3a8EA397941791A6E5bcB797CC207deF563Ad3', '0x8c3bf4e20f30859b9bc9654de796632bbd6589e153873687fcba762db4880db5'],
+    MamoruGasPolicyV2: ['0xEF86039BcCB06CDC1d16F3f424059D0084Da6C5C', '0xa85f9c3f11ef515578c4dd41481646245abfde007ba1a7c9f4689d8707e0ada1'],
+    MamoruActionPolicyV4: ['0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8', '0xf528a3695007591e38bfa96a01c55e588fb91a26d7af3aaffa3fa5f8d6236313'],
+    MamoruV4Helper: ['0x305cA9b816c3a3D8760c610352de60F091D9B31A', '0x950baa67a23a7d2d6d6439be9c185d6897a7b25e812697728b5435aa3a169e59'],
+    MamoruRemoteInit: ['0x57f2B890A42F49E2994820d292623Ebf3061a41c', '0xa25cf797c2f5afbaf601a82a0a52932ff43b4fc30a47ff082b793585b94afa1a'],
+  } as const
+
+  test('Base, Ethereum and Monad pin the same five contracts at the same addresses and code hashes; nothing is undeployed', () => {
+    for (const r of registries) {
+      expect(r.undeployed, r.chain).toEqual([])
+      for (const [name, [a, h]] of Object.entries(T8)) {
+        expect(address(name, r), `${r.chain} ${name}`).toBe(a)
+        expect(entry(name, r).codeHash, `${r.chain} ${name}`).toBe(h)
+        expect(r.retired?.some((x) => x.address === a), `${r.chain} ${name}`).toBe(false)
+      }
+    }
+  })
+
+  test('DeployV4.s.sol expects the pinned table, gas policy, policy and check', () => {
+    const src = readFileSync(new URL('../../../contracts/action-policy/script/DeployV4.s.sol', import.meta.url), 'utf8')
+    expect(src).toContain(`EXPECTED_TABLE = ${T8.MamoruV4Table[0]};`)
+    expect(src).toContain(`EXPECTED_GAS_POLICY = ${T8.MamoruGasPolicyV2[0]};`)
+    expect(src).toContain(`EXPECTED_POLICY = ${T8.MamoruActionPolicyV4[0]};`)
+    expect(src).toContain('EXPECTED_CHECK = 0xc04046b4649471875372FA9e800143491cD4fB31;')
   })
 })

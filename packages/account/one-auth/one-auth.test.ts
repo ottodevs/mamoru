@@ -57,14 +57,16 @@ describe('the V4 session', () => {
     expect(a.address).not.toBe(b.address) // the Init is part of the address
   })
 
-  test('#348: T7 is retired and not pinned; A1 is undeployed until T8, so no chain has a V4 deployment', () => {
+  test('#348: T7 is retired and not pinned; A1 is pinned as T8, the same deployment on every chain', () => {
     const t7 = ['0x2a70976970964faB1FBadaFF2f0b3851C2Cb74C7', '0xb1383F8E5045aFdcfF2031743d3c25082C8858a4', '0xe58dad8B381FF93A28Aa2A43De80acb96F535C7B']
     const script = readFileSync(new URL('../../../contracts/action-policy/script/DeployV4.s.sol', import.meta.url), 'utf8')
+    const t8 = oneAuthV4Deployment(baseRegistry)
+    expect(t8?.policy).toBe('0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8')
     for (const r of [baseRegistry, monadRegistry, ethereumRegistry]) {
-      expect(oneAuthV4Deployment(r), r.chain).toBeNull()
+      expect(oneAuthV4Deployment(r), r.chain).toEqual(t8)
       for (const a of t7) expect(r.entries.some((e) => e.address === a), `${r.chain} ${a}`).toBe(false)
       expect(r.entries.some((e) => e.name === 'MamoruRegistry'), r.chain).toBe(false)
-      for (const n of ['MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruV4Table']) expect(r.undeployed, `${r.chain} ${n}`).toContain(n)
+      expect(r.undeployed, r.chain).toEqual([])
     }
     // A1's deploy script predicts none of T7's addresses: T8 lands at new ones.
     for (const a of t7) expect(script.includes(a)).toBe(false)

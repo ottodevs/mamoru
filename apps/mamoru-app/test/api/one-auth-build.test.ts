@@ -59,7 +59,7 @@ async function world(prepare: (b: AccountRow) => unknown, opts: { sleeve?: boole
   return { call, seen, base: () => base, sleeveAddress }
 }
 
-describe('#348: no V4 pinned (T7 retired, A1 undeployed until T8)', () => {
+describe('#348: an operator without V4 pinned on Ethereum', () => {
   test("ethereum-sibling: the operator's 404 SIBLING_NOT_OFFERED reaches the app as is (#243: the UI falls back to plain Start)", async () => {
     const t = await world(() => new Response(JSON.stringify({ error: 'Mamoru on Ethereum is not available for this account yet', code: 'SIBLING_NOT_OFFERED' }), { status: 404, headers: { 'content-type': 'application/json' } }))
     const res = await t.call('/ethereum-sibling/prepare', { method: 'POST', body: '{}' })
@@ -77,7 +77,7 @@ describe('#348: no V4 pinned (T7 retired, A1 undeployed until T8)', () => {
 })
 
 describe('one-authorization prepares are rebuilt by the Worker (#311)', () => {
-  // #348: a test A1 stack pinned in memory on the three chains, as the T8 pin PR will in the registry files.
+  // #348: a test A1 stack pinned in memory on the three chains, over T8's pins in the registry files.
   const unpin: (() => void)[] = []
   beforeAll(() => unpin.push(...[baseRegistry, monadRegistry, ethereumRegistry].map(pinTestA1)))
   afterAll(() => unpin.splice(0).forEach((u) => u()))

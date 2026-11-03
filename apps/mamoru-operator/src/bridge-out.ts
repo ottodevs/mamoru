@@ -1521,7 +1521,7 @@ export class BridgeOut {
     this.on(ctx.accountKey)
     if (!this.siblingInScope(ctx)) throw new HttpError(404, 'SIBLING_NOT_OFFERED', 'Mamoru on Ethereum is not available for this account yet')
     const deployment = oneAuthV4Deployment(ethereumRegistry)
-    // #243 / #348: with no V4 pinned on Ethereum (A1 undeployed until T8) the sibling is not offered: 404
+    // #243 / #348: with no V4 pinned on Ethereum (as before T8, or a registry without it) the sibling is not offered: 404
     // SIBLING_NOT_OFFERED, which the one-approval screen reads as "Base alone" (plain Start), never a retry note.
     if (!deployment) throw new HttpError(404, 'SIBLING_NOT_OFFERED', 'Mamoru on Ethereum is not available for this account yet')
     const live = this.live(ctx)

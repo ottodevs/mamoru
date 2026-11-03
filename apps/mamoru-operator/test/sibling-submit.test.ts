@@ -15,7 +15,7 @@ import { P256_N } from '@mamoru/account/live'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { BridgeOut, type StoredSibling } from '../src/bridge-out.ts'
 import { HttpError } from '../src/operator.ts'
-import { pinTestA1 } from '../../../packages/account/one-auth/pin-fixture.ts'
+import { pinTestA1, unpinA1 } from '../../../packages/account/one-auth/pin-fixture.ts'
 
 const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
 const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
@@ -86,19 +86,32 @@ function world(prior?: Partial<StoredSibling>) {
   return { bo, sent, journal: () => JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8')).siblings.k as StoredSibling, setHash: (h: Hex) => { sentHash = h } }
 }
 
-describe('#243 / #348: no V4 pinned on Ethereum (A1 undeployed until T8)', () => {
-  test('the ethereum-sibling endpoints answer SIBLING_NOT_OFFERED (404), so the one-approval screen falls back to plain Start', async () => {
-    expect(oneAuthV4Deployment(ethereumRegistry)).toBeNull()
+describe('#243 / #348: the ethereum sibling with and without V4 pinned on Ethereum', () => {
+  test('the registry file pins T8 on Ethereum, so the sibling is offered once the account is in scope', () => {
+    expect(oneAuthV4Deployment(ethereumRegistry)?.policy).toBe('0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8')
     const w = world({})
-    expect(w.bo.siblingView('k', ctx)).toEqual({ state: 'failed', offered: false, safe: ctx.address, sessionKey: '0x0000000000000000000000000000000000000bbb' })
-    expect(new BridgeOut({} as never, { address: '0x0000000000000000000000000000000000000001', send: async () => { throw new Error('never') } } as never, mkdtempSync(join(tmpdir(), 'mamoru-sib-none-')), fetch, Date.now, undefined, () => true).siblingView('k', ctx)).toEqual({ state: 'none', offered: false })
-    for (const call of [() => w.bo.prepareSibling(ctx), () => w.bo.submitSibling(ctx, { prepareId: 'x', authenticatorData: '', clientDataJSON: '', signature: '' })]) {
-      const err = await call().then(() => null, (e) => e)
-      expect(err).toBeInstanceOf(HttpError)
-      expect((err as HttpError).status).toBe(404)
-      expect((err as HttpError).code).toBe('SIBLING_NOT_OFFERED')
+    expect(w.bo.siblingView('k', ctx).offered).toBe(true)
+    w.bo.siblingInScope = () => false
+    expect(w.bo.siblingView('k', ctx).offered).toBe(false)
+  })
+
+  test('with no V4 pinned on Ethereum the endpoints answer SIBLING_NOT_OFFERED (404), so the one-approval screen falls back to plain Start', async () => {
+    const restore = unpinA1(ethereumRegistry)
+    try {
+      expect(oneAuthV4Deployment(ethereumRegistry)).toBeNull()
+      const w = world({})
+      expect(w.bo.siblingView('k', ctx)).toEqual({ state: 'failed', offered: false, safe: ctx.address, sessionKey: '0x0000000000000000000000000000000000000bbb' })
+      expect(new BridgeOut({} as never, { address: '0x0000000000000000000000000000000000000001', send: async () => { throw new Error('never') } } as never, mkdtempSync(join(tmpdir(), 'mamoru-sib-none-')), fetch, Date.now, undefined, () => true).siblingView('k', ctx)).toEqual({ state: 'none', offered: false })
+      for (const call of [() => w.bo.prepareSibling(ctx), () => w.bo.submitSibling(ctx, { prepareId: 'x', authenticatorData: '', clientDataJSON: '', signature: '' })]) {
+        const err = await call().then(() => null, (e) => e)
+        expect(err).toBeInstanceOf(HttpError)
+        expect((err as HttpError).status).toBe(404)
+        expect((err as HttpError).code).toBe('SIBLING_NOT_OFFERED')
+      }
+      expect(w.sent).toEqual([])
+    } finally {
+      restore()
     }
-    expect(w.sent).toEqual([])
   })
 })
 

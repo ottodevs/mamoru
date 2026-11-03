@@ -547,7 +547,7 @@ export type OperatorConfig = {
   /**
    * otto/mamoru#293 (spec 010 A1): the V4 stack of this chain (MamoruActionPolicyV4, MamoruGasPolicyV2,
    * MamoruMigrationCheck, MamoruV4Table), from the chain's registry file (boot.ts `oneAuthV4Deployment`). Absent while any
-   * of the four is undeployed (all of A1 is, until T8; T7 is retired, #348): nothing of V4 is offered or run, whatever the `one_auth_v4` flag says.
+   * of the four is undeployed (A1 is pinned as T8 on Base, Ethereum and Monad since 3 Nov; T7 is retired, #348): nothing of V4 is offered or run, whatever the `one_auth_v4` flag says.
    */
   oneAuth?: OneAuthV4Deployment
   /** otto/mamoru#293: blocks per SessionCreated page of the migration inventory. Default 2,000. */
