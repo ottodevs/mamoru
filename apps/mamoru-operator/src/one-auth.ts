@@ -14,7 +14,7 @@ import { mamoruActionPolicyV2Abi } from '@mamoru/registry'
 export const WHATS_NEW_POINTS: readonly string[] = [
   'Mamoru can use new pools that pass its on-chain rules without asking you again',
   'Safer price limits',
-  'Nobody can pause or steer your account: its limits are code on chain',
+  'Nobody can pause your account or change its limits: they are code on chain',
   'No more renewals: you sign again only to take money out',
 ]
 

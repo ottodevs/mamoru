@@ -197,6 +197,18 @@
       "address": "0xe58dad8B381FF93A28Aa2A43De80acb96F535C7B",
       "codeHash": "0x1df4655d0b0a8582b68a4630f213570a143800c1b489a6977117a08044c5b6c5",
       "reason": "T7 (spec 010 before A1), desplegado el 2026-11-02 y retirado sin uso (otto/mamoru#348): guardian y registro con admin; ninguna cuenta lo usa. No volver a fijarlo: A1 se despliega como T8 en direcciones nuevas"
+    },
+    {
+      "name": "MamoruV4Helper",
+      "address": "0xcE3F72538476961CF1BA31Ac483a7998B66aaCac",
+      "codeHash": "0xf797702de9f79313edac15c35d3d93fcf25049e04291ecbbd1fdf3adb167700a",
+      "reason": "T7 (spec 010 before A1), creado por el MamoruActionPolicyV4 de T7 el 2026-11-02 y retirado sin uso (otto/mamoru#348). No volver a fijarlo: A1 se despliega como T8 en direcciones nuevas"
+    },
+    {
+      "name": "MamoruRemoteInit",
+      "address": "0xeba5Fa4F7eFEbd5F5A1Ec278C4caF00CC24C23F0",
+      "codeHash": "0x1088f92d62597086ab68e5328f83cb0afcedc23ef4245fbabea9fc31fdbfb48d",
+      "reason": "T7 (spec 010 before A1), creado por el MamoruActionPolicyV4 de T7 el 2026-11-02 y retirado sin uso (otto/mamoru#348). No volver a fijarlo: A1 se despliega como T8 en direcciones nuevas"
     }
   ]
 }
