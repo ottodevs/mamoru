@@ -54,9 +54,9 @@ contract DeployMamoruV4 is Script {
 
     /// The addresses `predict()` gives for this source and compiler (identical on Base, Monad and Ethereum). A source
     /// or compiler change moves them: `run()` then refuses, and re-pinning is a deliberate commit.
-    address public constant EXPECTED_TABLE = 0xDa201a0A72660e885b5314C1b889255bcE78a4eD;
-    address public constant EXPECTED_GAS_POLICY = 0x16d11189D987E123a7317b5786F1B20a84dFd28A;
-    address public constant EXPECTED_POLICY = 0x360FC1f2A0C37E63bfCF772a7efA93D198e2a8C1;
+    address public constant EXPECTED_TABLE = 0x1e3a8EA397941791A6E5bcB797CC207deF563Ad3;
+    address public constant EXPECTED_GAS_POLICY = 0xEF86039BcCB06CDC1d16F3f424059D0084Da6C5C;
+    address public constant EXPECTED_POLICY = 0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8;
     address public constant EXPECTED_CHECK = 0xc04046b4649471875372FA9e800143491cD4fB31;
 
     /// Selectors no V4 contract may carry (spec 010 I7, spec 009 POL-01): guardian, pause, review, readiness setter.

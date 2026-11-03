@@ -24,7 +24,7 @@ pragma solidity ^0.8.28;
  *    0, so CCTP refuses it anyway, and its non-standard `approve` is one less surface. No MetaMorpho factory: no vault.
  *  - Pool classes, reference pools and the exact vault list: MamoruV4Classes (spec 010 A1 "Eligibility rules").
  *  - Gas: the per-op caps a remote session carries, and the chain's gas allowance G per window W of
- *    MamoruGasPolicyV2's rate (spec 010 I6, A1): Base 0.002 ETH a day, Monad 1 MON a day, Ethereum 0.01 ETH a day.
+ *    MamoruGasPolicyV2's rate (spec 010 I6, A1): Base 0.002 ETH a day, Monad 5 MON a day, Ethereum 0.01 ETH a day.
  *  - CCTP fee cap (`cctpFeeCapBps`, #345 P2-5): the most `MamoruActionPolicyV4.bridge` lets a burn's maxFee be, in bps
  *    of the amount: 10 bps (0.1 %) on every chain. Standard transfers carry no fee today (the engine passes 0); the cap
  *    keeps the bridge working if Circle adds a Standard fee up to it, without a new V4.
@@ -84,8 +84,9 @@ library MamoruV4Chains {
             c.stables = [0x754704Bc059F8C67012fEd69BC8A327a5aafb603, address(0)];
             c.assets = [0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A, address(0)];
             c.wrapped = 0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A;
-            // packages/policy MONAD_GAS_CAPS (1 gwei priority, 3M / 2M / 200k, 1,000 gwei); G = 1 MON a day.
-            (c.gasPerWindow, c.gasWindow) = (1 ether, 1 days);
+            // packages/policy MONAD_GAS_CAPS (1 gwei priority, 3M / 2M / 200k, 1,000 gwei); G = 5 MON a day (#348: at
+            // the operator's 102 gwei ceiling and a swap's 2.3M of limits, 21 swaps a day; Monad's basefee floor is 100 gwei).
+            (c.gasPerWindow, c.gasWindow) = (5 ether, 1 days);
             c.remoteCaps = GasCaps(1_000_000_000, 3_000_000, 2_000_000, 200_000, 1_000_000_000_000, 0);
             c.cctpFeeCapBps = 10;
         } else if (chainId == ETHEREUM) {

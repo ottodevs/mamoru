@@ -154,10 +154,9 @@ export const V4_OP_GAS: Readonly<Record<number, Readonly<Record<V4OpKind, GasLim
  * Ops a day at the ceiling, G / (sum of the limits x ceiling), V4_GAS_RATE_BY_CHAIN:
  *  - Base (G = 0.002 ETH): swap 37, mint 29, increase 35, exit 55, harvest 78, bridge 63, vault 45, registerRemote 70,
  *    announceReady 78, relayMessage 70.
- *  - Monad (G = 1 MON; starting limits, the call gas is then resized from the simulation): swap 4.3, mint 3.5,
- *    increase 4.1, exit 5.8, harvest 7.3, bridge 6.3, vault 4.8, registerRemote 6.8. Fewer than 20 a day even at the
- *    100 gwei floor basefee: Monad's G in MamoruV4Chains must rise before T8 (about 5 MON a day for 20 swaps; a
- *    contract change, not made here).
+ *  - Monad (G = 5 MON, raised from 1 MON before T8 for this; starting limits, the call gas is then resized from the
+ *    simulation): swap 21, mint 17, increase 20, exit 29, harvest 36, bridge 32, vault 24, registerRemote 34,
+ *    announceReady 36, relayMessage 34.
  */
 export const V4_MAX_FEE_BY_CHAIN: Readonly<Record<number, bigint>> = { 8453: 30_000_000n, 143: 102_000_000_000n }
 

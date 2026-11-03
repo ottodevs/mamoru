@@ -169,7 +169,7 @@ export function decodeGasCapsV2(data: Hex): GasCapsV2 {
 /**
  * The gas caps of the V4 sessions, by chain: the same as MamoruV4Chains.remoteCaps (a remote Safe's caps are pinned in
  * V4; the home's are owner-signed and chosen equal, so one table holds both): V1's per-op caps (V4_GAS_CAPS on Base,
- * MONAD_GAS_CAPS on Monad), no paymaster. The rate (MamoruV4Chains, A1): 0.002 ETH / 1 MON per day.
+ * MONAD_GAS_CAPS on Monad), no paymaster. The rate (MamoruV4Chains, A1): 0.002 ETH / 5 MON per day.
  */
 export const GAS_CAPS_V2_BY_CHAIN: Readonly<Record<number, GasCapsV2>> = {
   8453: { maxPriorityFeePerGas: 10_000_000n, maxVerificationGasLimit: 3_000_000n, maxCallGasLimit: 2_000_000n, maxPreVerificationGas: 200_000n, maxFeePerGas: 100_000_000n, maxPaymasterGas: 0n },
@@ -180,11 +180,11 @@ export const GAS_CAPS_V2_BY_CHAIN: Readonly<Record<number, GasCapsV2>> = {
 
 /**
  * Spec 010 A1 (otto/mamoru#317): MamoruGasPolicyV2's rate per chain, MamoruV4Chains' `gasPerWindow` (G, wei) and
- * `gasWindow` (W, seconds). Pinned in V4's table, never owner-signed: Base 0.002 ETH, Monad 1 MON, Ethereum 0.01 ETH a day.
+ * `gasWindow` (W, seconds). Pinned in V4's table, never owner-signed: Base 0.002 ETH, Monad 5 MON (#348: 1 MON allowed ~4 swaps a day at Monad's 100 gwei floor), Ethereum 0.01 ETH a day.
  */
 export const V4_GAS_RATE_BY_CHAIN: Readonly<Record<number, { perWindow: bigint; window: number }>> = {
   8453: { perWindow: 2_000_000_000_000_000n, window: 86_400 },
-  143: { perWindow: 1_000_000_000_000_000_000n, window: 86_400 },
+  143: { perWindow: 5_000_000_000_000_000_000n, window: 86_400 },
   1: { perWindow: 10_000_000_000_000_000n, window: 86_400 },
 }
 

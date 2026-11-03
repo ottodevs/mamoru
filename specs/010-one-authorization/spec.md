@@ -486,6 +486,13 @@ CCTP `maxFee = 0`: the caller names it, capped per chain and charged.
    per-asset sub-bucket as entries, so in a crash automation de-risks at most C per day per chain and the rest waits
    for the owner; the sizing and the app copy say so.
 5. `G` and `W` per chain for the gas rate, from the engine's real gas use (about 0.01 ETH per month on Base today).
+   Set before T8 (otto/mamoru#348, coordinator under Ot's T8 GO): W = 1 day; G = 0.002 ETH on Base, 5 MON on Monad
+   (raised from 1 MON: at Monad's 100 gwei basefee floor and the operator's 102 gwei ceiling, 1 MON allowed about 4
+   swaps a day, 5 MON allows 21), 0.01 ETH on Ethereum. The operator sizes each op's limits from fork measurements
+   (`V4_OP_GAS`, `SIBLING_GAS`), since the rate charges limits, not use. T8's predicted addresses with this table
+   (`DeployV4.s.sol` `EXPECTED_*`): MamoruV4Table `0x1e3a8EA397941791A6E5bcB797CC207deF563Ad3`, MamoruGasPolicyV2
+   `0xEF86039BcCB06CDC1d16F3f424059D0084Da6C5C`, MamoruActionPolicyV4 `0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8`,
+   MamoruMigrationCheck `0xc04046b4649471875372FA9e800143491cD4fB31` (unchanged, reused).
 
 ## Tasks
 

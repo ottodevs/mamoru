@@ -143,7 +143,7 @@ contract V4RemoteInitParityTest is Test {
         c.stables = [0x754704Bc059F8C67012fEd69BC8A327a5aafb603, address(0)];
         c.assets = [0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A, address(0)];
         c.wrapped = 0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A;
-        (c.gasPerWindow, c.gasWindow) = (1 ether, 1 days);
+        (c.gasPerWindow, c.gasWindow) = (5 ether, 1 days);
         c.remoteCaps = GasCapsT(1_000_000_000, 3_000_000, 2_000_000, 200_000, 1_000_000_000_000, 0);
         c.cctpFeeCapBps = 10;
     }

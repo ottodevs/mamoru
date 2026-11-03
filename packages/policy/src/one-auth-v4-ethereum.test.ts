@@ -54,8 +54,8 @@ describe('Ethereum in the V4 tables (otto/mamoru#307, #308)', () => {
   })
 
   test("every chain's rate is MamoruV4Chains' (G, W)", () => {
-    const want: Record<number, string> = { 8453: '(0.002 ether, 1 days)', 143: '(1 ether, 1 days)', 1: '(0.01 ether, 1 days)' }
-    const wei: Record<string, bigint> = { '0.002 ether': 2n * 10n ** 15n, '1 ether': 10n ** 18n, '0.01 ether': 10n ** 16n }
+    const want: Record<number, string> = { 8453: '(0.002 ether, 1 days)', 143: '(5 ether, 1 days)', 1: '(0.01 ether, 1 days)' }
+    const wei: Record<string, bigint> = { '0.002 ether': 2n * 10n ** 15n, '5 ether': 5n * 10n ** 18n, '0.01 ether': 10n ** 16n }
     for (const [chain, txt] of Object.entries(want)) {
       expect(CHAINS_SOL).toContain(`(c.gasPerWindow, c.gasWindow) = ${txt};`)
       expect(V4_GAS_RATE_BY_CHAIN[Number(chain)]).toEqual({ perWindow: wei[txt.slice(1, txt.indexOf(','))]!, window: 86_400 })
@@ -119,3 +119,4 @@ describe('otto/mamoru#348 (review of #247): held pools', () => {
     expect(c.exitOnly).toEqual(['pool:WETH/USDC/3000@00000000'])
   })
 })
+

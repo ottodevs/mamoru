@@ -110,6 +110,10 @@ contract MamoruV4ClassesTest is Test {
             assertGe(ch.gasWindow, 2 * 5 minutes, "W well over twice the clock slack");
         }
         assertEq(MamoruV4Chains.byChainId(42161).gasPerWindow, 0, "off the table: every op refused");
+        // #348: G per day, the values packages/policy V4_GAS_RATE_BY_CHAIN mirrors (Monad raised to 5 MON before T8)
+        assertEq(MamoruV4Chains.byChainId(8453).gasPerWindow, 0.002 ether, "Base G");
+        assertEq(MamoruV4Chains.byChainId(143).gasPerWindow, 5 ether, "Monad G");
+        assertEq(MamoruV4Chains.byChainId(1).gasPerWindow, 0.01 ether, "Ethereum G");
     }
 
     /// #345 P2-5: every chain caps a CCTP burn's maxFee at 10 bps of the amount, inside V4's hard bound.
