@@ -3,6 +3,7 @@ import type { FundingView } from '@mamoru/domain'
 import { totalScopeNote } from '../../src/web/components/money-map.tsx'
 import { BRAIS_MONAD_SAFE, BRAIS_TOTAL, braisFunding, withFailedTransfer, withMonadOnlyPositions, withMonadPosition, withoutMoney, withPartialBase, withStaleMonad, withUnreadMonad, type BraisMoment } from '../../src/web/fixtures/money.ts'
 import { moneyTotal, split, wholeMoney } from '../../src/web/lib/money.ts'
+import { clockTime } from '../../src/web/lib/time.ts'
 import { hasMoney } from '../../src/web/routes/add-money.tsx'
 import { poolAddress } from '../../src/web/lib/positions.ts'
 import { Balance, Idle, rangeHoldCopy, Working } from '../../src/web/routes/home.tsx'
@@ -65,10 +66,14 @@ describe('Working names each chain\'s Safe, largest position first', () => {
 })
 
 describe('a chain read that failed or never happened', () => {
-  test('a stale chain keeps its last value in the total', () => {
+  test('a stale chain keeps its last value in the total, and the balance says when it was read', () => {
     const f = withStaleMonad(braisFunding('minted', NOW), NOW)
+    expect(f.money!.complete).toBe(true)
     expect(moneyTotal(f)).toBe(BRAIS_TOTAL)
-    expect(home(f)).toContain('13.78 USDC')
+    const text = home(f)
+    expect(text).toContain('13.78 USDC')
+    expect(text).toContain(`Monad could not be read just now. Showing its last value, read at ${clockTime(new Date(NOW - 6 * 60_000).toISOString())}.`)
+    expect(home(braisFunding('minted', NOW))).not.toContain('could not be read')
   })
 
   test('a chain never read is not shown as 0: the balance says it is missing', () => {
