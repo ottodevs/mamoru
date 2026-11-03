@@ -2,7 +2,7 @@
 
 Your Mamoru account is a Safe smart account on Base (chain id 8453). You own it. Mamoru's servers never hold an owner key. This guide shows how to take everything out without Mamoru: no app, no engine, no indexer, no support from us.
 
-In v1, Mamoru runs in simulation mode and deposits are closed, so an account made today holds nothing. This guide is for the day it does, and it is what our tests do on a Base fork (see "What we tested" at the end).
+Mamoru runs live on Base with real deposits. This guide is what our tests do on a Base fork (see "What we tested" at the end). Funds on another chain (the Growth share on Monad) sit in a second Safe with the same passkey. A walkaway kit that covers every chain is in progress.
 
 ## What you need
 
