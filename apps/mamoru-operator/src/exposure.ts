@@ -12,8 +12,35 @@ export type ChainExposure = {
   placedUsdc: bigint
   /** The engine runs this account on that chain. */
   active: boolean
-  /** otto/mamoru#332: a peer's answer only: the Safe and the block of that chain it was read at. */
+  /**
+   * otto/mamoru#332: the Safe and the block of `chainId` it was read at: a peer's answer, or (otto/mamoru#355) a sibling
+   * Safe read on this chain. Every consumer matches `chainId` as well as the Safe: a block of one chain never covers a
+   * mint on another.
+   */
   at?: { safe: string; block: bigint }
+  /**
+   * otto/mamoru#355, the Monad side of the return leg: the releases of this Safe sending or burned (not in `idleUsdc`), so
+   * the home operator counts those it does not count itself yet. `block`: the burn's block there; absent while sending.
+   */
+  releases?: ReleaseWire[]
+  /**
+   * otto/mamoru#355, the home side: returns to this Safe the answer positively holds (its journal has them burned, counted
+   * in `idleUsdc` as on their way, or minted, counted there until the Safe read holds them). The burning operator stops
+   * counting exactly these ids; one not listed is never taken as held.
+   */
+  returns?: string[]
+}
+
+/** otto/mamoru#355: one release of a remote Safe as its operator reports it. Amounts are base-unit strings. */
+export type ReleaseWire = {
+  id: string
+  amount: string
+  /** Out of the Safe by this block: the burn's block, or for a sending one the block of a read that sees its nonce used. */
+  block?: string
+  /** The burn's Monad tx, once burned: the home resolves on chain a release its journal does not hold (otto/mamoru#355). */
+  tx?: string
+  /** Sending, and a read at this block sees its nonce unused: the Safe's read up to this block still holds it (display). */
+  notLandedAt?: string
 }
 
 export function totalOf(e: Pick<ChainExposure, 'idleUsdc' | 'placedUsdc'>): bigint {
@@ -130,8 +157,11 @@ export function coversAsked(had: Covered | undefined, want: Covered | undefined)
   return had.chainId === want.chainId && had.safe.toLowerCase() === want.safe.toLowerCase() && had.block <= want.block
 }
 
-/** What GET /internal/exposure/<address> answers. Amounts are base-unit strings. */
-export type ExposureWire = { chainId: number; address: string; block: string; idleUsdc: string; placedUsdc: string; active: boolean }
+/**
+ * What GET /internal/exposure/<address> answers. Amounts are base-unit strings. otto/mamoru#355: `releases` (a remote
+ * Safe's operator) and `returns` (the home's), both optional: a peer on older code sends neither and ignores both.
+ */
+export type ExposureWire = { chainId: number; address: string; block: string; idleUsdc: string; placedUsdc: string; active: boolean; releases?: ReleaseWire[]; returns?: string[] }
 
 export type PeerRead = { ok: true; chains: ChainExposure[] } | { ok: false; chainId: number }
 
@@ -141,6 +171,29 @@ const CACHE_PER_SAFE = 4
 /** How long a failed read of a peer is answered from memory before the peer is asked again. */
 const FAILED_TTL_MS = 5_000
 const UINT = /^[0-9]{1,40}$/
+/** otto/mamoru#355: release ids as release.ts takes them; at most this many in one answer. */
+const RELEASE_ID = /^[A-Za-z0-9-]{1,64}$/
+export const MAX_LISTED = 64
+const TX = /^0x[0-9a-fA-F]{64}$/
+
+/** otto/mamoru#355: the optional lists of an answer, checked; null when one is there and malformed (the read fails). */
+function listsOf(w: Partial<ExposureWire>): Pick<ChainExposure, 'releases' | 'returns'> | null {
+  const out: Pick<ChainExposure, 'releases' | 'returns'> = {}
+  if (w.releases !== undefined) {
+    if (!Array.isArray(w.releases) || w.releases.length > MAX_LISTED) return null
+    for (const x of w.releases as unknown[]) {
+      const r = x as Partial<ReleaseWire> | null
+      const uintOpt = (v: unknown) => v === undefined || (typeof v === 'string' && UINT.test(v))
+      if (typeof r?.id !== 'string' || !RELEASE_ID.test(r.id) || typeof r.amount !== 'string' || !UINT.test(r.amount) || !uintOpt(r.block) || !uintOpt(r.notLandedAt) || (r.tx !== undefined && (typeof r.tx !== 'string' || !TX.test(r.tx)))) return null
+    }
+    out.releases = (w.releases as ReleaseWire[]).map((r) => ({ id: r.id, amount: r.amount, ...(r.block !== undefined ? { block: r.block } : {}), ...(r.tx !== undefined ? { tx: r.tx } : {}), ...(r.notLandedAt !== undefined ? { notLandedAt: r.notLandedAt } : {}) }))
+  }
+  if (w.returns !== undefined) {
+    if (!Array.isArray(w.returns) || w.returns.length > MAX_LISTED || !(w.returns as unknown[]).every((id) => typeof id === 'string' && RELEASE_ID.test(id))) return null
+    out.returns = [...(w.returns as string[])]
+  }
+  return out
+}
 
 /**
  * otto/mamoru#212: what the peer operators hold for one Safe address (the same CREATE2 address on every chain), read
@@ -269,7 +322,12 @@ export class PeerExposure {
         console.log(`[peer] chain ${peer.chainId} exposure read malformed`)
         return null
       }
-      return { chainId: peer.chainId, idleUsdc: BigInt(w.idleUsdc), placedUsdc: BigInt(w.placedUsdc), active: w.active, at: { safe: address, block: BigInt(w.block) } }
+      const lists = listsOf(w)
+      if (!lists) {
+        console.log(`[peer] chain ${peer.chainId} exposure read malformed (releases or returns)`)
+        return null
+      }
+      return { chainId: peer.chainId, idleUsdc: BigInt(w.idleUsdc), placedUsdc: BigInt(w.placedUsdc), active: w.active, at: { safe: address, block: BigInt(w.block) }, ...lists }
     } catch (e) {
       // Fixed text only: an error may quote the URL.
       console.log(`[peer] chain ${peer.chainId} exposure read failed (${e instanceof Error && e.name === 'TimeoutError' ? 'timeout' : 'unreachable'})`)

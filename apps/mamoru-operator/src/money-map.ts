@@ -1,5 +1,6 @@
 import type { FundingView, MoneyChain, MoneyInFlight, MoneyMap, MoneyWhy } from '@mamoru/domain'
 import { chainOf, type Address } from '@mamoru/domain'
+import type { Hex } from 'viem'
 import type { Registry } from '@mamoru/registry'
 import { idleTokens, MAX_INVENTORY, positionUsdc, positionView, POSITION_DUST_USDC, type PoolPosition, type SafeRead } from './chain.ts'
 
@@ -86,6 +87,65 @@ export function unreadLeg(o: { chainId: number; safe: Address; gasSymbol: 'ETH' 
 
 export function explorerOf(chainId: number, safe: string): string {
   return `https://${chainOf(chainId).explorerHost}/address/${safe}`
+}
+
+/** otto/mamoru#355: one return Monad→Base as the home knows it (its journal), or as the remote operator reports it. */
+export type ReturnLeg = {
+  id: string
+  /** The home Safe, the mint's recipient. */
+  home: Address
+  amount: bigint
+  /** sending: reported by the remote, not known landed (the remote Safe's read holds it); burned: out of it by `burnBlock`. */
+  state: 'sending' | 'burned' | 'minted'
+  burnBlock?: bigint
+  burnTx?: Hex
+  mintTx?: Hex
+  mintedBlock?: bigint
+  mintedAt?: string
+  /** Sending, and the remote saw its nonce unused at this block: a leg read at or before it still holds it. */
+  notLandedAt?: bigint
+  /** The remote Safes the return may have left (lowercase), for `legOf`. */
+  remotes?: string[]
+}
+
+/**
+ * otto/mamoru#355: the in-flight rows of the returns Monad→Base, so the map's total holds steady through the leg. A return
+ * is a row while it is in neither leg: burned and the remote Safe's leg read at or after the burn, until the home leg's
+ * read is at or after its mint. Not a row while the remote leg was read before the burn (still in it) or once the home
+ * leg holds the mint. A sending one the remote operator saw landed comes with the block of that read, as a burn; one it
+ * saw not landed at or after the remote leg's read is no row (the leg holds it); any other sending one (its nonce read
+ * failed, an older remote) is a row flagged `unsure`, as is one whose remote leg is unread or stale: counted here,
+ * perhaps also in a chain total. `legOf`: the read of
+ * the remote Safe the return left, as the map shows it.
+ */
+export function returnRows(returns: readonly ReturnLeg[], o: { from: number; to: number; homeBlock: bigint; legOf: (x: ReturnLeg) => { block?: bigint; stale: boolean } | undefined }): MoneyInFlight[] {
+  const { homeBlock } = o
+  const rows: MoneyInFlight[] = []
+  for (const x of returns) {
+    if (x.state === 'minted' && x.mintedBlock !== undefined && x.mintedBlock <= homeBlock) continue
+    const remoteLeg = o.legOf(x)
+    const legFresh = !!remoteLeg && !remoteLeg.stale && remoteLeg.block !== undefined
+    // Sending: dropped only when the remote positively saw it not landed at or after the leg's read (the leg holds it).
+    if (x.state === 'sending' && x.notLandedAt !== undefined && legFresh && remoteLeg!.block! <= x.notLandedAt) continue
+    if (legFresh && x.burnBlock !== undefined && remoteLeg!.block! < x.burnBlock) continue
+    const unsure = x.state === 'sending' || !legFresh || x.burnBlock === undefined || (x.state === 'minted' && x.mintedBlock === undefined)
+    rows.push({
+      id: x.id,
+      kind: 'cctp',
+      from: o.from,
+      to: o.to,
+      recipient: x.home,
+      amountUsdc: x.amount.toString(),
+      stage: x.state === 'sending' ? 'sending' : x.state === 'minted' ? 'minted' : x.mintTx ? 'minting' : 'burned',
+      ...(x.burnTx ? { burnTx: x.burnTx } : {}),
+      ...(x.mintTx ? { mintTx: x.mintTx } : {}),
+      ...(x.mintedAt ? { mintedAt: x.mintedAt } : {}),
+      feeUsdc: '0',
+      finality: 'standard',
+      ...(unsure ? { unsure: true } : {}),
+    })
+  }
+  return rows
 }
 
 /** The map: total = Σ chains + Σ in flight, always; complete unless a chain was never read. */

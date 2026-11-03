@@ -34,8 +34,8 @@ import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
 import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
-import type { ReturnHome } from './return-home.ts'
-import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
+import type { ReportedRelease, ReturnHome } from './return-home.ts'
+import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releasesToCount, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
 import { baseStepLines, monadStepLines, readEligiblePools, readHeldPools, readPaused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
 import { attestationValid, cctpAttestation } from './cctp.ts'
@@ -47,7 +47,7 @@ import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TW
 import { Engine, engineGas, v4EngineGas, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
 import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
-import { buildMoneyMap, chainLegOf, unreadLeg } from './money-map.ts'
+import { buildMoneyMap, chainLegOf, returnRows, unreadLeg, type ReturnLeg } from './money-map.ts'
 import type { GuardReadsState } from './guard-reads-state.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { Observation, PeerPositionObs, Proposal } from '@mamoru/decide'
@@ -549,7 +549,7 @@ export type OperatorConfig = {
    */
   bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs' | 'capUsdc'>
   /** otto/mamoru#278 (Base): a V4 home's returns from its remote Safe, followed to the mint here. Absent: none asked. */
-  returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'floor' | 'open' | 'request' | 'lastClosedAt'>
+  returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'floor' | 'open' | 'request' | 'lastClosedAt' | 'capUsdc' | 'returns' | 'holds' | 'noteReported'>
   /**
    * otto/mamoru#251, Base side: the operators that run the accounts' own Safes on the chains of v6's remote buckets
    * (remote-peer.ts), by chain id. A v6 approval asks the remote one for its session key, commits to the Safe that gives,
@@ -876,6 +876,15 @@ function vaultLabel(vault: string, registry: Registry): string {
 function poolLabel(pool: string, registry: Registry): string {
   const e = entry(pool, registry)
   return `${e.token0}/${e.token1} ${(e.fee! / 10_000).toFixed(2)}%`
+}
+
+/**
+ * otto/mamoru#355: whether a home's answer `e`, in the same total, holds release `x` (see Operator.releasesOf): the
+ * answer of its home chain for its own mint recipient (releaseHomeOf: the only recipient its burn may have) lists the id.
+ * Positive only: nothing is held by its absence from a list, by a time, or by another Safe's answer.
+ */
+function answerHolds(e: ChainExposure, x: { id: string; chainId: number; home?: Address }): boolean {
+  return e.chainId === x.chainId && !!x.home && e.at?.safe.toLowerCase() === x.home.toLowerCase() && !!e.returns?.includes(x.id)
 }
 
 export class Operator {
@@ -1436,7 +1445,8 @@ export class Operator {
         const r = sibling ? await this.readSafeCached(sibling, getAddress(address), maxAgeMs <= PEER_START_MAX_AGE_MS) : await this.readUnowned(getAddress(address))
         // otto/mamoru#352: a vault of that Safe that could not be valued is an unread leg (caught below: ok false).
         if (r.vaultsUnread?.length) throw new Error(`${address}: vault ${r.vaultsUnread.join(', ')} unreadable`)
-        out = joinReads(out, { ok: true, chains: [this.localExposure(sibling, r)] })
+        // otto/mamoru#355: with the Safe and block of that read, so a return minted to it stops counting once it holds it.
+        out = joinReads(out, { ok: true, chains: [{ ...this.localExposure(sibling, r), at: { safe: address.toLowerCase(), block: r.block } }] })
       }
       return out
     } catch (e) {
@@ -1492,10 +1502,81 @@ export class Operator {
     })
   }
 
-  /** otto/mamoru#212/#332: what the account holds outside this chain's Safe: the peers' reads and its burns not yet in them. Null when a peer could not be read. */
-  private elsewhereOf(acc: AccountState, peers: PeerRead): bigint | null {
+  /**
+   * otto/mamoru#212/#332/#355: what the account holds outside this chain's Safe: the peers' reads and the bridged USDC not
+   * yet in them (extrasOf). `local`: the read of this chain's Safe the same total adds (absent: every return minted here
+   * counts). Null when a peer could not be read.
+   */
+  private elsewhereOf(acc: AccountState, peers: PeerRead, local?: { safe: Address; block: bigint }): bigint | null {
     if (!peers.ok) return null
-    return peers.chains.reduce((s, e) => s + totalOf(e), 0n) + this.burnsOf(acc, peers)
+    return peers.chains.reduce((s, e) => s + totalOf(e), 0n) + this.extrasOf(acc, peers, local)
+  }
+
+  /**
+   * The USDC between two chains a total counts besides the Safe reads: Base→Monad burns (#332, Base), Monad→Base returns
+   * (#355: the home's journal on Base, and the releases its peer reports that the journal does not hold yet), and this
+   * chain's own releases (#355, Monad) the home's answers do not hold yet. With `peers` failed: all of them.
+   */
+  private extrasOf(acc: AccountState, peers: PeerRead, local?: { safe: Address; block: bigint }): bigint {
+    return this.burnsOf(acc, peers) + this.returnsOf(acc, peers, local) + this.releasesOf(acc, peers)
+  }
+
+  /**
+   * otto/mamoru#355, the home side of the return leg: the returns to the account's home Safes (its own and the owner's
+   * other Safes of this chain, the ones this total reads) that are in no Safe read of this total: burned, or minted
+   * after the read of their home here (`local`, or a sibling's read in `peers`). Then the releases a remote Safe's
+   * operator reports (`releases` of its answer) that this total does not positively hold (ReturnHome.holds: burned or
+   * minted here to one of these homes, counted above): burned there before this side learned of it, sending, or one this
+   * journal lost or pruned (until resolved on chain and adopted). Each counted once, by id. 0 without a journal or report.
+   */
+  private returnsOf(acc: AccountState, peers: PeerRead, local?: { safe: Address; block: bigint }): bigint {
+    const homes = [acc.ctx.address as Address, ...this.otherSafes(acc)]
+    const own = peers.ok ? peers.chains.filter((e) => e.chainId === this.cfg.chainId && e.at) : []
+    const readAt = (home: Address): bigint | undefined => {
+      let at = local && local.safe.toLowerCase() === home.toLowerCase() ? local.block : undefined
+      for (const e of own) if (e.at!.safe.toLowerCase() === home.toLowerCase() && (at === undefined || e.at!.block > at)) at = e.at!.block
+      return at
+    }
+    const mine = this.cfg.returnHome?.capUsdc(homes, readAt) ?? { usdc: 0n, ids: [] }
+    const held = new Set(mine.ids)
+    let sum = mine.usdc
+    for (const e of peers.ok ? peers.chains : []) {
+      // A remote operator's successful report: the prune waits on it, and an id this journal does not hold is resolved on chain.
+      if (e.releases && e.at && e.chainId !== this.cfg.chainId) this.cfg.returnHome?.noteReported(e.at.safe, e.releases as ReportedRelease[], acc.accountKey, homes)
+      for (const x of e.releases ?? []) {
+        if (held.has(x.id) || this.cfg.returnHome?.holds(x.id, homes)) continue
+        held.add(x.id)
+        sum += BigInt(x.amount)
+      }
+    }
+    return sum
+  }
+
+  /**
+   * otto/mamoru#355, the remote side of the return leg: this chain's releases sending or burned from the Safes this total
+   * reads here (the account's own and the owner's others, by source Safe), until an answer of the home's chain in the
+   * same total holds it: the answer for its home Safe lists the id (`returns`: on its way, or in its read). The burning
+   * side is the only one that knows the burn until the home's journal learns it. A failed read, or an older home that
+   * lists nothing, holds nothing: all count.
+   */
+  private releasesOf(acc: AccountState, peers: PeerRead): bigint {
+    const answers = peers.ok ? peers.chains.filter((e) => e.at && e.returns) : []
+    let sum = 0n
+    for (const x of this.releasesFrom([acc.ctx.address, ...this.otherSafes(acc)])) if (!answers.some((e) => answerHolds(e, x))) sum += x.amount
+    return sum
+  }
+
+  /** otto/mamoru#355: the releases to count (releasesToCount) of every account here whose Safe is one of `sources`, once per id. */
+  private releasesFrom(sources: readonly string[]): ReturnType<typeof releasesToCount> {
+    const from = new Set(sources.map((a) => a.toLowerCase()))
+    const seen = new Set<string>()
+    const out: ReturnType<typeof releasesToCount> = []
+    for (const a of Object.values(this.store.state.accounts)) {
+      // Only accounts with a release (V4 remote Safes on Monad): elsewhere this reads nothing.
+      if ((!a.release && !a.releasesDone?.length) || !from.has(a.ctx.address.toLowerCase())) continue
+      for (const x of releasesToCount(a)) if (!seen.has(x.id)) (seen.add(x.id), out.push(x))
+    }
+    return out
   }
 
   /**
@@ -1504,7 +1585,7 @@ export class Operator {
    * new is placed on a guess.
    */
   private async startTotal(acc: AccountState, local: LocalTotal): Promise<{ total: bigint; across: boolean }> {
-    const elsewhere = this.elsewhereOf(acc, await this.peerRead(acc, PEER_START_MAX_AGE_MS, this.coverOf(local.safe, local.block)))
+    const elsewhere = this.elsewhereOf(acc, await this.peerRead(acc, PEER_START_MAX_AGE_MS, this.coverOf(local.safe, local.block)), local)
     if (elsewhere === null) throw capCheckUnavailable()
     return { total: local.total + elsewhere, across: elsewhere > 0n }
   }
@@ -1519,7 +1600,8 @@ export class Operator {
   private async engineCap(acc: AccountState, observedBlock: bigint): Promise<NonNullable<Observation['cap']>> {
     if (this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID && this.readsElsewhere(acc)) this.enginePeers.set(acc.accountKey, await this.peerRead(acc, PEER_ENGINE_MAX_AGE_MS, this.coverOf(getAddress(acc.ctx.address), observedBlock)))
     const peers: PeerRead = this.readsElsewhere(acc) ? (this.enginePeers.get(acc.accountKey) ?? { ok: false, chainId: 0 }) : { ok: true, chains: [] }
-    return { capUsdc: this.effectiveCap(acc), elsewhereUsdc: this.elsewhereOf(acc, peers) }
+    // otto/mamoru#355: the review counts its own Safe at the observation's block.
+    return { capUsdc: this.effectiveCap(acc), elsewhereUsdc: this.elsewhereOf(acc, peers, { safe: getAddress(acc.ctx.address), block: observedBlock }) }
   }
 
   /**
@@ -1542,7 +1624,47 @@ export class Operator {
     // block the caller's total uses), as idle USDC on its way. Asked without one (the older path): every burn not failed.
     // By source Safe: the burns that left this very address, whether or not an account here still names it.
     const burns = this.burnsCoveredBy(safe, covered)
-    return { chainId: this.cfg.chainId, address: safe.toLowerCase(), block: r.block.toString(), idleUsdc: (e.idleUsdc + burns).toString(), placedUsdc: e.placedUsdc.toString(), active: e.active }
+    // otto/mamoru#355 (home): the returns to this Safe not in this very read, as idle USDC on its way, and the ids this
+    // answer holds (on their way or in the read): the remote operator stops counting exactly those.
+    const returns = this.cfg.returnHome?.capUsdc([safe], (home) => (home.toLowerCase() === safe.toLowerCase() ? r.block : undefined))
+    // otto/mamoru#355 (remote): this Safe's releases sending or burned, not in `idleUsdc`: the home counts those it does not hold.
+    // A sending one whose nonce is used at this read's block has landed by then: that block, so a display can tell
+    // whether a read of this Safe still holds it (money map). Unreadable: reported without a block (still counted).
+    // A sending one is looked up at this read's block: nonce used, reported with that block (out of the Safe by then);
+    // unused, with notLandedAt (the read still holds it); unreadable, with neither. Always a list, empty too: the home
+    // takes it as this Safe's full report (the prune of its journal waits on it).
+    const releases = await Promise.all(
+      this.releasesFrom([safe]).map(async (x) => {
+        const used = x.block === undefined && x.sending ? await this.nonceUsedAt(safe, x.sending, r.block) : undefined
+        const block = x.block !== undefined ? BigInt(x.block) : used === true ? r.block : undefined
+        return { id: x.id, amount: x.amount.toString(), ...(block !== undefined ? { block: block.toString() } : {}), ...(x.tx ? { tx: x.tx } : {}), ...(used === false ? { notLandedAt: r.block.toString() } : {}) }
+      }),
+    )
+    return {
+      chainId: this.cfg.chainId,
+      address: safe.toLowerCase(),
+      block: r.block.toString(),
+      idleUsdc: (e.idleUsdc + burns + (returns?.usdc ?? 0n)).toString(),
+      placedUsdc: e.placedUsdc.toString(),
+      active: e.active,
+      releases,
+      ...(returns?.ids.length ? { returns: returns.ids } : {}),
+    }
+  }
+
+  /** otto/mamoru#355: whether `safe`'s EntryPoint nonce of a sending release is used at `block`; undefined when unreadable. */
+  private async nonceUsedAt(safe: Address, n: { nonceKey: bigint; nonce: bigint }, block: bigint): Promise<boolean | undefined> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const read = this.client.readContract({ address: address('EntryPointV07', this.cfg.registry), abi: entryPointV07Abi, functionName: 'getNonce', args: [safe, n.nonceKey], blockNumber: block }) as Promise<bigint>
+      // Display only: never holds the peer's answer up past a second.
+      const used = await Promise.race([read, new Promise<null>((done) => (timer = setTimeout(() => done(null), 1_000)))])
+      return used === null ? undefined : used > n.nonce
+    } catch {
+      return undefined
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   /** otto/mamoru#332: burnsOf for a peer's total, covered by the peer's own read of a Safe on Monad (if any). */
@@ -1946,7 +2068,7 @@ export class Operator {
    * burns of the bridge journal that the engine's own rule (inFlightOf) still counts; the Ethereum to Base route amount is a
    * row of its own. A Monad Safe that could not be read at all is on the map, unread, and the map says it is not complete.
    */
-  private async moneyMapOf(acc: AccountState, safe: Address, r: SafeRead, legsP: Promise<{ safe: Address; key: string; leg: MoneyChain }[]>, engine: FundingView['engine'], deadline: number): Promise<MoneyMap> {
+  private async moneyMapOf(acc: AccountState, safe: Address, r: SafeRead, legsP: Promise<{ safe: Address; key: string; leg: MoneyChain }[]>, engine: FundingView['engine'], deadline: number, peers?: PeerRead): Promise<MoneyMap> {
     const bridge = this.cfg.bridgeMonad
     const legs = await legsP
     const waiting = acc.active ? engine?.waiting?.[0] : undefined
@@ -1976,12 +2098,54 @@ export class Operator {
     const inFlight: MoneyInFlight[] = [
       ...(route > 0n ? [{ id: 'ethereum-route', kind: 'bridge' as const, from: 1, to: this.cfg.chainId, recipient: safe, amountUsdc: route.toString(), stage: 'burned' as const, feeUsdc: '0', finality: 'standard' as const }] : []),
       ...flight.rows,
+      ...this.returnRowsOf(acc, safe, r.block, legs, peers),
     ]
     const missing = this.remoteSafes(acc).filter((x) => !legs.some((l) => l.safe.toLowerCase() === x.safe.toLowerCase()))
     const unread = missing.map((x) => unreadLeg({ chainId: BRIDGE_MONAD_CHAIN_ID, safe: x.safe, gasSymbol: 'MON', known: null }))
     // A past Safe a live read shows empty is forgotten.
     if (bridge) for (const l of legs) if (l.key.includes('#past:') && l.leg.read.at !== null) bridge.releaseRecipient(acc.accountKey, l.safe, { block: l.leg.read.block, stale: l.leg.read.stale, empty: l.leg.idle.length === 0 && l.leg.positions.every((p) => BigInt(p.valueUsdc ?? '0') === 0n) && !l.leg.partial })
     return buildMoneyMap([home, ...legs.map((l) => l.leg), ...unread], inFlight)
+  }
+
+  /**
+   * otto/mamoru#355: the money map's rows of the returns Monad→Base of this account (from 143 to this chain): its journal's
+   * burned and minted returns, and the releases the remote Safes' operator reports that the journal does not hold as
+   * burned yet (requested here, or not known). Display only.
+   */
+  private returnRowsOf(acc: AccountState, home: Address, homeBlock: bigint, legs: readonly { safe: Address; leg: MoneyChain }[], peers: PeerRead | undefined): MoneyInFlight[] {
+    const rh = this.cfg.returnHome
+    const remotes = this.remoteSafes(acc).map((x) => x.safe.toLowerCase())
+    // The Safe a journal return left: the V4 remote when the account names it, else any of its remote Safes (legOf takes
+    // the earliest fresh read among them: a read before the burn may still hold it).
+    const v4 = acc.oneAuth?.remote?.address?.toLowerCase()
+    const journalRemotes = v4 ? [v4] : remotes
+    const out: ReturnLeg[] = []
+    const known = new Set<string>()
+    for (const e of rh?.returns() ?? []) {
+      if (e.accountKey !== acc.accountKey || !e.burn || (e.state !== 'burned' && e.state !== 'minted')) continue
+      known.add(e.id)
+      out.push({ id: e.id, home: e.home, amount: BigInt(e.burn.amount), state: e.state, burnBlock: BigInt(e.burn.block), burnTx: e.burn.txHash, ...(e.mintTx ? { mintTx: e.mintTx } : {}), ...(e.mintedBlock !== undefined ? { mintedBlock: BigInt(e.mintedBlock) } : {}), ...(e.state === 'minted' && e.mintAt ? { mintedAt: e.mintAt } : {}), remotes: journalRemotes })
+    }
+    for (const c of peers?.ok ? peers.chains : []) {
+      if (c.chainId !== BRIDGE_MONAD_CHAIN_ID || !c.at || !remotes.includes(c.at.safe.toLowerCase())) continue
+      for (const x of c.releases ?? []) {
+        if (known.has(x.id)) continue
+        known.add(x.id)
+        out.push({ id: x.id, home, amount: BigInt(x.amount), state: x.block !== undefined ? 'burned' : 'sending', ...(x.block !== undefined ? { burnBlock: BigInt(x.block) } : {}), ...(x.notLandedAt !== undefined ? { notLandedAt: BigInt(x.notLandedAt) } : {}), remotes: [c.at.safe.toLowerCase()] })
+      }
+    }
+    return returnRows(out, {
+      from: BRIDGE_MONAD_CHAIN_ID,
+      to: this.cfg.chainId,
+      homeBlock,
+      legOf: (x) => {
+        const of = x.remotes ?? []
+        const found = legs.filter((y) => of.includes(y.safe.toLowerCase())).map((y) => y.leg)
+        const fresh = found.filter((l) => l.read.at !== null && !l.read.stale).sort((a, b) => a.read.block - b.read.block)[0]
+        if (fresh) return { block: BigInt(fresh.read.block), stale: false }
+        return found.length ? { stale: true } : undefined
+      },
+    })
   }
 
   async funding(ctx: AccountContext, fresh = false): Promise<FundingView> {
@@ -2001,11 +2165,13 @@ export class Operator {
     // otto/mamoru#212: the cap holds the account's total across every chain, idle and placed; #332: and the burns on
     // their way to Monad (all of them when a peer could not be read).
     // otto/mamoru#352: a vault that could not be valued leaves the total a floor; funding still answers and says so.
-    const total = totalOf(this.localExposure(acc, r)) + (this.elsewhereOf(acc, peers) ?? this.burnsOf(acc, peers))
+    // #355: and the returns Monad→Base (all of them too).
+    const local = { safe: live.safe, block: r.block }
+    const total = totalOf(this.localExposure(acc, r)) + (this.elsewhereOf(acc, peers, local) ?? this.extrasOf(acc, peers, local))
     const cap = this.effectiveCap(acc)
     const engine = this.engineView(acc)
     // Display only: a failure here never fails the balance.
-    const money = await this.moneyMapOf(acc, live.safe, r, legs, engine, deadline).catch((e: unknown) => (logErr(`[money] ${acc.accountKey}:`, e), undefined))
+    const money = await this.moneyMapOf(acc, live.safe, r, legs, engine, deadline, peers).catch((e: unknown) => (logErr(`[money] ${acc.accountKey}:`, e), undefined))
     return {
       address: live.safe,
       ...(money ? { money } : {}),
@@ -5101,7 +5267,7 @@ export class Operator {
     // before the peers: on Monad they are asked with its block (otto/mamoru#332).
     const local = await this.localTotal(acc, live.safe).catch((e: unknown) => (logErr(`[armed] ${acc.accountKey} ${a.opId} held: Safe unreadable for the cap check`, e), null))
     if (local === null) return this.park(acc, ARM_RETRY_MS)
-    const elsewhere = this.elsewhereOf(acc, await this.peerRead(acc, PEER_START_MAX_AGE_MS, this.coverOf(local.safe, local.block)))
+    const elsewhere = this.elsewhereOf(acc, await this.peerRead(acc, PEER_START_MAX_AGE_MS, this.coverOf(local.safe, local.block)), local)
     if (elsewhere === null) {
       logErr(`[armed] ${acc.accountKey} ${a.opId} held: the other chains could not be read (CAP_CHECK_UNAVAILABLE)`, undefined)
       return this.park(acc, ARM_RETRY_MS)

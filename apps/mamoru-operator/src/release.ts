@@ -246,6 +246,33 @@ export async function nonceUsedAtHead(acc: AccountState, chain: Pick<PublicClien
   return used > BigInt(s.nonce)
 }
 
+/** otto/mamoru#355: one release a cap counts (releasesToCount). */
+export type ReleaseCount = { id: string; amount: bigint; chainId: number; home?: Address; at: string; block?: number; tx?: Hex; sending?: { nonceKey: bigint; nonce: bigint } }
+
+/**
+ * otto/mamoru#355: the requests of this Safe a cap counts until the home holds them: sending (a burn may have landed
+ * before it is settled here; while it has not, the Safe's read holds the USDC too, counted twice) and burned (in
+ * neither Safe until the mint, and in the home's journal only once it learns of the burn). By the home operator's id,
+ * the burn's block once burned. Every kept request (the current one and the finished ones): it stops counting only by
+ * the home's answer (Operator.releasesOf). Only these two states can follow a signed burn: settle moves sending to
+ * burned (always with its burn) or back to open (the nonce taken by another op or the burn reverted: nothing left);
+ * cancel takes only an open one. A burned entry without its burn would still count, at the largest try or the request.
+ */
+export function releasesToCount(acc: Pick<AccountState, 'release' | 'releasesDone' | 'ctx'>): ReleaseCount[] {
+  const out: ReleaseCount[] = []
+  // Its mint recipient: the Safe's home, the only recipient beforeSign lets a burn of it have.
+  const home = homeOf(acc)?.home
+  for (const r of [acc.release, ...(acc.releasesDone ?? [])]) {
+    if (!r || (r.state !== 'burned' && r.state !== 'sending')) continue
+    // Only one try can land, and none for more than asked: the largest try (or the request) bounds what leaves.
+    const bound = (r.sending?.tries ?? []).reduce((m, t) => (BigInt(t.amount) > m ? BigInt(t.amount) : m), 0n) || BigInt(r.amount)
+    const base = { id: r.id, chainId: r.chainId, at: r.at, ...(home ? { home } : {}) }
+    if (r.state === 'burned') out.push(r.burn ? { ...base, amount: BigInt(r.burn.amount), block: r.burn.block, tx: r.burn.txHash } : { ...base, amount: bound })
+    else out.push({ ...base, amount: bound, ...(r.sending ? { sending: { nonceKey: BigInt(r.sending.nonceKey), nonce: BigInt(r.sending.nonce) } } : {}) })
+  }
+  return out
+}
+
 function viewOf(r: ReleaseState): ReleaseView {
   return { id: r.id, amount: r.amount, chainId: r.chainId, state: r.state, ...(r.burn ? { burn: { amount: r.burn.amount, txHash: r.burn.txHash, block: r.burn.block } } : {}) }
 }

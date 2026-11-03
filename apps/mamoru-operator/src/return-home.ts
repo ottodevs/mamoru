@@ -16,7 +16,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import type { Hex, PublicClient, TransactionReceipt } from 'viem'
+import { getAddress, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import type { AccountContext, Address } from '@mamoru/domain'
 import { messageTransmitterV2Abi } from '@mamoru/registry'
 import type { MonadSender } from './bridge-monad.ts'
@@ -67,6 +67,14 @@ export const RETURN_ATTEST_FIRST_POLL_MS = 5 * 60_000
 export const RETURN_ATTEST_POLL_MS = 60_000
 /** Minted and cancelled returns are kept this long for the ops history, then pruned. */
 export const RETURN_KEEP_MS = 30 * 24 * 3600_000
+/** otto/mamoru#355: at most this many ids listed to the remote operator in one answer (exposure.ts takes up to 64). */
+export const RETURN_LISTED = 64
+/** otto/mamoru#355: reported releases this journal does not hold, followed at most this many at a time, each once a minute. */
+const UNKNOWN_KEPT = 64
+const UNKNOWN_POLL_MS = 60_000
+
+/** otto/mamoru#355: a release the remote operator reports, as the home reads it (exposure.ts ReleaseWire). */
+export type ReportedRelease = { id: string; amount: string; block?: string; tx?: Hex }
 
 class MintBudget extends Error {}
 
@@ -139,6 +147,119 @@ export class ReturnHome {
   /** Burned on Monad and not minted here yet: value of the account in flight. */
   inFlight(accountKey: string): bigint {
     return this.returns().reduce((s, e) => (e.accountKey === accountKey && e.state === 'burned' && e.burn ? s + BigInt(e.burn.amount) : s), 0n)
+  }
+
+  /**
+   * otto/mamoru#355: what a cap counts of the returns to the home Safes `homes`, raw USDC, and the ids it holds. A return
+   * belongs to its home Safe (the only mint recipient), never to an account key. Burned: in flight, counted. Minted:
+   * counted until a read of its home used in the same total (`readAt(home)`: that read's block, undefined when the total
+   * holds none) is at or after its mintedBlock; from then on that read holds it (mintedBlock is never left unset: tick
+   * backfills one). `ids`: returns this total positively holds, burned ones first, then minted ones newest first, at most
+   * RETURN_LISTED (one left out keeps counting on the remote side: more, never less); `usdc` never depends on the list.
+   * Requested and cancelled: nothing here and never listed, the remote Safe's read or its operator's own release count
+   * holds that value. No chain read.
+   */
+  capUsdc(homes: readonly string[], readAt: (home: Address) => bigint | undefined): { usdc: bigint; ids: string[] } {
+    const of = new Set(homes.map((a) => a.toLowerCase()))
+    let usdc = 0n
+    const burned: ReturnEntry[] = []
+    const minted: ReturnEntry[] = []
+    for (const e of this.returns()) {
+      if (!of.has(e.home.toLowerCase())) continue
+      // A burned or minted entry always has its burn (follow sets both at once); without one it counts what was asked.
+      const amount = BigInt(e.burn?.amount ?? e.amount)
+      if (e.state === 'burned') {
+        usdc += amount
+        burned.push(e)
+      } else if (e.state === 'minted') {
+        const at = readAt(e.home)
+        if (e.mintedBlock === undefined || at === undefined || BigInt(e.mintedBlock) > at) usdc += amount
+        minted.push(e)
+      }
+    }
+    const newest = (a: ReturnEntry, b: ReturnEntry) => b.at.localeCompare(a.at)
+    return { usdc, ids: [...burned.sort(newest), ...minted.sort(newest)].slice(0, RETURN_LISTED).map((e) => e.id) }
+  }
+
+  /**
+   * otto/mamoru#355: whether a total counting `capUsdc(homes)` holds return `id`: a journal entry burned or minted to one
+   * of `homes`. Nothing else: an id not here (pruned, never seen, a lost journal), requested or cancelled is not held.
+   */
+  holds(id: string, homes: readonly string[]): boolean {
+    const e = this.journal.returns[id]
+    return !!e && (e.state === 'burned' || e.state === 'minted') && homes.some((h) => h.toLowerCase() === e.home.toLowerCase())
+  }
+
+  /** The last successful report of each remote Safe: the release ids it still counts (otto/mamoru#355, `noteReported`). */
+  private readonly reported = new Map<string, Set<string>>()
+  /** Reported releases this journal does not hold yet, to resolve on chain (`resolveUnknown`). */
+  private readonly unknown = new Map<string, { r: ReportedRelease; safe: string; accountKey: string; homes: string[]; triedAt: number }>()
+
+  /**
+   * otto/mamoru#355: a successful answer of the remote operator for its Safe `safe` reported these releases (all it counts
+   * there). The latest one per Safe holds back the prune of those ids. Each one this journal does not hold as burned or
+   * minted (to one of `homes`, the account's home Safes) is followed on chain until it is adopted (resolveUnknown).
+   */
+  noteReported(safe: string, releases: readonly ReportedRelease[], accountKey: string, homes: readonly string[]): void {
+    const key = safe.toLowerCase()
+    const ids = new Set(releases.map((r) => r.id))
+    this.reported.delete(key)
+    this.reported.set(key, ids)
+    // No longer reported by that Safe: nothing left to resolve.
+    for (const [id, u] of this.unknown) if (u.safe === key && !ids.has(id)) this.unknown.delete(id)
+    if (this.reported.size > 5_000) this.reported.delete(this.reported.keys().next().value!)
+    for (const r of releases) {
+      if (this.holds(r.id, homes) || this.unknown.has(r.id) || !r.tx || r.block === undefined) continue
+      if (this.unknown.size >= UNKNOWN_KEPT) break
+      this.unknown.set(r.id, { r, safe: key, accountKey, homes: homes.map((h) => h.toLowerCase()), triedAt: 0 })
+    }
+  }
+
+  /**
+   * otto/mamoru#355: a reported release this journal does not hold (pruned before this code, a lost journal, a cancelled
+   * entry), resolved on chain: Circle's attestation of its Monad burn tx, exactly a burn of Monad USDC by V4 to one of the
+   * account's home Safes of the reported amount, signed by the attesters enabled on Base, whose nonce is used on Base. Only
+   * then is it adopted as minted, with mintedBlock the block of that check (at or after the mint: an upper bound), and
+   * listed from then on. Anything else: left as it is, counted on both sides (more, never less). Never mints.
+   */
+  private async resolveUnknown(u: { r: ReportedRelease; safe: string; accountKey: string; homes: string[]; triedAt: number }): Promise<void> {
+    const { r } = u
+    if (this.holds(r.id, u.homes)) return void this.unknown.delete(r.id)
+    const m = this.monad()
+    if (!m || !r.tx || r.block === undefined || this.now() - u.triedAt < UNKNOWN_POLL_MS) return
+    u.triedAt = this.now()
+    const atts = await cctpAttestation(r.tx, this.fetcher, CCTP_DOMAIN_MONAD)
+    if (!atts) return
+    const amount = BigInt(r.amount)
+    for (const a of atts) {
+      let home: string | undefined
+      try {
+        const msg = decodeCctpMessage(a.message)
+        home = u.homes.find((h) => mintIsFor(msg, m.usdc, h as Address, amount, { source: CCTP_DOMAIN_MONAD, destination: CCTP_DOMAIN_BASE }, m.v4))
+      } catch {
+        continue
+      }
+      if (!home) continue
+      const msg = decodeCctpMessage(a.message)
+      if (BigInt(msg.nonce) === 0n || !(await attestationValid(this.base, a.message, a.attestation))) continue
+      if (this.returns().some((o) => o.id !== r.id && o.cctpNonce?.toLowerCase() === msg.nonce.toLowerCase())) continue
+      const block = await this.base.getBlockNumber()
+      const used = await this.base.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'usedNonces', args: [msg.nonce], blockNumber: block })
+      if (used === 0n) return
+      const before = this.journal.returns[r.id]
+      const at = this.iso()
+      this.journal.returns[r.id] = { id: r.id, accountKey: before?.accountKey ?? u.accountKey, home: getAddress(home), amount: r.amount, state: 'minted', note: `adopted: reported by the remote, its mint found on Base${before ? ` (was ${before.state})` : ''}`, burn: { amount: r.amount, txHash: r.tx, block: Number(r.block) }, cctpNonce: msg.nonce, mintedBlock: block.toString(), at: before?.at ?? at, updatedAt: at }
+      try {
+        this.save()
+      } catch (err) {
+        if (before) this.journal.returns[r.id] = before
+        else delete this.journal.returns[r.id]
+        throw err
+      }
+      this.unknown.delete(r.id)
+      console.log(`[return] ${u.accountKey} ${r.id}: reported by the remote and minted on Base by block ${block}; adopted`)
+      return
+    }
   }
 
   /**
@@ -225,8 +346,17 @@ export class ReturnHome {
           if (p) await this.follow(e, p.remote, p.peer)
         }
         if (e.state === 'burned') await this.mint(e)
+        if (e.state === 'minted' && e.mintedBlock === undefined) await this.backfillMinted(e)
       } catch (err) {
         console.error(`[return] ${e.accountKey} ${e.id}: ${(err as Error).message?.split('\n')[0]}`)
+      }
+    }
+    // otto/mamoru#355: releases the remote reports that this journal does not hold, resolved on chain.
+    for (const u of [...this.unknown.values()]) {
+      try {
+        await this.resolveUnknown(u)
+      } catch (err) {
+        console.error(`[return] ${u.accountKey} ${u.r.id}: reported, not resolved: ${(err as Error).message?.split('\n')[0]}`)
       }
     }
   }
@@ -328,11 +458,36 @@ export class ReturnHome {
     else this.update(e, { mintTx: undefined, mintReverts: reverts + 1 })
   }
 
+  /**
+   * otto/mamoru#355: a minted entry without mintedBlock (none today: every path to minted sets it; kept for any older or
+   * hand-edited entry) gets the block of its mint's receipt, or else the head block now, which is at or after the mint
+   * (it is known minted): the cap then stops counting it at the first read of the home that holds it.
+   */
+  private async backfillMinted(e: ReturnEntry): Promise<void> {
+    const rc = e.mintTx ? await this.base.getTransactionReceipt({ hash: e.mintTx }).catch(() => null) : null
+    const block = rc?.status === 'success' ? rc.blockNumber : await this.base.getBlockNumber()
+    // updatedAt kept: the prune's age and lastClosedAt are the mint's, not this backfill's.
+    e.mintedBlock = block.toString()
+    try {
+      this.save()
+    } catch (err) {
+      delete e.mintedBlock
+      throw err
+    }
+  }
+
+  /**
+   * Minted and cancelled returns older than RETURN_KEEP_MS. otto/mamoru#355: only once a successful answer of the remote
+   * operator was seen since boot, and never one the last answer for any remote Safe still reports (the remote counts it
+   * until this journal lists it, so the entry stays to be listed).
+   */
   private prune(): void {
+    if (this.reported.size === 0) return
+    const still = new Set([...this.reported.values()].flatMap((ids) => [...ids]))
     const cutoff = this.now() - RETURN_KEEP_MS
     let changed = false
     for (const [id, e] of Object.entries(this.journal.returns)) {
-      if ((e.state === 'minted' || e.state === 'cancelled') && Date.parse(e.updatedAt) < cutoff) {
+      if ((e.state === 'minted' || e.state === 'cancelled') && Date.parse(e.updatedAt) < cutoff && !still.has(id)) {
         delete this.journal.returns[id]
         changed = true
       }
