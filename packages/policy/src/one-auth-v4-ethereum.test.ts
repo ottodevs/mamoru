@@ -98,3 +98,24 @@ describe('encodeInitV4 follows V4 BadInit(4) with domain 0 (#307)', () => {
     expect(() => encodeInitV4(init(HOME, 3))).toThrow("not a chain of V4's table")
   })
 })
+
+describe('otto/mamoru#348 (review of #247): held pools', () => {
+  test('a held pool the registry json does not pin resolves (exit-only), and one the eligible set serves stays in its bucket', async () => {
+    const { baseRegistry } = await import('@mamoru/registry')
+    const { oneAuthV4Live, staticPool, withRegistryPools } = await import('./index.ts')
+    const entry = { twapWindow: 1800, twapShortWindow: 300, bandTicks: 100, anchorTick: 0, anchorBand: 0, ratioBps: 1500, active: true }
+    const weth = { ...staticPool('pool:WETH/USDC/3000', baseRegistry), entry }
+    // WETH/USDC at 0.01 %: a pool of pinned tokens the Base json does not list, found from the account's position
+    const dynamic = { ...weth, address: '0x00000000000000000000000000000000000d1a01' as const, fee: 100, tickSpacing: 1 }
+    const r = withRegistryPools(oneAuthV4Live, { policy: '0x00000000000000000000000000000000000000a2', gasPolicy: '0x00000000000000000000000000000000000000a3' }, [weth], baseRegistry, { held: [weth, dynamic] })
+    expect(r.pools).toEqual(['pool:WETH/USDC/3000'])
+    expect(r.exitOnly).toEqual(['pool:WETH/USDC/100'])
+    expect(r.registry.entries.find((e) => e.name === 'pool:WETH/USDC/100')?.address.toLowerCase()).toBe(dynamic.address)
+    expect(baseRegistry.entries.some((e) => e.name === 'pool:WETH/USDC/100')).toBe(false) // the json itself untouched
+    expect(r.policy.buckets.at(-1)).toMatchObject({ id: 'exit-only', preference: 0, pools: ['pool:WETH/USDC/100'] })
+    // a held record whose name an existing entry holds for another address keeps its own name
+    const clash = { ...weth, address: '0x00000000000000000000000000000000000d1a02' as const, fee: 3000 }
+    const c = withRegistryPools(oneAuthV4Live, { policy: '0x00000000000000000000000000000000000000a2', gasPolicy: '0x00000000000000000000000000000000000000a3' }, [], baseRegistry, { held: [clash] })
+    expect(c.exitOnly).toEqual(['pool:WETH/USDC/3000@00000000'])
+  })
+})

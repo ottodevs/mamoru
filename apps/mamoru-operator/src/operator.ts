@@ -6,7 +6,7 @@ import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, m
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LAB_POLICIES, POLICIES, sleeveEnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, POLICIES, sleeveEnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, registryPoolsKey, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -36,7 +36,7 @@ import { buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, 
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReturnHome } from './return-home.ts'
 import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
-import { baseStepLines, monadStepLines, readEligiblePools, readPaused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
+import { baseStepLines, monadStepLines, readEligiblePools, readHeldPools, readPaused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
 import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
@@ -169,6 +169,8 @@ const GRANTS_CHECK_MS = 300_000
 /** Permission ids per engine-loop grant sweep (one Multicall3 chunk): the engine's always, the others in rotation. */
 const GRANTS_SWEEP_MAX = 100
 
+/** Review of #247: how often a V4 account's held pools are read from the chain (its positions and V4's exit entry). */
+const V4_HELD_TTL_MS = 60_000
 /** Engine-loop sweeps within which every non-engine id the account knows is read again (see enforceGrants). */
 export function sweepsToCover(others: number, engine: number): number {
   return others <= GRANTS_SWEEP_MAX - engine ? 1 : Math.ceil(others / Math.max(1, GRANTS_SWEEP_MAX - engine))
@@ -5786,16 +5788,35 @@ export class Operator {
   }
 
   /**
-   * Review of #245 (Opus P2, rule 7): the pools an account's engine runs on: the settled eligible set (hysteresis in
-   * RegistryPoolsCache) plus every pool the account still holds a position in (its last decided review, `peerView`),
-   * eligible or not, since A1 never gates exits. Null before the first read.
+   * Review of #247 (P1): per V4 account, the pools it holds a position in, read from the chain (readHeldPools: its
+   * admitted positions, each one's pool from the factory and V4's exit entry), at most once per V4_HELD_TTL_MS. Read at
+   * the first tick after a boot, before the first review, so a restart while a pool is not eligible keeps its exit.
    */
-  private v4PoolsFor(acc: Pick<AccountState, 'peerView'>): { pools: RegistryPool[]; key: string } | null {
-    const held = (acc.peerView?.positions ?? []).flatMap((p) => {
-      const e = p.pool ? this.cfg.registry.entries.find((x) => x.kind === 'pool' && x.name === p.pool) : undefined
-      return e ? [e.address] : []
-    })
-    return this.v4Pools()?.forAccount(held) ?? null
+  private readonly v4Held = new Map<string, { at: number; pools: RegistryPool[] }>()
+
+  private async refreshV4Held(acc: AccountState): Promise<void> {
+    const d = this.cfg.oneAuth
+    if (!d) return
+    const last = this.v4Held.get(acc.accountKey)
+    if (last && Date.now() - last.at < V4_HELD_TTL_MS) return
+    const ids = [...new Set([...(acc.admittedTokenIds ?? []), ...(acc.grants[0]?.admit ?? [])])].map((x) => BigInt(x))
+    const pools = await readHeldPools(this.client, d, this.cfg.chainId, acc.ctx.address as Address, ids)
+    this.v4Held.set(acc.accountKey, { at: Date.now(), pools })
+  }
+
+  /**
+   * Review of #245 (rule 7) and #247: the pools an account's engine runs on: the settled eligible set (hysteresis in
+   * RegistryPoolsCache), and the pools it holds a position in (`held`), which withRegistryPools makes exit-only when the
+   * eligible set does not serve them (A1 never gates exits). The key changes only with the eligible set or with a held
+   * pool that is not in it, so a new position in an eligible pool restarts nothing. Null before the first read.
+   */
+  private v4PoolsFor(acc: Pick<AccountState, 'accountKey'>): { pools: RegistryPool[]; held: RegistryPool[]; key: string } | null {
+    const read = this.v4Pools()?.peek()
+    if (!read) return null
+    const held = this.v4Held.get(acc.accountKey)?.pools ?? []
+    const live = new Set(read.pools.map((p) => p.address.toLowerCase()))
+    const out = held.filter((p) => !live.has(p.address.toLowerCase()))
+    return { pools: read.pools, held, key: out.length ? `${read.key}|exit:${registryPoolsKey(out)}` : read.key }
   }
 
   /** The account runs on MamoruActionPolicyV4 (home or remote). */
@@ -5828,8 +5849,8 @@ export class Operator {
   private v4EngineBuild(acc: AccountState): { policy: PolicyVersion; registry: Registry; sessions: EngineSession[]; key: string } {
     const d = this.cfg.oneAuth
     if (!d) throw new ReasonError('CHAIN_UNSUPPORTED', `${acc.accountKey} runs on V4 but this operator has no V4 deployment`)
-    const read = this.v4PoolsFor(acc) ?? { pools: [], key: '' }
-    const r = withRegistryPools(this.v4PolicyOf(acc), d, read.pools, this.cfg.registry)
+    const read = this.v4PoolsFor(acc) ?? { pools: [], held: [], key: '' }
+    const r = withRegistryPools(this.v4PolicyOf(acc), d, read.pools, this.cfg.registry, { held: read.held })
     const g = acc.grants[0]
     if (!g?.grant.oneAuthV4) throw new Error(`${acc.accountKey}: a V4 account holds its V4 session`)
     const sessions: EngineSession[] = r.policy.session.grants.map((t) => ({ name: grantKey(t), grant: { ...g.grant, ...(t.pool ? { pool: t.pool } : {}) }, permissionId: g.permissionId, ...(g.admit?.length ? { admit: g.admit.map(BigInt) } : {}) }))
@@ -7056,7 +7077,9 @@ export class Operator {
           // otto/mamoru#293: MamoruRegistry listed, removed or re-parametrized a pool since this loop started: it restarts on them.
           if (this.onV4(acc)) {
             const read = await this.v4Pools()?.get().catch((e) => logErr(`[v4] registry pools unreadable:`, e))
-            // Rule 7 (review of #245): the account's own set, settled over several reads and keeping its held pools.
+            // Review of #247: the account's held pools from the chain (a failed read keeps the last).
+            await this.refreshV4Held(acc).catch((e) => logErr(`[v4] ${acc.accountKey} held pools unreadable:`, e))
+            // Rule 7 (review of #245): the settled eligible set, plus the account's held pools as exit-only.
             const pools = read ? this.v4PoolsFor(acc) : null
             if (pools && pools.key !== this.v4LoopKey.get(acc.accountKey)) {
               console.log(`[v4] ${acc.accountKey} MamoruRegistry pools changed: engine restarts on them`)

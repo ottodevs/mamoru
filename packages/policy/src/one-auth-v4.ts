@@ -230,6 +230,15 @@ export const V4_USAGE_LIMIT = 2 ** 31 - 1
 /** Off chain only (no TimeFramePolicy in a V4 session): the validUntil the engine's view of the session carries. */
 export const V4_VALID_UNTIL = 2 ** 32 - 1
 
+/**
+ * otto/mamoru#348 (review of #247): the template of a pool the account holds a position in that V4 does not find
+ * eligible now. Exit-only: no increase (hasIncrease false), in a bucket at preference 0, so decide only reduces,
+ * harvests and collects there; the account's one V4 session serves it like any other pool (V4 never gates exits).
+ */
+export function v4ExitOnlyTemplate(pool: RegistryName): GrantTemplate {
+  return { name: 'manage-any', pool, perPosition: false, usageLimit: V4_USAGE_LIMIT, actions: [], requiresActionPolicy: true, actionPolicyOnly: true }
+}
+
 /** The bridge leg's template, for a home account with a remote bucket and for a remote Safe (`bridge-out`, decide's name). */
 export function v4BridgeTemplate(): GrantTemplate {
   return { name: 'bridge-out', perPosition: false, usageLimit: V4_USAGE_LIMIT, actions: [], requiresActionPolicy: true, actionPolicyOnly: true }
@@ -309,7 +318,18 @@ export function registryPoolEntry(p: RegistryPool, registry: Registry, opts: { u
  * carries each pool's band, anchor and windows exactly as V4's class states them, so its bounds are V4's own.
  * Returns the extended registry too: the engine resolves every pool name in it.
  */
-export function withRegistryPools(policy: PolicyVersion, deployment: Pick<OneAuthV4Deployment, 'policy' | 'gasPolicy'>, pools: readonly RegistryPool[], registry: Registry): { policy: PolicyVersion; registry: Registry; pools: RegistryName[] } {
+export function withRegistryPools(
+  policy: PolicyVersion,
+  deployment: Pick<OneAuthV4Deployment, 'policy' | 'gasPolicy'>,
+  pools: readonly RegistryPool[],
+  registry: Registry,
+  /**
+   * otto/mamoru#348 (review of #247): pools the account holds a position in, read from its positions on chain with V4's
+   * exit entry (MamoruV4Helper.exitEntry). Each one the eligible set does not place in a bucket goes to an `exit-only`
+   * bucket at preference 0 with an exit-only template, resolved even when the registry json does not pin it.
+   */
+  opts: { held?: readonly RegistryPool[] } = {},
+): { policy: PolicyVersion; registry: Registry; pools: RegistryName[]; exitOnly: RegistryName[] } {
   const pinned = V4_PINNED[registry.chainId]
   if (!pinned) throw new Error(`one-auth-v4: chain ${registry.chainId} is not in V4's table`)
   const entries: RegistryEntry[] = [...registry.entries]
@@ -343,11 +363,28 @@ export function withRegistryPools(policy: PolicyVersion, deployment: Pick<OneAut
     const byPair = declared.find((d) => d.pairs.has(pairOf(e.token0!, e.token1!)))
     return (byPair ?? declared.find((d) => d.stableKind === n.stablePair))?.b.id
   }
-  const buckets = policy.buckets.map((b) => ({ ...b, pools: named.filter((n) => home(n) === b.id).map((n) => n.name) }))
+  const buckets: PolicyVersion['buckets'] = policy.buckets.map((b) => ({ ...b, pools: named.filter((n) => home(n) === b.id).map((n) => n.name) }))
+  // Held pools no live bucket serves: exits only. A pool not pinned in the registry json resolves here too (the engine's
+  // own copy), since its position must be managed out whatever the json says.
+  const placed = new Set(buckets.flatMap((b) => b.pools.map((n) => entries.find((x) => x.name === n)!.address.toLowerCase())))
+  const exitOnly: { name: RegistryName; pool: RegistryPool }[] = []
+  for (const p of opts.held ?? []) {
+    if (placed.has(p.address.toLowerCase())) continue
+    const found = registryPoolEntry(p, { ...registry, entries }, { unpinned: true })
+    if (!found) continue
+    // A name another address already holds (the factory makes one pool per pair and fee, so only a non-factory record
+    // could): the address keeps it apart, never a pool mistaken for another.
+    const clash = entries.find((x) => x.name === found.name && x.address.toLowerCase() !== found.address.toLowerCase())
+    const e = clash ? { ...found, name: `${found.name}@${found.address.slice(2, 10).toLowerCase()}` as RegistryName } : found
+    if (!entries.some((x) => x.name === e.name)) entries.push(e)
+    placed.add(p.address.toLowerCase())
+    exitOnly.push({ name: e.name, pool: p })
+  }
+  if (exitOnly.length) buckets.push({ id: 'exit-only', preference: 0, exitOnly: true, pools: exitOnly.map((n) => n.name) })
   const bandTicksByPool: Record<RegistryName, number> = {}
   const anchorByPool: Record<RegistryName, { tick: number; band: number }> = {}
   const twapByPool: Record<RegistryName, { long: number; short: number }> = {}
-  for (const n of named) {
+  for (const n of [...named, ...exitOnly]) {
     bandTicksByPool[n.name] = n.pool.entry.bandTicks
     if (n.pool.entry.anchorBand > 0) anchorByPool[n.name] = { tick: n.pool.entry.anchorTick, band: n.pool.entry.anchorBand }
     twapByPool[n.name] = { long: n.pool.entry.twapWindow, short: n.pool.entry.twapShortWindow }
@@ -355,7 +392,7 @@ export function withRegistryPools(policy: PolicyVersion, deployment: Pick<OneAut
   const caps = GAS_CAPS_V2_BY_CHAIN[registry.chainId]!
   // A home with a remote bucket bridges out to it; a remote Safe bridges home on its home's request (#278). Same session.
   const bridges = (policy.remoteBuckets ?? []).length > 0 || policy.policyId === ONE_AUTH_V4_REMOTE || policy.policyId === `${ONE_AUTH_V4_REMOTE}-lab`
-  const grants = [...named.map((n) => v4PoolTemplate(n.name)), ...(bridges ? [v4BridgeTemplate()] : [])]
+  const grants = [...named.map((n) => v4PoolTemplate(n.name)), ...exitOnly.map((n) => v4ExitOnlyTemplate(n.name)), ...(bridges ? [v4BridgeTemplate()] : [])]
   const out: PolicyVersion = {
     ...policy,
     buckets,
@@ -370,7 +407,7 @@ export function withRegistryPools(policy: PolicyVersion, deployment: Pick<OneAut
       contractVersion: 4,
     },
   }
-  return { policy: out, registry: extended, pools: named.map((n) => n.name) }
+  return { policy: out, registry: extended, pools: named.map((n) => n.name), exitOnly: exitOnly.map((n) => n.name) }
 }
 
 /** A stable signature of an eligible pool set (what changes when a pool becomes eligible or stops being so). */

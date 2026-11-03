@@ -2,14 +2,14 @@
 // pinned) is byte-identical to today for a v6 account; on, a clean inventory offers approval.whatsNew in the shape #295
 // builds against; never while paused; a V4 account never renews; step 1 waits for step 0.
 import { describe, expect, test } from 'bun:test'
-import { BaseError, decodeFunctionData, encodeAbiParameters, encodeFunctionResult, type Hex, type PublicClient } from 'viem'
+import { BaseError, decodeFunctionData, encodeAbiParameters, encodeFunctionResult, parseAbi, type Hex, type PublicClient } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseRegistry } from '@mamoru/registry'
 import { grantKey, ONE_AUTH_V4, oneAuthV4Live, staticPool, withRegistryPools, type OneAuthV4Deployment } from '@mamoru/policy'
 import { resolveV4Policy, resolveV5Policy, resolveV6Policy } from '../src/boot.ts'
 import { encodeFunctionData, erc20Abi } from 'viem'
 import { HttpError, movedTo, type Operator } from '../src/operator.ts'
-import { MULTICALL3, readEligiblePools, readPaused, v4StoredGrant, WHATS_NEW_POINTS, RegistryPoolsCache } from '../src/one-auth.ts'
+import { MULTICALL3, readEligiblePools, readHeldPools, readPaused, v4StoredGrant, WHATS_NEW_POINTS, RegistryPoolsCache } from '../src/one-auth.ts'
 import { mamoruV4HelperAbi, v4Children } from '@mamoru/account/one-auth'
 import type { AccountState } from '../src/state.ts'
 import { withPinnedV6Base } from '../../../packages/account/remote/fixture.ts'
@@ -230,7 +230,7 @@ describe('engine pools from V4 eligibility (spec 010 A1)', () => {
     await expect(readEligiblePools(client, D, 8453)).rejects.toThrow('fetch failed')
   })
 
-  test('rule 7 (review of #245): a pool joins or leaves only after 3 reads in a row; a held pool stays for its account', async () => {
+  test('rule 7 (review of #245): a pool joins or leaves only after 3 reads in a row', async () => {
     const A = pool('pool:USDC/USDT/100')
     const B = pool('pool:WETH/USDC/3000')
     let next: ReturnType<typeof pool>[] = [A, B]
@@ -248,16 +248,99 @@ describe('engine pools from V4 eligibility (spec 010 A1)', () => {
     next = [A]
     expect(await names()).toEqual([A.address, B.address])
     expect(await names()).toEqual([A.address, B.address])
-    // an account still holding a position in B keeps it after it left the set; one that does not, does not
     expect(await names()).toEqual([A.address]) // third miss in a row: B leaves
-    expect(c.forAccount([B.address.toLowerCase()])!.pools.map((p) => p.address)).toEqual([A.address, B.address])
-    expect(c.forAccount([])!.key).toBe(c.peek()!.key)
-    expect(c.forAccount([B.address])!.key).not.toBe(c.peek()!.key)
     // a new pool needs 3 reads in a row too
     next = [A, B]
     expect(await names()).toEqual([A.address])
     expect(await names()).toEqual([A.address])
     expect(await names()).toEqual([A.address, B.address])
+  })
+
+  test('review of #247: the read is chunked; no candidate, or every priced failing, is a failed read', async () => {
+    const helper = v4Children(D.policy).helper
+    const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+    const WETH = '0x4200000000000000000000000000000000000006'
+    let chunks: number[] = []
+    let pricedOk = true
+    let pairs: string[][] = []
+    const client = {
+      readContract: async (a: { functionName: string; args?: readonly unknown[] }) => {
+        if (a.functionName === 'chain') return { chainId: 8453n, factory: '0x33128a8fC17869897dcE68Ed026d694621f6FDfD' }
+        if (a.functionName === 'pairsOf') return pairs
+        if (a.functionName === 'classOf') return { ref: `0x${'7'.repeat(40)}`, feeMask: 15 }
+        // a distinct pool per (pair, fee): 4 per pair
+        if (a.functionName === 'getPool') return `0x${(pairs.findIndex((p) => p[1] === a.args![1]) * 4 + [100, 500, 3000, 10_000].indexOf(a.args![2] as number) + 1).toString(16).padStart(40, '0')}`
+        if (a.functionName === 'aggregate3') {
+          const cs = a.args![0] as { target: string; callData: Hex }[]
+          chunks.push(cs.length)
+          return cs.map((c) => (c.target === helper ? (pricedOk ? { success: true, returnData: encodeFunctionResult({ abi: mamoruV4HelperAbi, functionName: 'priced', result: [{ token0: WETH, token1: USDC, fee: 3000, in1: true, stablePair: false }, { twapWindow: 1800, twapShortWindow: 300, bandTicks: 100, anchorTick: 0, anchorBand: 0, ratioBps: 1500, active: true }, WETH] as never }) } : { success: false, returnData: '0x' }) : { success: true, returnData: encodeAbiParameters([{ type: 'int24' }], [60]) }))
+        }
+        throw new Error(a.functionName)
+      },
+    } as unknown as PublicClient
+    // 30 pairs x 4 fee tiers = 120 candidates, 240 calls: three aggregate3 of at most 100
+    pairs = Array.from({ length: 30 }, (_, i) => [USDC, `0x${(i + 1).toString(16).padStart(40, 'a')}`])
+    expect(await readEligiblePools(client, D, 8453)).toHaveLength(120)
+    expect(chunks).toEqual([100, 100, 40])
+    pricedOk = false
+    await expect(readEligiblePools(client, D, 8453)).rejects.toThrow('priced failed for all')
+    pairs = []
+    await expect(readEligiblePools(client, D, 8453)).rejects.toThrow('no candidate pool')
+    chunks = []
+  })
+
+  test('review of #247: readHeldPools reads the positions the account still owns with value, and V4\'s exit entry', async () => {
+    const ACCOUNT = ctx.address
+    const helper = v4Children(D.policy).helper
+    const NPM = '0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1'
+    const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+    const WETH = '0x4200000000000000000000000000000000000006'
+    const POOL = '0x00000000000000000000000000000000000000e1'
+    const pos = (liquidity: bigint) => encodeFunctionResult({ abi: parseAbi(['function positions(uint256) view returns (uint96, address, address, address, uint24, int24, int24, uint128, uint256, uint256, uint128, uint128)']), functionName: 'positions', result: [0n, ACCOUNT, WETH, USDC, 500, -10, 10, liquidity, 0n, 0n, 0n, 0n] })
+    const owner = (a: string) => encodeAbiParameters([{ type: 'address' }], [a as Hex])
+    const client = {
+      readContract: async (a: { functionName: string; args?: readonly unknown[] }) => {
+        if (a.functionName === 'chain') return { chainId: 8453n, factory: '0x33128a8fC17869897dcE68Ed026d694621f6FDfD', npm: NPM }
+        if (a.functionName === 'getPool') return POOL
+        if (a.functionName === 'aggregate3') {
+          return (a.args![0] as { target: string; callData: Hex }[]).map((c) => {
+            const sel = c.callData.slice(0, 10)
+            if (c.target === NPM) {
+              const id = BigInt(`0x${c.callData.slice(10)}`)
+              if (id === 3n) return { success: false, returnData: '0x' } // burned
+              if (sel === '0x6352211e') return { success: true, returnData: owner(id === 2n ? `0x${'9'.repeat(40)}` : ACCOUNT) } // ownerOf: 2 was transferred away
+              return { success: true, returnData: pos(id === 4n ? 0n : 1_000n) } // 4 is empty
+            }
+            if (c.target === helper) return { success: true, returnData: encodeFunctionResult({ abi: parseAbi(['struct E { uint32 a; uint32 b; uint24 c; int24 d; uint24 e; uint16 f; bool g; }', 'function exitEntry(address) view returns (E)']), functionName: 'exitEntry', result: { a: 1800, b: 300, c: 100, d: 0, e: 0, f: 1500, g: false } }) }
+            return { success: true, returnData: encodeAbiParameters([{ type: 'int24' }], [10]) }
+          })
+        }
+        throw new Error(a.functionName)
+      },
+    } as unknown as PublicClient
+    const held = await readHeldPools(client, D, 8453, ACCOUNT, [1n, 2n, 3n, 4n])
+    expect(held).toEqual([{ address: POOL, token0: WETH, token1: USDC, fee: 500, tickSpacing: 10, entry: { twapWindow: 1800, twapShortWindow: 300, bandTicks: 100, anchorTick: 0, anchorBand: 0, ratioBps: 1500, active: true } }])
+  })
+
+  test('review of #247 (P1): N accounts asking at once move a streak by one read, not N', async () => {
+    const A = pool('pool:USDC/USDT/100')
+    const B = pool('pool:WETH/USDC/3000')
+    let next: ReturnType<typeof pool>[] = [A, B]
+    let reads = 0
+    let t = 0
+    const c = new RegistryPoolsCache(async () => (reads++, await Bun.sleep(5), next), 1000, () => t)
+    await c.get() // the first read, taken as is
+    next = [A]
+    t += 1000
+    const all = await Promise.all(Array.from({ length: 10 }, () => c.get()))
+    expect(reads).toBe(2)
+    // one miss of B, however many accounts asked: B stays (it needs 3 reads in a row)
+    for (const r of all) expect(r.pools.map((p) => p.address)).toEqual([A.address, B.address])
+    t += 1000
+    await Promise.all(Array.from({ length: 10 }, () => c.get()))
+    t += 1000
+    expect((await Promise.all(Array.from({ length: 10 }, () => c.get())))[0]!.pools.map((p) => p.address)).toEqual([A.address])
+    expect(reads).toBe(4)
   })
 
   test('V4 has no pause (A1): a V4 account never reads one; readPaused is the V2/V3 guardian read only', async () => {

@@ -113,3 +113,42 @@ describe('every bucket the policy declares is kept, pools resolved by chain and 
     expect(r.policy.buckets.map((b) => [b.id, b.pools])).toEqual([['stables', []], ['risk', ['pool:WETH/USDC/500', 'pool:WETH/USDC/3000']]])
   })
 })
+
+describe('otto/mamoru#348 (review of #247): a held pool V4 no longer finds eligible is exit-only', () => {
+  const BTC = 'pool:USDC/cbBTC/500'
+  const held = entryOf(BTC)
+  const { policy, exitOnly } = withRegistryPools(oneAuthV4Live, D, [entryOf('pool:WETH/USDC/3000')], baseRegistry, { held: [held] })
+  const tick = 60_000
+  const obsWith = (liquidity: bigint, idleBtc: bigint): Observation => ({
+    chainId: 8453,
+    block: { number: 100n, hash: `0x${'11'.repeat(32)}`, timestamp: 1_000_000n },
+    safeBlock: { number: 98n, hash: `0x${'22'.repeat(32)}` },
+    account: { address: '0x00000000000000000000000000000000000000aa', deployed: true, nonceKey: 0n, nonce: 0n },
+    sessions: policy.session.grants.map((g, i) => ({ grant: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(2, '0').repeat(32)}` as const, validUntil: 2 ** 32 - 1, active: true })),
+    native: 10n ** 17n,
+    balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: idleBtc, WETH: 0n },
+    positions: liquidity > 0n ? [{ tokenId: 7n, pool: BTC, tickLower: tick - 600, tickUpper: tick + 600, liquidity, collectable0: 10n, collectable1: 10n, principalOwed0: 0n, principalOwed1: 0n, managed: true, admitted: true }] : [],
+    pools: [pool('pool:WETH/USDC/3000', -193_380), pool(BTC, tick)],
+    ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' },
+    gas: { maxFeePerGas: 2_000_000n, opGasUnits: 1_800_000n },
+    deposits: [],
+    intents: { paused: false, exitRequested: false },
+    slot: null,
+  })
+
+  test('its bucket is at preference 0, its template has no increase, it is never entered', () => {
+    expect(exitOnly).toEqual([BTC])
+    expect(policy.buckets.find((b) => b.id === 'exit-only')).toEqual({ id: 'exit-only', preference: 0, exitOnly: true, pools: [BTC] })
+    expect(policy.session.grants.find((g) => g.pool === BTC)!.actions).toEqual([])
+    expect(policy.actionPolicy!.bandTicksByPool[BTC]).toBe(100) // its exit is priced like any other pool's
+  })
+
+  test('only exits: a large held position is reduced; idle cbBTC is not sold through it; nothing enters it', () => {
+    for (const [liq, idle] of [[10n ** 15n, 0n], [10n ** 15n, 50_000n], [0n, 50_000n], [10n ** 9n, 0n]] as const) {
+      const d = decide(obsWith(liq, idle), policy)
+      const p = d.proposal
+      if (p && 'pool' in p && p.pool === BTC) expect(['reduce', 'harvest']).toContain(p.kind)
+      if (liq === 10n ** 15n && idle === 0n) expect(p?.kind).toBe('reduce')
+    }
+  })
+})

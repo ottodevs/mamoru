@@ -131,8 +131,11 @@ export type PolicyVersion = {
    * `exitOptIn` (otto/mamoru#210, only on a bucket at preference 0): its positions are held, not wound down, until the
    * account opts in to the exit (decide's `exitPreferenceZero`, from the per-account `stables_lp_exit` flag); then they
    * are emptied whatever their size. Absent: a bucket at 0 is reduced as before (v6's USDC/cbBTC).
+   * `exitOnly` (otto/mamoru#348, review of #247; one-auth-v4 only, at preference 0): pools the account still holds a
+   * position in but V4 does not find eligible now. Exits only (reduce, harvest, the collect and burn of a re-range's
+   * close): no entry, increase or swap there, since V4 refuses each of them on a pool that is not eligible.
    */
-  buckets: { id: 'stables' | 'stables-lp' | 'btc-usdc' | 'risk'; preference: number; pools: RegistryName[]; vaults?: RegistryName[]; exitOptIn?: true }[]
+  buckets: { id: 'stables' | 'stables-lp' | 'btc-usdc' | 'risk' | 'exit-only'; preference: number; pools: RegistryName[]; vaults?: RegistryName[]; exitOptIn?: true; exitOnly?: true }[]
   /**
    * otto/mamoru#201/#213: buckets served on another chain, by the account's sleeve there (same Safe address, its own
    * policy). Their pools resolve in that chain's registry, never this one, so nothing that walks `buckets` sees them.

@@ -1,6 +1,6 @@
 // otto/mamoru#293, the fixes of the high-stakes review of PR #202 (Opus + Argon NO APTO), one test each.
 import { describe, expect, test } from 'bun:test'
-import type { Hex } from 'viem'
+import { encodeAbiParameters, encodeFunctionResult, parseAbi, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, Address, OpView } from '@mamoru/domain'
 import { baseRegistry, monadRegistry, type Registry } from '@mamoru/registry'
@@ -22,7 +22,7 @@ const pinned = (r: Registry): Registry => {
 }
 const base = pinned(baseRegistry)
 const scoped = { oneAuth: D, opsFlags: () => ({}), opsScopedFlags: () => ({ one_auth_v4: ['k'] }) }
-type Priv = { client: { readContract: (a: { functionName: string; args?: readonly unknown[] }) => Promise<unknown>; getBlockNumber: () => Promise<bigint>; getLogs: (a: unknown) => Promise<unknown[]> }; v4Engine(a: AccountState): { policy: { buckets: { id: string; pools: string[] }[] }; registry: Registry }; v4PoolsCache: unknown; prepared: Map<string, unknown>; tickOneAuth(): Promise<void> }
+type Priv = { client: { readContract: (a: { functionName: string; args?: readonly unknown[] }) => Promise<unknown>; getBlockNumber: () => Promise<bigint>; getLogs: (a: unknown) => Promise<unknown[]> }; v4Engine(a: AccountState): { policy: { buckets: { id: string; pools: string[] }[] }; registry: Registry }; v4PoolsCache: unknown; prepared: Map<string, unknown>; tickOneAuth(): Promise<void>; refreshV4Held(a: AccountState): Promise<void>; v4PoolsFor(a: AccountState): { key: string } | null }
 const priv = (op: Operator) => op as unknown as Priv
 
 function onV4(w: ReturnType<typeof world>, extra: Partial<AccountState> = {}): AccountState {
@@ -34,7 +34,7 @@ function onV4(w: ReturnType<typeof world>, extra: Partial<AccountState> = {}): A
 const pool = (name: string): RegistryPool => ({ ...staticPool(name, baseRegistry), entry: { twapWindow: 600, twapShortWindow: 60, bandTicks: 100, anchorTick: 0, anchorBand: name.includes('USDT') ? 40 : 0, ratioBps: 10_000, active: true } })
 function poolsAre(w: ReturnType<typeof world>, pools: RegistryPool[]) {
   const read = { pools, key: pools.map((p) => p.address).join() }
-  priv(w.op).v4PoolsCache = { peek: () => read, get: async () => read, forAccount: () => read }
+  priv(w.op).v4PoolsCache = { peek: () => read, get: async () => read }
 }
 
 describe('P0-3: the V4 remote of a design-C account has its own key on the Monad operator', () => {
@@ -274,5 +274,42 @@ describe('review of #202, round 2', () => {
     const step = (w.op as unknown as { submitStep(b: unknown, a?: AccountState): number }).submitStep.bind(w.op)
     expect(step({ prepareId: 'x' }, acc)).toBe(1)
     expect(step({ prepareId: 'x', step: 0 }, acc)).toBe(0)
+  })
+})
+
+describe('review of #247 (P1): after a restart, a held pool V4 no longer finds eligible keeps its exit', () => {
+  test('the fresh operator reads the held position from the chain and runs its pool as exit-only', async () => {
+    const BTC = 'pool:USDC/cbBTC/500'
+    const btc = staticPool(BTC, baseRegistry)
+    const w = world(0n, scoped)
+    const acc = onV4(w, { admittedTokenIds: ['7'] })
+    poolsAre(w, [pool('pool:WETH/USDC/3000')]) // cbBTC/USDC not eligible now
+    const before = priv(w.op).v4Engine(acc)
+    expect(before.policy.buckets.flatMap((b) => b.pools)).not.toContain(BTC)
+    const NPM = '0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1'
+    const helper = (await import('@mamoru/account/one-auth')).v4Children(D.policy).helper
+    const c = priv(w.op).client
+    const real = c.readContract.bind(c)
+    c.readContract = async (a) => {
+      if (a.functionName === 'chain') return { chainId: 8453n, factory: '0x33128a8fC17869897dcE68Ed026d694621f6FDfD', npm: NPM }
+      if (a.functionName === 'getPool') return btc.address
+      if (a.functionName === 'aggregate3') {
+        return (a.args![0] as { target: string; callData: Hex }[]).map((x) => {
+          if (x.target === NPM && x.callData.startsWith('0x6352211e')) return { success: true, returnData: encodeAbiParameters([{ type: 'address' }], [ctx.address]) }
+          if (x.target === NPM) return { success: true, returnData: encodeFunctionResult({ abi: parseAbi(['function positions(uint256) view returns (uint96, address, address, address, uint24, int24, int24, uint128, uint256, uint256, uint128, uint128)']), functionName: 'positions', result: [0n, ctx.address, btc.token0, btc.token1, 500, -10, 10, 5_000n, 0n, 0n, 0n, 0n] }) }
+          if (x.target === helper) return { success: true, returnData: encodeFunctionResult({ abi: parseAbi(['struct E { uint32 a; uint32 b; uint24 c; int24 d; uint24 e; uint16 f; bool g; }', 'function exitEntry(address) view returns (E)']), functionName: 'exitEntry', result: { a: 1800, b: 300, c: 120, d: 0, e: 0, f: 1500, g: false } }) }
+          return { success: true, returnData: encodeAbiParameters([{ type: 'int24' }], [10]) }
+        })
+      }
+      return real(a)
+    }
+    const keyBefore = priv(w.op).v4PoolsFor(acc)!.key
+    await priv(w.op).refreshV4Held(acc)
+    expect(priv(w.op).v4PoolsFor(acc)!.key).not.toBe(keyBefore) // the loop restarts on it before its first review
+    const after = priv(w.op).v4Engine(acc) as unknown as { policy: { buckets: { id: string; pools: string[]; preference: number }[]; session: { grants: { pool?: string; actions: unknown[] }[] }; actionPolicy: { bandTicksByPool: Record<string, number> } }; sessions: { name: string }[] }
+    expect(after.policy.buckets.find((b) => b.id === 'exit-only')).toMatchObject({ preference: 0, pools: [BTC] })
+    expect(after.policy.session.grants.find((g) => g.pool === BTC)!.actions).toEqual([]) // no increase: exits only
+    expect(after.policy.actionPolicy.bandTicksByPool[BTC]).toBe(120) // V4's exit entry
+    expect(after.sessions.map((x) => x.name)).toContain(`manage-any:${BTC}`)
   })
 })

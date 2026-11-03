@@ -12,7 +12,8 @@ type Position = FundingView['positions'][number]
 
 export type Bucket = 'Stable' | 'Balanced' | 'Growth'
 
-const BUCKET_LABEL: Record<BucketId, Bucket> = { stables: 'Stable', 'stables-lp': 'Stable', 'btc-usdc': 'Balanced', risk: 'Growth' }
+// 'exit-only' (#348): a V4 pool held but not eligible now; never a plan's bucket, sorted with Balanced.
+const BUCKET_LABEL: Record<BucketId, Bucket> = { stables: 'Stable', 'stables-lp': 'Stable', 'btc-usdc': 'Balanced', risk: 'Growth', 'exit-only': 'Balanced' }
 const STABLES = new Set(['USDC', 'USDT', 'EURC', 'DAI'])
 
 /** The bucket a pool belongs to in Mamoru's plans; a pool no plan names is sorted by its tokens. */

@@ -6,6 +6,7 @@
 import { decodeFunctionResult, encodeFunctionData, keccak256, parseAbi, toHex, zeroAddress, type Hex, type PublicClient } from 'viem'
 import type { Address, WhatsNew } from '@mamoru/domain'
 import { address, type Registry } from '@mamoru/registry'
+import { BATCH_MAX_CALLS } from '@mamoru/rpc'
 import { ONE_AUTH_V4, V4_CAP30_MULTIPLE, registryPoolsKey, V4_USAGE_LIMIT, V4_VALID_UNTIL, type OneAuthV4Deployment, type RegistryPool, type SessionGrant } from '@mamoru/policy'
 import { mamoruActionPolicyV4Abi, mamoruV4HelperAbi, mamoruV4TableAbi, v4Children, V4_FEE_BITS } from '@mamoru/account/one-auth'
 import { mamoruActionPolicyV2Abi } from '@mamoru/registry'
@@ -108,16 +109,35 @@ const poolIdentityAbi = [
 /** Multicall3, the same address on every chain (canonical CREATE2 deployment; Base, Monad and Ethereum included). */
 export const MULTICALL3: Address = '0xcA11bde05977b3631167028862bE2a173976CA11'
 
+type Call3 = { target: Address; allowFailure: true; callData: Hex }
+
+/**
+ * `calls` through Multicall3.aggregate3 with allowFailure, in chunks of at most BATCH_MAX_CALLS (review of #247: one
+ * aggregate3 over every candidate could run out of gas and read as "everything failed"). A chunk that returns another
+ * number of results than calls throws: the read failed, it says nothing about the calls.
+ */
+async function aggregate(client: PublicClient, calls: readonly Call3[], at: { blockNumber?: bigint }): Promise<{ success: boolean; returnData: Hex }[]> {
+  const out: { success: boolean; returnData: Hex }[] = []
+  for (let i = 0; i < calls.length; i += BATCH_MAX_CALLS) {
+    const chunk = calls.slice(i, i + BATCH_MAX_CALLS)
+    const r = (await client.readContract({ address: MULTICALL3, abi: multicall3Abi, functionName: 'aggregate3', args: [chunk], ...at })) as readonly { success: boolean; returnData: Hex }[]
+    if (r.length !== chunk.length) throw new Error(`Multicall3 returned ${r.length} results for ${chunk.length} calls`)
+    out.push(...r)
+  }
+  return out
+}
+
 /**
  * The pools V4 makes eligible on this chain now (spec 010 A1 "Eligibility rules"): for every pair with a class in
  * MamoruV4Table, every pool of the chain's factory at a fee tier of the class's set, kept only when MamoruV4Helper.priced
  * accepts it (factory, pinned tokens, fee set, observation ring, agreement with the reference pool), with the entry V4
  * itself prices it with.
  *
- * Review of #245 (Opus P2): `priced` for every candidate goes in ONE Multicall3.aggregate3 with allowFailure, so a pool
+ * Review of #245 (Opus P2): `priced` of every candidate goes through Multicall3.aggregate3 with allowFailure, so a pool
  * `priced` refuses is told by Multicall3's own success flag, whatever the RPC makes of a revert: one ineligible or new
- * pool is left out and never fails the whole read. A failure of the read itself (transport, the multicall reverting)
- * throws, and the cache keeps the last good set.
+ * pool is left out and never fails the whole read. Review of #247: chunked (BATCH_MAX_CALLS), and a read that finds no
+ * candidate at all, or where every `priced` fails, is a failed read (it throws and the cache keeps the last good set),
+ * never "nothing is eligible": the table always lists pairs whose reference pools V4 itself prices.
  */
 export async function readEligiblePools(client: PublicClient, deployment: Pick<OneAuthV4Deployment, 'policy' | 'table'>, chainId: number, blockNumber?: bigint): Promise<RegistryPool[]> {
   const at = blockNumber !== undefined ? { blockNumber } : {}
@@ -138,19 +158,13 @@ export async function readEligiblePools(client: PublicClient, deployment: Pick<O
     }
   }
   const list = [...candidates]
-  if (!list.length) return []
+  if (!list.length) throw new Error(`no candidate pool on chain ${chainId} (table ${pairs.length} pairs): read refused`)
   // priced(pool) and the pool's tickSpacing, each allowed to fail on its own.
-  const results = (await client.readContract({
-    address: MULTICALL3,
-    abi: multicall3Abi,
-    functionName: 'aggregate3',
-    args: [list.flatMap((pool) => [
-      { target: helper, allowFailure: true, callData: encodeFunctionData({ abi: mamoruV4HelperAbi, functionName: 'priced', args: [pool] }) },
-      { target: pool, allowFailure: true, callData: encodeFunctionData({ abi: poolIdentityAbi, functionName: 'tickSpacing' }) },
-    ])],
-    ...at,
-  })) as readonly { success: boolean; returnData: Hex }[]
-  if (results.length !== list.length * 2) throw new Error(`Multicall3 returned ${results.length} results for ${list.length * 2} calls`)
+  const results = await aggregate(client, list.flatMap((pool) => [
+    { target: helper, allowFailure: true as const, callData: encodeFunctionData({ abi: mamoruV4HelperAbi, functionName: 'priced', args: [pool] }) },
+    { target: pool, allowFailure: true as const, callData: encodeFunctionData({ abi: poolIdentityAbi, functionName: 'tickSpacing' }) },
+  ]), at)
+  if (list.every((_, k) => !results[2 * k]!.success)) throw new Error(`priced failed for all ${list.length} candidate pools on chain ${chainId}: read refused`)
   const out: RegistryPool[] = []
   list.forEach((pool, k) => {
     const pr = results[2 * k]!
@@ -161,6 +175,58 @@ export async function readEligiblePools(client: PublicClient, deployment: Pick<O
     const tickSpacing = decodeFunctionResult({ abi: poolIdentityAbi, functionName: 'tickSpacing', data: ts.returnData })
     out.push({ address: pool, token0: p.token0, token1: p.token1, fee: Number(p.fee), tickSpacing: Number(tickSpacing), entry: { twapWindow: e.twapWindow, twapShortWindow: e.twapShortWindow, bandTicks: e.bandTicks, anchorTick: e.anchorTick, anchorBand: e.anchorBand, ratioBps: e.ratioBps, active: e.active } })
   })
+  return out
+}
+
+const positionsAbi = parseAbi([
+  'function positions(uint256 tokenId) view returns (uint96 nonce, address operator, address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)',
+  'function ownerOf(uint256 tokenId) view returns (address)',
+])
+const exitEntryAbi = parseAbi([
+  'struct PoolEntryV4 { uint32 twapWindow; uint32 twapShortWindow; uint24 bandTicks; int24 anchorTick; uint24 anchorBand; uint16 ratioBps; bool active; }',
+  'function exitEntry(address pool) view returns (PoolEntryV4)',
+])
+
+/**
+ * otto/mamoru#348 (review of #247): the pools `account` holds a position in, from the chain: each of `tokenIds` (the
+ * positions V4 admitted for it) that the account still owns with liquidity or tokens owed, its pool from the factory,
+ * and the entry V4 prices its exit with (MamoruV4Helper.exitEntry: the pair's class, never its eligibility, A1). So an
+ * operator that restarts while a pool is not eligible still manages that position out, and a pool the registry json
+ * never pinned resolves too. A token id the manager no longer knows (burned) is skipped; a failed read throws.
+ */
+export async function readHeldPools(client: PublicClient, deployment: Pick<OneAuthV4Deployment, 'policy' | 'table'>, chainId: number, account: Address, tokenIds: readonly bigint[]): Promise<RegistryPool[]> {
+  if (!tokenIds.length) return []
+  const { helper } = v4Children(deployment.policy)
+  const chain = await client.readContract({ address: deployment.table, abi: mamoruV4TableAbi, functionName: 'chain', args: [BigInt(chainId)] })
+  if (chain.chainId !== BigInt(chainId)) throw new Error(`MamoruV4Table has no row for chain ${chainId}`)
+  const reads = await aggregate(client, tokenIds.flatMap((id) => [
+    { target: chain.npm, allowFailure: true as const, callData: encodeFunctionData({ abi: positionsAbi, functionName: 'positions', args: [id] }) },
+    { target: chain.npm, allowFailure: true as const, callData: encodeFunctionData({ abi: positionsAbi, functionName: 'ownerOf', args: [id] }) },
+  ]), {})
+  const keys = new Map<string, { token0: Address; token1: Address; fee: number }>()
+  tokenIds.forEach((_, k) => {
+    const pr = reads[2 * k]!
+    const ow = reads[2 * k + 1]!
+    if (!pr.success || !ow.success) return // burned: nothing to manage
+    const owner = decodeFunctionResult({ abi: positionsAbi, functionName: 'ownerOf', data: ow.returnData })
+    if (owner.toLowerCase() !== account.toLowerCase()) return
+    const [, , token0, token1, fee, , , liquidity, , , owed0, owed1] = decodeFunctionResult({ abi: positionsAbi, functionName: 'positions', data: pr.returnData })
+    if (liquidity === 0n && owed0 === 0n && owed1 === 0n) return
+    keys.set(`${token0}|${token1}|${fee}`.toLowerCase(), { token0, token1, fee: Number(fee) })
+  })
+  const out: RegistryPool[] = []
+  for (const k of keys.values()) {
+    const pool = (await client.readContract({ address: chain.factory, abi: factoryGetPoolAbi, functionName: 'getPool', args: [k.token0, k.token1, k.fee] })) as Address
+    if (BigInt(pool) === 0n) continue
+    const [ee, ts] = await aggregate(client, [
+      { target: helper, allowFailure: true, callData: encodeFunctionData({ abi: exitEntryAbi, functionName: 'exitEntry', args: [pool] }) },
+      { target: pool, allowFailure: true, callData: encodeFunctionData({ abi: poolIdentityAbi, functionName: 'tickSpacing' }) },
+    ], {})
+    if (!ee!.success || !ts!.success) continue // a pair V4 has no class for: V4 could not price its exit either
+    const e = decodeFunctionResult({ abi: exitEntryAbi, functionName: 'exitEntry', data: ee!.returnData })
+    const tickSpacing = decodeFunctionResult({ abi: poolIdentityAbi, functionName: 'tickSpacing', data: ts!.returnData })
+    out.push({ address: pool, token0: k.token0, token1: k.token1, fee: k.fee, tickSpacing: Number(tickSpacing), entry: { twapWindow: e.twapWindow, twapShortWindow: e.twapShortWindow, bandTicks: e.bandTicks, anchorTick: e.anchorTick, anchorBand: e.anchorBand, ratioBps: e.ratioBps, active: true } })
+  }
   return out
 }
 
@@ -184,14 +250,15 @@ export const ELIGIBILITY_STREAK = 3
 /**
  * One read of the eligible pools per TTL for every V4 account of the process (each review asks; a failed read keeps the
  * last), with hysteresis: after the first read (taken as is), a pool joins the set only after ELIGIBILITY_STREAK reads
- * in a row find it eligible, and leaves it only after as many find it not. Every pool ever read stays known (`known`),
- * so an account still holding a position in a pool that left the set keeps it (`forAccount`): A1 never gates exits.
+ * in a row find it eligible, and leaves it only after as many find it not. Review of #247 (P1): the read and its
+ * settling run once, inside the one shared promise, so N accounts asking at once move a streak by one read, not N.
+ * A pool that leaves the set while an account still holds a position in it stays that account's as exit-only
+ * (readHeldPools, withRegistryPools' `held`).
  */
 export class RegistryPoolsCache {
   private last: { at: number; pools: RegistryPool[]; key: string } | null = null
-  private inflight: Promise<RegistryPool[]> | null = null
+  private inflight: Promise<{ at: number; pools: RegistryPool[]; key: string }> | null = null
   private readonly set = new Map<string, RegistryPool>()
-  private readonly known = new Map<string, RegistryPool>()
   /** Reads in a row that disagree with the set about a pool (eligible while out, or not while in). */
   private readonly streak = new Map<string, number>()
   constructor(
@@ -204,21 +271,24 @@ export class RegistryPoolsCache {
   /** The eligible pools (with hysteresis), at most `ttlMs` old. Throws only when no read has ever succeeded. */
   async get(): Promise<{ pools: RegistryPool[]; key: string }> {
     if (this.last && this.now() - this.last.at < this.ttlMs) return this.last
-    this.inflight ??= this.read().finally(() => (this.inflight = null))
+    this.inflight ??= this.read()
+      .then((raw) => {
+        const pools = this.settle(raw)
+        this.last = { at: this.now(), pools, key: registryPoolsKey(pools) }
+        return this.last
+      })
+      .finally(() => (this.inflight = null))
     try {
-      const raw = await this.inflight
-      const pools = this.settle(raw)
-      this.last = { at: this.now(), pools, key: registryPoolsKey(pools) }
+      return await this.inflight
     } catch (e) {
       if (!this.last) throw e
+      return this.last
     }
-    return this.last!
   }
 
   private settle(raw: readonly RegistryPool[]): RegistryPool[] {
     const first = this.last === null
     const now = new Map(raw.filter((p) => p.entry.active).map((p) => [p.address.toLowerCase(), p]))
-    for (const [a, p] of now) this.known.set(a, p)
     for (const a of new Set([...now.keys(), ...this.set.keys()])) {
       const inSet = this.set.has(a)
       const eligible = now.has(a)
@@ -242,26 +312,6 @@ export class RegistryPoolsCache {
   /** The last settled set, without waiting (null before the first read). */
   peek(): { pools: RegistryPool[]; key: string } | null {
     return this.last
-  }
-
-  /**
-   * An account's pools: the settled set, plus every known pool in `held` (addresses of pools the account holds a
-   * position in) that is not in it now. Exits are never gated by eligibility (A1), so the engine keeps managing those
-   * positions; an entry there is V4's to refuse while the pool is not eligible. Null before the first read.
-   */
-  forAccount(held: Iterable<string>): { pools: RegistryPool[]; key: string } | null {
-    if (!this.last) return null
-    const pools = [...this.last.pools]
-    const inSet = new Set(pools.map((p) => p.address.toLowerCase()))
-    for (const h of held) {
-      const a = h.toLowerCase()
-      const p = this.known.get(a)
-      if (p && !inSet.has(a)) {
-        pools.push(p)
-        inSet.add(a)
-      }
-    }
-    return pools.length === this.last.pools.length ? this.last : { pools, key: registryPoolsKey(pools) }
   }
 }
 

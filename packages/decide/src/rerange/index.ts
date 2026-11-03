@@ -367,6 +367,9 @@ export function idleConvertOf(obs: Observation, policy: PolicyVersion, policyPoo
     if (!b.pool || b.value * 10_000n + total * BigInt(DRIFT_BPS) < b.target * 10_000n) continue
     // Bought for a top-up and about to be minted: selling it back would undo the entry.
     if (keep?.has(b.pool)) continue
+    // otto/mamoru#348 (review of #247): an exit-only V4 pool is not eligible now and V4 refuses a swap there; its idle
+    // token is sold through a bucket whose pool is eligible, or waits.
+    if (policy.buckets.find((x) => x.id === b.bucket)?.exitOnly) continue
     // otto/mamoru#213: a bucket being left (preference 0) sells its idle token even once its last position is gone.
     const leaving = policy.buckets.find((x) => x.id === b.bucket)?.preference === 0
     if (!leaving && !obs.positions.some((p) => p.pool === b.pool && p.liquidity > 0n && isManaged(p, policy, policyPools))) continue

@@ -990,7 +990,8 @@ export class Engine {
     const nonce = await this.entryPointNonce(block.number)
     const baseFee = block.baseFeePerGas ?? 0n
     // Review of #247: a V4 op carries its kind's measured limits and the chain's fee ceiling (gas-rate sizing).
-    const gas = isV4Policy(this.cfg.policy.actionPolicy) ? v4EngineGas(v4OpKind(proposal.kind), this.cfg.chainId, baseFee, this.cfg.policy.actionPolicy.gasPolicy?.caps) : engineGas(baseFee, this.cfg.policy.actionPolicy?.gasPolicy?.caps)
+    const caps = this.cfg.policy.actionPolicy?.gasPolicy?.caps
+    const gas = isV4Policy(this.cfg.policy.actionPolicy) ? v4EngineGas(v4OpKind(proposal.kind), this.cfg.chainId, baseFee, caps) : engineGas(baseFee, caps)
     // Spec 007 T7: a v4 session's MamoruGasPolicy refuses an op over its owner-signed caps; at a basefee that leaves no
     // room under maxFeePerGas the engine waits instead of sending one that cannot validate.
     if (!gas) return void j.move(op.opId, 'discarded', 'GAS_PRICE_OVER_CAP', {}, `basefee ${baseFee}`)

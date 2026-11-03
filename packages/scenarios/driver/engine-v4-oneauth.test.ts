@@ -31,7 +31,7 @@ const NPM = address('NonfungiblePositionManager', baseRegistry)
 const grant = { policyId: 'one-auth-v4', policyHash: `0x${'00'.repeat(32)}`, name: 'manage-any', salt: `0x${'02'.repeat(32)}`, chainId: 8453, account: ACCOUNT, sessionValidator: 'OwnableValidator', sessionKey: sessionKey.address, userOp: { validAfter: 0, validUntil: 2 ** 32 - 1, usageLimit: 2 ** 31 - 1 }, permitERC4337Paymaster: false, erc7739: 'none', fallbackAction: 'none', actions: [], requiresActionPolicy: true, actionPolicyOnly: true, oneAuthV4: { policy: V4, npm: NPM } } as unknown as SessionGrant
 const session: EngineSession = { name: `manage-any:${POOL}`, grant, permissionId: `0x${'0d'.repeat(32)}` }
 
-async function withEngine<T>(fn: (e: Engine, chain: FakeChain) => Promise<T>, hooks: Partial<EngineHooks> = {}): Promise<T> {
+async function withEngine<T>(fn: (e: Engine, chain: FakeChain) => Promise<T>, hooks: Partial<EngineHooks> = {}, pol = policy): Promise<T> {
   const chain = new FakeChain()
   chain.code.set(ACCOUNT.toLowerCase(), '0x6001')
   chain.contracts.set(V4.toLowerCase(), (data: Hex) => {
@@ -43,7 +43,7 @@ async function withEngine<T>(fn: (e: Engine, chain: FakeChain) => Promise<T>, ho
   const rpc = chain.serve()
   try {
     const e = new Engine(
-      { mode: 'live', chainId: 8453, signingChainIds: [8453], rpcUrl: rpc.url, bundlerUrl: 'http://127.0.0.1:9/', policy, account: ACCOUNT, sessionKey, nonceLane: 0, depositsAfter: 800n, historyFromBlock: 800n, sessions: [], v4BridgeRecipient: () => REMOTE },
+      { mode: 'live', chainId: 8453, signingChainIds: [8453], rpcUrl: rpc.url, bundlerUrl: 'http://127.0.0.1:9/', policy: pol, account: ACCOUNT, sessionKey, nonceLane: 0, depositsAfter: 800n, historyFromBlock: 800n, sessions: [], v4BridgeRecipient: () => REMOTE },
       { waitBlock: async () => {}, ...hooks },
     )
     return await fn(e, chain)
@@ -136,5 +136,19 @@ describe('review of #247: V4 gas-rate sizing', () => {
     for (const l of Object.values(V4_OP_GAS[8453]!)) {
       expect(l.verificationGasLimit <= caps.maxVerificationGasLimit && l.callGasLimit <= caps.maxCallGasLimit && l.preVerificationGas <= caps.maxPreVerificationGas).toBe(true)
     }
+  })
+})
+
+describe('review of #247: a held pool V4 no longer finds eligible is exit-only in the engine', () => {
+  test('its reduce and re-range close are A1 exits; it is never swapped or minted into by decide (see decide tests)', async () => {
+    const exitOnly = withRegistryPools(oneAuthV4Live, { policy: V4, gasPolicy: '0x00000000000000000000000000000000000000b5' }, [], baseRegistry, { held: [pool(POOL)] }).policy
+    expect(exitOnly.buckets.find((b) => b.id === 'exit-only')!.pools).toEqual([POOL])
+    await withEngine(async (e, chain) => {
+      chain.addPosition(ACCOUNT, 7n, POOL)
+      for (const p of [kinds[4]![1], kinds[5]![1], kinds[6]![1]]) {
+        const out = await prepare(e, p)
+        expect(checkA1Batch(out.calls, { chainId: 8453, account: ACCOUNT, policy: V4, now: 1_790_002_000n }).ok).toBe(true)
+      }
+    }, {}, exitOnly)
   })
 })
