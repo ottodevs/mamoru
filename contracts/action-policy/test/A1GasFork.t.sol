@@ -59,6 +59,12 @@ contract A1GasForkTest is V4Fixture {
         console2.log("  rest (validation + EntryPoint)", total - exec);
     }
 
+    /// Review of #247: each op is sent with the operator's own limits for its kind (packages/scenarios engine.ts
+    /// V4_OP_GAS, Base; preVerification 100k), so the run proves they suffice.
+    function _limits(uint256 verification, uint256 callGas) internal {
+        (opVerification, opCall, opPre) = (verification, callGas, 100_000);
+    }
+
     /// approve / use / reset / assertZero, the builder's order for one pulled token.
     function _pulled1(address token, uint256 amount, bytes memory action) internal view returns (Execution[] memory) {
         return _approved(token, amount, address(v4), action);
@@ -101,7 +107,9 @@ contract A1GasForkTest is V4Fixture {
     }
 
     function test_gas_engineOpsInTheA1Shape() public {
+        _limits(500_000, 1200_000);
         _measure("swap 100 USDC -> cbBTC", _batch(_pulled1(USDC, 100e6, _swapCall(POOL_BTC, USDC, 100e6))));
+        _limits(500_000, 1700_000);
         _measure("mint USDC/cbBTC (2 approvals, 2 resets)", _mintBatch(_mintParams(safe, 300e6, 0.003e8)));
         uint256 tokenId = INPMT(NPM).tokenOfOwnerByIndex(safe, 0);
         Execution[] memory inc = new Execution[](7);
@@ -113,19 +121,25 @@ contract A1GasForkTest is V4Fixture {
         inc[4] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.assertZero, (USDC)));
         inc[5] = Execution(CBBTC, 0, abi.encodeCall(IERC20T.approve, (address(v4), 0)));
         inc[6] = Execution(address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.assertZero, (CBBTC)));
+        _limits(500_000, 1300_000);
         _measure("increase (2 approvals, 2 resets)", _batch(inc));
         Execution[] memory col = new Execution[](1);
         col[0] = Execution(NPM, 0, abi.encodeWithSelector(0xfc6f7865, tokenId, safe, type(uint128).max, type(uint128).max));
+        _limits(500_000, 250_000);
         _measure("harvest (collect)", _batch(col));
         (,,,,,,, uint128 liq,,,,) = INPMT(NPM).positions(tokenId);
+        _limits(500_000, 600_000);
         _measure("reduce half (checkExit + decrease + collect)", _exit(tokenId, liq / 2, false));
         (,,,,,,, liq,,,,) = INPMT(NPM).positions(tokenId);
+        _limits(500_000, 600_000);
         _measure("rerange exit (checkExit + decrease all + collect + burn)", _exit(tokenId, liq, true));
         // registerRemote, then readiness by a CCTP message from the remote's V4 (as V4UserOpFork), then the bridge
         address sk = makeAddr("remote session key");
+        _limits(500_000, 350_000);
         _measure("registerRemote", _single(address(v4), abi.encodeCall(MamoruActionPolicyV4.registerRemote, (DOMAIN_MONAD, sk))));
         MamoruActionPolicyV4.Remote memory r = v4.remoteOf(safe, DOMAIN_MONAD);
         // announceReady from the account's own session (noema-d3's op): the home proves itself to a sibling on Ethereum.
+        _limits(500_000, 250_000);
         _measure("announceReady (home -> Ethereum, read back + sendMessage)", _single(address(v4), abi.encodeCall(MamoruActionPolicyV4.announceReady, (safe, 0, address(0), pid))));
         vm.recordLogs(); // a message header to build the remote's from (anyone may announce)
         v4.announceReady(safe, 0, address(0), pid);
@@ -135,13 +149,17 @@ contract A1GasForkTest is V4Fixture {
         m = _readyFromMonad(m, abi.encode(safe, r.remote, r.ownersHash));
         bytes memory a = _attestable(m, 2000);
         bytes memory att = _attest(a);
+        _limits(500_000, 350_000);
         _measure("relayMessage (MessageTransmitterV2.receiveMessage -> V4, readiness)", _single(MESSAGE_TRANSMITTER, abi.encodeWithSignature("receiveMessage(bytes,bytes)", a, att)));
         assertTrue(v4.isReady(safe, DOMAIN_MONAD), "the relayed message made the remote ready");
+        _limits(500_000, 450_000);
         _measure("bridge 100 USDC (approve + V4.bridge + reset + assertZero)", _batch(_pulled1(USDC, 100e6, abi.encodeCall(MamoruActionPolicyV4.bridge, (DOMAIN_MONAD, USDC, 100e6, 0)))));
         // vault deposit (V4.deposit into gtUSDCp) and redeem (V4 pulls the shares: approve of the vault's shares)
+        _limits(410_000, 950_000);
         _measure("vault deposit 1,000 USDC (approve + V4.deposit + reset + assertZero)", _batch(_pulled1(USDC, 1_000e6, abi.encodeCall(MamoruActionPolicyV4.deposit, (GT_USDCP, 1_000e6)))));
         uint256 shares = IERC20T(GT_USDCP).balanceOf(safe);
         assertGt(shares, 0, "deposited");
+        _limits(410_000, 950_000);
         _measure("vault redeem (approve shares + V4.redeem + reset + assertZero)", _batch(_pulled1(GT_USDCP, shares, abi.encodeCall(MamoruActionPolicyV4.redeem, (GT_USDCP, shares)))));
         console2.log("max handleOps gas of an engine op", maxTotal);
         console2.log("max execution gas of an engine op", maxExec);

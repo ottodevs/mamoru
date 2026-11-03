@@ -100,7 +100,7 @@ export class Relayer {
     tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint },
     onSent?: (hash: Hex) => void,
     /** maxFeeWei: the most the transaction can cost; signed: its hash, relayer nonce and the maxFeePerGas it is signed with (#180). */
-    onSending?: (maxFeeWei: bigint, signed: { hash: Hex; nonce: number; maxFeePerGas: bigint }) => void,
+    onSending?: (maxFeeWei: bigint, signed: { hash: Hex; nonce: number; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }) => void,
     /** #180: the hash of the signed transaction, before it is broadcast, so a caller can persist it first. */
     onSigned?: (hash: Hex, nonce: number) => void,
   ): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
@@ -132,7 +132,7 @@ export class Relayer {
       })
       // The most it can cost: execution at its signed maxFeePerGas plus the L1 data fee for these bytes, doubled for the L1
       // price moving before inclusion. Only read when someone needs the bound.
-      if (onSending) onSending(gas * fees.maxFeePerGas + 2n * (await this.l1Fee(serializedTransaction)), { hash: keccak256(serializedTransaction), nonce, maxFeePerGas: fees.maxFeePerGas })
+      if (onSending) onSending(gas * fees.maxFeePerGas + 2n * (await this.l1Fee(serializedTransaction)), { hash: keccak256(serializedTransaction), nonce, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas })
       onSigned?.(keccak256(serializedTransaction), nonce)
       const hash = await wallet.sendRawTransaction({ serializedTransaction })
       this.lastSent = { nonce, at: Date.now() }
@@ -143,6 +143,27 @@ export class Relayer {
         // The window runs from the end of the send, receipt wait included: the next send starts right after it.
         this.lastSent = { nonce, at: Date.now() }
       }
+    })
+  }
+
+  /**
+   * otto/mamoru#348 (review of #247): replaces the pending transaction at `nonce` by a 0-value transfer to the relayer
+   * itself, both fees at least 12.5 % over the stuck one's (the replacement rule of geth and reth) and never under
+   * today's. Returns the replacement's hash once the provider accepts it; does not wait for its receipt.
+   */
+  cancel(nonce: number, stuck: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }): Promise<Hex> {
+    if (this.refusal !== null) return Promise.reject(new ReasonError('CHAIN_UNSUPPORTED', this.refusal))
+    return this.lock.run(async () => {
+      const wallet = createWalletClient({ account: this.account, chain: this.chain, transport: http(this.rpcUrl, { timeout: 60_000 }) })
+      const fees = await this.client.estimateFeesPerGas()
+      const bump = (x: bigint) => (x * 9n) / 8n + 1n
+      const prio = bump(stuck.maxPriorityFeePerGas) > fees.maxPriorityFeePerGas ? bump(stuck.maxPriorityFeePerGas) : fees.maxPriorityFeePerGas
+      let max = bump(stuck.maxFeePerGas) > fees.maxFeePerGas ? bump(stuck.maxFeePerGas) : fees.maxFeePerGas
+      if (max < prio) max = prio
+      const serializedTransaction = await this.account.signTransaction({ chainId: this.chain.id, type: 'eip1559', to: this.account.address, value: 0n, gas: 21_000n, nonce, maxFeePerGas: max, maxPriorityFeePerGas: prio })
+      const hash = await wallet.sendRawTransaction({ serializedTransaction })
+      this.lastSent = { nonce, at: Date.now() }
+      return hash
     })
   }
 }

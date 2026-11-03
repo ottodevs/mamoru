@@ -313,3 +313,44 @@ describe('review of #247 (P1): after a restart, a held pool V4 no longer finds e
     expect(after.sessions.map((x) => x.name)).toContain(`manage-any:${BTC}`)
   })
 })
+
+describe('review of #247 (P2): lane-1 session ops (registerRemote now, announceReady next)', () => {
+  type Lane1 = { sendV4SessionOp(a: AccountState, i: unknown[]): Promise<Hex | null>; lane1Bundler: () => { sendUserOperation: (op: { callData: Hex; nonce: bigint }) => Promise<Hex> } }
+  function setup(revert = false) {
+    const w = world(0n, scoped)
+    const acc = onV4(w)
+    const sent: { callData: Hex; nonce: bigint }[] = []
+    let t = 1_800_000_000n
+    let chainNonce = 0n
+    const c = priv(w.op).client as unknown as Record<string, unknown>
+    const real = (c.readContract as (a: unknown) => Promise<unknown>).bind(c)
+    c.getBlock = async () => ({ number: 500n, timestamp: t, baseFeePerGas: 5_000_000n, hash: `0x${'aa'.repeat(32)}` })
+    c.readContract = async (a: { functionName: string }) => (a.functionName === 'getNonce' ? chainNonce : real(a))
+    c.call = async () => {
+      if (revert) throw new Error('execution reverted: RemoteNotReady(15)')
+      return { data: '0x' }
+    }
+    ;(w.op as unknown as Lane1).lane1Bundler = () => ({ sendUserOperation: async (op) => (sent.push(op), `0x${'bb'.repeat(32)}` as Hex) })
+    const send = () => (w.op as unknown as Lane1).sendV4SessionOp(acc, [{ kind: 'registerRemote', domain: 15, sessionKey: privateKeyToAccount(KEY).address }])
+    return { send, sent, advance: (s: bigint) => (t += s), spend: () => chainNonce++ }
+  }
+
+  test('two senders at once never sign the same nonce; the next one waits for the nonce or the window to pass', async () => {
+    const s = setup()
+    const [a, b] = await Promise.all([s.send(), s.send()])
+    expect([a, b].filter((x) => x !== null)).toHaveLength(1)
+    expect(s.sent).toHaveLength(1)
+    expect(await s.send()).toBeNull() // nonce 0 unspent, its window open
+    s.spend()
+    expect(await s.send()).not.toBeNull() // the first landed: nonce 1
+    expect(s.sent.map((o) => o.nonce)).toEqual([0n, 1n])
+    s.advance(301n)
+    expect(await s.send()).not.toBeNull() // nonce 1 never landed and its window closed: it can be signed again
+  })
+
+  test('an op that would revert after validating is never signed', async () => {
+    const s = setup(true)
+    expect(await s.send()).toBeNull()
+    expect(s.sent).toHaveLength(0)
+  })
+})

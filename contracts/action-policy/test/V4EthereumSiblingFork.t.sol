@@ -310,18 +310,18 @@ contract V4EthereumSiblingForkTest is V4Fixture {
 
     /// otto/mamoru#348: the sibling's two steady-state ops (USE mode) in the A1 shape the operator's builder produces
     /// (apps/mamoru-operator bridge-out.ts `driveSibling`: clock, wrap, approve, V4.swap, reset, assertZero; clock,
-    /// approve, V4.bridge, reset, assertZero), sent with the operator's own limits (SIBLING_GAS: verification 600k, call
-    /// 1.3M / 450k, preVerification 80k) under Ethereum's caps (3M / 2M / 200k). Logs handleOps and execution gas.
+    /// approve, V4.bridge, reset, assertZero), sent with the operator's own limits (SIBLING_GAS: call
+    /// 1.0M / 420k, preVerification 80k; verification 450k) under Ethereum's caps (3M / 2M / 200k). Logs handleOps and execution gas.
     ///   nix shell nixpkgs#foundry --command forge test --isolate --match-test test_gas_siblingA1Ops -vv
     function test_gas_siblingA1Ops() public {
         _enabledAndSwapped();
         vm.deal(safe, safe.balance + 0.05 ether);
-        (opVerification, opCall, opPre) = (600_000, 1_300_000, 80_000);
+        (opVerification, opCall, opPre) = (450_000, 1_000_000, 80_000);
         (uint256 swapTotal, uint256 swapExec) = _measureSibling(_wrapSwap(0.04 ether));
         assertEq(IERC20T(E_WETH).balanceOf(safe), 0, "wrapped and swapped");
         _provenReady();
         uint256 usdc = IERC20T(E_USDC).balanceOf(safe);
-        (opVerification, opCall, opPre) = (600_000, 450_000, 80_000);
+        (opVerification, opCall, opPre) = (450_000, 420_000, 80_000);
         (uint256 bridgeTotal, uint256 bridgeExec) = _measureSibling(_bridgeCall(DOMAIN_BASE, usdc));
         assertEq(IERC20T(E_USDC).balanceOf(safe), 0, "burned to Base");
         console2.log("sibling wrap + approve + V4.swap + reset + assertZero: handleOps gas", swapTotal);

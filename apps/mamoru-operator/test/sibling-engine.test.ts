@@ -9,7 +9,7 @@ import { concat, encodeAbiParameters, encodeEventTopics, pad, parseAbi, toHex, T
 import { generatePrivateKey } from 'viem/accounts'
 import { address, ethereumRegistry } from '@mamoru/registry'
 import { oneAuthV4Deployment } from '@mamoru/policy'
-import { BridgeOut, L1_USDC, SIBLING_IDLE_MS, SIBLING_LEG_FAILS, SIBLING_LEG_RETRY_MS, UNCONFIRMED_GIVEUP_MS, type SiblingLeg, type StoredSibling } from '../src/bridge-out.ts'
+import { BridgeOut, L1_USDC, SIBLING_GAS, SIBLING_MAX_FEE, SIBLING_IDLE_MS, SIBLING_LEG_FAILS, SIBLING_LEG_RETRY_MS, UNCONFIRMED_GIVEUP_MS, type SiblingLeg, type StoredSibling } from '../src/bridge-out.ts'
 import { MESSAGE_TRANSMITTER_V2, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
 import { pinTestA1 } from '../../../packages/account/one-auth/pin-fixture.ts'
 
@@ -134,12 +134,14 @@ function make(fake: Fake, now: () => number, leg?: Partial<SiblingLeg>, extra: P
       return { hash: TX, receipt: receiptOf(lastHash!, TX) as never }
     },
   }
+  const cancels: { nonce: number; stuck: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } }[] = []
+  ;(relayer as unknown as { cancel: (n: number, s: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }) => Promise<Hex> }).cancel = async (nonce, stuck) => (cancels.push({ nonce, stuck }), OTHER_TX)
   const bo = new BridgeOut(l1 as never, relayer, dir, fetch, now, undefined, () => true)
   const journal = () => JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8')) as { siblings: { k: StoredSibling }; routes: Record<string, { state: string; amountUsdc: string; cctp?: { sender?: string; message?: Hex } }>; spent: { wei: string } }
-  return { bo, sent, journal }
+  return { bo, sent, journal, cancels }
 }
 
-const ready: Fake = { eth: 10n ** 16n, usdc: 5_000_000n, ready: true, paused: false, nonce: 0n, baseFee: 1_000_000_000n, send: 'lands', opSuccess: true, burn: 'good', receipt: 'ours', pending: false, ranElsewhere: false }
+const ready: Fake = { eth: 10n ** 16n, usdc: 5_000_000n, ready: true, paused: false, nonce: 0n, baseFee: 50_000_000n, send: 'lands', opSuccess: true, burn: 'good', receipt: 'ours', pending: false, ranElsewhere: false }
 
 describe('the sibling engine (#309 c)', () => {
   test('ready on Base with USDC: one bridge op, and its burn becomes the CCTP route (V4 the burner)', async () => {
@@ -224,6 +226,32 @@ describe('the sibling engine (#309 c)', () => {
     expect(m.journal().siblings.k.leg?.state).toBe('unconfirmed')
   })
 
+  test('review of #247: a handleOps still pending past its op window is replaced once, then the op is failed and re-signed', async () => {
+    const fake: Fake = { ...ready, receipt: 'none', pending: true }
+    const sec = BigInt(Math.floor(T0 / 1000))
+    let now = T0
+    const m = make(fake, () => now, { l1Tx: TX, validUntil: (sec + 300n).toString(), relayerNonce: 41, relayerMaxFee: '2000000000', relayerPrio: '100000000' })
+    await m.bo.tick()
+    expect(m.cancels).toEqual([]) // inside the window: it may still land
+    now += 301_000
+    await m.bo.tick()
+    expect(m.cancels).toEqual([{ nonce: 41, stuck: { maxFeePerGas: 2_000_000_000n, maxPriorityFeePerGas: 100_000_000n } }])
+    expect(m.journal().siblings.k.leg?.cancelTx).toBe(OTHER_TX)
+    await m.bo.tick()
+    expect(m.cancels).toHaveLength(1) // once
+    // the replacement landed: the handleOps is gone, its op can never run: failed now, not after the give-up
+    fake.pending = false
+    await m.bo.tick()
+    expect(m.journal().siblings.k.leg?.state).toBe('failed')
+  })
+
+  test('review of #247: a dropped op past its window is failed at once (no give-up wait), so its nonce is re-signed', async () => {
+    const sec = BigInt(Math.floor(T0 / 1000))
+    const m = make({ ...ready, receipt: 'none' }, () => T0 + 301_000, { l1Tx: TX, validUntil: (sec + 300n).toString() })
+    await m.bo.tick()
+    expect(m.journal().siblings.k.leg?.state).toBe('failed')
+  })
+
   test("a reverted op is failed; SIBLING_LEG_FAILS of them stop the engine for the day", async () => {
     let now = T0
     const m = make({ ...ready, opSuccess: false }, () => now)
@@ -264,9 +292,9 @@ describe('the sibling engine (#309 c)', () => {
     const m = make({ ...ready, ready: false, usdc: 0n, eth: 10n ** 17n }, () => T0)
     await m.bo.tick()
     const leg = m.journal().siblings.k.leg!
-    const swapGas = 600_000n + 1_300_000n + 80_000n
-    const bridgeGas = 600_000n + 450_000n + 80_000n
-    expect(BigInt(leg.amount)).toBe(10n ** 17n - swapGas * (2n * 1_000_000_000n + 100_000_000n) - bridgeGas * 3_000_000_000n)
+    const sum = (g: { verificationGasLimit: bigint; callGasLimit: bigint; preVerificationGas: bigint }) => g.verificationGasLimit + g.callGasLimit + g.preVerificationGas
+    expect(sum(SIBLING_GAS.swap)).toBe(1_530_000n) // review of #247: the measured limits
+    expect(BigInt(leg.amount)).toBe(10n ** 17n - sum(SIBLING_GAS.swap) * (2n * 50_000_000n + 100_000_000n) - sum(SIBLING_GAS.bridge) * SIBLING_MAX_FEE)
   })
 
   test('review r1 of #238: a send refused before signing gives the day its bound back and keeps the previous leg', async () => {

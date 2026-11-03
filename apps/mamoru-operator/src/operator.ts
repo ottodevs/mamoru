@@ -32,7 +32,7 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
-import { buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, smartSessionV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
+import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, smartSessionV4Abi, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReturnHome } from './return-home.ts'
 import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
@@ -42,7 +42,7 @@ import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSess
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
-import { Engine, engineGas, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
+import { Engine, engineGas, v4EngineGas, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
 import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
 import { buildMoneyMap, chainLegOf, unreadLeg } from './money-map.ts'
@@ -6519,23 +6519,55 @@ export class Operator {
    * checked by its validator before signing. registerRemote uses it; so does the operator's announceReady
    * (#348: announceReady by the operator, noema-d3: `[{ kind: 'announceReady', safe, toDomain, sessionKey, permissionId }]`,
    * or `[{ kind: 'relayMessage', message, attestation }]` to deliver the CCTP readiness message on the other chain).
-   * Returns the userOp hash, or null when nothing was sent (no V4 session, gas over the caps).
+   * Review of #247 (P2):
+   *  - one lane-1 send at a time per account (`lane1Lock`), and a ledger of the last lane-1 op: while its nonce is unspent
+   *    and its window (T + S) is open nothing else is signed on lane 1, so two senders never sign the same nonce;
+   *  - the calls are run from the EntryPoint first (eth_call at the block): an op that would validate and then revert is
+   *    never sent (under A1 it would still charge the account and its gas rate);
+   *  - the kind's measured limits and the chain's fee ceiling (v4EngineGas).
+   * Returns the userOp hash, or null when nothing was sent (no V4 session, another lane-1 op open, gas over the ceiling,
+   * the simulation refused).
    */
   private async sendV4SessionOp(acc: AccountState, intents: A1Intent[]): Promise<Hex | null> {
-    const d = this.cfg.oneAuth!
-    const g = acc.grants[0]
-    if (!g?.grant.oneAuthV4 || !acc.sessionKey) return null
-    const account = acc.ctx.address as Address
-    const block = await this.client.getBlock()
-    const { callData } = buildA1CallData({ chainId: this.cfg.chainId, account, policy: d.policy, t: block.timestamp }, intents)
-    const key = sessionNonceKey(1, address('SmartSession', this.cfg.registry))
-    const nonce = (await this.client.readContract({ address: address('EntryPointV07', this.cfg.registry), abi: entryPointV07Abi, functionName: 'getNonce', args: [account, key] })) as bigint
-    const gas = engineGas(block.baseFeePerGas ?? 0n, GAS_CAPS_V2_BY_CHAIN[this.cfg.chainId])
-    if (!gas) return null
-    const op = await signSessionUserOp(draftUserOp(account, nonce, callData, gas), this.cfg.chainId, g.permissionId, privateKeyToAccount(acc.sessionKey), this.cfg.registry)
-    const bundler = new BundlerClient({ url: this.cfg.bundlerUrl, mode: 'live', chainId: this.cfg.chainId, signingChainIds: [this.cfg.chainId], registry: this.cfg.registry })
-    return bundler.sendUserOperation(op)
+    let lock = this.lane1Locks.get(acc.accountKey)
+    if (!lock) this.lane1Locks.set(acc.accountKey, (lock = new Lock()))
+    return lock.run(async () => {
+      const d = this.cfg.oneAuth!
+      const g = acc.grants[0]
+      if (!g?.grant.oneAuthV4 || !acc.sessionKey) return null
+      const account = acc.ctx.address as Address
+      const block = await this.client.getBlock()
+      const key = sessionNonceKey(1, address('SmartSession', this.cfg.registry))
+      const nonce = (await this.client.readContract({ address: address('EntryPointV07', this.cfg.registry), abi: entryPointV07Abi, functionName: 'getNonce', args: [account, key], blockNumber: block.number })) as bigint
+      const open = this.lane1Sent.get(acc.accountKey)
+      if (open && nonce <= open.nonce && block.timestamp <= open.expiresAt) {
+        console.log(`[v4] ${acc.accountKey} lane-1 op with nonce ${open.nonce} still open (until ${open.expiresAt}): nothing signed`)
+        return null
+      }
+      const { callData } = buildA1CallData({ chainId: this.cfg.chainId, account, policy: d.policy, t: block.timestamp }, intents)
+      const kind = intents.length === 1 && (intents[0]!.kind === 'registerRemote' || intents[0]!.kind === 'announceReady' || intents[0]!.kind === 'relayMessage') ? intents[0]!.kind : null
+      const gas = kind ? v4EngineGas(kind, this.cfg.chainId, block.baseFeePerGas ?? 0n, GAS_CAPS_V2_BY_CHAIN[this.cfg.chainId]) : engineGas(block.baseFeePerGas ?? 0n, GAS_CAPS_V2_BY_CHAIN[this.cfg.chainId])
+      if (!gas) return null
+      try {
+        await this.client.call({ account: address('EntryPointV07', this.cfg.registry), to: account, data: callData, blockNumber: block.number })
+      } catch (e) {
+        logErr(`[v4] ${acc.accountKey} lane-1 op (${intents.map((i) => i.kind).join(', ')}) would revert, nothing signed:`, e instanceof Error ? e.message.split('\n')[0] : e)
+        return null
+      }
+      const op = await signSessionUserOp(draftUserOp(account, nonce, callData, gas), this.cfg.chainId, g.permissionId, privateKeyToAccount(acc.sessionKey), this.cfg.registry)
+      this.lane1Sent.set(acc.accountKey, { nonce, expiresAt: a1ExpiresAt(block.timestamp) })
+      return this.lane1Bundler().sendUserOperation(op)
+    })
   }
+
+  /** The bundler lane-1 ops go to (a method so tests can stand in for it). */
+  private lane1Bundler(): Pick<BundlerClient, 'sendUserOperation'> {
+    return new BundlerClient({ url: this.cfg.bundlerUrl, mode: 'live', chainId: this.cfg.chainId, signingChainIds: [this.cfg.chainId], registry: this.cfg.registry })
+  }
+
+  /** Review of #247: one lane-1 sender per account at a time, and the last lane-1 op signed (its nonce and A1 window). */
+  private readonly lane1Locks = new Map<string, Lock>()
+  private readonly lane1Sent = new Map<string, { nonce: bigint; expiresAt: bigint }>()
 
   /**
    * A confirmed migration step: the account's grants are its one V4 session from here on (home on Base; on Monad the

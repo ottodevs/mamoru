@@ -5,7 +5,7 @@ import { encodeFunctionData, getAddress, pad, parseAbi, parseAbiItem, parseEvent
 import type { UserOperation } from 'viem/account-abstraction'
 import type { AccountContext, Address, BridgeOutRoute, BridgeOutToSign, BridgeOutView, EthConvert, EthConvertToSign, MigrateV4Input, OwnerSignature } from '@mamoru/domain'
 import { address, baseRegistry, entryPointV07Abi, erc20Abi, ethereumRegistry } from '@mamoru/registry'
-import { buildA1CallData, buildMigrateV4, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, type A1Intent } from '@mamoru/account/one-auth'
+import { a1ExpiresAt, buildA1CallData, buildMigrateV4, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, type A1Intent } from '@mamoru/account/one-auth'
 import { GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment } from '@mamoru/policy'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { chmodSync, closeSync, fsyncSync, openSync, writeSync } from 'node:fs'
@@ -100,17 +100,23 @@ export const SIBLING_STUCK_POLL_MS = 10 * 60_000
  *    validation + EntryPoint 277k (verification limit 600k: 2.2x);
  *  - clock + approve + V4.bridge + reset + assertZero: handleOps 528k, execution 276k (call limit 450k: 1.6x),
  *    validation + EntryPoint 252k.
- * T7's figures before #348 (e2e-ethereum-sibling, gone with T7): wrap + approve + V4.swap ~0.91M from the EntryPoint, approve + V4.bridge ~0.15M.
+ * Review of #247 (gas-rate sizing): MamoruGasPolicyV2 charges the limits x maxFeePerGas against Ethereum's G = 0.01 ETH a
+ * day, so the limits are cut to the measurements: verification 450k (1.6x the 277k / 252k of validation + EntryPoint),
+ * call gas 1.5x the execution (swap 1.0M, bridge 420k). The fork test sends the ops with exactly these limits.
  */
 export const SIBLING_GAS = {
-  swap: { verificationGasLimit: 600_000n, callGasLimit: 1_300_000n, preVerificationGas: 80_000n },
-  bridge: { verificationGasLimit: 600_000n, callGasLimit: 450_000n, preVerificationGas: 80_000n },
+  swap: { verificationGasLimit: 450_000n, callGasLimit: 1_000_000n, preVerificationGas: 80_000n },
+  bridge: { verificationGasLimit: 450_000n, callGasLimit: 420_000n, preVerificationGas: 80_000n },
 } as const
 const opGasOf = (k: keyof typeof SIBLING_GAS) => SIBLING_GAS[k].verificationGasLimit + SIBLING_GAS[k].callGasLimit + SIBLING_GAS[k].preVerificationGas
 /** The relayer's handleOps for one sibling op: the op's limits plus the EntryPoint's own work. */
 export const SIBLING_HANDLE_OPS_OVERHEAD = 200_000n
-/** The highest fee a sibling op signs (its maxFeePerGas): the relayer's own ceiling, under GasPolicyV2's 5 gwei. */
-export const SIBLING_MAX_FEE = 3_000_000_000n // = MAX_GAS_PRICE_WEI (declared below)
+/**
+ * The highest fee a sibling op signs (its maxFeePerGas), under GasPolicyV2's 5 gwei; above it (basefee + priority over
+ * it) the sibling waits. Review of #247: 0.25 gwei (Ethereum's basefee is ~0.04 gwei today), so G = 0.01 ETH a day
+ * covers, at the ceiling, 26 swaps (1.53M of limits) or 42 bridges (0.95M) a day; a deposit needs one of each.
+ */
+export const SIBLING_MAX_FEE = 250_000_000n
 /** A swap's value (as V4 values it) stays this far (bps) under V4's room: the band moves before the op runs. */
 export const SIBLING_ROOM_MARGIN_BPS = 300n
 /** The op search stops this many blocks behind the head: a provider's logs may lag its state (review r2 of #238). */
@@ -280,7 +286,13 @@ export type Deposit = {
 /** The relayer sends this module needs, so tests can stand in for the operator's Relayer. */
 export type L1Sender = {
   readonly address: Address
-  send(tx: { to: Address; data?: Hex; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: (maxFeeWei: bigint, signed: { hash: Hex; nonce: number; maxFeePerGas: bigint }) => void, onSigned?: (hash: Hex, nonce: number) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }>
+  send(tx: { to: Address; data?: Hex; gas?: bigint }, onSent?: (hash: Hex) => void, onSending?: (maxFeeWei: bigint, signed: { hash: Hex; nonce: number; maxFeePerGas: bigint; maxPriorityFeePerGas?: bigint }) => void, onSigned?: (hash: Hex, nonce: number) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }>
+  /**
+   * Review of #247: replaces the relayer's pending transaction at `nonce` with a 0-value transfer to itself at higher
+   * fees (both at least 12.5 % over the stuck one's), so a handleOps past its op's window neither lands (AA22, at the
+   * relayer's cost) nor holds the nonce. Returns the replacement's hash; does not wait for it.
+   */
+  cancel?(nonce: number, stuck: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }): Promise<Hex>
 }
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>
@@ -361,7 +373,22 @@ export type StoredSibling = {
  * it is sent. `nonce` is the EntryPoint nonce it signs (SmartSession lane 0): any later op signs the same one while it
  * is unspent, so at most one of them ever runs; `nonceFrom` is the first block any op with that nonce was sent from.
  */
-export type SiblingLeg = { kind: 'swap' | 'bridge'; userOpHash: Hex; nonce: string; nonceFrom: string; amount: string; state: 'sending' | 'unconfirmed' | 'done' | 'failed'; l1Tx?: Hex; at: string }
+export type SiblingLeg = {
+  kind: 'swap' | 'bridge'
+  userOpHash: Hex
+  nonce: string
+  nonceFrom: string
+  amount: string
+  state: 'sending' | 'unconfirmed' | 'done' | 'failed'
+  l1Tx?: Hex
+  at: string
+  /** Review of #247: the op's A1 window end (T + S, seconds), the relayer transaction's nonce and fees, and its replacement. */
+  validUntil?: string
+  relayerNonce?: number
+  relayerMaxFee?: string
+  relayerPrio?: string
+  cancelTx?: Hex
+}
 
 type PreparedSibling = { prepareId: string; accountKey: string; live: LiveAccount; tx: SafeTx; safeTxHash: Hex; permissionId: Hex; sessionKey: Address; capUsdc: bigint; deployed: boolean; expires: number }
 
@@ -1980,7 +2007,7 @@ export class BridgeOut {
       return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} simulation refused, nothing sent:`, e instanceof Error ? e.message.split('\n')[0] : e)
     }
     const prev = c.leg
-    const leg: SiblingLeg = { kind, userOpHash: hash, nonce: nonce.toString(), nonceFrom: c.opNonce.from, amount: amount.toString(), state: 'sending', at: new Date(now).toISOString() }
+    const leg: SiblingLeg = { kind, userOpHash: hash, nonce: nonce.toString(), nonceFrom: c.opNonce.from, amount: amount.toString(), state: 'sending', at: new Date(now).toISOString(), validUntil: a1ExpiresAt(block.timestamp).toString() }
     c.leg = leg
     this.save()
     try {
@@ -1996,6 +2023,12 @@ export class BridgeOut {
           (h) => {
             leg.l1Tx = h
             this.save()
+          },
+          (signed) => {
+            // Review of #247: what a replacement must outbid if this transaction is still pending past the op's window.
+            leg.relayerNonce = signed.nonce
+            leg.relayerMaxFee = signed.maxFeePerGas.toString()
+            leg.relayerPrio = (signed.maxPriorityFeePerGas ?? signed.maxFeePerGas).toString()
           },
         )
         await this.settleLeg(accountKey, c, leg, receipt)
@@ -2033,8 +2066,24 @@ export class BridgeOut {
       if (receipt && userOpLogs(receipt, leg.userOpHash)) return this.settleLeg(accountKey, c, leg, receipt)
     }
     if ((await this.siblingNonce(c.safe)) > BigInt(leg.nonce)) return this.recoverNonce(accountKey, c)
-    if (leg.l1Tx && !receipt && (await this.pending(leg.l1Tx))) return
-    if (receipt || this.now() - Date.parse(leg.at) > UNCONFIRMED_GIVEUP_MS) {
+    // Review of #247 (P2): an op is dead once its A1 window (T + S) has passed: the EntryPoint refuses it (AA22).
+    const dead = leg.validUntil !== undefined && BigInt(Math.floor(this.now() / 1000)) > BigInt(leg.validUntil)
+    if (leg.l1Tx && !receipt && (await this.pending(leg.l1Tx))) {
+      // Still pending past the window: landing now would only revert the relayer's handleOps at its cost, and hold its
+      // nonce. Replaced once by a 0-value transfer to itself at higher fees; the op is re-signed after it.
+      if (dead && !leg.cancelTx && leg.relayerNonce !== undefined && this.relayer.cancel) {
+        try {
+          leg.cancelTx = await this.relayer.cancel(leg.relayerNonce, { maxFeePerGas: BigInt(leg.relayerMaxFee ?? '0'), maxPriorityFeePerGas: BigInt(leg.relayerPrio ?? '0') })
+          this.save()
+          logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: handleOps ${leg.l1Tx} still pending past its op's window, replaced by ${leg.cancelTx}`, undefined)
+        } catch (e) {
+          logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: replacing ${leg.l1Tx} failed:`, e instanceof Error ? e.message.split('\n')[0] : e)
+        }
+      }
+      return
+    }
+    // Not pending and no receipt of ours: once the window has passed it can never run, so the next op signs that nonce.
+    if (receipt || dead || this.now() - Date.parse(leg.at) > UNCONFIRMED_GIVEUP_MS) {
       leg.state = 'failed'
       this.legFailed(accountKey, c)
       this.save()
@@ -2136,7 +2185,7 @@ export class BridgeOut {
    * stays charged. Before the send the bound is one transaction at today's price (written first, as charged()), returned
    * when the send is refused before anything is signed (review r1 of #238); the relayer must hold twice it.
    */
-  private async chargedOp(tx: { to: Address; data: Hex; gas: bigint }, op: Hex, onSent: (hash: Hex) => void, onSigned: (hash: Hex) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
+  private async chargedOp(tx: { to: Address; data: Hex; gas: bigint }, op: Hex, onSent: (hash: Hex) => void, onSigned: (hash: Hex) => void, onSending?: (signed: { hash: Hex; nonce: number; maxFeePerGas: bigint; maxPriorityFeePerGas?: bigint }) => void): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
     const price = await this.l1.getGasPrice()
     if (price > MAX_GAS_PRICE_WEI) throw new HttpError(503, 'BRIDGE_GAS_HIGH', 'Ethereum gas is too high right now, try later')
     const bound = tx.gas * price
@@ -2146,7 +2195,7 @@ export class BridgeOut {
     let signed = false
     let r: { hash: Hex; receipt: TransactionReceipt }
     try {
-      r = await this.relayer.send(tx, onSent, undefined, (h) => {
+      r = await this.relayer.send(tx, onSent, onSending ? (_max, sg) => onSending(sg) : undefined, (h) => {
         signed = true
         onSigned(h)
       })
