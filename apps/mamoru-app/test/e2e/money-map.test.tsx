@@ -99,8 +99,11 @@ describe('a bridge on its way (Brais, 3 Nov)', () => {
     expect(text).toContain('2.07 USDC moving from Base to Monad')
   })
 
-  test('arrived or failed: no moving line', () => {
-    expect(totalScopeNote(braisFunding('arriving', NOW), true) ?? '').not.toContain('moving')
+  test('minted before the Monad read catches up: still the moving line, until it shows in Idle', () => {
+    expect(totalScopeNote(braisFunding('arriving', NOW), true)).toContain('2.07 USDC moving from Base to Monad')
+  })
+
+  test('failed, or arrived and read: no moving line', () => {
     expect(totalScopeNote(withFailedTransfer(braisFunding('before', NOW), NOW), true) ?? '').not.toContain('moving')
     expect(totalScopeNote(braisFunding('minted', NOW), true)).toBeNull()
   })
