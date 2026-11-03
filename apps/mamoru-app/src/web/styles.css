@@ -1890,12 +1890,8 @@
   height: 1.6rem;
   transform: rotate(-90deg);
 }
-.panel-head:hover .chev,
-.foot-link:hover .chev {
+.panel-head:hover .chev {
   border-color: var(--color-ink);
-}
-.foot-link:hover .chev-right {
-  transform: rotate(-90deg) translateY(2px);
 }
 
 /* Share bars grow in from the left the first time they show. */
@@ -2105,45 +2101,64 @@
   }
 }
 
-/* Footer (#226): three tappable rows, three columns on wide screens; the seal signs off centred under them. */
+/* Footer (#226, #290): one row of plain links, centred; the seal signs off under them, then the legal links, small. */
 .foot {
   margin-top: auto;
-  padding-top: 1.25rem;
+  padding-top: 2.5rem;
+  border-top: 1px solid var(--color-wash);
 }
 .foot-links {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0 1.5rem;
-  border-top: 1px solid var(--color-wash);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.25rem 1.75rem;
 }
 .foot-link {
   all: unset;
   box-sizing: border-box;
-  display: flex;
+  min-height: 2.75rem;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  min-height: 3.25rem;
-  padding: 0.85rem 0;
-  border-bottom: 1px solid var(--color-wash);
-  font-size: 0.95rem;
-  color: var(--color-ink);
+  font-size: 1rem;
+  color: var(--color-emerald);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.25em;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   transition: color 200ms ease-out;
+}
+.foot-link:hover {
+  color: var(--color-ink);
 }
 .foot-link:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
-.foot-link:focus-visible {
+.foot-link:focus-visible,
+.foot-legal a:focus-visible {
   outline: 2px solid var(--color-emerald);
   outline-offset: 2px;
+}
+.foot-legal {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  padding: 1.25rem 0 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+.foot-legal a {
+  color: var(--color-stone);
+  text-decoration: none;
+}
+.foot-legal a:hover {
+  color: var(--color-ink);
 }
 .foot-sign {
   display: flex;
   justify-content: center;
-  padding: 2.25rem 0 0.5rem;
+  padding: 1.5rem 0 0;
 }
 .seal {
   display: inline-flex;
@@ -2157,9 +2172,6 @@
   color: var(--color-muted);
 }
 @media (max-width: 760px) {
-  .foot-links {
-    grid-template-columns: 1fr;
-  }
   .panel-sum {
     font-size: 1.3rem;
   }

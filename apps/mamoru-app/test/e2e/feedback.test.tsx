@@ -3,20 +3,21 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createMemoryHistory, RouterProvider } from '@tanstack/react-router'
 import { ApiContext } from '../../src/web/api/client.ts'
 import { queryKeys } from '../../src/web/api/queries.ts'
-import { FeedbackDialog, feedbackCopy, FeedbackForm } from '../../src/web/components/feedback-dialog.tsx'
+import { FeedbackDialog, feedbackCopy, FeedbackForm, type FeedbackStart } from '../../src/web/components/feedback-dialog.tsx'
 import { fixtureClient, fixtureConfig, fixtureFunding, fixtureSession } from '../../src/web/fixtures/client.ts'
 import { FIXTURE_ACCOUNT_KEY } from '../../src/web/fixtures/empty-account.ts'
 import { poolsResponse } from '../../src/web/fixtures/pools.ts'
 import { buildRouter } from '../../src/web/router.tsx'
+import { howCopy } from '../../src/web/components/how-it-works.tsx'
 import { render } from './render.ts'
 
 /** FeedbackDialog uses react-query and the ApiContext; both need a provider even for a static render. */
-function dialog(open: boolean) {
+function dialog(open: boolean, start: FeedbackStart = 'feedback') {
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   return render(
     <ApiContext.Provider value={fixtureClient}>
       <QueryClientProvider client={qc}>
-        <FeedbackDialog accountKey={FIXTURE_ACCOUNT_KEY} open={open} onClose={() => {}} />
+        <FeedbackDialog accountKey={FIXTURE_ACCOUNT_KEY} start={start} open={open} onClose={() => {}} />
       </QueryClientProvider>
     </ApiContext.Provider>,
   )
@@ -29,15 +30,22 @@ describe('feedback dialog copy (#72)', () => {
     expect(html).not.toContain('data-testid="feedback-pick"')
   })
 
-  test('open, no path chosen yet: one button for help, two for feedback, no form field', () => {
-    const { text, html } = dialog(true)
-    expect(text).toContain(feedbackCopy.title)
-    expect(text).toContain(feedbackCopy.needHelp)
-    expect(text).toContain(feedbackCopy.haveFeedbackLead)
+  test('Feedback (#290): the choice of bug or idea, no help button, no form field yet', () => {
+    const { text, html } = dialog(true, 'feedback')
+    expect(text).toContain(feedbackCopy.feedback)
     expect(text).toContain(feedbackCopy.bug)
     expect(text).toContain(feedbackCopy.idea)
+    expect(text).not.toContain(feedbackCopy.bodyLabel('support'))
     expect(html).toContain('data-testid="feedback-pick"')
     expect(html).not.toContain('data-testid="feedback-form"')
+  })
+
+  test('Help (#290): the support form at once, no choice to make', () => {
+    const { text, html } = dialog(true, 'help')
+    expect(text).toContain(feedbackCopy.help)
+    expect(text).toContain(feedbackCopy.bodyLabel('support'))
+    expect(html).toContain('data-testid="feedback-form"')
+    expect(html).not.toContain('data-testid="feedback-pick"')
   })
 
   test('the support form asks what help is needed; the bug form asks what went wrong; both carry the honeypot, contact and attach checkbox', () => {
@@ -65,7 +73,7 @@ describe('feedback dialog copy (#72)', () => {
     )
   })
 
-  test('Home, mounted: the trigger sits in the footer next to Save recovery kit', async () => {
+  test('Home, mounted: the footer reads How Mamoru works, Help, Feedback, Save recovery kit, then Terms, Privacy, Risks (#290)', async () => {
     const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
     qc.setQueryData(queryKeys.config, fixtureConfig)
     qc.setQueryData(queryKeys.session, fixtureSession)
@@ -75,16 +83,19 @@ describe('feedback dialog copy (#72)', () => {
     qc.setQueryData(queryKeys.otherChains(FIXTURE_ACCOUNT_KEY), undefined)
     const router = buildRouter(createMemoryHistory({ initialEntries: ['/'] }))
     await router.load()
-    const { text } = render(
+    const { text, html } = render(
       <ApiContext.Provider value={fixtureClient}>
         <QueryClientProvider client={qc}>
           <RouterProvider router={router} />
         </QueryClientProvider>
       </ApiContext.Provider>,
     )
-    expect(text).toContain('Save recovery kit')
-    expect(text).toContain(feedbackCopy.trigger)
-    expect(text.indexOf('Save recovery kit')).toBeLessThan(text.indexOf(feedbackCopy.trigger))
+    const foot = text.slice(text.lastIndexOf(howCopy.trigger))
+    const order = [howCopy.trigger, feedbackCopy.help, feedbackCopy.feedback, 'Save recovery kit', 'Terms', 'Privacy', 'Risks'].map((t) => foot.indexOf(t))
+    expect(order.every((i) => i >= 0)).toBe(true)
+    expect(order).toEqual([...order].sort((a, b) => a - b))
+    expect(html).not.toContain('chev-right')
+    expect(html).toContain('href="https://mamoru.lol/risks"')
   })
 })
 
