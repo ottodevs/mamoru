@@ -1,7 +1,8 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import type { MigrateV4Input } from '@mamoru/domain'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
-import { registryFor } from '@mamoru/registry'
+import { baseRegistry, ethereumRegistry, monadRegistry, registryFor } from '@mamoru/registry'
+import { pinTestA1 } from '../../../../packages/account/one-auth/pin-fixture.ts'
 import type { RemoteSpec } from '@mamoru/domain'
 import { liveWmonUsdcMonadV6 } from '@mamoru/policy'
 import { remoteInput, remoteSafe } from '@mamoru/account/remote'
@@ -33,7 +34,10 @@ async function world(prepare: (b: AccountRow) => unknown, opts: { sleeve?: boole
   const operatorFetch = async (url: string, init: RequestInit) => {
     seen.push(`${init.method} ${new URL(url).pathname}`)
     const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
-    if (init.method === 'POST' && url.endsWith('/prepare')) return json(prepare(base))
+    if (init.method === 'POST' && url.endsWith('/prepare')) {
+      const out = prepare(base)
+      return out instanceof Response ? out : json(out)
+    }
     return json({ state: 'none' })
   }
   const h = harness(undefined, { env: { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET }, operatorFetch, remoteRegistry: () => withPinnedV3() })
@@ -55,7 +59,28 @@ async function world(prepare: (b: AccountRow) => unknown, opts: { sleeve?: boole
   return { call, seen, base: () => base, sleeveAddress }
 }
 
+describe('#348: no V4 pinned (T7 retired, A1 undeployed until T8)', () => {
+  test("ethereum-sibling: the operator's 404 SIBLING_NOT_OFFERED reaches the app as is (#243: the UI falls back to plain Start)", async () => {
+    const t = await world(() => new Response(JSON.stringify({ error: 'Mamoru on Ethereum is not available for this account yet', code: 'SIBLING_NOT_OFFERED' }), { status: 404, headers: { 'content-type': 'application/json' } }))
+    const res = await t.call('/ethereum-sibling/prepare', { method: 'POST', body: '{}' })
+    expect(res.status).toBe(404)
+    expect(((await res.json()) as { code: string }).code).toBe('SIBLING_NOT_OFFERED')
+  })
+
+  test('a one-authorization prepare cannot be rebuilt, so it is refused (BUILD_MISMATCH), nothing to sign', async () => {
+    const input = (b: AccountRow) => ({ safe: b.address, chainId: 8453, safeTxHash: `0x${'12'.repeat(32)}`, summary: [], expiresAt: 'x', prepareId: 'p1', input: home(b) })
+    const t = await world(input)
+    const res = await t.call('/migrate-v4/prepare', { method: 'POST', body: '{}' })
+    expect(res.status).toBe(502)
+    expect(((await res.json()) as { code: string }).code).toBe('BUILD_MISMATCH')
+  })
+})
+
 describe('one-authorization prepares are rebuilt by the Worker (#311)', () => {
+  // #348: a test A1 stack pinned in memory on the three chains, as the T8 pin PR will in the registry files.
+  const unpin: (() => void)[] = []
+  beforeAll(() => unpin.push(...[baseRegistry, monadRegistry, ethereumRegistry].map(pinTestA1)))
+  afterAll(() => unpin.splice(0).forEach((u) => u()))
   for (const route of ['activate', 'migrate-v4']) {
     test(`${route}/prepare: the builder's tx for this account passes untouched`, async () => {
       const t = await world((b) => offer(home(b)))

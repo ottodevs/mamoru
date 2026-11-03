@@ -11,7 +11,7 @@ import { address, ethereumRegistry } from '@mamoru/registry'
 import { oneAuthV4Deployment } from '@mamoru/policy'
 import { BridgeOut, L1_USDC, SIBLING_IDLE_MS, SIBLING_LEG_FAILS, SIBLING_LEG_RETRY_MS, UNCONFIRMED_GIVEUP_MS, type SiblingLeg, type StoredSibling } from '../src/bridge-out.ts'
 import { MESSAGE_TRANSMITTER_V2, TOKEN_MESSENGER_V2 } from '../src/cctp.ts'
-import { pinTestA1 } from './v4-pin.ts'
+import { pinTestA1 } from '../../../packages/account/one-auth/pin-fixture.ts'
 
 const SAFE = '0x0000000000000000000000000000000000000aaa' as const
 const TX = `0x${'ab'.repeat(32)}` as Hex

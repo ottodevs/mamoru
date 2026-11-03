@@ -15,7 +15,7 @@ import { P256_N } from '@mamoru/account/live'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { BridgeOut, type StoredSibling } from '../src/bridge-out.ts'
 import { HttpError } from '../src/operator.ts'
-import { pinTestA1 } from './v4-pin.ts'
+import { pinTestA1 } from '../../../packages/account/one-auth/pin-fixture.ts'
 
 const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
 const owners = [address('SafeWebAuthnSharedSigner', baseRegistry)]
