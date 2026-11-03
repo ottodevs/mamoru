@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity ^0.8.28;
 
-import {Vm} from "forge-std/Test.sol";
+import {Vm, console2} from "forge-std/Test.sol";
 import {V4Fixture, IERC20T, IEntryPointT, ISmartSessionT} from "./V4Fixture.sol";
 import {MamoruActionPolicyV4, InitV4, SwapParams} from "../src/MamoruActionPolicyV4.sol";
 import {MamoruGasPolicyV2} from "../src/MamoruGasPolicyV2.sol";
@@ -306,6 +306,41 @@ contract V4EthereumSiblingForkTest is V4Fixture {
         _run(safe, _bridgeCall(DOMAIN_BASE, usdc), pid);
         assertTrue(watchSeen, "CCTP mintRecipient is the account's own address");
         assertEq(IERC20T(E_USDC).balanceOf(safe), 0, "burned to Base");
+    }
+
+    /// otto/mamoru#348: the sibling's two steady-state ops (USE mode) in the A1 shape the operator's builder produces
+    /// (apps/mamoru-operator bridge-out.ts `driveSibling`: clock, wrap, approve, V4.swap, reset, assertZero; clock,
+    /// approve, V4.bridge, reset, assertZero), sent with the operator's own limits (SIBLING_GAS: verification 600k, call
+    /// 1.3M / 450k, preVerification 80k) under Ethereum's caps (3M / 2M / 200k). Logs handleOps and execution gas.
+    ///   nix shell nixpkgs#foundry --command forge test --isolate --match-test test_gas_siblingA1Ops -vv
+    function test_gas_siblingA1Ops() public {
+        _enabledAndSwapped();
+        vm.deal(safe, safe.balance + 0.05 ether);
+        (opVerification, opCall, opPre) = (600_000, 1_300_000, 80_000);
+        (uint256 swapTotal, uint256 swapExec) = _measureSibling(_wrapSwap(0.04 ether));
+        assertEq(IERC20T(E_WETH).balanceOf(safe), 0, "wrapped and swapped");
+        _provenReady();
+        uint256 usdc = IERC20T(E_USDC).balanceOf(safe);
+        (opVerification, opCall, opPre) = (600_000, 450_000, 80_000);
+        (uint256 bridgeTotal, uint256 bridgeExec) = _measureSibling(_bridgeCall(DOMAIN_BASE, usdc));
+        assertEq(IERC20T(E_USDC).balanceOf(safe), 0, "burned to Base");
+        console2.log("sibling wrap + approve + V4.swap + reset + assertZero: handleOps gas", swapTotal);
+        console2.log("  execution", swapExec);
+        console2.log("  rest (validation + EntryPoint)", swapTotal - swapExec);
+        console2.log("sibling approve + V4.bridge + reset + assertZero: handleOps gas", bridgeTotal);
+        console2.log("  execution", bridgeExec);
+        console2.log("  rest (validation + EntryPoint)", bridgeTotal - bridgeExec);
+    }
+
+    function _measureSibling(bytes memory callData) internal returns (uint256 total, uint256 exec) {
+        uint256 snap = vm.snapshotState();
+        vm.prank(ENTRY_POINT);
+        uint256 g = gasleft();
+        (bool ok,) = safe.call(callData);
+        exec = g - gasleft();
+        assertTrue(ok, "execution");
+        vm.revertToState(snap);
+        total = _run(safe, callData, pid);
     }
 
     function test_sibling_bridgeOnlyHome() public {

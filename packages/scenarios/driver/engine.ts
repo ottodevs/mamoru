@@ -50,7 +50,16 @@ const mamoruActionPolicyReadAbi = parseAbi([
 const observeAbi = parseAbi(['function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128s)'])
 import { reconcileReceipt } from './receipt.ts'
 
-/** Gas limits of every engine userOp. Their sum is the budget `decide` prices for the harvest cost. */
+/**
+ * Gas limits of every engine userOp. Their sum is the budget `decide` prices for the harvest cost. otto/mamoru#348: they
+ * fit a V4 session's A1 batches under MamoruGasPolicyV2's Base caps (verification 3M, call 2M, preVerification 200k).
+ * Measured on a Base fork at block 53,140,000, cold, in the builder's shape (contracts/action-policy/test/A1GasFork.t.sol):
+ * handleOps / execution / validation + EntryPoint, in thousands of gas: swap 1,111 / 790 / 321; mint 1,457 / 1,117 / 340;
+ * increase 1,196 / 858 / 338; harvest 350 / 140 / 210; reduce 644 / 390 / 254; re-range exit 659 / 383 / 277;
+ * registerRemote 423 / 223 / 200; bridge 555 / 283 / 271. Largest execution 1.12M (mint, 1.8x under 2M), largest
+ * validation 340k. The gas policy charges the limits, not the use: 5.1M x maxFeePerGas per op against Base's
+ * G = 0.002 ETH a day (at the 0.1 gwei cap: about 4 ops a day), sized at the T8 pin.
+ */
 export const LAB_GAS_LIMITS = { verificationGasLimit: 3_000_000n, callGasLimit: 2_000_000n, preVerificationGas: 100_000n } as const
 export const MAX_PRIORITY_FEE_PER_GAS = 1_000_000n
 /**

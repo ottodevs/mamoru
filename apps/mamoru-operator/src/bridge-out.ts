@@ -93,9 +93,14 @@ export const SIBLING_STUCK_POLL_MS = 10 * 60_000
 
 // #309 (c): the sibling's own session userOps on Ethereum, bundled by the relayer (handleOps, beneficiary itself).
 /**
- * Each op's limits, under GasPolicyV2's Ethereum caps. Measured on the fork against T7 (e2e-ethereum-sibling, gone with T7 in #348; to re-measure on A1): the wrap + approve +
- * V4.swap batch takes ~0.91M from the EntryPoint (cold), the approve + V4.bridge ~0.15M, validation (SmartSession,
- * V4.checkAction, gas policy) ~0.3M.
+ * Each op's limits, under GasPolicyV2's Ethereum caps (verification 3M, call 2M, preVerification 200k). #348: re-measured
+ * on A1 in the builder's shape, steady state (USE mode), Ethereum fork at block 26,328,000, cold (forge --isolate;
+ * contracts/action-policy/test/V4EthereumSiblingFork.t.sol `test_gas_siblingA1Ops`, sent with these very limits):
+ *  - clock + wrap + approve + V4.swap + reset + assertZero: handleOps 947k, execution 670k (call limit 1.3M: 1.9x),
+ *    validation + EntryPoint 277k (verification limit 600k: 2.2x);
+ *  - clock + approve + V4.bridge + reset + assertZero: handleOps 528k, execution 276k (call limit 450k: 1.6x),
+ *    validation + EntryPoint 252k.
+ * T7's figures before #348 (e2e-ethereum-sibling, gone with T7): wrap + approve + V4.swap ~0.91M from the EntryPoint, approve + V4.bridge ~0.15M.
  */
 export const SIBLING_GAS = {
   swap: { verificationGasLimit: 600_000n, callGasLimit: 1_300_000n, preVerificationGas: 80_000n },
