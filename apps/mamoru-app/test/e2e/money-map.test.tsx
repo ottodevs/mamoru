@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { FundingView } from '@mamoru/domain'
 import { totalScopeNote } from '../../src/web/components/money-map.tsx'
-import { BRAIS_MONAD_SAFE, BRAIS_TOTAL, braisFunding, withFailedTransfer, withMonadOnlyPositions, withMonadPosition, withoutMoney, withPartialBase, withStaleMonad, withUnreadMonad, type BraisMoment } from '../../src/web/fixtures/money.ts'
+import { BRAIS_MONAD_SAFE, BRAIS_TOTAL, braisFunding, braisToday, withFailedTransfer, withMonadOnlyPositions, withMonadPosition, withoutMoney, withPartialBase, withStaleMonad, withUnreadMonad, type BraisMoment } from '../../src/web/fixtures/money.ts'
 import { moneyTotal, split, wholeMoney } from '../../src/web/lib/money.ts'
 import { clockTime } from '../../src/web/lib/time.ts'
 import { hasMoney } from '../../src/web/routes/add-money.tsx'
@@ -44,8 +44,9 @@ describe('Working names each chain\'s Safe, largest position first', () => {
     expect(base).toContain('href="https://basescan.org/address/0x7a3C5f0e8D21b94E6f0A1c2B3d4E5F60718293aB"')
     expect(monad).toContain(`href="https://monadscan.com/address/${BRAIS_MONAD_SAFE}"`)
     expect(monad).not.toContain('basescan.org/address/0x7a3C')
-    expect(text).toContain('Base · Safe 0x7a3C')
-    expect(text).toContain('Monad · Safe ')
+    expect(base).toContain('class="wc-safe"')
+    expect(text).toContain('Safe 0x7a3C')
+    expect(text).not.toContain('· Safe')
     expect(text).not.toContain('Where your money is')
   })
 
@@ -85,6 +86,19 @@ describe('Working names each chain\'s Safe, largest position first', () => {
     const f = withMonadPosition(braisFunding('minted', NOW), '2000000')
     const { s } = wholeMoney(f)
     expect(s.working + s.idle + counted(f)).toBe(moneyTotal(f))
+  })
+
+  test('Brais on 3 Nov: Morpho, then WETH/USDC, then WMON/USDC on Monad, each with its own Safe line; the sum holds', () => {
+    const f = braisToday(NOW)
+    const { f: w, s } = wholeMoney(f)
+    expect(s.working + s.idle).toBe(moneyTotal(f))
+    const rows = rowsOf(render(<Working f={w} s={s} onStop={null} />).html)
+    expect(rows.length).toBe(3)
+    expect(rows[0]).toContain('Gauntlet USDC Prime')
+    expect(rows[1]).toContain('WETH/USDC')
+    expect(rows[2]).toContain('WMON/USDC')
+    expect(rows[0]).toContain('basescan.org/address/')
+    expect(rows[2]).toContain(`monadscan.com/address/${BRAIS_MONAD_SAFE}`)
   })
 
   test('an old operator without the money map links the home Safe', () => {
@@ -223,7 +237,8 @@ describe('operator version skew and odd rows', () => {
     const working = render(<Working f={w} s={s} onStop={null} />)
     expect(working.text).toContain('chain 42161')
     // Only Base's position links to its pool and its Safe; the unknown chain's gets neither (never Basescan for it).
-    expect(working.html.match(/<a class="seg"/g)?.length).toBe(2)
+    expect(working.html.match(/<a class="seg"/g)?.length).toBe(1)
+    expect(working.html.match(/<a class="wc-safe"/g)?.length).toBe(1)
     expect(working.html).not.toContain('monadscan')
     expect(rowsOf(working.html).find((r) => r.includes('chain 42161'))).not.toContain('<a ')
     expect(render(<Idle f={w} s={s} />).text).toContain('Base 1.10 · chain 42161 0.07')
