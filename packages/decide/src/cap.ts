@@ -29,10 +29,12 @@ export function capRoomOf(obs: Observation, policy: PolicyVersion): bigint | nul
 }
 
 /**
- * otto/mamoru#212 (soft cap): the observation `decide` sizes with, where the savings the account holds above its room
- * under the cap are not there to place. Every step then sizes from what may still be placed: entries take at most the
- * room, the rest stays idle; positions already placed are re-ranged, harvested and reduced as before, and nothing is
- * sold because their value rose above the cap. Unchanged without a cap or within it.
+ * otto/mamoru#212 (soft cap): the observation the fixed-weight entries (`enterBucket`) size with, where the savings the
+ * account holds above its room under the cap are not there to place: entries take at most the room, the rest stays
+ * idle. otto/mamoru#353: nothing else reads it. Target weights pass the room to `allocate` (capRoomOf), which reads the
+ * total, the targets, sales of idle volatile and the remote bucket's return from the observation as it is; positions
+ * already placed are re-ranged, harvested and reduced as before, and nothing is sold, reduced or moved between chains
+ * because of the cap. Unchanged without a cap or within it.
  */
 export function withinCap(obs: Observation, policy: PolicyVersion): Observation {
   const room = capRoomOf(obs, policy)

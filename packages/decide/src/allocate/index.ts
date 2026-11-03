@@ -133,8 +133,9 @@ export function reusablePosition(obs: Observation, policy: PolicyVersion, pool: 
  * is less, split as a new range around the tick needs it. Idle volatile short of that split: buy it. Too much of it
  * and not the savings to pair it (the one-sided tokens a re-range frees): sell the excess back. Otherwise mint.
  */
-export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit: boolean, frozen?: ReadonlySet<string>): Allocation {
+export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit: boolean, frozen?: ReadonlySet<string>, room?: bigint | null): Allocation {
   // `frozen`: bucket ids that get no entry this review (spec 004).
+  // `room` (otto/mamoru#353): the new savings the account's cap lets entries place (capRoomOf); absent or null, no cap.
   const savings = policy.savingsAsset
   /** 0 when savings is token0 of the proposal's pool, else 1. */
   const savingsSide = (p: { pool: string }) => (obs.pools.find((x) => x.name === p.pool)?.token0 === savings ? 0 : 1)
@@ -148,7 +149,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   const vaultMin = policy.vaultMinDeposit !== undefined && policy.vaultMinDeposit > entryMin ? policy.vaultMinDeposit : entryMin
   const free = safeSavings(obs, policy)
   const trail: GateStep[] = []
-  const rows = policy.buckets.map((b) => {
+  const rowsAll = policy.buckets.map((b) => {
     // otto/mamoru#210: a vault bucket is worth its shares at the vault's own rate; it has no pool, no volatile and no fall.
     if (b.vaults?.length) {
       const value = vaultValue(obs, b)
@@ -173,243 +174,305 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     const blocked = purga.verdict !== 'GO' ? purga.reason : frozen?.has(b.id) ? ('DECIDE_ENTRY_PAUSED_FALL' as ReasonCode) : null
     return { b, pool, vault: false, value, deployed, idleVolatile, blocked }
   })
-  const executable = rows.filter((r) => r.pool || r.vault)
-  const total = free + executable.reduce((s, r) => s + r.value, 0n) + (obs.remote?.value ?? 0n)
-  // otto/mamoru#213: a bucket on another chain keeps its share of the account; here it waits as savings until bridged.
-  const remote = (policy.remoteBuckets ?? []).reduce((s, b) => s + b.preference, 0)
-  // otto/mamoru#293 (review of #202 r2): under MamoruActionPolicyV4 (contractVersion 4) the denominator is every bucket's
-  // preference (preferenceTotal), the one the reduce side uses, so a bucket whose registry pool is not listed keeps its
-  // weight and its share waits as savings. Every other policy keeps today's denominator (the executable buckets and the
-  // remote ones), byte for byte.
-  const prefTotal = BigInt(policy.actionPolicy?.contractVersion === 4 ? preferenceTotal(policy) : executable.reduce((s, r) => s + r.b.preference, 0) + remote)
+  const executable = rowsAll.filter((r) => r.pool || r.vault)
+  /**
+   * The allocation of `free` savings. otto/mamoru#353: run once with every savings held, and once more with the cap's room
+   * when the cap binds (`sales` false: a sale only the smaller amount would ask for is never made). See the end of allocate.
+   */
+  const run = (free: bigint, sales: boolean) => {
+    const rows = rowsAll.map((r) => ({ ...r }))
+    const total = free + executable.reduce((s, r) => s + r.value, 0n) + (obs.remote?.value ?? 0n)
+    // otto/mamoru#213: a bucket on another chain keeps its share of the account; here it waits as savings until bridged.
+    const remote = (policy.remoteBuckets ?? []).reduce((s, b) => s + b.preference, 0)
+    // otto/mamoru#293 (review of #202 r2): under MamoruActionPolicyV4 (contractVersion 4) the denominator is every bucket's
+    // preference (preferenceTotal), the one the reduce side uses, so a bucket whose registry pool is not listed keeps its
+    // weight and its share waits as savings. Every other policy keeps today's denominator (the executable buckets and the
+    // remote ones), byte for byte.
+    const prefTotal = BigInt(policy.actionPolicy?.contractVersion === 4 ? preferenceTotal(policy) : executable.reduce((s, r) => s + r.b.preference, 0) + remote)
 
-  const buckets: BucketValue[] = rows.map((r) => {
-    const target = (r.pool || r.vault) && prefTotal > 0n ? (total * BigInt(r.b.preference)) / prefTotal : 0n
-    return { bucket: r.b.id, pool: r.pool?.name ?? null, value: r.value, target, weightBps: total > 0n ? Number((r.value * 10_000n) / total) : 0, code: r.blocked ?? 'STRATEGY_PREFERENCE' }
-  })
-  // otto/mamoru#210 (review of #174, P1): an `exitOptIn` bucket the account has not opted out of yet (v7's USDC/USDT, held)
-  // is still Stable money: it counts toward the vault bucket's share, so new money never puts a second Stable share in the
-  // vaults beside it. Only for sizing the gap: the total and the rows shown above are unchanged.
-  const held = obs.exitOptIn === true ? 0n : rows.filter((r) => r.b.preference === 0 && r.b.exitOptIn).reduce((s, r) => s + r.value, 0n)
-  const creditTo = held > 0n ? rows.findIndex((r) => r.vault) : -1
-  if (creditTo >= 0) rows[creditTo] = { ...rows[creditTo]!, value: rows[creditTo]!.value + held, deployed: rows[creditTo]!.deployed + held }
-  // A frozen bucket is one more reason savings wait (otto/mamoru#127, #128), shown the same way as a pool short of depth.
-  const waiting: Waiting[] = []
-  rows.forEach((r, i) => {
-    const gap = buckets[i]!.target - r.deployed
-    if (r.blocked === 'DECIDE_ENTRY_PAUSED_FALL' && gap >= minEntry && free > 0n) waiting.push({ bucket: r.b.id, code: 'DECIDE_ENTRY_PAUSED_FALL', amount: gap < free ? gap : free })
-    // A bucket short by more than the floor but not by enough to pay for its gas waits, and says so (#195).
-    const band = gap * 10_000n > buckets[i]!.target * BigInt(policy.rebalanceBandBps ?? 0)
-    const floor = r.vault ? vaultMin : entryMin
-    if ((r.pool || r.vault) && !r.blocked && gap >= minEntry && gap < floor && band && free > 0n) {
-      waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_GAS', amount: gap < free ? gap : free })
-      buckets[i]!.code = 'DECIDE_WAIT_GAS'
-    }
-  })
-
-  // Short buckets, most under-weight first (relative deficit), policy order on ties.
-  const order = rows
-    .map((r, i) => ({ r, i, deficit: buckets[i]!.target - r.value, gap: buckets[i]!.target - r.deployed, target: buckets[i]!.target }))
-    .filter((x) => (x.r.pool || x.r.vault) && !x.r.blocked && x.gap >= (x.r.vault ? vaultMin : entryMin) && x.gap * 10_000n > x.target * BigInt(policy.rebalanceBandBps ?? 0))
-    .sort((x, y) => {
-      const dx = (x.deficit * 1_000_000n) / x.target
-      const dy = (y.deficit * 1_000_000n) / y.target
-      return dx === dy ? x.i - y.i : dy > dx ? 1 : -1
+    const buckets: BucketValue[] = rows.map((r) => {
+      const target = (r.pool || r.vault) && prefTotal > 0n ? (total * BigInt(r.b.preference)) / prefTotal : 0n
+      return { bucket: r.b.id, pool: r.pool?.name ?? null, value: r.value, target, weightBps: total > 0n ? Number((r.value * 10_000n) / total) : 0, code: r.blocked ?? 'STRATEGY_PREFERENCE' }
+    })
+    // otto/mamoru#210 (review of #174, P1): an `exitOptIn` bucket the account has not opted out of yet (v7's USDC/USDT, held)
+    // is still Stable money: it counts toward the vault bucket's share, so new money never puts a second Stable share in the
+    // vaults beside it. Only for sizing the gap: the total and the rows shown above are unchanged.
+    const held = obs.exitOptIn === true ? 0n : rows.filter((r) => r.b.preference === 0 && r.b.exitOptIn).reduce((s, r) => s + r.value, 0n)
+    const creditTo = held > 0n ? rows.findIndex((r) => r.vault) : -1
+    if (creditTo >= 0) rows[creditTo] = { ...rows[creditTo]!, value: rows[creditTo]!.value + held, deployed: rows[creditTo]!.deployed + held }
+    // A frozen bucket is one more reason savings wait (otto/mamoru#127, #128), shown the same way as a pool short of depth.
+    const waiting: Waiting[] = []
+    rows.forEach((r, i) => {
+      const gap = buckets[i]!.target - r.deployed
+      if (r.blocked === 'DECIDE_ENTRY_PAUSED_FALL' && gap >= minEntry && free > 0n) waiting.push({ bucket: r.b.id, code: 'DECIDE_ENTRY_PAUSED_FALL', amount: gap < free ? gap : free })
+      // A bucket short by more than the floor but not by enough to pay for its gas waits, and says so (#195).
+      const band = gap * 10_000n > buckets[i]!.target * BigInt(policy.rebalanceBandBps ?? 0)
+      const floor = r.vault ? vaultMin : entryMin
+      if ((r.pool || r.vault) && !r.blocked && gap >= minEntry && gap < floor && band && free > 0n) {
+        waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_GAS', amount: gap < free ? gap : free })
+        buckets[i]!.code = 'DECIDE_WAIT_GAS'
+      }
     })
 
-  let proposal: Proposal | null = null
-  // otto/mamoru#141: the review has one op. The first short bucket in order takes it, except that selling a bucket's
-  // excess idle volatile outranks any op that is not a larger such sale: idle volatile waiting behind small entries is
-  // unmanaged exposure (Lab, Feb 2025 100k: 34k of cbBTC waited 16 reviews behind cent-sized mints).
-  let picked: number | null = null
-  let pickedSale = 0n
-  const pendingMint: Allocation['pendingMint'] = []
-  for (const { r, i, gap } of order) {
-    // After the first proposal the loop only finds which other buckets have a use for their idle volatile; their codes stay.
-    const row = proposal ? null : buckets[i]!
-    if (unsafeDeposit) {
-      if (row) row.code = 'OBS_DEPOSIT_UNSAFE'
-      continue
-    }
-    if (r.vault) {
-      // otto/mamoru#210: the gap goes to the first vault, in the bucket's order, that takes at least the vault floor now,
-      // preferring one with a live session (without any, the EHG says which session is missing), up to what that vault takes
-      // (review of #174, P1: the rest goes to the next vault on a later review). Less than the floor waits as savings.
-      const want = gap < free ? gap : free
-      if (want < vaultMin) {
-        if (want >= minEntry) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_GAS', amount: want })
-        if (row) row.code = want >= minEntry ? 'DECIDE_WAIT_GAS' : 'DECIDE_NO_CAPITAL'
+    // Short buckets, most under-weight first (relative deficit), policy order on ties.
+    const order = rows
+      .map((r, i) => ({ r, i, deficit: buckets[i]!.target - r.value, gap: buckets[i]!.target - r.deployed, target: buckets[i]!.target }))
+      .filter((x) => (x.r.pool || x.r.vault) && !x.r.blocked && x.gap >= (x.r.vault ? vaultMin : entryMin) && x.gap * 10_000n > x.target * BigInt(policy.rebalanceBandBps ?? 0))
+      .sort((x, y) => {
+        const dx = (x.deficit * 1_000_000n) / x.target
+        const dy = (y.deficit * 1_000_000n) / y.target
+        return dx === dy ? x.i - y.i : dy > dx ? 1 : -1
+      })
+
+    let proposal: Proposal | null = null
+    // otto/mamoru#141: the review has one op. The first short bucket in order takes it, except that selling a bucket's
+    // excess idle volatile outranks any op that is not a larger such sale: idle volatile waiting behind small entries is
+    // unmanaged exposure (Lab, Feb 2025 100k: 34k of cbBTC waited 16 reviews behind cent-sized mints).
+    let picked: number | null = null
+    let pickedSale = 0n
+    const pendingMint: Allocation['pendingMint'] = []
+    for (const { r, i, gap } of order) {
+      // After the first proposal the loop only finds which other buckets have a use for their idle volatile; their codes stay.
+      const row = proposal ? null : buckets[i]!
+      if (unsafeDeposit) {
+        if (row) row.code = 'OBS_DEPOSIT_UNSAFE'
         continue
       }
-      const open = bucketVaults(obs, r.b).filter((v) => v.maxDeposit >= vaultMin)
-      const v = open.find((x) => liveSession(obs, grantKeyFor(policy, 'vault-supply', x.name))) ?? open[0]
-      if (!v) {
-        waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_VAULT_LIQUIDITY', amount: want })
-        if (row) row.code = 'DECIDE_WAIT_VAULT_LIQUIDITY'
+      if (r.vault) {
+        // otto/mamoru#210: the gap goes to the first vault, in the bucket's order, that takes at least the vault floor now,
+        // preferring one with a live session (without any, the EHG says which session is missing), up to what that vault takes
+        // (review of #174, P1: the rest goes to the next vault on a later review). Less than the floor waits as savings.
+        const want = gap < free ? gap : free
+        if (want < vaultMin) {
+          if (want >= minEntry) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_GAS', amount: want })
+          if (row) row.code = want >= minEntry ? 'DECIDE_WAIT_GAS' : 'DECIDE_NO_CAPITAL'
+          continue
+        }
+        const open = bucketVaults(obs, r.b).filter((v) => v.maxDeposit >= vaultMin)
+        const v = open.find((x) => liveSession(obs, grantKeyFor(policy, 'vault-supply', x.name))) ?? open[0]
+        if (!v) {
+          waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_VAULT_LIQUIDITY', amount: want })
+          if (row) row.code = 'DECIDE_WAIT_VAULT_LIQUIDITY'
+          continue
+        }
+        const assets = want < v.maxDeposit ? want : v.maxDeposit
+        if (!row) continue
+        row.code = 'STRATEGY_PREFERENCE_DEVIATION'
+        picked = i
+        proposal = { kind: 'vault_deposit', grant: grantKeyFor(policy, 'vault-supply', v.name) as `vault-supply:${string}`, bucket: r.b.id, pool: v.name, vault: v.name, assets }
         continue
       }
-      const assets = want < v.maxDeposit ? want : v.maxDeposit
+      const pool = r.pool!
+      const volatile = volatileOf(pool, savings)
+      const volatileValue = inSavings(atTwap(pool), volatile, r.idleVolatile, savings)
+      // What the next mint of this bucket holds: the gap, or everything the bucket can gather when that is less.
+      const wanted = gap < free + volatileValue ? gap : free + volatileValue
+      let size = wanted
+      // Lab geometry (#101): the range a mint gets now; without `policy.geometry`, the centred policy width. #171: a held
+      // position close enough to it takes the entry instead, and the split follows that position's range.
+      const fresh = rangeFor(obs, policy, pool)
+      const reuse = reusablePosition(obs, policy, pool, fresh)
+      const range = reuse ? { tickLower: reuse.tickLower, tickUpper: reuse.tickUpper } : fresh
+      const volShare = volatileShareBps(pool, policy, range)
+      // otto/mamoru#127: no more than the pool can take at its depth; the rest waits as savings, with its reason. The
+      // swap toward the mint sells at most the volatile share of that size, so it stays within the allowed impact too.
+      // Sized on the range the money goes into: a held position's own width when it takes the entry (#220).
+      const depth = depthOf(obs, policy, pool, reuse ? reuse.tickUpper - reuse.tickLower : widthFor(obs, policy, pool))
+      if (depth) {
+        const bySwap = volShare > 0n ? (depth.swapRoom * 10_000n) / volShare : size
+        const room = depth.shareRoom < bySwap ? depth.shareRoom : bySwap
+        if (room < size) {
+          size = room < entryMin ? 0n : room
+          // What does not fit waits as savings, whether this review places part of the bucket or none of it.
+          // The bucket stays short by what this entry does not cover; what of it is savings is what waits.
+          const short = gap - size
+          const held = short < free ? short : free
+          if (held >= minEntry) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_DEPTH', amount: held })
+          if (size === 0n) {
+            if (row) row.code = 'DECIDE_WAIT_DEPTH'
+            continue
+          }
+        }
+      }
+      const wantVolatile = (size * volShare) / 10_000n
+      const wantSavings = size - wantVolatile
+      if (volatileValue * 10_000n < wantVolatile * SWAP_BELOW_BPS) {
+        const need = wantVolatile - volatileValue
+        const amountIn = need < free ? need : free
+        if (amountIn < minEntry) {
+          if (row) row.code = 'DECIDE_NO_CAPITAL'
+          continue
+        }
+        // What it already holds of the volatile token is part of that mint: it is not idle capital to sell meanwhile.
+        const buyGrant = grantKeyFor(policy, 'enter-swap', pool.name) as `enter-swap:${string}`
+        if (r.idleVolatile > 0n) pendingMint.push({ pool: pool.name, grant: buyGrant })
+        if (row) {
+          row.code = 'STRATEGY_PREFERENCE_DEVIATION'
+          proposal = { kind: 'enter_swap', grant: buyGrant, pool: pool.name, tokenIn: savings, tokenOut: volatile, fee: pool.fee, amountIn }
+          picked = i
+        }
+        continue
+      }
+      // Depth shrinks the mint, never the volatile the bucket keeps for it: the sale is judged against the unsized entry,
+      // and one sale stays within the impact the pool allows.
+      const keepVolatile = (wanted * volShare) / 10_000n
+      const keepSavings = wanted - keepVolatile
+      if (free < keepSavings && volatileValue * 10_000n > keepVolatile * SELL_ABOVE_BPS) {
+        // With the cap's room only: the idle volatile stays (and is kept for the mint), never sold for the cap.
+        if (!sales) {
+          pendingMint.push({ pool: pool.name, grant: convertKey(policy, pool.name) })
+          if (row) row.code = 'DECIDE_NO_CAPITAL'
+          continue
+        }
+        const excessValue = volatileValue - keepVolatile
+        let sell = (r.idleVolatile * excessValue) / volatileValue
+        let excess = excessValue
+        if (depth && sell > depth.sellRoom) {
+          sell = depth.sellRoom
+          excess = (sell * volatileValue) / r.idleVolatile
+        }
+        if (excess < minEntry || !hasManageAny(policy)) {
+          if (row) row.code = 'DECIDE_NO_CAPITAL'
+          continue
+        }
+        // The rest of the idle token is the volatile side of the mint that follows.
+        const sellGrant = convertKey(policy, pool.name)
+        pendingMint.push({ pool: pool.name, grant: sellGrant })
+        if (row || excess > pickedSale) {
+          // The bucket it displaces keeps waiting for a later review, as any bucket after the one that acts.
+          if (picked !== null) buckets[picked]!.code = 'STRATEGY_PREFERENCE'
+          buckets[i]!.code = 'STRATEGY_PREFERENCE_DEVIATION'
+          proposal = { kind: 'enter_swap', grant: sellGrant, pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: sell }
+          picked = i
+          pickedSale = excess
+        }
+        continue
+      }
+      const savingsIn = wantSavings < free ? wantSavings : free
+      // No more of the idle token than the mint needs: the session cap counts what is asked for, not what the pool takes.
+      // What is over stays idle and is converted once the bucket is full.
+      // With savings short of the split, the volatile side shrinks with them.
+      const pairValue = wantSavings > 0n ? (wantVolatile * savingsIn) / wantSavings : wantVolatile
+      const volatileIn = volatileValue > pairValue ? (r.idleVolatile * pairValue) / volatileValue : r.idleVolatile
+      const volatileInValue = volatileValue < pairValue ? volatileValue : pairValue
+      // A mint smaller than the minimum entry is dust left by an earlier mint: its minimums round to zero and it cannot be built.
+      if (savingsIn <= 0n || volatileIn === 0n || savingsIn + volatileInValue < minEntry) {
+        if (row) row.code = 'DECIDE_NO_CAPITAL'
+        continue
+      }
+      const mintGrant = reuse ? (grantKeyFor(policy, 'manage-any', pool.name) as `manage-any:${string}`) : (grantKeyFor(policy, 'enter-mint', pool.name) as `enter-mint:${string}`)
+      pendingMint.push({ pool: pool.name, grant: mintGrant })
       if (!row) continue
       row.code = 'STRATEGY_PREFERENCE_DEVIATION'
       picked = i
-      proposal = { kind: 'vault_deposit', grant: grantKeyFor(policy, 'vault-supply', v.name) as `vault-supply:${string}`, bucket: r.b.id, pool: v.name, vault: v.name, assets }
-      continue
+      const savingsIs0 = pool.token0 === savings
+      const amounts = { amount0Desired: savingsIs0 ? savingsIn : volatileIn, amount1Desired: savingsIs0 ? volatileIn : savingsIn }
+      proposal = reuse
+        ? { kind: 'increase_liquidity', grant: mintGrant as `manage-any:${string}`, pool: pool.name, tokenId: reuse.tokenId, ...range, ...amounts }
+        : { kind: 'enter_mint', grant: mintGrant as `enter-mint:${string}`, pool: pool.name, ...range, ...amounts }
     }
-    const pool = r.pool!
-    const volatile = volatileOf(pool, savings)
-    const volatileValue = inSavings(atTwap(pool), volatile, r.idleVolatile, savings)
-    // What the next mint of this bucket holds: the gap, or everything the bucket can gather when that is less.
-    const wanted = gap < free + volatileValue ? gap : free + volatileValue
-    let size = wanted
-    // Lab geometry (#101): the range a mint gets now; without `policy.geometry`, the centred policy width. #171: a held
-    // position close enough to it takes the entry instead, and the split follows that position's range.
-    const fresh = rangeFor(obs, policy, pool)
-    const reuse = reusablePosition(obs, policy, pool, fresh)
-    const range = reuse ? { tickLower: reuse.tickLower, tickUpper: reuse.tickUpper } : fresh
-    const volShare = volatileShareBps(pool, policy, range)
-    // otto/mamoru#127: no more than the pool can take at its depth; the rest waits as savings, with its reason. The
-    // swap toward the mint sells at most the volatile share of that size, so it stays within the allowed impact too.
-    // Sized on the range the money goes into: a held position's own width when it takes the entry (#220).
-    const depth = depthOf(obs, policy, pool, reuse ? reuse.tickUpper - reuse.tickLower : widthFor(obs, policy, pool))
-    if (depth) {
-      const bySwap = volShare > 0n ? (depth.swapRoom * 10_000n) / volShare : size
-      const room = depth.shareRoom < bySwap ? depth.shareRoom : bySwap
-      if (room < size) {
-        size = room < entryMin ? 0n : room
-        // What does not fit waits as savings, whether this review places part of the bucket or none of it.
-        // The bucket stays short by what this entry does not cover; what of it is savings is what waits.
-        const short = gap - size
-        const held = short < free ? short : free
-        if (held >= minEntry) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_DEPTH', amount: held })
-        if (size === 0n) {
-          if (row) row.code = 'DECIDE_WAIT_DEPTH'
-          continue
-        }
-      }
-    }
-    const wantVolatile = (size * volShare) / 10_000n
-    const wantSavings = size - wantVolatile
-    if (volatileValue * 10_000n < wantVolatile * SWAP_BELOW_BPS) {
-      const need = wantVolatile - volatileValue
-      const amountIn = need < free ? need : free
-      if (amountIn < minEntry) {
-        if (row) row.code = 'DECIDE_NO_CAPITAL'
+    // otto/mamoru#215: a bucket on another chain is filled by moving savings to the account's own sleeve there. Its
+    // value there (and what is still in flight) is `obs.remote`; with no sleeve ready, or a bridge not yet minted, its
+    // share waits here and says so. A bridge goes before an entry that spends savings (it takes a finality to land),
+    // never before the sale of idle volatile.
+    // `obs.remote` describes one sleeve (no chain key): a policy with more than one remote bucket would compare each
+    // against the others' value and readiness. Refused until it is keyed by chain.
+    if ((policy.remoteBuckets?.length ?? 0) > 1) throw new Error(`${policy.policyId}: more than one remote bucket is not supported (obs.remote has no chain key)`)
+    let displaced: Proposal | undefined
+    /** The bucket of `displaced` (otto/mamoru#353: the capped run's local entry, when its bridge-out is not taken). */
+    let displacedAt: number | null = null
+    // A bridge needs a live bridge-out session; without one its share waits instead of taking the review.
+    const bridgeLive = obs.sessions.some((s) => s.grant === 'bridge-out' && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
+    for (const rb of policy.remoteBuckets ?? []) {
+      if (unsafeDeposit || free === 0n) break
+      const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
+      const gap = target - (obs.remote?.value ?? 0n)
+      if (gap < minEntry || gap * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
+      const amount = gap < free ? gap : free
+      if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n || !bridgeLive) {
+        waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE', amount })
         continue
       }
-      // What it already holds of the volatile token is part of that mint: it is not idle capital to sell meanwhile.
-      const buyGrant = grantKeyFor(policy, 'enter-swap', pool.name) as `enter-swap:${string}`
-      if (r.idleVolatile > 0n) pendingMint.push({ pool: pool.name, grant: buyGrant })
-      if (row) {
-        row.code = 'STRATEGY_PREFERENCE_DEVIATION'
-        proposal = { kind: 'enter_swap', grant: buyGrant, pool: pool.name, tokenIn: savings, tokenOut: volatile, fee: pool.fee, amountIn }
-        picked = i
-      }
-      continue
-    }
-    // Depth shrinks the mint, never the volatile the bucket keeps for it: the sale is judged against the unsized entry,
-    // and one sale stays within the impact the pool allows.
-    const keepVolatile = (wanted * volShare) / 10_000n
-    const keepSavings = wanted - keepVolatile
-    if (free < keepSavings && volatileValue * 10_000n > keepVolatile * SELL_ABOVE_BPS) {
-      const excessValue = volatileValue - keepVolatile
-      let sell = (r.idleVolatile * excessValue) / volatileValue
-      let excess = excessValue
-      if (depth && sell > depth.sellRoom) {
-        sell = depth.sellRoom
-        excess = (sell * volatileValue) / r.idleVolatile
-      }
-      if (excess < minEntry || !hasManageAny(policy)) {
-        if (row) row.code = 'DECIDE_NO_CAPITAL'
+      if (amount < entryMin) {
+        waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_GAS', amount })
         continue
       }
-      // The rest of the idle token is the volatile side of the mint that follows.
-      const sellGrant = convertKey(policy, pool.name)
-      pendingMint.push({ pool: pool.name, grant: sellGrant })
-      if (row || excess > pickedSale) {
-        // The bucket it displaces keeps waiting for a later review, as any bucket after the one that acts.
-        if (picked !== null) buckets[picked]!.code = 'STRATEGY_PREFERENCE'
-        buckets[i]!.code = 'STRATEGY_PREFERENCE_DEVIATION'
-        proposal = { kind: 'enter_swap', grant: sellGrant, pool: pool.name, tokenIn: volatile, tokenOut: savings, fee: pool.fee, amountIn: sell }
-        picked = i
-        pickedSale = excess
-      }
-      continue
+      if (proposal && pickedSale > 0n) continue
+      if (picked !== null) buckets[picked]!.code = 'STRATEGY_PREFERENCE'
+      displaced = proposal ?? undefined
+      displacedAt = picked
+      proposal = { kind: 'bridge_out', grant: 'bridge-out', bucket: rb.id, chainId: rb.chainId, pool: rb.pools[0]!, amount }
+      picked = null
+      break
     }
-    const savingsIn = wantSavings < free ? wantSavings : free
-    // No more of the idle token than the mint needs: the session cap counts what is asked for, not what the pool takes.
-    // What is over stays idle and is converted once the bucket is full.
-    // With savings short of the split, the volatile side shrinks with them.
-    const pairValue = wantSavings > 0n ? (wantVolatile * savingsIn) / wantSavings : wantVolatile
-    const volatileIn = volatileValue > pairValue ? (r.idleVolatile * pairValue) / volatileValue : r.idleVolatile
-    const volatileInValue = volatileValue < pairValue ? volatileValue : pairValue
-    // A mint smaller than the minimum entry is dust left by an earlier mint: its minimums round to zero and it cannot be built.
-    if (savingsIn <= 0n || volatileIn === 0n || savingsIn + volatileInValue < minEntry) {
-      if (row) row.code = 'DECIDE_NO_CAPITAL'
-      continue
+    // otto/mamoru#278 (spec 002 FR-XCH-014 a): the other way. A remote bucket above its target by more than the band, by
+    // at least what an entry must be worth (the same ceiling both ways), is due home: the operator asks the remote Safe
+    // for the excess. Never while anything is in flight either way, or with the sleeve not ready.
+    let returnDue: { bucket: string; chainId: ChainId; amount: bigint } | undefined
+    for (const rb of policy.remoteBuckets ?? []) {
+      if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n || total === 0n) break
+      const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
+      const excess = obs.remote.value - target
+      if (excess < entryMin || excess * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
+      returnDue = { bucket: rb.id, chainId: rb.chainId, amount: excess }
     }
-    const mintGrant = reuse ? (grantKeyFor(policy, 'manage-any', pool.name) as `manage-any:${string}`) : (grantKeyFor(policy, 'enter-mint', pool.name) as `enter-mint:${string}`)
-    pendingMint.push({ pool: pool.name, grant: mintGrant })
-    if (!row) continue
-    row.code = 'STRATEGY_PREFERENCE_DEVIATION'
-    picked = i
-    const savingsIs0 = pool.token0 === savings
-    const amounts = { amount0Desired: savingsIs0 ? savingsIn : volatileIn, amount1Desired: savingsIs0 ? volatileIn : savingsIn }
-    proposal = reuse
-      ? { kind: 'increase_liquidity', grant: mintGrant as `manage-any:${string}`, pool: pool.name, tokenId: reuse.tokenId, ...range, ...amounts }
-      : { kind: 'enter_mint', grant: mintGrant as `enter-mint:${string}`, pool: pool.name, ...range, ...amounts }
+    if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'
+    return { total, buckets, proposal, picked, sale: pickedSale > 0n, pendingMint, waiting, displaced, displacedAt, returnDue }
   }
-  // otto/mamoru#215: a bucket on another chain is filled by moving savings to the account's own sleeve there. Its
-  // value there (and what is still in flight) is `obs.remote`; with no sleeve ready, or a bridge not yet minted, its
-  // share waits here and says so. A bridge goes before an entry that spends savings (it takes a finality to land),
-  // never before the sale of idle volatile.
-  // `obs.remote` describes one sleeve (no chain key): a policy with more than one remote bucket would compare each
-  // against the others' value and readiness. Refused until it is keyed by chain.
-  if ((policy.remoteBuckets?.length ?? 0) > 1) throw new Error(`${policy.policyId}: more than one remote bucket is not supported (obs.remote has no chain key)`)
-  let displaced: Proposal | undefined
-  // A bridge needs a live bridge-out session; without one its share waits instead of taking the review.
-  const bridgeLive = obs.sessions.some((s) => s.grant === 'bridge-out' && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
-  for (const rb of policy.remoteBuckets ?? []) {
-    if (unsafeDeposit || free === 0n) break
-    const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
-    const gap = target - (obs.remote?.value ?? 0n)
-    if (gap < minEntry || gap * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
-    const amount = gap < free ? gap : free
-    if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n || !bridgeLive) {
-      waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE', amount })
-      continue
-    }
-    if (amount < entryMin) {
-      waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_GAS', amount })
-      continue
-    }
-    if (proposal && pickedSale > 0n) continue
-    if (picked !== null) buckets[picked]!.code = 'STRATEGY_PREFERENCE'
-    displaced = proposal ?? undefined
-    proposal = { kind: 'bridge_out', grant: 'bridge-out', bucket: rb.id, chainId: rb.chainId, pool: rb.pools[0]!, amount }
-    picked = null
-    break
-  }
-  // otto/mamoru#278 (spec 002 FR-XCH-014 a): the other way. A remote bucket above its target by more than the band, by
-  // at least what an entry must be worth (the same ceiling both ways), is due home: the operator asks the remote Safe
-  // for the excess. Never while anything is in flight either way, or with the sleeve not ready.
-  let returnDue: { bucket: string; chainId: ChainId; amount: bigint } | undefined
-  for (const rb of policy.remoteBuckets ?? []) {
-    if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n || total === 0n) break
-    const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
-    const excess = obs.remote.value - target
-    if (excess < entryMin || excess * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
-    returnDue = { bucket: rb.id, chainId: rb.chainId, amount: excess }
-  }
-  if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'
   // Each bucket's wait was measured against the same free savings: together they cannot hold more than what is free
   // once this review's entry has taken its savings. Clipped in the order they were found.
-  const spent = !proposal ? 0n : proposal.kind === 'bridge_out' ? proposal.amount : proposal.kind === 'vault_deposit' ? proposal.assets : proposal.kind === 'enter_swap' && proposal.tokenIn === savings ? proposal.amountIn : proposal.kind === 'enter_mint' || proposal.kind === 'increase_liquidity' ? (savingsSide(proposal) === 0 ? proposal.amount0Desired : proposal.amount1Desired) : 0n
-  let left = free > spent ? free - spent : 0n
-  const clipped: Waiting[] = []
-  for (const w of waiting) {
-    const amount = w.amount < left ? w.amount : left
-    if (amount >= minEntry) clipped.push({ ...w, amount })
-    left -= amount
+  const clip = (waiting: Waiting[], proposal: Proposal | null, have: bigint): Waiting[] => {
+    const spent = !proposal ? 0n : proposal.kind === 'bridge_out' ? proposal.amount : proposal.kind === 'vault_deposit' ? proposal.assets : proposal.kind === 'enter_swap' && proposal.tokenIn === savings ? proposal.amountIn : proposal.kind === 'enter_mint' || proposal.kind === 'increase_liquidity' ? (savingsSide(proposal) === 0 ? proposal.amount0Desired : proposal.amount1Desired) : 0n
+    let left = have > spent ? have - spent : 0n
+    const clipped: Waiting[] = []
+    for (const w of waiting) {
+      const amount = w.amount < left ? w.amount : left
+      if (amount >= minEntry) clipped.push({ ...w, amount })
+      left -= amount
+    }
+    return clipped
   }
-  return { total, free, buckets, proposal, trail, pendingMint, waiting: clipped, ...(displaced ? { displaced } : {}), ...(returnDue ? { returnDue } : {}) }
+  const open = run(free, true)
+  const spend = room === undefined || room === null || room >= free ? free : room > 0n ? room : 0n
+  if (spend === free) {
+    return { total: open.total, free, buckets: open.buckets, proposal: open.proposal, trail, pendingMint: open.pendingMint, waiting: clip(open.waiting, open.proposal, free), ...(open.displaced ? { displaced: open.displaced } : {}), ...(open.returnDue ? { returnDue: open.returnDue } : {}) }
+  }
+  // otto/mamoru#353: the cap binds. It limits only the new savings an entry (or a bridge-out) places, and those are sized
+  // as if the account held only its room (`capped`). Everything else reads every savings held (`open`): the total and the
+  // targets shown, the remote bucket's return (never due because of the cap), a sale of idle volatile (made exactly when
+  // it would be without a cap, and outranking any entry as it always does), and the idle volatile kept for a mint.
+  // Neither run writes `trail` (only the rows above do, once): the decision's trail has no step of either run twice.
+  const capped = run(spend, false)
+  const sale = open.sale ? open.proposal : null
+  // By bucket id, not position (both runs map policy.buckets in order; matched anyway).
+  const codeOf = new Map(capped.buckets.map((b) => [b.bucket, b.code]))
+  const buckets = open.buckets.map((b) => ({ ...b, code: codeOf.get(b.bucket) ?? b.code }))
+  const at = (i: number | null) => (i === null ? undefined : buckets.findIndex((b) => b.bucket === capped.buckets[i]!.bucket))
+  /** What the capped run may decide: an entry that spends savings, or a bridge-out. Never a sale or any other step. */
+  const entry = (p: Proposal | null | undefined): p is Proposal =>
+    !!p && ((p.kind === 'enter_swap' && p.tokenIn === savings) || p.kind === 'enter_mint' || p.kind === 'increase_liquidity' || p.kind === 'vault_deposit' || p.kind === 'bridge_out')
+  let proposal: Proposal | null = null
+  let displaced: Proposal | undefined
+  if (sale) {
+    const c = at(capped.picked)
+    if (c !== undefined && c >= 0) buckets[c]!.code = 'STRATEGY_PREFERENCE'
+    const o = open.picked === null ? -1 : buckets.findIndex((b) => b.bucket === open.buckets[open.picked!]!.bucket)
+    if (o >= 0) buckets[o]!.code = 'STRATEGY_PREFERENCE_DEVIATION'
+    proposal = sale
+  } else if (capped.proposal?.kind === 'bridge_out') {
+    const b = capped.proposal
+    // A bridge-out only where the account would bridge without a cap, to the same bucket: the cap never picks a
+    // cross-chain move over the local entry the account would make. Otherwise the capped run's local entry, if any.
+    if (open.proposal?.kind === 'bridge_out' && open.proposal.bucket === b.bucket) {
+      proposal = b
+      displaced = entry(capped.displaced) && capped.displaced.kind !== 'bridge_out' ? capped.displaced : undefined
+    } else if (entry(capped.displaced) && capped.displaced.kind !== 'bridge_out') {
+      proposal = capped.displaced
+      const c = at(capped.displacedAt)
+      if (c !== undefined && c >= 0) buckets[c]!.code = 'STRATEGY_PREFERENCE_DEVIATION'
+    }
+  } else if (entry(capped.proposal)) proposal = capped.proposal
+  const pendingMint = [...open.pendingMint]
+  for (const k of capped.pendingMint) if (!pendingMint.some((x) => x.pool === k.pool && x.grant === k.grant)) pendingMint.push(k)
+  return { total: open.total, free, buckets, proposal, trail, pendingMint, waiting: clip(capped.waiting, proposal, spend), ...(displaced ? { displaced } : {}), ...(open.returnDue ? { returnDue: open.returnDue } : {}) }
 }

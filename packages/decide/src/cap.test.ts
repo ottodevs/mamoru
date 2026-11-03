@@ -164,4 +164,42 @@ describe('otto/mamoru#212: placing within the cap', () => {
     expect(h.proposal?.kind).toBe('harvest')
     expect(decide({ ...fees, cap: { capUsdc: 100n * USDC, elsewhereUsdc: 0n } }, V2).proposal).toEqual(h.proposal)
   })
+
+  test('otto/mamoru#353: the cap never makes the engine sell idle volatile: the sale is decided on every savings held', () => {
+    // 1,000 USDC and ~300 USDC of WETH idle, the cap's room 10 USDC. Sized as if the account held only its room (the
+    // rule before #353), WETH looked far above the mint it could pair and was sold back to USDC.
+    const weth = 75n * 10n ** 15n
+    const asIfRoom = obs({ balances: { USDC: 10n * USDC, USDT: 0n, cbBTC: 0n, WETH: weth } })
+    expect(decide(asIfRoom, V2).proposal).toMatchObject({ kind: 'enter_swap', tokenIn: 'WETH', tokenOut: 'USDC' })
+    const held = obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: weth } })
+    const room = 10n * USDC
+    const capped = { ...held, cap: { capUsdc: placedOf(held, V2) + room, elsewhereUsdc: 0n } }
+    expect(capRoomOf(capped, V2)).toBe(room)
+    const d = decide(capped, V2)
+    expect(d.proposal && d.proposal.kind === 'enter_swap' && d.proposal.tokenIn === 'WETH').toBe(false)
+    // An entry, if any, spends no more new savings than the room.
+    const p = d.proposal
+    const spent = !p ? 0n : p.kind === 'enter_swap' && p.tokenIn === 'USDC' ? p.amountIn : p.kind === 'enter_mint' ? (p.pool === 'pool:WETH/USDC/3000' ? p.amount1Desired : p.amount0Desired) : 0n
+    expect(spent <= room).toBe(true)
+    // At the limit (no room): nothing spends savings and nothing is sold.
+    const full = decide({ ...held, cap: { capUsdc: placedOf(held, V2), elsewhereUsdc: 0n } }, V2)
+    expect(full.proposal).toBeNull()
+  })
+
+  test('otto/mamoru#353: fixed weights: the convert reads every savings held but only sells; what buys is sized on the room', () => {
+    // ratioConvertOf (rerange/index.ts) returns a swap of the pool's volatile token into savings or nothing: it never spends
+    // savings. The entries (enterBucket) size from withinCap: 1,000 held, room 10, a little WETH idle.
+    const FIRST = { ...V2, allocation: 'first-entry' as const }
+    const held = obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 10n ** 15n } })
+    const room = 10n * USDC
+    const o = { ...held, cap: { capUsdc: placedOf(held, FIRST) + room, elsewhereUsdc: 0n } }
+    expect(capRoomOf(o, FIRST)).toBe(room)
+    const p = decide(o, FIRST).proposal
+    expect(p).not.toBeNull()
+    if (p!.kind === 'enter_swap' && p!.tokenIn === 'USDC') expect(p!.amountIn <= room).toBe(true)
+    if (p!.kind === 'enter_mint') expect((p!.pool.startsWith('pool:USDC/') ? p!.amount0Desired : p!.amount1Desired) <= room).toBe(true)
+    // Without the cap the same account buys far more: the room is what limits it.
+    const free = decide(held, FIRST).proposal
+    expect(free?.kind === 'enter_swap' && free.tokenIn === 'USDC' && free.amountIn > room).toBe(true)
+  })
 })

@@ -11,7 +11,7 @@ import { weightTargets } from './rebalance/weights.ts'
 import { releaseOf } from './release/index.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, mergeOf, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, GuardNote, Observation, Proposal, RerangeProposal, ShadowNote, ShadowRisk } from './types.ts'
-import { withinCap } from './cap.ts'
+import { capRoomOf, withinCap } from './cap.ts'
 import { poolStatsShadowRisk } from './shadow-pool-stats.ts'
 import { poolDepthShadowRisk } from './shadow-pool-depth.ts'
 
@@ -69,9 +69,11 @@ function inRange(tick: number, lower: number, upper: number): boolean {
  * the same decision, codes and trail, byte for byte.
  */
 export function decide(obs: Observation, given: PolicyVersion): Decision {
-  // otto/mamoru#212: for the sizing of new money only (the entries below), savings above the account's room under its
-  // cap are not there to place. Re-range, harvest, reduce and idle sales read the observation as it is.
+  // otto/mamoru#212, #353: the cap limits only the new savings an entry places. Under target weights allocate takes the
+  // room and reads everything else (total, targets, sales, returns) from the observation as it is; the fixed-weight
+  // entries size from `entryObs`. Re-range, harvest, reduce, merges and idle sales read the observation as it is.
   const entryObs = withinCap(obs, given)
+  const room = capRoomOf(obs, given)
   // Lab (#101 experiment 6): every step reads the scaled preferences; the decision still names the policy as given.
   const targets = weightTargets(obs, given)
   const policy: PolicyVersion = targets ? { ...given, buckets: targets } : given
@@ -152,7 +154,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // otto/mamoru#215: the local entry a bridge took the review from, used when the bridge cannot go.
   let displaced: Proposal | undefined
   if (policy.allocation === 'target-weights') {
-    const a = allocate(entryObs, policy, unsafeDeposit, frozen)
+    const a = allocate(obs, policy, unsafeDeposit, frozen, room)
     // Only where the next step has a live session: without one it never goes and the token would wait for ever.
     // A mint after a re-range runs under manage-any, as below.
     const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
@@ -199,7 +201,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       buckets.push({ bucket: b.id, code: 'OBS_DEPOSIT_UNSAFE' })
       continue
     }
-    const convert = ratioConvertOf(entryObs, policy, b.preference, pool, safeSavings(entryObs, policy))
+    // The sale of idle volatile to pair it reads the savings actually held: the cap never makes it sell (otto/mamoru#353).
+    const convert = ratioConvertOf(obs, policy, b.preference, pool, safeSavings(obs, policy))
     const e = convert ? { code: 'DECIDE_CONVERT' as const, proposal: convert } : enterBucket(entryObs, policy, b.preference, pool)
     if (remint && e.proposal?.kind === 'enter_mint') e.proposal = { ...e.proposal, grant: anyKey(policy, 'manage-any', pool.name) }
     buckets.push({ bucket: b.id, code: e.code })
