@@ -313,6 +313,15 @@ describe('a partial chain read', () => {
     expect(render(<Working f={wholeMoney(g).f} s={wholeMoney(g).s} onStop={null} />).text).not.toContain('target 50%')
   })
 
+  test('two stale chains read at different times: each says its own time', () => {
+    const f = withStaleMonad(braisFunding('minted', NOW), NOW)
+    const base = f.money!.chains.find((c) => c.chainId === 8453)!
+    base.read = { ...base.read, at: new Date(NOW - 60 * 60_000).toISOString(), stale: true }
+    const note = totalScopeNote(f, true)!
+    expect(note).toContain(`Base could not be read just now. Showing its last value, read at ${clockTime(new Date(NOW - 60 * 60_000).toISOString())}.`)
+    expect(note).toContain(`Monad could not be read just now. Showing its last value, read at ${clockTime(new Date(NOW - 6 * 60_000).toISOString())}.`)
+  })
+
   test('a stale chain whose positions are also partial: the balance says both', () => {
     const f = withPartialBase(withStaleMonad(braisFunding('minted', NOW), NOW))
     const note = totalScopeNote(f, true)!

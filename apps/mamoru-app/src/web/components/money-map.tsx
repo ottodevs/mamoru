@@ -57,9 +57,10 @@ export function totalScopeNote(f: FundingView | undefined, otherChain: boolean):
   if (unread.length) notes.push(moneyCopy.incomplete(names(unread, f.money.chains)))
   // A chain never read is stale too; it is said once, as unread.
   const stale = f.money.chains.filter((c) => c.read.stale && c.read.at !== null)
-  if (stale.length) {
-    const at = clockTime(stale.map((c) => c.read.at!).sort()[0]!)
-    notes.push(at ? moneyCopy.stale(names(stale, f.money.chains), at) : moneyCopy.staleNoTime(names(stale, f.money.chains)))
+  // One sentence per stale chain, each with its own read time (#350 review r6).
+  for (const c of stale) {
+    const at = clockTime(c.read.at!)
+    notes.push(at ? moneyCopy.stale(names([c], f.money.chains), at) : moneyCopy.staleNoTime(names([c], f.money.chains)))
   }
   const partial = f.money.chains.filter((c) => c.partial)
   if (partial.length) notes.push(moneyCopy.partial(names(partial, f.money.chains)))
