@@ -318,7 +318,9 @@ export function WrongNetwork({ accountKey: sleeveKey, startPending = false }: { 
   const other = useOtherChains(accountKey)
   const status = useBridgeOut(accountKey)
   const sibling = useEthereumSibling(accountKey)
-  const ethereum = accountKey ? ethereumTakeover(sibling.isError ? undefined : sibling.data, startPending, accountKey) : undefined
+  // Review of #243 (GPT-6 P1): the last answer stands after a failed poll (react-query keeps it), so a setup on its way is
+  // never traded back for convert and move because one read failed.
+  const ethereum = accountKey ? ethereumTakeover(sibling.data, startPending, accountKey) : undefined
   // Off on /ops, or the operator has no Ethereum RPC (the route answers 404): the notice stays as it was, no button.
   const canMove = !status.isError && status.data?.enabled === true
   const route = status.isError ? null : (status.data?.route ?? null)

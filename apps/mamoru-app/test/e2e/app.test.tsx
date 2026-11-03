@@ -5,7 +5,7 @@ import { createMemoryHistory, RouterProvider } from '@tanstack/react-router'
 import { ApiContext, ApiRequestError, type ApiClient } from '../../src/web/api/client.ts'
 import { queryKeys } from '../../src/web/api/queries.ts'
 import { fixtureClient, fixtureConfig, fixtureFunding, fixtureSession } from '../../src/web/fixtures/client.ts'
-import { FIXTURE_ACCOUNT_KEY } from '../../src/web/fixtures/empty-account.ts'
+import { FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from '../../src/web/fixtures/empty-account.ts'
 import { poolsResponse } from '../../src/web/fixtures/pools.ts'
 import { base64url, PasskeyError } from '../../src/web/lib/passkey.ts'
 import { challengeUsable, signInCopy, signInProblem, signInWithPasskey, WALKAWAY_URL } from '../../src/web/lib/signin.ts'
@@ -56,6 +56,9 @@ async function renderRoute(
   }
   if (more.lastBalance) qc.setQueryData(queryKeys.yieldLedger(FIXTURE_ACCOUNT_KEY), { asOf: null, accruedUsd: null, collectedUsd: null, earnedSoFarUsd: null, gasPaidWei: null, valueVsHoldUsd: null, feeAccruedUsd: null, lastBalance: more.lastBalance })
   qc.setQueryData(queryKeys.ops(FIXTURE_ACCOUNT_KEY), { ops: more.ops ?? [] })
+  // otto/mamoru#311: Start waits for the Ethereum offer; these routes are about Base, so the operator offers none.
+  qc.setQueryData(queryKeys.ethereumSibling(FIXTURE_ACCOUNT_KEY), { state: 'none', offered: false })
+  qc.setQueryData(queryKeys.otherChains(FIXTURE_ACCOUNT_KEY), { address: FIXTURE_ADDRESS, accountChainId: 8453, chains: [] })
   if (more.apy) qc.setQueryData(queryKeys.apy, more.apy)
   const router = buildRouter(createMemoryHistory({ initialEntries: [path] }))
   await router.load()

@@ -1275,14 +1275,22 @@ export function ActivateScope({ summary }: { summary: string[] }) {
 
 function StartRow({ accountKey, funded, one }: { accountKey: string; funded: boolean; one: OneApproval }) {
   // otto/mamoru#311: with funds on Ethereum that Mamoru can take over, Start is the one approval for Base and Ethereum.
+  // Review of #243 (GPT-6 P1): Start waits until both reads have answered (or failed), so Base is never approved alone
+  // while the Ethereum offer is still unknown; then the choice is kept for this mount, so a later poll never swaps the
+  // flow between its two taps. The last answer counts after a failed poll (react-query keeps it).
   const sibling = useEthereumSibling(accountKey)
   const other = useOtherChains(accountKey)
-  const onEthereum = fundsElsewhere(other.isError ? undefined : other.data).some((c) => c.chainId === BRIDGE_CHAIN_ID)
-  if (one.parts || (!sibling.isError && sibling.data?.offered && onEthereum)) return <OneApprovalStart flow={one} title={funded ? homeCopy.notRunning : homeCopy.armFirst} startLabel={funded ? homeCopy.start : 'Approve'} />
-  return <PlainStartRow accountKey={accountKey} funded={funded} />
+  const settled = !sibling.isPending && !other.isPending
+  const offered = !!sibling.data?.offered && fundsElsewhere(other.data).some((c) => c.chainId === BRIDGE_CHAIN_ID)
+  const [mode, setMode] = useState<'one' | 'plain' | null>(() => (settled ? (offered ? 'one' : 'plain') : null))
+  useEffect(() => {
+    if (mode === null && settled) setMode(offered ? 'one' : 'plain')
+  }, [mode, settled, offered])
+  if (one.parts || mode === 'one') return <OneApprovalStart flow={one} title={funded ? homeCopy.notRunning : homeCopy.armFirst} startLabel={funded ? homeCopy.start : 'Approve'} />
+  return <PlainStartRow accountKey={accountKey} funded={funded} waiting={mode === null} />
 }
 
-function PlainStartRow({ accountKey, funded }: { accountKey: string; funded: boolean }) {
+function PlainStartRow({ accountKey, funded, waiting = false }: { accountKey: string; funded: boolean; waiting?: boolean }) {
   const flow = useOwnerAction(accountKey, 'activate')
   const tap = () => void (flow.prepared ? flow.approve() : flow.prepare())
   if (flow.result) return null
@@ -1297,8 +1305,8 @@ function PlainStartRow({ accountKey, funded }: { accountKey: string; funded: boo
         ) : null}
         {flow.error ? <span className="err mt-1 block">{flow.error}</span> : null}
       </span>
-      <button type="button" className="act" onClick={tap} disabled={flow.busy !== null}>
-        {flow.busy === 'signing' ? 'Waiting for passkey' : flow.busy === 'preparing' ? 'Preparing' : flow.prepared ? homeCopy.confirm : funded ? homeCopy.start : 'Approve'}
+      <button type="button" className="act" onClick={tap} disabled={flow.busy !== null || waiting}>
+        {flow.busy === 'signing' ? 'Waiting for passkey' : flow.busy === 'preparing' || waiting ? 'Preparing' : flow.prepared ? homeCopy.confirm : funded ? homeCopy.start : 'Approve'}
       </button>
     </section>
   )

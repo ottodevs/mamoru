@@ -178,7 +178,7 @@ export function useBridgeOut(accountKey: string | undefined) {
 
 /**
  * #311: Mamoru's session on the account's own Safe on Ethereum. Polls every 5 s while its setup is being sent, every
- * minute once it runs (it moves the funds by itself); a failed read shows nothing (an operator without Ethereum: 404).
+ * minute otherwise; a read that never succeeded shows nothing (an operator without Ethereum: 404).
  */
 export function useEthereumSibling(accountKey: string | undefined) {
   const api = useApi()
@@ -187,7 +187,9 @@ export function useEthereumSibling(accountKey: string | undefined) {
     queryFn: () => api.ethereumSiblingStatus(accountKey as string),
     enabled: accountKey !== undefined,
     retry: false,
-    refetchInterval: (q) => (q.state.data && (q.state.data.state === 'sending' || q.state.data.state === 'unconfirmed') ? 5_000 : q.state.data?.state === 'done' ? 60_000 : false),
+    // Review of #243 (GPT-6 P1): every minute in every other state too, so funds that reach Ethereum later, or a scope
+    // turned on in /ops, show the offer in an open page. The operator answers this from memory.
+    refetchInterval: (q) => (q.state.data && (q.state.data.state === 'sending' || q.state.data.state === 'unconfirmed') ? 5_000 : 60_000),
   })
 }
 

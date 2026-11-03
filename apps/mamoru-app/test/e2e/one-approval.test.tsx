@@ -78,6 +78,14 @@ describe('the Ethereum notice with one approval (#311)', () => {
     }
   })
 
+  test('a failed poll keeps the last answer: a setup on its way is never traded back for convert and move', () => {
+    const qc = client({ state: 'sending', offered: false })
+    qc.getQueryCache().find({ queryKey: queryKeys.ethereumSibling(FIXTURE_ACCOUNT_KEY) })!.setState({ status: 'error', error: new Error('down') })
+    const { text, html } = notice(qc)
+    expect(text).toContain(ethereumCopy.state.sending)
+    expect(html).not.toContain('data-testid="eth-convert"')
+  })
+
   test('a failed setup is offered again, and says the first one did not go through', () => {
     const { text, html } = notice(client({ state: 'failed', offered: true }))
     expect(text).toContain(ethereumCopy.state.failed)
@@ -96,6 +104,13 @@ describe('Start as the one approval (#311)', () => {
   test('offered with funds on Ethereum: Start is the one approval', async () => {
     const { html } = await home(client({ state: 'none', offered: true }))
     expect(html).toContain('data-approval="one"')
+  })
+
+  test('before the Ethereum offer is known, Start waits: nothing can be approved on Base alone', async () => {
+    const { html } = await home(client(undefined))
+    expect(html).toContain('data-testid="start"')
+    expect(html).not.toContain('data-approval="one"')
+    expect(html).toMatch(/<button[^>]*class="act"[^>]*disabled=""[^>]*>Preparing/)
   })
 
   test('not offered: the plain Start, unchanged', async () => {
