@@ -359,10 +359,15 @@ export function rangeHoldCopy(code: string | undefined): string {
   return homeCopy.paused
 }
 
-/** otto/mamoru#350: the account's Safe on a position's chain: the money map's, the remote one, or the home Safe. */
-function safeOn(f: FundingView, chainId: number, homeChain: number): string | null {
-  const mapped = f.money?.chains.find((c) => c.chainId === chainId)?.safe
-  if (mapped) return mapped
+/**
+ * otto/mamoru#350: the Safe that holds a position: the money map chain that lists it (a chain can carry a current and a
+ * retired Safe, #350 review r2), else the remote Safe on that chain, else the home Safe.
+ */
+function safeOn(f: FundingView, p: { tokenId: string; chainId?: number }, homeChain: number): string | null {
+  const chainId = p.chainId ?? homeChain
+  const holder = f.money?.chains.find((c) => c.chainId === chainId && c.positions.some((q) => q.tokenId === p.tokenId))
+  if (holder) return holder.safe
+  if (f.money) return null
   if (f.remote?.chainId === chainId) return f.remote.address
   return chainId === homeChain ? f.address : null
 }
@@ -567,7 +572,7 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
           <ul className="m-0 list-none p-0">
             {bySize(rows).map((k, i) => {
               const p = f.positions[k]! as FundingView['positions'][number] & { chainId?: number }
-              return <PositionRow key={`${p.chainId ?? ''}:${p.tokenId}`} p={p} r={rows[k]!} i={i} readFromChain={f.source === 'chain'} hold={holdsApply(p, homeChain) ? f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code : undefined} safe={safeOn(f, p.chainId ?? homeChain, homeChain)} />
+              return <PositionRow key={`${p.chainId ?? ''}:${p.tokenId}`} p={p} r={rows[k]!} i={i} readFromChain={f.source === 'chain'} hold={holdsApply(p, homeChain) ? f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code : undefined} safe={safeOn(f, p, homeChain)} />
             })}
           </ul>
           {noRate ? <p className="m-0 pt-2 font-mono text-[0.72rem] text-stone">{homeCopy.noRate}</p> : null}

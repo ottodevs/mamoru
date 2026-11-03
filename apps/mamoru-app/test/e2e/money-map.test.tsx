@@ -58,6 +58,18 @@ describe('Working names each chain\'s Safe, largest position first', () => {
     expect(second).toContain('Base')
   })
 
+  test('two Safes on one chain (current and retired): each row links the Safe that holds it', () => {
+    const f = withMonadPosition(braisFunding('minted', NOW), '2000000')
+    const retired = '0x1111111111111111111111111111111111111111'
+    const current = f.money!.chains.find((c) => c.chainId === 143)!
+    f.money!.chains.push({ ...structuredClone(current), safe: retired, positions: [{ ...current.positions[0]!, tokenId: '9002', valueUsdc: '1000000' }] })
+    const { f: w, s } = wholeMoney(f)
+    const rows = rowsOf(render(<Working f={w} s={s} onStop={null} />).html)
+    expect(rows.find((r) => r.includes('monadscan') && r.includes(BRAIS_MONAD_SAFE))).toBeDefined()
+    expect(rows.filter((r) => r.includes(`monadscan.com/address/${retired}`)).length).toBe(1)
+    expect(rows.filter((r) => r.includes(`monadscan.com/address/${BRAIS_MONAD_SAFE}`)).length).toBe(1)
+  })
+
   test('an old operator without the money map links the home Safe', () => {
     const f = withoutMoney(braisFunding('minted', NOW))
     const html = render(<Working f={f} s={split(f, null)} onStop={null} />).html
@@ -324,6 +336,13 @@ describe('a partial chain read', () => {
     expect(home(f)).toContain('Some positions on Base could not be listed, so the total may be short.')
     const g: FundingView = { ...f, approval: { validUntil: 2_000_000_000, renewDue: false, expired: false, policyId: 'conservador-live-v6' } }
     expect(render(<Working f={wholeMoney(g).f} s={wholeMoney(g).s} onStop={null} />).text).not.toContain('target 50%')
+  })
+
+  test('a stale chain whose positions are also partial: the balance says both', () => {
+    const f = withPartialBase(withStaleMonad(braisFunding('minted', NOW), NOW))
+    const note = totalScopeNote(f, true)!
+    expect(note).toContain('Monad could not be read just now')
+    expect(note).toContain('Some positions on Base could not be listed, so the total may be short.')
   })
 
   test('an unread chain still wins the note over a partial one', () => {
