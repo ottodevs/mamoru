@@ -33,7 +33,8 @@ function onV4(w: ReturnType<typeof world>, extra: Partial<AccountState> = {}): A
 }
 const pool = (name: string): RegistryPool => ({ ...staticPool(name, baseRegistry), entry: { twapWindow: 600, twapShortWindow: 60, bandTicks: 100, anchorTick: 0, anchorBand: name.includes('USDT') ? 40 : 0, ratioBps: 10_000, active: true } })
 function poolsAre(w: ReturnType<typeof world>, pools: RegistryPool[]) {
-  priv(w.op).v4PoolsCache = { peek: () => ({ pools, key: pools.map((p) => p.address).join() }), get: async () => ({ pools, key: pools.map((p) => p.address).join() }) }
+  const read = { pools, key: pools.map((p) => p.address).join() }
+  priv(w.op).v4PoolsCache = { peek: () => read, get: async () => read, forAccount: () => read }
 }
 
 describe('P0-3: the V4 remote of a design-C account has its own key on the Monad operator', () => {

@@ -6,7 +6,7 @@ import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, m
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LAB_POLICIES, POLICIES, sleeveEnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, type OneAuthV4Deployment, type OpsFlagName, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, POLICIES, sleeveEnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -5785,6 +5785,19 @@ export class Operator {
     return (this.v4PoolsCache ??= new RegistryPoolsCache(() => readEligiblePools(this.client, d, this.cfg.chainId)))
   }
 
+  /**
+   * Review of #245 (Opus P2, rule 7): the pools an account's engine runs on: the settled eligible set (hysteresis in
+   * RegistryPoolsCache) plus every pool the account still holds a position in (its last decided review, `peerView`),
+   * eligible or not, since A1 never gates exits. Null before the first read.
+   */
+  private v4PoolsFor(acc: Pick<AccountState, 'peerView'>): { pools: RegistryPool[]; key: string } | null {
+    const held = (acc.peerView?.positions ?? []).flatMap((p) => {
+      const e = p.pool ? this.cfg.registry.entries.find((x) => x.kind === 'pool' && x.name === p.pool) : undefined
+      return e ? [e.address] : []
+    })
+    return this.v4Pools()?.forAccount(held) ?? null
+  }
+
   /** The account runs on MamoruActionPolicyV4 (home or remote). */
   private onV4(acc: Pick<AccountState, 'policyId'>): boolean {
     return isOneAuthV4(acc.policyId)
@@ -5804,7 +5817,7 @@ export class Operator {
   private readonly v4EngineMemo = new Map<string, { policy: PolicyVersion; registry: Registry; sessions: EngineSession[]; key: string }>()
 
   private v4Engine(acc: AccountState): { policy: PolicyVersion; registry: Registry; sessions: EngineSession[]; key: string } {
-    const memoKey = `${acc.accountKey}|${acc.grants[0]?.permissionId}|${acc.policyId}|${this.v4Pools()?.peek()?.key ?? ''}`
+    const memoKey = `${acc.accountKey}|${acc.grants[0]?.permissionId}|${acc.policyId}|${this.v4PoolsFor(acc)?.key ?? ''}`
     const hit = this.v4EngineMemo.get(memoKey)
     if (hit) return hit
     const built = this.v4EngineBuild(acc)
@@ -5815,7 +5828,7 @@ export class Operator {
   private v4EngineBuild(acc: AccountState): { policy: PolicyVersion; registry: Registry; sessions: EngineSession[]; key: string } {
     const d = this.cfg.oneAuth
     if (!d) throw new ReasonError('CHAIN_UNSUPPORTED', `${acc.accountKey} runs on V4 but this operator has no V4 deployment`)
-    const read = this.v4Pools()?.peek() ?? { pools: [], key: '' }
+    const read = this.v4PoolsFor(acc) ?? { pools: [], key: '' }
     const r = withRegistryPools(this.v4PolicyOf(acc), d, read.pools, this.cfg.registry)
     const g = acc.grants[0]
     if (!g?.grant.oneAuthV4) throw new Error(`${acc.accountKey}: a V4 account holds its V4 session`)
@@ -7042,7 +7055,9 @@ export class Operator {
           if (runner.stopped || !acc.active) return
           // otto/mamoru#293: MamoruRegistry listed, removed or re-parametrized a pool since this loop started: it restarts on them.
           if (this.onV4(acc)) {
-            const pools = await this.v4Pools()?.get().catch((e) => logErr(`[v4] registry pools unreadable:`, e))
+            const read = await this.v4Pools()?.get().catch((e) => logErr(`[v4] registry pools unreadable:`, e))
+            // Rule 7 (review of #245): the account's own set, settled over several reads and keeping its held pools.
+            const pools = read ? this.v4PoolsFor(acc) : null
             if (pools && pools.key !== this.v4LoopKey.get(acc.accountKey)) {
               console.log(`[v4] ${acc.accountKey} MamoruRegistry pools changed: engine restarts on them`)
               queueMicrotask(() => {

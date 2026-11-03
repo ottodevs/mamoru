@@ -2,15 +2,15 @@
 // pinned) is byte-identical to today for a v6 account; on, a clean inventory offers approval.whatsNew in the shape #295
 // builds against; never while paused; a V4 account never renews; step 1 waits for step 0.
 import { describe, expect, test } from 'bun:test'
-import { BaseError, ContractFunctionRevertedError, type Hex, type PublicClient } from 'viem'
+import { BaseError, decodeFunctionData, encodeAbiParameters, encodeFunctionResult, type Hex, type PublicClient } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { baseRegistry } from '@mamoru/registry'
 import { grantKey, ONE_AUTH_V4, oneAuthV4Live, staticPool, withRegistryPools, type OneAuthV4Deployment } from '@mamoru/policy'
 import { resolveV4Policy, resolveV5Policy, resolveV6Policy } from '../src/boot.ts'
 import { encodeFunctionData, erc20Abi } from 'viem'
 import { HttpError, movedTo, type Operator } from '../src/operator.ts'
-import { readEligiblePools, readPaused, v4StoredGrant, WHATS_NEW_POINTS, RegistryPoolsCache } from '../src/one-auth.ts'
-import { v4Children } from '@mamoru/account/one-auth'
+import { MULTICALL3, readEligiblePools, readPaused, v4StoredGrant, WHATS_NEW_POINTS, RegistryPoolsCache } from '../src/one-auth.ts'
+import { mamoruV4HelperAbi, v4Children } from '@mamoru/account/one-auth'
 import type { AccountState } from '../src/state.ts'
 import { withPinnedV6Base } from '../../../packages/account/remote/fixture.ts'
 import { ctx, world } from './owner-world.ts'
@@ -186,6 +186,10 @@ describe('engine pools from V4 eligibility (spec 010 A1)', () => {
     const entry = { twapWindow: 1800, twapShortWindow: 300, bandTicks: 100, anchorTick: 0, anchorBand: 0, ratioBps: 1500, active: true }
     const calls: string[] = []
     let transportDown = false
+    const priced = (pool: string) => {
+      const [t0, t1, fee] = pool === P.stable ? [USDC, USDT, 100] : [WETH, USDC, 3000]
+      return encodeFunctionResult({ abi: mamoruV4HelperAbi, functionName: 'priced', result: [{ token0: t0, token1: t1, fee, in1: t0 === WETH, stablePair: pool === P.stable }, { ...entry, anchorBand: pool === P.stable ? 40 : 0 }, t0 === WETH ? WETH : `0x${'5'.repeat(40)}`] as never })
+    }
     const client = {
       readContract: async (a: { address: string; functionName: string; args?: readonly unknown[] }) => {
         calls.push(`${a.functionName}@${a.address}`)
@@ -193,14 +197,20 @@ describe('engine pools from V4 eligibility (spec 010 A1)', () => {
         if (a.functionName === 'pairsOf') return [[USDC, USDT], [USDC, WETH]]
         if (a.functionName === 'classOf') return a.args![2] === USDT ? { ref: P.stable, feeMask: 1 } : { ref: P.weth3000, feeMask: 2 | 4 }
         if (a.functionName === 'getPool') return a.args![2] === 100 ? P.stable : a.args![2] === 500 ? P.weth500 : a.args![2] === 3000 ? P.weth3000 : '0x0000000000000000000000000000000000000000'
-        if (a.functionName === 'priced') {
+        if (a.functionName === 'aggregate3') {
+          expect(a.address).toBe(MULTICALL3)
           if (transportDown) throw new BaseError('fetch failed')
-          // the 0.05 % pool disagrees with the reference pool now: NotEligible(pool, 7)
-          if (a.args![0] === P.weth500) throw new BaseError('reverted', { cause: new ContractFunctionRevertedError({ abi: [], functionName: 'priced' }) })
-          const [t0, t1, fee] = a.args![0] === P.stable ? [USDC, USDT, 100] : [WETH, USDC, 3000]
-          return [{ token0: t0, token1: t1, fee, in1: t0 === WETH, stablePair: a.args![0] === P.stable }, { ...entry, anchorBand: a.args![0] === P.stable ? 40 : 0 }, t0 === WETH ? WETH : `0x${'5'.repeat(40)}`]
+          return (a.args![0] as { target: string; allowFailure: boolean; callData: Hex }[]).map((c) => {
+            expect(c.allowFailure).toBe(true)
+            if (c.target === helper) {
+              const pool = (decodeFunctionData({ abi: mamoruV4HelperAbi, data: c.callData }).args![0] as string).toLowerCase()
+              calls.push(`priced@${c.target}`)
+              // the 0.05 % pool disagrees with the reference pool now: priced reverts there, told by Multicall3's flag
+              return pool === P.weth500 ? { success: false, returnData: '0x' } : { success: true, returnData: priced(pool) }
+            }
+            return { success: true, returnData: encodeAbiParameters([{ type: 'int24' }], [c.target === P.stable ? 1 : 60]) }
+          })
         }
-        if (a.functionName === 'tickSpacing') return a.address === P.stable ? 1 : 60
         throw new Error(`unexpected ${a.functionName}`)
       },
     } as unknown as PublicClient
@@ -210,13 +220,44 @@ describe('engine pools from V4 eligibility (spec 010 A1)', () => {
       [P.weth3000, 3000, 60, 0],
     ])
     // only the class's fee tiers are asked of the factory (no 0.3 % for the stable pair, no 1 % for WETH/USDC), and every
-    // eligibility read is MamoruV4Helper's (V4's child), never a registry
+    // eligibility read is MamoruV4Helper's (V4's child), never a registry, all in one Multicall3 read
     expect(calls.filter((c) => c.startsWith('getPool'))).toHaveLength(3)
     expect(calls.filter((c) => c.startsWith('priced')).every((c) => c.endsWith(helper))).toBe(true)
+    expect(calls.filter((c) => c.startsWith('aggregate3'))).toHaveLength(1)
     expect(calls.some((c) => c.startsWith('activePools') || c.startsWith('poolOf'))).toBe(false)
-    // a failure that is not a revert (an RPC down) is not "not eligible": it throws, and the cache keeps the last good set
+    // a failure of the read itself (an RPC down) is not "not eligible": it throws, and the cache keeps the last good set
     transportDown = true
     await expect(readEligiblePools(client, D, 8453)).rejects.toThrow('fetch failed')
+  })
+
+  test('rule 7 (review of #245): a pool joins or leaves only after 3 reads in a row; a held pool stays for its account', async () => {
+    const A = pool('pool:USDC/USDT/100')
+    const B = pool('pool:WETH/USDC/3000')
+    let next: ReturnType<typeof pool>[] = [A, B]
+    let t = 0
+    const c = new RegistryPoolsCache(async () => next, 1000, () => t)
+    const names = async () => {
+      t += 1000
+      return (await c.get()).pools.map((p) => p.address)
+    }
+    expect(await names()).toEqual([A.address, B.address]) // the first read is taken as is
+    next = [A]
+    expect(await names()).toEqual([A.address, B.address]) // B missed once
+    next = [A, B]
+    expect(await names()).toEqual([A.address, B.address]) // back: the streak restarts
+    next = [A]
+    expect(await names()).toEqual([A.address, B.address])
+    expect(await names()).toEqual([A.address, B.address])
+    // an account still holding a position in B keeps it after it left the set; one that does not, does not
+    expect(await names()).toEqual([A.address]) // third miss in a row: B leaves
+    expect(c.forAccount([B.address.toLowerCase()])!.pools.map((p) => p.address)).toEqual([A.address, B.address])
+    expect(c.forAccount([])!.key).toBe(c.peek()!.key)
+    expect(c.forAccount([B.address])!.key).not.toBe(c.peek()!.key)
+    // a new pool needs 3 reads in a row too
+    next = [A, B]
+    expect(await names()).toEqual([A.address])
+    expect(await names()).toEqual([A.address])
+    expect(await names()).toEqual([A.address, B.address])
   })
 
   test('V4 has no pause (A1): a V4 account never reads one; readPaused is the V2/V3 guardian read only', async () => {

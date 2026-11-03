@@ -3,7 +3,7 @@
 // the account's one V4 session, and the pools V4's rules make eligible, read on chain (cached per review; spec 010 A1:
 // MamoruV4Table's classes checked by MamoruV4Helper.priced, no registry). Everything here is reached only for an account
 // in the `one_auth_v4` scope on a chain whose registry pins the V4 stack, or for an account that already runs on V4.
-import { keccak256, toHex, zeroAddress, type Hex, type PublicClient } from 'viem'
+import { decodeFunctionResult, encodeFunctionData, keccak256, parseAbi, toHex, zeroAddress, type Hex, type PublicClient } from 'viem'
 import type { Address, WhatsNew } from '@mamoru/domain'
 import { address, type Registry } from '@mamoru/registry'
 import { ONE_AUTH_V4, V4_CAP30_MULTIPLE, registryPoolsKey, V4_USAGE_LIMIT, V4_VALID_UNTIL, type OneAuthV4Deployment, type RegistryPool, type SessionGrant } from '@mamoru/policy'
@@ -105,12 +105,19 @@ const poolIdentityAbi = [
   { type: 'function', name: 'tickSpacing', stateMutability: 'view', inputs: [], outputs: [{ type: 'int24' }] },
 ] as const
 
+/** Multicall3, the same address on every chain (canonical CREATE2 deployment; Base, Monad and Ethereum included). */
+export const MULTICALL3: Address = '0xcA11bde05977b3631167028862bE2a173976CA11'
+
 /**
  * The pools V4 makes eligible on this chain now (spec 010 A1 "Eligibility rules"): for every pair with a class in
  * MamoruV4Table, every pool of the chain's factory at a fee tier of the class's set, kept only when MamoruV4Helper.priced
  * accepts it (factory, pinned tokens, fee set, observation ring, agreement with the reference pool), with the entry V4
- * itself prices it with. A pool `priced` refuses is not eligible now and is left out; a read that fails otherwise throws
- * (the cache keeps the last good set).
+ * itself prices it with.
+ *
+ * Review of #245 (Opus P2): `priced` for every candidate goes in ONE Multicall3.aggregate3 with allowFailure, so a pool
+ * `priced` refuses is told by Multicall3's own success flag, whatever the RPC makes of a revert: one ineligible or new
+ * pool is left out and never fails the whole read. A failure of the read itself (transport, the multicall reverting)
+ * throws, and the cache keeps the last good set.
  */
 export async function readEligiblePools(client: PublicClient, deployment: Pick<OneAuthV4Deployment, 'policy' | 'table'>, chainId: number, blockNumber?: bigint): Promise<RegistryPool[]> {
   const at = blockNumber !== undefined ? { blockNumber } : {}
@@ -130,19 +137,30 @@ export async function readEligiblePools(client: PublicClient, deployment: Pick<O
       if (BigInt(pool) !== 0n) candidates.add(pool)
     }
   }
+  const list = [...candidates]
+  if (!list.length) return []
+  // priced(pool) and the pool's tickSpacing, each allowed to fail on its own.
+  const results = (await client.readContract({
+    address: MULTICALL3,
+    abi: multicall3Abi,
+    functionName: 'aggregate3',
+    args: [list.flatMap((pool) => [
+      { target: helper, allowFailure: true, callData: encodeFunctionData({ abi: mamoruV4HelperAbi, functionName: 'priced', args: [pool] }) },
+      { target: pool, allowFailure: true, callData: encodeFunctionData({ abi: poolIdentityAbi, functionName: 'tickSpacing' }) },
+    ])],
+    ...at,
+  })) as readonly { success: boolean; returnData: Hex }[]
+  if (results.length !== list.length * 2) throw new Error(`Multicall3 returned ${results.length} results for ${list.length * 2} calls`)
   const out: RegistryPool[] = []
-  for (const pool of candidates) {
-    let priced: readonly [{ token0: Address; token1: Address; fee: number }, { twapWindow: number; twapShortWindow: number; bandTicks: number; anchorTick: number; anchorBand: number; ratioBps: number; active: boolean }, Address]
-    try {
-      priced = (await client.readContract({ address: helper, abi: mamoruV4HelperAbi, functionName: 'priced', args: [pool], ...at })) as typeof priced
-    } catch (e) {
-      if (isRevert(e)) continue // not eligible now (NotEligible, NotPinned, ...): left out
-      throw e
-    }
-    const [p, e] = priced
-    const tickSpacing = await client.readContract({ address: pool, abi: poolIdentityAbi, functionName: 'tickSpacing', ...at })
+  list.forEach((pool, k) => {
+    const pr = results[2 * k]!
+    const ts = results[2 * k + 1]!
+    if (!pr.success) return // not eligible now (NotEligible, NotPinned, ...): left out
+    if (!ts.success) return // not a pool V4 could run on (no tickSpacing): left out
+    const [p, e] = decodeFunctionResult({ abi: mamoruV4HelperAbi, functionName: 'priced', data: pr.returnData })
+    const tickSpacing = decodeFunctionResult({ abi: poolIdentityAbi, functionName: 'tickSpacing', data: ts.returnData })
     out.push({ address: pool, token0: p.token0, token1: p.token1, fee: Number(p.fee), tickSpacing: Number(tickSpacing), entry: { twapWindow: e.twapWindow, twapShortWindow: e.twapShortWindow, bandTicks: e.bandTicks, anchorTick: e.anchorTick, anchorBand: e.anchorBand, ratioBps: e.ratioBps, active: e.active } })
-  }
+  })
   return out
 }
 
@@ -150,28 +168,46 @@ const factoryGetPoolAbi = [
   { type: 'function', name: 'getPool', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'address' }, { type: 'uint24' }], outputs: [{ type: 'address' }] },
 ] as const
 
-/** A contract revert (viem ContractFunctionRevertedError somewhere in the cause chain), not a transport failure. */
-function isRevert(e: unknown): boolean {
-  for (let c = e as { name?: string; cause?: unknown } | undefined; c; c = c.cause as typeof c) if (c.name === 'ContractFunctionRevertedError') return true
-  return false
-}
+const multicall3Abi = parseAbi([
+  'struct Call3 { address target; bool allowFailure; bytes callData; }',
+  'struct Result { bool success; bytes returnData; }',
+  'function aggregate3(Call3[] calls) payable returns (Result[] returnData)',
+])
 
-/** One read of the eligible pools per TTL for every V4 account of the process (each review asks; a failed read keeps the last). */
+/**
+ * Review of #245 (Opus P2, rule 7 hysteresis): how many reads in a row must agree before a pool joins or leaves the
+ * engine's set. Eligibility can flap minute to minute (the reference-pool agreement), and every change of the set
+ * restarts each V4 account's engine loop.
+ */
+export const ELIGIBILITY_STREAK = 3
+
+/**
+ * One read of the eligible pools per TTL for every V4 account of the process (each review asks; a failed read keeps the
+ * last), with hysteresis: after the first read (taken as is), a pool joins the set only after ELIGIBILITY_STREAK reads
+ * in a row find it eligible, and leaves it only after as many find it not. Every pool ever read stays known (`known`),
+ * so an account still holding a position in a pool that left the set keeps it (`forAccount`): A1 never gates exits.
+ */
 export class RegistryPoolsCache {
   private last: { at: number; pools: RegistryPool[]; key: string } | null = null
   private inflight: Promise<RegistryPool[]> | null = null
+  private readonly set = new Map<string, RegistryPool>()
+  private readonly known = new Map<string, RegistryPool>()
+  /** Reads in a row that disagree with the set about a pool (eligible while out, or not while in). */
+  private readonly streak = new Map<string, number>()
   constructor(
     private readonly read: () => Promise<RegistryPool[]>,
     private readonly ttlMs = 60_000,
     private readonly now: () => number = Date.now,
+    private readonly needed = ELIGIBILITY_STREAK,
   ) {}
 
-  /** The eligible pools, at most `ttlMs` old. Throws only when no read has ever succeeded. */
+  /** The eligible pools (with hysteresis), at most `ttlMs` old. Throws only when no read has ever succeeded. */
   async get(): Promise<{ pools: RegistryPool[]; key: string }> {
     if (this.last && this.now() - this.last.at < this.ttlMs) return this.last
     this.inflight ??= this.read().finally(() => (this.inflight = null))
     try {
-      const pools = await this.inflight
+      const raw = await this.inflight
+      const pools = this.settle(raw)
       this.last = { at: this.now(), pools, key: registryPoolsKey(pools) }
     } catch (e) {
       if (!this.last) throw e
@@ -179,9 +215,53 @@ export class RegistryPoolsCache {
     return this.last!
   }
 
-  /** The last successful read, without waiting (null before the first). */
+  private settle(raw: readonly RegistryPool[]): RegistryPool[] {
+    const first = this.last === null
+    const now = new Map(raw.filter((p) => p.entry.active).map((p) => [p.address.toLowerCase(), p]))
+    for (const [a, p] of now) this.known.set(a, p)
+    for (const a of new Set([...now.keys(), ...this.set.keys()])) {
+      const inSet = this.set.has(a)
+      const eligible = now.has(a)
+      if (first || inSet === eligible) {
+        this.streak.delete(a)
+        if (eligible) this.set.set(a, now.get(a)!) // the entry as read last
+        continue
+      }
+      const n = (this.streak.get(a) ?? 0) + 1
+      if (n < this.needed) {
+        this.streak.set(a, n)
+        continue
+      }
+      this.streak.delete(a)
+      if (eligible) this.set.set(a, now.get(a)!)
+      else this.set.delete(a)
+    }
+    return [...this.set.values()]
+  }
+
+  /** The last settled set, without waiting (null before the first read). */
   peek(): { pools: RegistryPool[]; key: string } | null {
     return this.last
+  }
+
+  /**
+   * An account's pools: the settled set, plus every known pool in `held` (addresses of pools the account holds a
+   * position in) that is not in it now. Exits are never gated by eligibility (A1), so the engine keeps managing those
+   * positions; an entry there is V4's to refuse while the pool is not eligible. Null before the first read.
+   */
+  forAccount(held: Iterable<string>): { pools: RegistryPool[]; key: string } | null {
+    if (!this.last) return null
+    const pools = [...this.last.pools]
+    const inSet = new Set(pools.map((p) => p.address.toLowerCase()))
+    for (const h of held) {
+      const a = h.toLowerCase()
+      const p = this.known.get(a)
+      if (p && !inSet.has(a)) {
+        pools.push(p)
+        inSet.add(a)
+      }
+    }
+    return pools.length === this.last.pools.length ? this.last : { pools, key: registryPoolsKey(pools) }
   }
 }
 
