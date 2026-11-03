@@ -810,7 +810,7 @@ export class MonadBridge {
           if (b.state === 'burned' && monadOk) await this.mint(b)
           if (b.state === 'minted' && monadOk) await this.backfillMinted(b)
         } catch (e) {
-          logErr(`[bridge-monad] ${b.account.slice(0, 10)} ${b.id.slice(0, 10)}:`, e)
+          logErr(`[bridge-monad] ${String(b.account ?? '').slice(0, 10)} ${String(b.id ?? '').slice(0, 10)}:`, e)
         }
         // otto/mamoru#245: one bad entry never skips the rest of the pass nor the prune.
         try {
@@ -1021,10 +1021,11 @@ export class MonadBridge {
     // seen on the burn's poll timer even when Iris does not answer; the check after the attestation is then skipped, so
     // a pass reads usedNonces once, as before.
     const checkedNonce = b.cctpNonce?.toLowerCase()
+    // On disk, and before any read: a restart does not poll again at once, and neither does a pass whose usedNonces
+    // read or Iris call throws (otto/mamoru#245: the poll timer holds when Iris does not answer).
+    this.update(b, { attestPolledAt: this.iso() })
     if (b.cctpNonce && (await this.mintedElsewhere(b, b.cctpNonce))) return
     const atts = await cctpAttestation(b.txHash, this.fetcher, CCTP_DOMAIN_BASE)
-    // On disk: a restart does not poll again at once.
-    this.update(b, { attestPolledAt: this.iso() })
     if (!b.mintReverts) this.blockers.set(b.id, 'no_attestation')
     if (!atts) return
     const amount = BigInt(b.amount)

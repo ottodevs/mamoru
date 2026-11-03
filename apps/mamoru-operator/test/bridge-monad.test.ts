@@ -1134,6 +1134,39 @@ describe('stuck burns (otto/mamoru#245)', () => {
     expect(a.lines).toHaveLength(2)
   })
 
+  test('an entry without account whose step throws neither stops the pass nor the prune', async () => {
+    const a = alerts()
+    let now = T0
+    const s = await burnedAt(() => now)
+    const burns = (s.bridge as unknown as { journal: { burns: Record<string, BridgeBurn> } }).journal.burns
+    const bad = `0x${'55'.repeat(32)}` as Hex
+    burns[bad] = { ...burns[UOP]!, id: bad, account: undefined as unknown as Hex, txHash: undefined as unknown as Hex }
+    const old = `0x${'66'.repeat(32)}` as Hex
+    burns[old] = { ...burns[UOP]!, id: old, state: 'failed', updatedAt: new Date(T0 - 31 * 86_400_000).toISOString() }
+    now += 46 * MIN
+    await s.bridge.tick()
+    a.restore()
+    expect(s.j().burns[UOP]!.stuckReason).toBe('no_attestation')
+    expect(s.j().burns[old]).toBeUndefined()
+  })
+
+  test('Iris throwing still starts the poll timer: the next pass inside ATTEST_POLL_MS asks neither Iris nor usedNonces', async () => {
+    let now = T0
+    const s = await burnedAt(() => now)
+    let calls = 0
+    ;(s.bridge as unknown as { fetcher: unknown }).fetcher = async () => {
+      calls++
+      throw new Error('network down')
+    }
+    now += 6 * MIN
+    await s.bridge.tick()
+    expect(calls).toBe(1)
+    expect(s.j().burns[UOP]!.attestPolledAt).toBe(new Date(now).toISOString())
+    now += 10_000
+    await s.bridge.tick()
+    expect(calls).toBe(1)
+  })
+
   test('with the CCTP nonce known, a pass reads usedNonces once, on the poll timer', async () => {
     let now = T0
     const att = await attest(message({ nonce: 42n, executed: true }))
