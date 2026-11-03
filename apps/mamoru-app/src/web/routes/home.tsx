@@ -21,7 +21,7 @@ import { activateLine, signatureCopy } from '../lib/signature.ts'
 import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel, type Locale } from '../lib/price-divergence.ts'
 import { localTime } from '../lib/time.ts'
-import { BASE_SLEEVE, explorerAddress, explorerTx, knownChain, sleeveChain, useChain } from '../lib/chain.tsx'
+import { BASE_SLEEVE, explorerAddress, explorerTx, knownChain, safeLink, sleeveChain, useChain } from '../lib/chain.tsx'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
@@ -34,7 +34,7 @@ import { useThrottledRefresh } from '../lib/refresh-throttle.ts'
 import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '../components/monad-consent.tsx'
 import { isVaultTarget } from '../lib/policies.ts'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
-import { MoneyMapCard, moneyCopy, showsMoneyMap, totalScopeNote, unreadChains } from '../components/money-map.tsx'
+import { moneyCopy, totalScopeNote, unreadChains } from '../components/money-map.tsx'
 
 export const homeCopy = {
   total: 'Total balance',
@@ -86,6 +86,9 @@ export const homeCopy = {
   colShare: 'Share',
   target: (pct: number) => (pct === 0 ? 'target 0%, closing' : `target ${pct}%`),
   inRange: 'In range',
+  // otto/mamoru#350: each position names the account's Safe on its chain (Brais, 3 Nov), in place of the money map card.
+  safe: 'Safe',
+  safeLabel: (chain: string, safe: string) => `Your Safe on ${chain}, ${safe}`,
   // otto/mamoru#210: a row of USDC supplied to a lending vault.
   lending: 'USDC lending',
   // otto/mamoru#297: next to the range gauge; the dust, cost and cooldown holds below keep their own, truer lines.
@@ -356,7 +359,29 @@ export function rangeHoldCopy(code: string | undefined): string {
   return homeCopy.paused
 }
 
-function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView['positions'][number] & { chainId?: number }; r: PositionRate; i: number; readFromChain?: boolean; hold?: string }) {
+/** otto/mamoru#350: the account's Safe on a position's chain: the money map's, the remote one, or the home Safe. */
+function safeOn(f: FundingView, chainId: number, homeChain: number): string | null {
+  const mapped = f.money?.chains.find((c) => c.chainId === chainId)?.safe
+  if (mapped) return mapped
+  if (f.remote?.chainId === chainId) return f.remote.address
+  return chainId === homeChain ? f.address : null
+}
+
+/** otto/mamoru#350: largest USDC value first; a position that cannot be valued goes last, the API order breaks ties. */
+function bySize(rows: PositionRate[]): number[] {
+  return rows
+    .map((_, i) => i)
+    .sort((a, b) => {
+      const va = rows[a]!.valueUsdc
+      const vb = rows[b]!.valueUsdc
+      if (va === vb) return a - b
+      if (va === null) return 1
+      if (vb === null) return -1
+      return vb > va ? 1 : -1
+    })
+}
+
+function PositionRow({ p, r, i, readFromChain = false, hold, safe = null }: { p: FundingView['positions'][number] & { chainId?: number }; r: PositionRate; i: number; readFromChain?: boolean; hold?: string; safe?: string | null }) {
   const legs = positionAmounts(p).filter((l) => l.amount !== '0')
   // otto/mamoru#210: USDC supplied to a lending vault: one token, the vault as venue, always earning.
   const addr = p.vault ? vaultAddress(p.vault.name) : poolAddress(p.pool, p.chainId)
@@ -370,6 +395,7 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
   // otto/mamoru#216: against a target, the share is of the whole account (the target's own base); otherwise of working capital.
   const shown = r.targetPct !== null && r.accountPct !== null ? r.accountPct : r.sharePct
   const share = shown === null ? null : Math.round(shown)
+  const safeHref = safe && known ? safeLink(chain.chainId, safe) : null
   return (
     <li data-testid="position" className="wc-row" style={{ ['--i' as string]: i }}>
       <span className="wc-marks" aria-hidden="true">
@@ -395,6 +421,14 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
           <span className="seg" data-testid="position-chain">
             {known ? chain.name : chainLabel(p.chainId!)}
           </span>
+          {safeHref ? (
+            <>
+              {' · '}
+              <a className="seg" href={safeHref} target="_blank" rel="noreferrer" aria-label={homeCopy.safeLabel(chain.name, safe!)} data-testid="position-safe">
+                {homeCopy.safe} {shortHex(safe!)}
+              </a>
+            </>
+          ) : null}
           {/* Out of range the gauge alone follows, and it is decorative: the separator is too. */}
           {p.vault ? null : p.inRange ? ' · ' : p.range ? <span aria-hidden="true"> · </span> : null}
           {!p.vault && (p.inRange || p.range) ? (
@@ -531,9 +565,10 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
             <span className="wc-rate">{homeCopy.monthly}</span>
           </div>
           <ul className="m-0 list-none p-0">
-            {f.positions.map((p, i) => (
-              <PositionRow key={`${(p as { chainId?: number }).chainId ?? ''}:${p.tokenId}`} p={p} r={rows[i]!} i={i} readFromChain={f.source === 'chain'} hold={holdsApply(p as { chainId?: number }, homeChain) ? f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code : undefined} />
-            ))}
+            {bySize(rows).map((k, i) => {
+              const p = f.positions[k]! as FundingView['positions'][number] & { chainId?: number }
+              return <PositionRow key={`${p.chainId ?? ''}:${p.tokenId}`} p={p} r={rows[k]!} i={i} readFromChain={f.source === 'chain'} hold={holdsApply(p, homeChain) ? f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code : undefined} safe={safeOn(f, p.chainId ?? homeChain, homeChain)} />
+            })}
           </ul>
           {noRate ? <p className="m-0 pt-2 font-mono text-[0.72rem] text-stone">{homeCopy.noRate}</p> : null}
         </>
@@ -1553,7 +1588,6 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           {/* otto/mamoru#311: Base is approved and the account is starting, so Start's row is gone; the one approval stays
               on screen for its Ethereum part, and says when it is done. */}
           {!canStart && (oneOpen || one.finished) ? <OneApprovalStart flow={one} title={homeCopy.notRunning} startLabel={homeCopy.start} /> : null}
-          {showsMoneyMap(f.money) ? <MoneyMapCard money={f.money} /> : null}
           {noPositions ? null : <Working f={whole!.f} s={whole!.s} apy={apy.data} price={price} otherChainsUsdc={otherChainsUsdc} onStop={!fromChain && (f.active || whole!.f.positions.length > 0) ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />}
           <Idle f={whole!.f} s={whole!.s} home={s as Split} />
           <History ops={opList} onRetry={retry} loaded={ops.isSuccess} />

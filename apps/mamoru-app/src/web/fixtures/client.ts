@@ -2,7 +2,7 @@ import { overCap, PRODUCTION_BANNER, type AppConfig, type BridgeOutView, type Et
 import { ApiRequestError, type ApiClient } from '../api/client.ts'
 import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-account.ts'
 import { poolsResponse } from './pools.ts'
-import { braisFunding, withMonadOnlyPositions, withoutMoney, withStaleMonad, withUnreadMonad, type BraisMoment } from './money.ts'
+import { braisFunding, withMonadOnlyPositions, withMonadPosition, withoutMoney, withStaleMonad, withUnreadMonad, type BraisMoment } from './money.ts'
 
 // Dev (VITE_FIXTURES=1) and tests only. Never imported by the production build.
 export const fixtureConfig: AppConfig = {
@@ -190,12 +190,12 @@ const chainView = (): FundingView => {
   return { ...listed, active: false, overCap: null, source: 'chain', chainRead: operatorChainIdle ? { positions: 'unknown', listedAt: null } : { positions: 'listed', listedAt: new Date(Date.now() - 40 * 60_000).toISOString() } }
 }
 let fundingReads = 0
-// ?braismoney=before|flight|arriving|minted|monadonly (dev only, otto/mamoru#269): Brais's account around the 2.075638 USDC that crossed Base to
+// ?braismoney=before|flight|arriving|minted|monadonly|mixed (dev only, otto/mamoru#269): Brais's account around the 2.075638 USDC that crossed Base to
 // Monad. Add &stale, &unread or &old for a chain read late, never read, or an operator without the money map.
 const brais = typeof location !== 'undefined' && liveGate ? new URLSearchParams(location.search).get('braismoney') : null
 const braisView = (): FundingView | null => {
   if (!brais) return null
-  const f = brais === 'monadonly' ? withMonadOnlyPositions() : braisFunding((['before', 'flight', 'minted', 'arriving'].includes(brais) ? brais : 'flight') as BraisMoment)
+  const f = brais === 'monadonly' ? withMonadOnlyPositions() : brais === 'mixed' ? withMonadPosition(braisFunding('minted'), '2000000') : braisFunding((['before', 'flight', 'minted', 'arriving'].includes(brais) ? brais : 'flight') as BraisMoment)
   return param('old') ? withoutMoney(f) : param('unread') ? withUnreadMonad(f) : param('stale') ? withStaleMonad(f) : f
 }
 const upgradeApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 1000) + 300 * 86_400, renewDue: false, expired: false, policyId: 'conservador-live-v5', upgrade: true, upgradePolicy: 'conservador-live-v6' } })
