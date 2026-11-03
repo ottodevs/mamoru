@@ -345,6 +345,16 @@ describe('a partial chain read', () => {
     expect(note).toContain('Some positions on Base could not be listed, so the total may be short.')
   })
 
+  test('every gap is said on its own: unread, partial and an unsure transfer together', () => {
+    const f = withPartialBase(withUnreadMonad(braisFunding('flight', NOW)))
+    f.money!.inFlight[0]!.unsure = true
+    const note = totalScopeNote(f, true)!
+    expect(note).toContain('Monad could not be read yet, so it is not in this total.')
+    expect(note).toContain('Some positions on Base could not be listed, so the total may be short.')
+    expect(note).toContain('The total is being confirmed.')
+    expect(note).not.toContain('could not be read just now')
+  })
+
   test('an unread chain still wins the note over a partial one', () => {
     expect(totalScopeNote(withPartialBase(withUnreadMonad(braisFunding('minted', NOW))), true)).toContain('could not be read yet')
   })
