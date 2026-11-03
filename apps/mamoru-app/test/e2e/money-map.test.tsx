@@ -1,9 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import type { FundingView } from '@mamoru/domain'
-import { isLate, MoneyMapCard, showsMoneyMap, totalScopeNote } from '../../src/web/components/money-map.tsx'
-import { BRAIS_MONAD_SAFE, BRAIS_TOTAL, braisFunding, withFailedTransfer, withMonadOnlyPositions, withoutMoney, withPartialBase, withStaleMonad, withUnreadMonad, type BraisMoment } from '../../src/web/fixtures/money.ts'
+import { totalScopeNote } from '../../src/web/components/money-map.tsx'
+import { BRAIS_MONAD_SAFE, BRAIS_TOTAL, braisFunding, withFailedTransfer, withMonadOnlyPositions, withMonadPosition, withoutMoney, withPartialBase, withStaleMonad, withUnreadMonad, type BraisMoment } from '../../src/web/fixtures/money.ts'
 import { moneyTotal, split, wholeMoney } from '../../src/web/lib/money.ts'
-import { clockOrDate, clockTime } from '../../src/web/lib/time.ts'
 import { hasMoney } from '../../src/web/routes/add-money.tsx'
 import { poolAddress } from '../../src/web/lib/positions.ts'
 import { Balance, Idle, rangeHoldCopy, Working } from '../../src/web/routes/home.tsx'
@@ -14,7 +13,6 @@ import { render } from './render.ts'
 
 const NOW = Date.parse('2026-11-01T10:30:00.000Z')
 const home = (f: FundingView) => render(<Balance s={split(f, null)} total={moneyTotal(f)} scopeNote={totalScopeNote(f, true)} onAdd={() => {}} onWithdraw={() => {}} />).text
-const card = (f: FundingView) => render(<MoneyMapCard money={f.money!} now={NOW} />)
 
 describe('the total is the whole money in every moment of the crossing', () => {
   for (const moment of ['before', 'flight', 'minted'] as BraisMoment[]) {
@@ -33,71 +31,49 @@ describe('the total is the whole money in every moment of the crossing', () => {
   })
 })
 
-describe('where your money is', () => {
-  test('before the burn: one chain, nothing to explain, no card', () => {
-    expect(showsMoneyMap(braisFunding('before', NOW).money)).toBe(false)
+// otto/mamoru#350 (Brais, 3 Nov): no "Where your money is" card; each Working row names its chain's Safe, largest first.
+const rowsOf = (html: string) => html.split('data-testid="position"').slice(1)
+
+describe('Working names each chain\'s Safe, largest position first', () => {
+  test('a Base row links the Base Safe and a Monad row the Monad Safe', () => {
+    const f = withMonadPosition(braisFunding('minted', NOW), '2000000')
+    const { f: w, s } = wholeMoney(f)
+    const { text, html } = render(<Working f={w} s={s} onStop={null} />)
+    const [base, monad] = rowsOf(html)
+    expect(base).toContain('href="https://basescan.org/address/0x7a3C5f0e8D21b94E6f0A1c2B3d4E5F60718293aB"')
+    expect(monad).toContain(`href="https://monadscan.com/address/${BRAIS_MONAD_SAFE}"`)
+    expect(monad).not.toContain('basescan.org/address/0x7a3C')
+    expect(text).toContain('Base · Safe 0x7a3C')
+    expect(text).toContain('Monad · Safe ')
+    expect(text).not.toContain('Where your money is')
   })
 
-  test('burn in flight: Base 11.70, the transfer with its stage, ETA window, links and gas apart', () => {
-    const f = braisFunding('flight', NOW)
-    const { text, html } = card(f)
-    expect(showsMoneyMap(f.money)).toBe(true)
-    expect(text).toContain('Where your money is 13.78 USDC')
-    expect(text).toContain('Base')
-    expect(text).toContain('11.70 USDC')
-    expect(text).toContain('Idle 1.10')
-    expect(text).toContain('In positions 10.60')
-    expect(text).toContain('Moving 2.07 USDC from Base to Monad')
-    expect(text).toContain('Left Base, being confirmed')
-    expect(text).toContain(`Expected between ${clockTime(new Date(NOW + 3 * 60_000).toISOString())} and ${clockTime(new Date(NOW + 9 * 60_000).toISOString())}`)
-    expect(html).toContain(`https://basescan.org/tx/0x${'b'.repeat(64)}`)
-    expect(html).toContain('https://basescan.org/address/0x7a3C5f0e8D21b94E6f0A1c2B3d4E5F60718293aB')
-    expect(html).not.toContain('monadscan.com/tx')
-    // CCTP is named only in the detail line; the gas reserve is listed apart and is not in the total.
-    expect(text.match(/CCTP/g)?.length).toBe(1)
-    expect(text).toContain('Gas reserve, not part of your total: 0.0003 ETH on Base')
-    expect(text).not.toContain('late')
+  test('rows go from the largest USDC value to the smallest, whatever the API order', () => {
+    const f = withMonadPosition(braisFunding('minted', NOW), '20000000')
+    const { f: w, s } = wholeMoney(f)
+    expect((w.positions[0] as { chainId?: number }).chainId).toBe(8453)
+    const [first, second] = rowsOf(render(<Working f={w} s={s} onStop={null} />).html)
+    expect(first).toContain('Monad')
+    expect(second).toContain('Base')
   })
 
-  test('a transfer past its window says it is late and that the money still counts', () => {
-    const f = braisFunding('flight', NOW)
-    f.money!.inFlight[0]!.eta!.late = true
-    const { text } = card(f)
-    expect(text).toContain('Taking longer than expected')
-    expect(text).toContain(`due by ${clockTime(new Date(NOW + 9 * 60_000).toISOString())}`)
-    expect(text).toContain('counted in the total')
-    expect(text).not.toContain('Expected between')
+  test('an old operator without the money map links the home Safe', () => {
+    const f = withoutMoney(braisFunding('minted', NOW))
+    const html = render(<Working f={f} s={split(f, null)} onStop={null} />).html
+    expect(html).toContain(`href="https://basescan.org/address/${f.address}"`)
   })
+})
 
-  test('minted on Monad: both Safes with their explorer links, 2.07 on Monad, nothing in flight', () => {
-    const f = braisFunding('minted', NOW)
-    const { text, html } = card(f)
-    expect(text).toContain('Monad')
-    expect(text).toContain('2.07 USDC')
-    expect(text).toContain('11.70 USDC')
-    expect(text).toContain('0.5 MON on Monad')
-    expect(text).not.toContain('Moving')
-    expect(html).toContain(`https://monadscan.com/address/${BRAIS_MONAD_SAFE}`)
-    expect(html).toContain('https://basescan.org/address/')
-    expect(home(f)).toContain('13.78 USDC')
-  })
-
-  test('a chain that failed its read keeps its last value and says when it was read', () => {
+describe('a chain read that failed or never happened', () => {
+  test('a stale chain keeps its last value in the total', () => {
     const f = withStaleMonad(braisFunding('minted', NOW), NOW)
     expect(moneyTotal(f)).toBe(BRAIS_TOTAL)
-    const { text } = card(f)
-    expect(text).toContain('2.07 USDC')
-    expect(text).toContain(`Showing the last value, read at ${clockTime(new Date(NOW - 6 * 60_000).toISOString())}`)
     expect(home(f)).toContain('13.78 USDC')
   })
 
-  test('a chain never read is not shown as 0: the card and the balance say it is missing', () => {
+  test('a chain never read is not shown as 0: the balance says it is missing', () => {
     const f = withUnreadMonad(braisFunding('minted', NOW))
     expect(f.money!.complete).toBe(false)
-    const { text } = card(f)
-    expect(text).toContain('Not read yet')
-    expect(text).toContain('Monad could not be read yet, so its money is not counted here')
-    expect(text).not.toMatch(/Monad[^.]*0\.00 USDC/)
     const balance = home(f)
     expect(balance).toContain('11.70 USDC')
     expect(balance).toContain('Monad could not be read yet, so it is not in this total.')
@@ -110,7 +86,6 @@ describe('an operator without the money map', () => {
     expect(f.money).toBeUndefined()
     expect(moneyTotal(f)).toBe(split(f, null).total)
     expect(home(f)).toContain('Showing Base only. Your other chains are not in this total yet.')
-    expect(showsMoneyMap(f.money)).toBe(false)
   })
 
   test('a Base-only account on an old operator gets no notice', () => {
@@ -183,35 +158,24 @@ describe('Working + Idle + in flight = Total balance', () => {
 })
 
 describe('links are built here, never taken from the operator', () => {
-  test('a hostile explorerUrl is ignored; a malformed Safe or hash gets no link', () => {
+  test('a hostile explorerUrl is ignored; a malformed Safe gets no link', () => {
     const f = braisFunding('flight', NOW)
     f.money!.chains[0]!.explorerUrl = 'https://evil.example/phish'
-    const ok = card(f).html
+    const ok = render(<Working f={wholeMoney(f).f} s={wholeMoney(f).s} onStop={null} />).html
     expect(ok).not.toContain('evil.example')
     expect(ok).toContain('https://basescan.org/address/0x7a3C5f0e8D21b94E6f0A1c2B3d4E5F60718293aB')
 
     const bad = braisFunding('flight', NOW)
     bad.money!.chains[0]!.safe = 'javascript:alert(1)' as never
     bad.money!.chains[0]!.explorerUrl = 'https://evil.example/x'
-    bad.money!.inFlight[0]!.burnTx = '0xabc"><script>' as never
-    const html = card(bad).html
+    const html = render(<Working f={wholeMoney(bad).f} s={wholeMoney(bad).s} onStop={null} />).html
     expect(html).not.toContain('evil.example')
     expect(html).not.toContain('javascript:')
-    expect(html).not.toContain('<script>')
-    expect(html).not.toContain('/tx/')
-    expect(html).not.toContain('/address/0x7a3C')
+    expect(html).not.toContain('data-testid="position-safe"')
   })
 })
 
 describe('operator version skew and odd rows', () => {
-  test('an unknown stage reads as generic words and never throws', () => {
-    const f = braisFunding('flight', NOW)
-    f.money!.inFlight[0]!.stage = 'refunded' as never
-    const { text } = card(f)
-    expect(text).toContain('On its way')
-    expect(text).toContain('Moving 2.07 USDC from Base to Monad')
-  })
-
   test('an unknown chain: raw label, no links, still in the totals, no wrong-chain links on its position', () => {
     const f = braisFunding('minted', NOW)
     const monad = f.money!.chains.find((c) => c.chainId === 143)!
@@ -219,61 +183,30 @@ describe('operator version skew and odd rows', () => {
     monad.positions = [{ tokenId: '9001', chainId: 42161, pool: 'pool:USDC/USDT/100', liquidity: '1', inRange: true, amountUsdc: '1000000', amountCbbtc: '0', valueUsdc: '2000000', amounts: [{ token: 'USDC', amount: '1000000', decimals: 6, valueUsdc: '1000000' }, { token: 'USDT', amount: '1000000', decimals: 6, valueUsdc: '1000000' }] }]
     monad.idle = [{ token: 'USDC', amount: '75638', decimals: 6, valueUsdc: '75638' }]
     monad.totalUsdc = '2075638'
-    const c = card(f)
-    expect(c.text).toContain('chain 42161')
-    expect(c.html).not.toContain('monadscan')
-    expect(c.html.match(/href="https:\/\/basescan\.org\/address\//g)?.length).toBe(1)
     expect(moneyTotal(f)).toBe(BRAIS_TOTAL)
     const { f: w, s } = wholeMoney(f)
     expect(s.working + s.idle).toBe(BRAIS_TOTAL)
     const working = render(<Working f={w} s={s} onStop={null} />)
     expect(working.text).toContain('chain 42161')
-    // Only Base's position links to a pool; the unknown chain's gets none (never Basescan for it).
-    expect(working.html.match(/<a class="seg"/g)?.length).toBe(1)
+    // Only Base's position links to its pool and its Safe; the unknown chain's gets neither (never Basescan for it).
+    expect(working.html.match(/<a class="seg"/g)?.length).toBe(2)
+    expect(working.html).not.toContain('monadscan')
+    expect(rowsOf(working.html).find((r) => r.includes('chain 42161'))).not.toContain('<a ')
     expect(render(<Idle f={w} s={s} />).text).toContain('Base 1.10 · chain 42161 0.07')
   })
 
-  test('minted but not yet read on Monad: one row, "arrived", counted once, not "moving"', () => {
-    const f = braisFunding('arriving', NOW)
-    expect(moneyTotal(f)).toBe(BRAIS_TOTAL)
-    const { text } = card(f)
-    expect(text).toContain('2.07 USDC from Base arrived on Monad')
-    expect(text).toContain('Updating the balance')
-    expect(text).toContain('Already counted in your total')
-    expect(text).not.toContain('Moving')
-    expect(text).not.toContain('moving')
-    expect(text).not.toContain('Expected between')
-  })
-
-  test('a failed transfer is shown as not counted, and the header does not call it moving', () => {
-    const f = withFailedTransfer(braisFunding('before', NOW), NOW)
-    expect(moneyTotal(f)).toBe(BRAIS_TOTAL)
-    const { text } = card(f)
-    expect(text).toContain('Did not complete. Not counted in your total.')
-    expect(text).not.toContain('moving')
-    expect(text).not.toContain('Circle CCTP')
-  })
-
-  test('lateness follows the clock, not only the operator flag; a window across midnight carries its date', () => {
-    const f = braisFunding('flight', NOW)
-    const t = f.money!.inFlight[0]!
-    expect(isLate(t, NOW)).toBe(false)
-    expect(isLate(t, NOW + 10 * 60_000)).toBe(true)
-    expect(render(<MoneyMapCard money={f.money!} now={NOW + 10 * 60_000} />).text).toContain('Taking longer than expected')
-    const tomorrow = new Date(NOW + 30 * 3_600_000).toISOString()
-    expect(clockOrDate(tomorrow, new Date(NOW))).not.toBe(clockTime(tomorrow))
-    expect(clockOrDate(new Date(NOW + 60_000).toISOString(), new Date(NOW))).toBe(clockTime(new Date(NOW + 60_000).toISOString()))
+  test('minted but not yet read on Monad, or a failed transfer: counted once, never twice', () => {
+    expect(moneyTotal(braisFunding('arriving', NOW))).toBe(BRAIS_TOTAL)
+    expect(moneyTotal(withFailedTransfer(braisFunding('before', NOW), NOW))).toBe(BRAIS_TOTAL)
   })
 })
 
 describe('only one place per amount; positions only on Monad', () => {
-  test('Monad idle shows in the map row and once in the Idle breakdown, not in Working', () => {
+  test('Monad idle shows once in the Idle breakdown, not in Working', () => {
     const f = braisFunding('minted', NOW)
     const { f: w, s } = wholeMoney(f)
-    const map = card(f).text
     const idle = render(<Idle f={w} s={s} />).text
     const working = render(<Working f={w} s={s} onStop={null} />).text
-    expect(map.match(/2\.07 USDC/g)?.length).toBe(1)
     expect(idle.match(/Monad 2\.07/g)?.length).toBe(1)
     expect(working).not.toContain('2.07')
   })
@@ -302,13 +235,11 @@ describe('only one place per amount; positions only on Monad', () => {
 })
 
 describe('an unsure transfer (PR 1: a check failed, the total is still counted)', () => {
-  test('the row says it is being confirmed and counted; the balance says the total is being confirmed', () => {
+  test('the balance says the total is being confirmed', () => {
     const f = braisFunding('flight', NOW)
     f.money!.inFlight[0]!.unsure = true
     f.money!.complete = false
     expect(moneyTotal(f)).toBe(BRAIS_TOTAL)
-    expect(card(f).text).toContain('Being confirmed · counted in your total')
-    expect(card(f).text).not.toContain('Left Base')
     const text = home(f)
     expect(text).toContain('The total is being confirmed.')
     expect(text).not.toContain('could not be read')
@@ -383,11 +314,9 @@ describe('review round 2', () => {
 })
 
 describe('a partial chain read', () => {
-  test('the balance and the chain row say positions are missing and the total may be short', () => {
+  test('the balance says positions are missing and the total may be short', () => {
     const f = withPartialBase(braisFunding('before', NOW))
-    expect(showsMoneyMap(f.money)).toBe(true)
     expect(home(f)).toContain('Some positions on Base could not be listed, so the total may be short.')
-    expect(card(f).text).toContain('Some positions on Base could not be listed, so this may be short.')
     const g: FundingView = { ...f, approval: { validUntil: 2_000_000_000, renewDue: false, expired: false, policyId: 'conservador-live-v6' } }
     expect(render(<Working f={wholeMoney(g).f} s={wholeMoney(g).s} onStop={null} />).text).not.toContain('target 50%')
   })
