@@ -126,3 +126,11 @@ export function withStuckTransfer(reason: BridgeStuckReason | string = 'mint_bud
     money: { ...f.money!, inFlight: [{ ...t, burnedAt, eta, ...stuck }] },
   }
 }
+
+/** otto/mamoru#350: the minted moment with a WMON/USDC position on Monad beside the Base one, worth `valueUsdc`. */
+export function withMonadPosition(f: FundingView, valueUsdc: string): FundingView {
+  const monad = f.money!.chains.find((c) => c.chainId === 143)!
+  monad.positions = [{ tokenId: '9001', chainId: 143, pool: 'pool:WMON/USDC/3000', liquidity: '1', inRange: true, amountUsdc: '1000000', amountCbbtc: '0', valueUsdc, amounts: [{ token: 'WMON', amount: '1000000000000000000', decimals: 18, valueUsdc: '1000000' }, { token: 'USDC', amount: '1000000', decimals: 6, valueUsdc: '1000000' }] }]
+  monad.idle = []
+  return f
+}

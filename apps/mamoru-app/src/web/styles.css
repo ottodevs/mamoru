@@ -2400,43 +2400,7 @@
   }
 }
 
-/* otto/mamoru#269 Where your money is: one block per chain and per transfer in flight, inside a panel. */
-.mm-list {
-  display: grid;
-  gap: 1rem;
-  margin: 0;
-  padding: 0.4rem 0 0;
-  list-style: none;
-}
-.mm-chain,
-.mm-flight {
-  display: grid;
-  gap: 0.25rem;
-  min-width: 0;
-}
-.mm-flight {
-  padding-left: 0.75rem;
-  border-left: 2px solid var(--color-emerald);
-}
-.mm-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.15rem 0.9rem;
-}
-.mm-name {
-  font-weight: 700;
-}
-.mm-sum {
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.mm-unread {
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  color: var(--color-alert-ink);
-}
+/* otto/mamoru#245: the stuck-transfer note and its way out (the money map card is gone, #350). */
 .mm-link {
   display: inline-flex;
   align-items: center;
@@ -2465,12 +2429,6 @@
   font-size: 0.72rem;
   letter-spacing: 0.06em;
   color: var(--color-alert-ink);
-}
-.mm-late {
-  color: var(--color-alert-ink);
-}
-.mm-gas {
-  margin: 1rem 0 0;
 }
 /* otto/mamoru#245: a stuck transfer's way out, closed by default and quiet: the owner opens it only if they want to. */
 .mm-diy > summary {
