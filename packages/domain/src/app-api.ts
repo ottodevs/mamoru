@@ -87,7 +87,9 @@ export type FundingView = {
   // (running: the current cap, never above the one its approval was signed for). `overUsdc`: how far the total is above
   // it (0 within). A running account places nothing new past the cap; what is above it stays idle, and nothing is sold
   // because positions gained. `peerUnavailable`: another chain could not be read, so nothing new is placed until it is.
-  exposure?: { totalUsdc: string; capUsdc: string; overUsdc: string; peerUnavailable?: boolean }
+  // `vaultUnavailable` (otto/mamoru#352): a vault on this chain could not be valued; the total leaves it out (a floor)
+  // and nothing new is placed until it is read.
+  exposure?: { totalUsdc: string; capUsdc: string; overUsdc: string; peerUnavailable?: boolean; vaultUnavailable?: boolean }
   // The relayer deploys the Safe only once it holds this much USDC (base units); below it nothing starts and nothing can be sent.
   deployMinUsdc?: string
   cbbtc: string           // base units

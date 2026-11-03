@@ -751,6 +751,17 @@ export class Engine {
     return { ...obs, positions: obs.positions.map((p) => (admitted.has(p.tokenId) ? { ...p, admitted: admitted.get(p.tokenId)! } : p)) }
   }
 
+  /**
+   * The vaults an observation reads: the policy's, then (otto/mamoru#352) every other vault of the engine's registry in
+   * the savings asset, whatever the policy: anyone can credit shares to the Safe, and they count under the cap. The same
+   * set funding values (operator readSafe: the registry's USDC vaults); a V4 engine's registry is the operator's plus
+   * pools, so its vaults are the same.
+   */
+  private observedVaults(): RegistryName[] {
+    const own = this.registry.entries.filter((e) => e.kind === 'vault' && e.asset === this.cfg.policy.savingsAsset).map((e) => e.name)
+    return [...new Set([...this.cfg.policy.buckets.flatMap((b) => b.vaults ?? []), ...own])]
+  }
+
   private async observeChain(): Promise<Observation> {
     const live = this.journal.live
     const obs = await observe(this.client, {
@@ -772,8 +783,8 @@ export class Engine {
       savingsAsset: this.cfg.policy.savingsAsset,
       ethPricePool: this.cfg.nativePricePool ?? ETH_PRICE_POOL,
       ...(this.cfg.registry ? { registry: this.cfg.registry } : {}),
-      // otto/mamoru#210: the vaults of a vault bucket; a policy without one reads none.
-      ...(this.cfg.policy.buckets.some((b) => b.vaults?.length) ? { vaults: this.cfg.policy.buckets.flatMap((b) => b.vaults ?? []) } : {}),
+      // otto/mamoru#210: the vaults of a vault bucket; otto/mamoru#352: and every other savings vault of the registry.
+      ...(this.observedVaults().length ? { vaults: this.observedVaults() } : {}),
     })
     const gh = this.cfg.guardHistory
     if (!gh || gh.pools.length === 0) return obs

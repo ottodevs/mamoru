@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { conservadorLiveV2, grantKey } from '@mamoru/policy'
+import { conservadorLiveV2, conservadorLiveV7, grantKey } from '@mamoru/policy'
 import { address, baseRegistry, entry } from '@mamoru/registry'
 import { quoteMint, sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
-import { capRoomOf, decide, placedOf, withinCap, type Observation, type PoolObs, type PositionObs } from './index.ts'
+import { bucketValues, capRoomOf, decide, placedOf, withinCap, type Observation, type PoolObs, type PositionObs, type VaultObs } from './index.ts'
 
 // otto/mamoru#212: the engine places new savings only within the account's cap, counted across chains.
 const V2 = conservadorLiveV2
@@ -201,5 +201,75 @@ describe('otto/mamoru#212: placing within the cap', () => {
     // Without the cap the same account buys far more: the room is what limits it.
     const free = decide(held, FIRST).proposal
     expect(free?.kind === 'enter_swap' && free.tokenIn === 'USDC' && free.amountIn > room).toBe(true)
+  })
+})
+
+describe('otto/mamoru#352: USDC lent in vaults is placed money under the cap', () => {
+  const vault = (name: string, assets: bigint): VaultObs => ({ name, shares: assets, assets, maxWithdraw: assets, maxDeposit: 10n ** 15n, maxRedeem: assets })
+
+  test('a vault of the policy: an LP, idle USDC and vault shares, the room is the cap less positions and vault', () => {
+    const settled = settle(obs({ balances: { USDC: 300n * USDC } }))
+    const lp = placedOf(settled, V2)
+    expect(lp > 0n).toBe(true)
+    const o = { ...settled, balances: { ...settled.balances, USDC: settled.balances.USDC! + 500n * USDC }, vaults: [vault('vault:gtUSDCp', 600n * USDC)], cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 0n } }
+    const placed = placedOf(o, conservadorLiveV7)
+    expect(placed >= lp + 600n * USDC).toBe(true)
+    const room = capRoomOf(o, conservadorLiveV7)!
+    expect(room).toBe(1_000n * USDC - placed)
+    // Without the vault the engine would have had 600 more to place: now what it may place stays within the cap.
+    expect(room < 1_000n * USDC - lp - 500n * USDC).toBe(true)
+    expect(withinCap(o, conservadorLiveV7).balances.USDC).toBe(room)
+  })
+
+  test('a vault the policy no longer names (heldVaults) counts too, and gets no op', () => {
+    const o = obs({ balances: { USDC: 900n * USDC }, vaults: [vault('vault:gtUSDCp', 600n * USDC)], cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 0n } })
+    expect(placedOf(o, V2)).toBe(600n * USDC)
+    expect(capRoomOf(o, V2)).toBe(400n * USDC)
+    // Sized as if 400 USDC were held: the entry the engine proposes is the one for 400.
+    expect(decide(o, V2).proposal).toEqual(decide(obs({ balances: { USDC: 400n * USDC } }), V2).proposal)
+    // Over the cap only because of the vault: nothing new goes in.
+    const full = { ...o, vaults: [vault('vault:gtUSDCp', 1_000n * USDC)] }
+    expect(capRoomOf(full, V2)).toBe(0n)
+    expect(decide(full, V2).proposal).toBeNull()
+  })
+})
+
+describe('otto/mamoru#352: v7 with a vault it does not name, and a vault that could not be read', () => {
+  const V7 = conservadorLiveV7
+  const vault = (name: string, assets: bigint): VaultObs => ({ name, shares: assets, assets, maxWithdraw: assets, maxDeposit: 10n ** 15n, maxRedeem: assets })
+  const pools = new Set(V7.buckets.flatMap((b) => b.pools))
+  const sessions = [...V7.session.grants.filter((g) => !g.perPosition).map((g, i) => ({ grant: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(2, '0').repeat(32)}` as const, validUntil: 10_000, active: true }))]
+
+  test('the unnamed vault is counted once, under the cap only, and never acted on', () => {
+    // The Stable bucket's vault far over its weight; 5000 more in a vault v7 does not name.
+    const o = obs({ sessions, balances: { USDC: 0n }, vaults: [vault('vault:gtUSDCp', 1_000n * USDC), vault('vault:other', 5_000n * USDC)] })
+    // bucketValues (rebalancing) sees only the policy's vault; placedOf adds the other one once.
+    expect(bucketValues(o, V7, pools).total).toBe(1_000n * USDC)
+    expect(placedOf(o, V7)).toBe(6_000n * USDC)
+    const d = decide(o, V7)
+    // The rebalance redeems from the policy's vault, by the weights without the other one.
+    expect(d.proposal).toMatchObject({ kind: 'vault_redeem', vault: 'vault:gtUSDCp' })
+    expect(JSON.stringify(d, (_, v) => (typeof v === 'bigint' ? v.toString() : v))).not.toContain('vault:other')
+    // Idle USDC under a cap the unnamed vault already fills: nothing new goes in.
+    const capped = obs({ sessions, balances: { USDC: 500n * USDC }, vaults: [vault('vault:other', 1_000n * USDC)], cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 0n } })
+    expect(capRoomOf(capped, V7)).toBe(0n)
+    expect(decide(capped, V7).proposal).toBeNull()
+  })
+
+  test('an unread vault: no new room; a reduce held only when the policy names it', () => {
+    const over = obs({ sessions, balances: { USDC: 0n }, vaults: [vault('vault:gtUSDCp', 1_000n * USDC)] })
+    expect(decide(over, V7).proposal?.kind).toBe('vault_redeem')
+    // An unread vault v7 does not name is outside the bucket weights: the redeem from gtUSDCp goes on.
+    expect(decide({ ...over, vaultsUnread: ['vault:other'] }, V7).proposal).toMatchObject({ kind: 'vault_redeem', vault: 'vault:gtUSDCp' })
+    // An unread vault v7 names (waBasUSDC, the Stable bucket's second): the weights are unknown, nothing is reduced.
+    expect(decide({ ...over, vaultsUnread: ['vault:waBasUSDC'] }, V7).proposal).toBeNull()
+    const idle = obs({ sessions, balances: { USDC: 500n * USDC }, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 0n } })
+    expect(decide(idle, V7).proposal).not.toBeNull()
+    // Any unread vault, named or not, is unknown placed money: no new room.
+    for (const v of ['vault:gtUSDCp', 'vault:other']) {
+      const unread = { ...idle, vaultsUnread: [v] }
+      expect(capRoomOf(unread, V7)).toBe(0n)
+      expect(decide(unread, V7).proposal).toBeNull()
+    }
   })
 })

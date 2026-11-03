@@ -14,7 +14,7 @@ import {
 } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { positionEventsAbi } from '@mamoru/projector'
-import { address, baseRegistry, entry, entryPointV07Abi, erc20Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3FactoryAbi, uniswapV3PoolAbi } from '@mamoru/registry'
+import { address, baseRegistry, entry, entryPointV07Abi, erc20Abi, erc4626Abi, nonfungiblePositionManagerAbi, smartSessionAbi, uniswapV3FactoryAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { multicall3Abi } from '../src/multicall.ts'
 
 const enumerableAbi = parseAbi(['function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)'])
@@ -33,6 +33,8 @@ export type FakeLog = { address: Address; topics: Hex[]; data: Hex; blockNumber:
 export type Recorded = { method: string; params: any }
 
 /** What a node answers for a call that reverted. */
+const FAKE_VAULTS = new Set(baseRegistry.entries.filter((e) => e.kind === 'vault').map((e) => e.address.toLowerCase()))
+
 export class Revert extends Error {
   code = 3
   data: Hex = '0x'
@@ -53,6 +55,8 @@ export class FakeChain {
   readonly code = new Map<string, Hex>()
   readonly native = new Map<string, bigint>()
   readonly erc20 = new Map<string, bigint>()
+  /** otto/mamoru#352: vault shares by `${vault}:${holder}`, lowercase (18-decimal shares, one per 10^12 USDC units). */
+  readonly vaultShares = new Map<string, bigint>()
   readonly nonces = new Map<string, bigint>()
   readonly positions: FakePosition[] = []
   readonly logs: FakeLog[] = []
@@ -213,6 +217,13 @@ export class FakeChain {
     if (this.reverting.has(`${at}:${data.slice(0, 10)}`)) throw new Revert('forced')
     const extra = this.contracts.get(at)
     if (extra) return extra(data, from)
+    // otto/mamoru#352: the registry's ERC-4626 vaults, read for every Safe: no shares unless a test sets some.
+    if (FAKE_VAULTS.has(at)) {
+      const call = decodeFunctionData({ abi: erc4626Abi, data })
+      const shares = this.vaultShares.get(`${at}:${String(call.args?.[0]).toLowerCase()}`) ?? 0n
+      const result = call.functionName === 'convertToAssets' ? (call.args[0] as bigint) / 10n ** 12n : call.functionName === 'maxDeposit' ? 10n ** 15n : shares
+      return encodeFunctionResult({ abi: erc4626Abi, functionName: call.functionName, result } as never)
+    }
     if (at === address('Multicall3', baseRegistry).toLowerCase()) {
       const call = decodeFunctionData({ abi: multicall3Abi, data })
       if (call.functionName === 'getEthBalance') return encodeFunctionResult({ abi: multicall3Abi, functionName: 'getEthBalance', result: this.native.get(call.args[0].toLowerCase()) ?? 0n })

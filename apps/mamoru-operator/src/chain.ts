@@ -120,8 +120,17 @@ export type SafeRead = {
   /** The admitted ids were read one by one (over MAX_INVENTORY); `ownedIds` are the ones still the Safe's. */
   byId?: boolean
   ownedIds?: bigint[]
-  /** otto/mamoru#210: the Safe's shares in every ERC-4626 vault of the registry (none off Base). Absent: none read. */
+  /**
+   * otto/mamoru#210: the Safe's shares in every ERC-4626 vault of the registry (none off Base). otto/mamoru#352: readSafe
+   * always reads them, for every Safe (anyone can credit shares to one). Absent only in fixtures: none.
+   */
   vaults?: VaultHolding[]
+  /**
+   * otto/mamoru#352: vaults whose shares or share price could not be read (a reverting or paused vault, a failed call).
+   * They are not in `vaults`: what they hold is unknown, so nothing is placed on this read's word (CAP_CHECK_UNAVAILABLE),
+   * while withdrawals, stops and funding go on with the rest. Absent: every vault was read.
+   */
+  vaultsUnread?: string[]
 }
 
 /** otto/mamoru#210: one vault as the Safe holds it, at the read's block. Amounts in raw USDC (the vaults' asset). */
@@ -184,7 +193,7 @@ export function positionUsdc(p: PoolPosition, sqrtPriceX96: bigint, registry: Re
  * call instead of a separate eth_blockNumber, and eth_getCode is asked only until the Safe's deployment is
  * confirmed (see `isDeployed`).
  */
-export async function readSafe(client: PublicClient, safe: Address, registry: Registry, opts: { admitted?: readonly bigint[]; vaults?: boolean } = {}): Promise<SafeRead> {
+export async function readSafe(client: PublicClient, safe: Address, registry: Registry, opts: { admitted?: readonly bigint[] } = {}): Promise<SafeRead> {
   const pools = usdcPools(registry)
   const live = livePool(registry)
   const npm = address('NonfungiblePositionManager', registry)
@@ -196,8 +205,8 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
   const nftRead = first.add(contractRead(client, { address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe] }))
   const balanceReads = tokenNames.map((t) => first.add(contractRead(client, { address: address(t, registry), abi: erc20Abi, functionName: 'balanceOf', args: [safe] })))
   const slotReads = pools.map((p) => first.add(contractRead(client, { address: address(p, registry), abi: uniswapV3PoolAbi, functionName: 'slot0' })))
-  // otto/mamoru#210: only for an account whose policy has a vault bucket (opts.vaults); no read for any other.
-  const vaultNames = opts.vaults ? usdcVaults(registry) : []
+  // otto/mamoru#352: every USDC vault of the registry, for every Safe, whatever its policy (none off Base).
+  const vaultNames = usdcVaults(registry)
   const vaultRead = (name: string, functionName: 'balanceOf' | 'convertToAssets' | 'maxWithdraw' | 'maxRedeem', arg: Address | bigint) =>
     first.add(contractRead(client, { address: address(name, registry), abi: erc4626Abi, functionName, args: [arg as never] }))
   const vaultReads = vaultNames.map((n) => {
@@ -233,16 +242,29 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
     Promise.all(balanceReads.map((r, i) => needAt(r, () => client.readContract({ address: address(tokenNames[i]!, registry), abi: erc20Abi, functionName: 'balanceOf', args: [safe], blockNumber })))),
     Promise.all(slotReads.map((r, i) => needAt(r, () => client.readContract({ address: address(pools[i]!, registry), abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber })))),
   ])
-  const vaults: VaultHolding[] = await Promise.all(
-    vaultReads.map(async ({ n, one, reads }) => {
+  // otto/mamoru#352: one vault that reverts (paused, upgraded) never fails the read. Its shares and share price are its
+  // value: either failing, the vault is `vaultsUnread` (no shares: worth nothing, whatever its price). A failed
+  // maxWithdraw or maxRedeem reads 0: nothing is taken out of it on this read's word.
+  const vaultsUnread: string[] = []
+  const settled = await Promise.all(
+    vaultReads.map(async ({ n, one, reads }): Promise<VaultHolding | null> => {
       const fns = ['balanceOf', 'convertToAssets', 'maxWithdraw', 'maxRedeem'] as const
       const args = [safe, one, safe, safe] as const
-      const [shares, price, maxWithdraw, maxRedeem] = (await Promise.all(
-        reads.map((r, i) => needAt(r as Handle<bigint>, () => client.readContract({ address: address(n, registry), abi: erc4626Abi, functionName: fns[i]!, args: [args[i] as never], blockNumber }) as Promise<bigint>)),
-      )) as bigint[]
-      return { name: n, shares: shares!, assets: (shares! * price!) / one, maxWithdraw: maxWithdraw!, maxRedeem: maxRedeem! }
+      const read = (i: number) => needAt(reads[i] as Handle<bigint>, () => client.readContract({ address: address(n, registry), abi: erc4626Abi, functionName: fns[i]!, args: [args[i] as never], blockNumber }) as Promise<bigint>)
+      const orZero = (i: number) => read(i).catch(() => 0n)
+      try {
+        const shares = await read(0)
+        if (shares === 0n) return { name: n, shares, assets: 0n, maxWithdraw: 0n, maxRedeem: 0n }
+        const [price, maxWithdraw, maxRedeem] = await Promise.all([read(1), orZero(2), orZero(3)])
+        return { name: n, shares, assets: (shares * price) / one, maxWithdraw, maxRedeem }
+      } catch (e) {
+        console.log(`[read] ${safe} vault ${n} unreadable: ${(e as Error).message?.split('\n')[0]}`)
+        vaultsUnread.push(n)
+        return null
+      }
     }),
   )
+  const vaults = settled.filter((v): v is VaultHolding => v !== null)
   const tokens = Object.fromEntries(tokenNames.map((t, i) => [t, balances[i]!]))
   const prices: Record<string, PoolPrice> = Object.fromEntries(pools.map((p, i) => [p, { sqrtPriceX96: slots[i]![0], tick: slots[i]![1] }]))
   const count = Number(nfts)
@@ -283,7 +305,7 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
     positions.push({ tokenId, pool, token0: e.token0!, token1: e.token1!, fee: e.fee!, liquidity, tickLower, tickUpper, inRange: price.tick >= tickLower && price.tick < tickUpper, amount0, amount1, tokensOwed0, tokensOwed1 })
   }
   const livePrice = prices[live]!
-  return { block: blockNumber, deployed, eth, usdc: tokens.USDC ?? 0n, sqrtPriceX96: livePrice.sqrtPriceX96, tick: livePrice.tick, tokens, prices, positions, positionCount: count, ...(byId ? { byId, ownedIds: ids } : {}), ...(opts.vaults ? { vaults } : {}) }
+  return { block: blockNumber, deployed, eth, usdc: tokens.USDC ?? 0n, sqrtPriceX96: livePrice.sqrtPriceX96, tick: livePrice.tick, tokens, prices, positions, positionCount: count, ...(byId ? { byId, ownedIds: ids } : {}), vaults, ...(vaultsUnread.length ? { vaultsUnread } : {}) }
 }
 
 /**

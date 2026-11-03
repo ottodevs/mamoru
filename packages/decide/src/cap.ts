@@ -4,14 +4,17 @@ import type { Observation } from './types.ts'
 
 /**
  * otto/mamoru#212: what this account has placed on this chain, in raw savings units: its managed positions (with what
- * they can collect) and the idle tokens of its pools that are not the savings asset (bought for an entry). The idle
- * savings asset is not placed.
+ * they can collect), the idle tokens of its pools that are not the savings asset (bought for an entry) and its vault
+ * shares (`bucketValues`). The idle savings asset is not placed. otto/mamoru#352: shares in an observed vault no bucket
+ * names (left from an earlier policy) are placed money too.
  */
 export function placedOf(obs: Observation, policy: PolicyVersion): bigint {
   const pools = new Set(policy.buckets.flatMap((b) => b.pools))
   const { total } = bucketValues(obs, policy, pools)
   const free = obs.balances[policy.savingsAsset] ?? 0n
-  return total > free ? total - free : 0n
+  const named = new Set(policy.buckets.flatMap((b) => b.vaults ?? []))
+  const unnamed = (obs.vaults ?? []).filter((v) => !named.has(v.name)).reduce((s, v) => s + v.assets, 0n)
+  return (total > free ? total - free : 0n) + unnamed
 }
 
 /**
@@ -23,7 +26,8 @@ export function capRoomOf(obs: Observation, policy: PolicyVersion): bigint | nul
   const cap = obs.cap
   if (!cap) return null
   const reinvest = cap.reinvestUsdc ?? 0n
-  const left = cap.elsewhereUsdc === null ? 0n : cap.capUsdc - cap.elsewhereUsdc - placedOf(obs, policy)
+  // otto/mamoru#352: a vault of this chain unread is an unread leg, as another chain is: nothing new.
+  const left = cap.elsewhereUsdc === null || obs.vaultsUnread?.length ? 0n : cap.capUsdc - cap.elsewhereUsdc - placedOf(obs, policy)
   // What the engine's own re-range or reduce took out goes back in, even above the cap or with a chain unread.
   return left > reinvest ? left : reinvest
 }

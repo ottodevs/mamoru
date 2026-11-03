@@ -1375,12 +1375,20 @@ export class Operator {
     return acc.active ? this.activationCap(acc, acc.signedCapUsdc) : this.capFor(acc)
   }
 
-  /** otto/mamoru#212: this chain's share of the account's exposure, valued as funding shows it (idle tokens, positions). */
-  private localExposure(acc: Pick<AccountState, 'accountKey' | 'admittedTokenIds' | 'active'>, r: SafeRead): ChainExposure {
+  /**
+   * otto/mamoru#212: this chain's share of the account's exposure, valued as funding shows it (idle tokens, positions
+   * and, otto/mamoru#352, the USDC lent in every registry vault, which readSafe always reads). `acc` undefined: an
+   * address no account here uses (nothing admitted, nothing in flight, not active). A vault the read could not value
+   * (`vaultsUnread`) is left out: the total is then a floor, and `capReadable` says nothing new may be placed on it.
+   */
+  private localExposure(acc: AccountState | undefined, r: SafeRead): ChainExposure {
     const reg = this.cfg.registry
+    const held = acc ?? { admittedTokenIds: undefined }
     // Every position Mamoru admitted (up to MAX_INVENTORY), not only the MAX_SIZING_POSITIONS largest a withdrawal plans from.
-    const positions = this.heldPositions(acc, r).map((p) => positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, reg))
-    return exposureOf(this.cfg.chainId, idleTokens(r, reg), positions, this.bridgeInFlight?.(acc.accountKey) ?? 0n, acc.active)
+    const positions = this.heldPositions(held, r).map((p) => positionUsdc(p, r.prices[p.pool]!.sqrtPriceX96, reg))
+    // otto/mamoru#352: the vaults as funding's rows value them (vaultRows: `assets`, shares > 0), placed money.
+    const vaults = (r.vaults ?? []).filter((v) => v.shares > 0n).map((v) => v.assets)
+    return exposureOf(this.cfg.chainId, idleTokens(r, reg), [...positions, ...vaults], acc ? (this.bridgeInFlight?.(acc.accountKey) ?? 0n) : 0n, acc?.active ?? false)
   }
 
   /**
@@ -1410,7 +1418,9 @@ export class Operator {
       for (const address of others) {
         const sibling = Object.values(this.store.state.accounts).find((a) => a.ctx.address.toLowerCase() === address)
         const r = sibling ? await this.readSafeCached(sibling, getAddress(address), maxAgeMs <= PEER_START_MAX_AGE_MS) : await readSafe(this.client, getAddress(address), this.cfg.registry)
-        out = joinReads(out, { ok: true, chains: [this.localExposure(sibling ?? { accountKey: '', admittedTokenIds: undefined, active: false }, r)] })
+        // otto/mamoru#352: a vault of that Safe that could not be valued is an unread leg (caught below: ok false).
+        if (r.vaultsUnread?.length) throw new Error(`${address}: vault ${r.vaultsUnread.join(', ')} unreadable`)
+        out = joinReads(out, { ok: true, chains: [this.localExposure(sibling, r)] })
       }
       return out
     } catch (e) {
@@ -1421,7 +1431,16 @@ export class Operator {
 
   /** otto/mamoru#212: what this chain holds for the account now (a live read), for the Start checks after prepare. */
   private async localTotal(acc: AccountState, safe: Address): Promise<bigint> {
-    return totalOf(this.localExposure(acc, await this.readOf(acc, safe)))
+    return this.capTotal(acc, await this.readOf(acc, safe))
+  }
+
+  /**
+   * otto/mamoru#352: this chain's total for a cap check that places money (Start, an armed activation, the peer
+   * endpoint). A vault the read could not value fails it closed (CAP_CHECK_UNAVAILABLE), as an unread peer does.
+   */
+  private capTotal(acc: AccountState | undefined, r: SafeRead): bigint {
+    if (r.vaultsUnread?.length) throw capCheckUnavailable()
+    return totalOf(this.localExposure(acc, r))
   }
 
   /**
@@ -1453,7 +1472,10 @@ export class Operator {
     const acc = Object.values(this.store.state.accounts).find((a) => a.ctx.address.toLowerCase() === safe.toLowerCase())
     // A read at most FUNDING_FRESH_READ_MS old: the caller's own cache age then bounds how old the balances are.
     const r = acc ? await this.readSafeCached(acc, safe, true) : await readSafe(this.client, safe, this.cfg.registry)
-    const e = this.localExposure(acc ?? { accountKey: '', admittedTokenIds: undefined, active: false }, r)
+    // otto/mamoru#352: a vault that could not be valued answers 503 (CAP_CHECK_UNAVAILABLE): the peer reads this chain as
+    // unread and places nothing new, never a total that leaves the vault out.
+    if (r.vaultsUnread?.length) throw capCheckUnavailable()
+    const e = this.localExposure(acc, r)
     return { chainId: this.cfg.chainId, address: safe.toLowerCase(), block: r.block.toString(), idleUsdc: e.idleUsdc.toString(), placedUsdc: e.placedUsdc.toString(), active: e.active }
   }
 
@@ -1901,6 +1923,7 @@ export class Operator {
     const legs = this.remoteLegs(acc, deadline)
     const [r, peers] = await Promise.all([this.fundingRead(acc, live.safe, fresh), this.peerRead(acc, PEER_FUNDING_MAX_AGE_MS)])
     // otto/mamoru#212: the cap holds the account's total across every chain, idle and placed.
+    // otto/mamoru#352: a vault that could not be valued leaves the total a floor; funding still answers and says so.
     const total = totalOf(this.localExposure(acc, r)) + (peers.ok ? peers.chains.reduce((s, e) => s + totalOf(e), 0n) : 0n)
     const cap = this.effectiveCap(acc)
     const engine = this.engineView(acc)
@@ -1916,7 +1939,7 @@ export class Operator {
       capUsdc: this.capFor(acc).toString(),
       // Only while the engine is off: that is when the cap refuses Start.
       overCap: acc.active ? null : overCap(total, cap),
-      exposure: { totalUsdc: total.toString(), capUsdc: cap.toString(), overUsdc: (total > cap ? total - cap : 0n).toString(), ...(peers.ok ? {} : { peerUnavailable: true }) },
+      exposure: { totalUsdc: total.toString(), capUsdc: cap.toString(), overUsdc: (total > cap ? total - cap : 0n).toString(), ...(peers.ok ? {} : { peerUnavailable: true }), ...(r.vaultsUnread?.length ? { vaultUnavailable: true } : {}) },
       deployMinUsdc: MIN_DEPLOY_USDC.toString(),
       ...(acc.remote ? { remote: { chainId: acc.remote.chainId, address: acc.remote.address, spec: acc.remote.spec, ready: acc.remote.ready === true } } : {}),
       cbbtc: (r.tokens.cbBTC ?? 0n).toString(),
@@ -2057,12 +2080,11 @@ export class Operator {
     // The ids as they were when the read started: an id admitted while it was in flight (onMinted) was not looked
     // for, and is never pruned on this read's word.
     const asked = acc.admittedTokenIds ? [...acc.admittedTokenIds] : undefined
-    const vaults = this.hasVaults(acc)
-    if (vaults && !acc.vaultsSeen && this.store.state.accounts[acc.accountKey] === acc) {
+    if (this.hasVaults(acc) && !acc.vaultsSeen && this.store.state.accounts[acc.accountKey] === acc) {
       acc.vaultsSeen = true
       this.store.save()
     }
-    const r = await readSafe(this.client, safe, this.cfg.registry, { ...(asked ? { admitted: asked.map((id) => BigInt(id)) } : {}), ...(vaults ? { vaults } : {}) })
+    const r = await readSafe(this.client, safe, this.cfg.registry, asked ? { admitted: asked.map((id) => BigInt(id)) } : {})
     this.homeReadAt.set(r, Date.now())
     // Sol review #6: the record holds what the Safe still owns, so it stays bounded. Pruned from a read that saw every
     // NFT (enumerated) or checked the admitted ids one by one (ownerOf), never from a capped enumeration.
@@ -3379,7 +3401,7 @@ export class Operator {
     // value, so a settings pull in the middle cannot make them disagree.
     const cap = this.capFor(acc)
     // otto/mamoru#212: what the account holds here and on every other chain, idle and placed.
-    const start = await this.startTotal(acc, totalOf(this.localExposure(acc, r)))
+    const start = await this.startTotal(acc, this.capTotal(acc, r))
     // otto/mamoru#309 (a) / #333: an account in the one-authorization scope never gets a v1-v6 grant set: its Start IS
     // the V4 activation. What it holds at its own address on Ethereum (its sibling, still to come home) counts toward the
     // cap and toward the deploy minimum (review r1 of #235).

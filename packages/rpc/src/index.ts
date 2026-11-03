@@ -272,12 +272,26 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
   // Settled here, inside the block-hash bracket: a read that failed in the batch is asked again on its own.
   const [nativeBalance, accountNonce, tokenBalances] = await Promise.all([native.need(), nonce.need(), Promise.all(balances.map((b) => b.need()))])
   // otto/mamoru#210: assets at the vault's share price of this block (convertToAssets of one share, scaled).
-  const vaults: VaultObs[] = await Promise.all(
-    vaultReads.map(async (v) => {
-      const [shares, maxWithdraw, maxDeposit, maxRedeem, price] = (await Promise.all([v.shares.need(), v.maxWithdraw.need(), v.maxDeposit.need(), v.maxRedeem.need(), v.price.need()])) as bigint[]
-      return { name: v.name, shares: shares!, assets: (shares! * price!) / v.one, maxWithdraw: maxWithdraw!, maxDeposit: maxDeposit!, maxRedeem: maxRedeem! }
-    }),
-  )
+  // otto/mamoru#352: one vault that reverts (paused, upgraded) never fails the observation. Its shares and share price
+  // are its value: either failing, the vault is `vaultsUnread` and left out (no op on it, nothing new placed). A failed
+  // maxWithdraw, maxDeposit or maxRedeem reads 0: nothing goes in or comes out of it on this observation's word.
+  const vaultsUnread: RegistryName[] = []
+  const vaults: VaultObs[] = (
+    await Promise.all(
+      vaultReads.map(async (v): Promise<VaultObs | null> => {
+        const orZero = (h: { need(): Promise<unknown> }) => (h.need() as Promise<bigint>).catch(() => 0n)
+        try {
+          const shares = (await v.shares.need()) as bigint
+          const [maxWithdraw, maxDeposit, maxRedeem] = await Promise.all([orZero(v.maxWithdraw), orZero(v.maxDeposit), orZero(v.maxRedeem)])
+          const price = shares === 0n ? 0n : ((await v.price.need()) as bigint)
+          return { name: v.name, shares, assets: (shares * price) / v.one, maxWithdraw, maxDeposit, maxRedeem }
+        } catch {
+          vaultsUnread.push(v.name)
+          return null
+        }
+      }),
+    )
+  ).filter((v): v is VaultObs => v !== null)
   const readAlone = async () => {
     const batch = new Batch(client, multicall3, blockNumber)
     const finish = POOLS.map((p) => poolReads(batch, client, p, blockNumber, input.twapWindowSeconds, reg, tvl, input.savingsAsset))
@@ -334,6 +348,7 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
     intents: input.intents,
     slot: input.slot,
     ...(vaults.length ? { vaults } : {}),
+    ...(vaultsUnread.length ? { vaultsUnread } : {}),
     // otto/mamoru#61: decide's gates compare pool identities with the observation's registry; a Base observation keeps
     // leaving it out (the default), so its shape is the one it always had.
     ...(reg !== baseRegistry ? { registry: reg } : {}),

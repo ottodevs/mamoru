@@ -246,6 +246,10 @@ export function bucketValues(obs: Observation, policy: PolicyVersion, policyPool
  */
 export function reduceOf(obs: Observation, policy: PolicyVersion, policyPools: ReadonlySet<string>, lab?: { skip?: ReadonlySet<string>; driftBps?: Partial<Record<string, number>> }): { code: ReasonCode | null; proposal: ReduceProposal | VaultRedeemProposal | null } {
   if (!hasManageAny(policy)) return { code: null, proposal: null }
+  // otto/mamoru#352: a vault of the policy that could not be read leaves the bucket weights unknown: nothing is reduced
+  // on them. An unread vault no bucket names is outside the weights (it holds only cap room, capRoomOf).
+  const named = new Set(policy.buckets.flatMap((b) => b.vaults ?? []))
+  if (obs.vaultsUnread?.some((v) => named.has(v))) return { code: null, proposal: null }
   const { total, buckets } = bucketValues(obs, policy, policyPools)
   if (total === 0n) return { code: null, proposal: null }
   // A vault bucket that cannot give back now (no liquidity, or below the op cost) says so, but never holds the other

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { decodeFunctionData, zeroAddress, type Hex } from 'viem'
+import { decodeFunctionData, encodeFunctionResult, zeroAddress, type Hex } from 'viem'
 import { ReasonError, type Address } from '@mamoru/domain'
-import { address, baseRegistry, monadRegistry } from '@mamoru/registry'
+import { address, baseRegistry, erc4626Abi, monadRegistry } from '@mamoru/registry'
 import { poolTvlInSavings } from '@mamoru/decide'
 import { BATCH_MAX_BYTES, BATCH_MAX_CALLS, chunkCalls, createDeployedChecker, historyCursor, multicall3Abi, multicall3Of, observe, poolStateCache, type ObserveInput, isDeployed } from '../src/index.ts'
 import { FakeChain, POOLS, Revert } from './fake-chain.ts'
@@ -549,5 +549,24 @@ describe('pool TVL (otto/mamoru#101, shadow)', () => {
     await observe(c.client, input({ poolCache, poolTvl: true }))
     await observe(c.client, input({ poolCache, poolTvl: true, savingsAsset: 'WETH' }))
     expect(poolCache.size).toBe(2)
+  })
+})
+
+describe('otto/mamoru#352: a vault that reverts never fails the observation', () => {
+  test('a reverting vault is vaultsUnread, the others are read; a reverting maxDeposit reads 0', async () => {
+    const c = chain()
+    const vault = (shares: bigint, failing: string[] = []) => (data: Hex) => {
+      const call = decodeFunctionData({ abi: erc4626Abi, data })
+      if (failing.includes(call.functionName) || failing.includes('*')) throw new Revert('paused')
+      const result = call.functionName === 'convertToAssets' ? (call.args[0] as bigint) / 10n ** 12n : call.functionName === 'maxDeposit' ? 10n ** 15n : shares
+      return encodeFunctionResult({ abi: erc4626Abi, functionName: call.functionName, result } as never)
+    }
+    c.contracts.set(address('vault:gtUSDCp', baseRegistry).toLowerCase(), vault(70n * 10n ** 18n, ['maxDeposit']))
+    c.contracts.set(address('vault:waBasUSDC', baseRegistry).toLowerCase(), vault(5n * 10n ** 18n, ['*']))
+    const obs = await observe(c.client, input({ vaults: ['vault:gtUSDCp', 'vault:waBasUSDC'] }))
+    expect(obs.vaults).toEqual([{ name: 'vault:gtUSDCp', shares: 70n * 10n ** 18n, assets: 70_000_000n, maxWithdraw: 70n * 10n ** 18n, maxDeposit: 0n, maxRedeem: 70n * 10n ** 18n }])
+    expect(obs.vaultsUnread).toEqual(['vault:waBasUSDC'])
+    // The rest of the observation is there.
+    expect(obs.positions.map((p) => p.tokenId)).toEqual([11n, 12n, 13n])
   })
 })

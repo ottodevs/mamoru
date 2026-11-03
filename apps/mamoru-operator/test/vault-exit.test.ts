@@ -61,3 +61,14 @@ describe('planVaultExit', () => {
     expect(calls.every((c) => c.value === 0n)).toBe(true)
   })
 })
+
+describe('otto/mamoru#352: a vault the policy does not name', () => {
+  test('a withdrawal the policy vaults cover never touches it; only what they cannot pay comes from it (owner-signed)', () => {
+    const vaults = [holding('vault:other', 900n * USDC), holding('vault:gtUSDCp', 500n * USDC)]
+    expect(planVaultExit(vaults, 300n * USDC, ['vault:gtUSDCp']).exits.map((e) => e.vault)).toEqual(['vault:gtUSDCp'])
+    expect(planVaultExit(vaults, 600n * USDC, ['vault:gtUSDCp']).exits.map((e) => [e.vault, e.assets])).toEqual([
+      ['vault:gtUSDCp', 500n * USDC],
+      ['vault:other', 100n * USDC],
+    ])
+  })
+})

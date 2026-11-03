@@ -113,6 +113,7 @@ export const homeCopy = {
   // otto/mamoru#212: the cap holds the account's total across every network; above it, new money stays idle.
   overLimit: (amount: string, cap: string) => `${amount} USDC above your ${cap} USDC limit stays idle.`,
   peerUnread: 'Mamoru is adding nothing new right now: your balance on the other network could not be read. It tries again shortly.',
+  vaultUnread: 'Mamoru is adding nothing new right now: what you lend through a vault could not be read. It tries again shortly.',
   capRaiseTitle: (cap: string, signed: string) => `Your limit is now ${cap} USDC. Mamoru keeps to the ${signed} USDC you approved until you renew its approval.`,
   whyDepth: 'they are not deep enough for more right now',
   whyFall: 'their markets are falling fast',
@@ -564,6 +565,7 @@ export function engineLine(f: FundingView): string | null {
   if (f.engine.placing) return BigInt(f.usdc) >= MIN_ENTRY_USDC ? homeCopy.putting(usd(f.usdc)) : homeCopy.placing
   // otto/mamoru#212: past the cap (counted across networks) new money stays idle; gains on what is placed are kept.
   if (f.exposure?.peerUnavailable) return homeCopy.peerUnread
+  if (f.exposure?.vaultUnavailable) return homeCopy.vaultUnread
   const over = BigInt(f.exposure?.overUsdc ?? '0')
   const held = over < BigInt(f.usdc) ? over : BigInt(f.usdc)
   if (held >= MIN_ENTRY_USDC) return homeCopy.overLimit(usd(held), usdPlain(f.exposure!.capUsdc))

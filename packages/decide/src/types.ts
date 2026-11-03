@@ -46,8 +46,16 @@ export type Observation = {
   /**
    * otto/mamoru#210: the account's shares in each ERC-4626 vault the policy names (`buckets[].vaults`), read at
    * `block`. Absent: the policy has no vault bucket, or nothing was read (the bucket then holds nothing and gets no op).
+   * otto/mamoru#352: the operator's engine also reads every other savings-asset vault of its registry: only the ones a
+   * bucket names get ops (`bucketVaults`); the others count as placed under the cap (`placedOf`).
    */
   vaults?: VaultObs[]
+  /**
+   * otto/mamoru#352: vaults whose shares or share price could not be read (a reverting or paused vault). Not in
+   * `vaults`. While any is, nothing new is placed (as with another chain unread); while one the policy names is,
+   * nothing is reduced either, since the bucket weights are not known. Re-ranges, harvests and owner exits go on. Absent: every vault was read.
+   */
+  vaultsUnread?: RegistryName[]
   /**
    * otto/mamoru#210: the account opted in to the exit of its `exitOptIn` buckets (v7's USDC/USDT), from the per-account
    * `stables_lp_exit` flag. Absent or false: those buckets are held, nothing of them is reduced.

@@ -48,7 +48,11 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
     /** otto/mamoru#163: the Safe nonce at a past block (default: today's), Safe txs of others run at a block, and a node that cannot serve a block's logs by hash. */
     nonceAt: null as ((block: bigint) => bigint) | null, foreign: [] as { stx: Hex; hash: Hex; block: bigint }[], blockLogsDown: false, guard: `0x${'0'.repeat(64)}` as Hex, forks: new Map<Hex, bigint>(), parents: new Map<bigint, Hex>(),
     /** otto/mamoru#340: USDC Transfer logs to the Safe (a deposit, or Mamoru's own money coming back). */
-    transfers: [] as { from: Hex; value: bigint; block: bigint; tx: Hex; logIndex: number }[] }
+    transfers: [] as { from: Hex; value: bigint; block: bigint; tx: Hex; logIndex: number }[],
+    /** otto/mamoru#352: ERC-4626 shares every Safe holds, by vault address (lowercase), at one USDC each. */
+    vaultShares: new Map<string, bigint>(),
+    /** otto/mamoru#352: vaults (lowercase address) whose every call reverts, as a paused or broken vault. */
+    vaultRevert: new Set<string>() }
   /** eth_calls of execTransaction the operator made. */
   const called: Hex[] = []
   const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -96,6 +100,7 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
         if (knobs.twapTick === null) throw new Error('execution reverted: OLD')
         return [[0n, BigInt(knobs.twapTick) * 1800n], [0n, 0n]]
       }
+      if (knobs.vaultRevert.has(String(at).toLowerCase())) throw new Error('execution reverted')
       if (functionName === 'nonce') return blockNumber !== undefined && knobs.nonceAt ? knobs.nonceAt(blockNumber) : chain.nonce
       if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC', baseRegistry).toLowerCase() ? chain.usdc : 0n
       if (functionName === 'isPermissionEnabled') {
@@ -132,8 +137,12 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
         const word = (v: bigint) => toHex(v, { size: 32 })
         return {
           data: answerAggregate3(data, (target, callData) => {
+            if (knobs.vaultRevert.has(target.toLowerCase())) throw new Error('execution reverted')
             if (callData.startsWith('0x3850c7bd')) return encodeFunctionResult({ abi: uniswapV3PoolAbi, functionName: 'slot0', result: [sqrtRatioAtTick(knobs.spotTick), knobs.spotTick, 0, 0, 0, 0, true] })
-            if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC', baseRegistry).toLowerCase() ? chain.usdc : target.toLowerCase() === address('USDT', baseRegistry).toLowerCase() ? knobs.usdt : 0n)
+            if (callData.startsWith('0x70a08231')) return word(target.toLowerCase() === address('USDC', baseRegistry).toLowerCase() ? chain.usdc : target.toLowerCase() === address('USDT', baseRegistry).toLowerCase() ? knobs.usdt : (knobs.vaultShares.get(target.toLowerCase()) ?? 0n))
+            // otto/mamoru#352: a vault's convertToAssets (one share, one USDC unit), maxWithdraw and maxRedeem (all of it).
+            if (callData.startsWith(toFunctionSelector('convertToAssets(uint256)'))) return `0x${callData.slice(10, 74)}` as Hex
+            if (callData.startsWith(toFunctionSelector('maxWithdraw(address)')) || callData.startsWith(toFunctionSelector('maxRedeem(address)'))) return word(knobs.vaultShares.get(target.toLowerCase()) ?? 0n)
             if (callData.startsWith('0x4d2301cc')) return word(0n)
             // readSafe (otto/mamoru#135): the block number rides inside this same call.
             if (callData.startsWith(toFunctionSelector('getBlockNumber()'))) return word(100n)
@@ -3881,5 +3890,72 @@ describe('otto/mamoru#212: the cap counts what the account holds on every chain'
     acc.active = true
     acc.signedCapUsdc = '100000000'
     expect((w.op as unknown as Internals).engineCap(acc)).toEqual({ capUsdc: 100_000_000n, elsewhereUsdc: 0n })
+  })
+})
+
+describe('otto/mamoru#352: the cap counts the USDC lent in vaults', () => {
+  const GT = address('vault:gtUSDCp', baseRegistry).toLowerCase()
+  type Read = Awaited<ReturnType<typeof import('../src/chain.ts').readSafe>>
+  type Internals = { readOf(a: AccountState, s: string): Promise<Read> }
+  /** 20 USDC idle, an LP worth 20 USDC (USDC side of USDC/USDT, admitted by value) and `vault` USDC in gtUSDCp. */
+  const holding = (vault: bigint) => {
+    const w = world(20_000_000n)
+    const { acc } = w.op.account(ctx)
+    w.knobs.vaultShares.set(GT, vault)
+    const op = w.op as unknown as Internals
+    const readOf = op.readOf.bind(w.op)
+    const lp = { tokenId: 7n, pool: 'pool:USDC/USDT/100', token0: 'USDC', token1: 'USDT', fee: 100, liquidity: 1n, tickLower: -10, tickUpper: 10, inRange: true, amount0: 20_000_000n, amount1: 0n, tokensOwed0: 0n, tokensOwed1: 0n }
+    op.readOf = async (a, s) => {
+      const r = await readOf(a, s)
+      return { ...r, positions: [...r.positions, lp] }
+    }
+    return { w, acc }
+  }
+
+  test('funding, the peer endpoint and Start count LP + idle + vault, for a policy without vaults and nothing Mamoru recorded', async () => {
+    const { w, acc } = holding(70_000_000n)
+    // conservador-live-v2: no vault bucket, never had one. Shares credited to the Safe by anyone still count.
+    expect(acc.vaultsSeen).toBeUndefined()
+    const f = await w.op.funding(ctx)
+    expect(f.exposure).toEqual({ totalUsdc: '110000000', capUsdc: '100000000', overUsdc: '10000000' })
+    expect(f.overCap).toMatchObject({ code: 'DEPOSIT_OVER_CAP', usdc: '110000000' })
+    // What a peer operator counts of this Safe: the vault is placed money here.
+    expect(await w.op.exposureFor(SAFE)).toMatchObject({ idleUsdc: '20000000', placedUsdc: '90000000' })
+    const err = await w.op.prepareActivate(ctx).catch((e: unknown) => e)
+    expect(err).toMatchObject({ status: 409, code: 'DEPOSIT_OVER_CAP' })
+    expect((err as HttpError).message).toContain('110.00 USDC')
+    // 50 in the vault: 90 in all, within the cap, Start prepares.
+    w.knobs.vaultShares.set(GT, 50_000_000n)
+    expect((await w.op.prepareActivate(ctx)).summary[0]).toContain('Safe')
+  })
+
+  test('a Safe no account here uses is read with its vaults, here and for the peer endpoint', async () => {
+    const { w } = holding(70_000_000n)
+    const other = '0x00000000000000000000000000000000000000b2'
+    expect(await w.op.exposureFor(other as `0x${string}`)).toMatchObject({ idleUsdc: '20000000', placedUsdc: '70000000' })
+    ;(w.op.cfg as { settings?: unknown }).settings = { forAccount: () => ({ settings: { depth: null, capUsdc: null, guard: { enabled: false, btc: { fallBps: 700, volBps: 8000 }, eth: { fallBps: 900, volBps: 10000 } } }, versionId: 1, source: 'd1', override: [] }), status: () => ({}), otherSafes: () => [other] }
+    // 110 here plus the other Safe's 90 (its idle and its vault).
+    expect((await w.op.funding(ctx)).exposure).toMatchObject({ totalUsdc: '200000000' })
+  })
+
+  test('a reverting vault: Start and the peer endpoint fail closed; funding and a withdrawal go on', async () => {
+    const { w } = holding(70_000_000n)
+    w.knobs.vaultRevert.add(GT)
+    // Funding answers, without the vault (a floor), and says it could not be read.
+    const f = await w.op.funding(ctx)
+    expect(f.exposure).toEqual({ totalUsdc: '40000000', capUsdc: '100000000', overUsdc: '0', vaultUnavailable: true })
+    expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ status: 503, code: 'CAP_CHECK_UNAVAILABLE' })
+    expect(await w.op.exposureFor(SAFE).catch((e: unknown) => e)).toMatchObject({ status: 503, code: 'CAP_CHECK_UNAVAILABLE' })
+    // Another Safe of the owner with an unreadable vault is an unread leg: Start refused the same way.
+    const other = '0x00000000000000000000000000000000000000b2'
+    ;(w.op.cfg as { settings?: unknown }).settings = { forAccount: () => ({ settings: { depth: null, capUsdc: null, guard: { enabled: false, btc: { fallBps: 700, volBps: 8000 }, eth: { fallBps: 900, volBps: 10000 } } }, versionId: 1, source: 'd1', override: [] }), status: () => ({}), otherSafes: () => [other] }
+    expect((await w.op.funding(ctx)).exposure).toMatchObject({ peerUnavailable: true, vaultUnavailable: true })
+    // The owner's money still leaves.
+    const plan = await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '5000000' })
+    expect(plan.ownerTx.summary).toContain(`Send 5.00 USDC from your Safe to ${TO}`)
+    expect(await w.op.submit(ctx, 'transfer', sign(plan.ownerTx))).toMatchObject({ kind: 'transfer', state: 'confirmed', amountUsdc: '5000000' })
+    // Read again: Start counts the vault.
+    w.knobs.vaultRevert.clear()
+    expect(await w.op.prepareActivate(ctx).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'DEPOSIT_OVER_CAP' })
   })
 })
