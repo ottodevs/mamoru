@@ -87,7 +87,6 @@ export const homeCopy = {
   colAmount: 'Amount',
   colShare: 'Share',
   target: (pct: number) => (pct === 0 ? 'target 0%, closing' : `target ${pct}%`),
-  inRange: 'In range',
   // otto/mamoru#210: a row of USDC supplied to a lending vault.
   lending: 'USDC lending',
   // otto/mamoru#297: next to the range gauge; the dust, cost and cooldown holds below keep their own, truer lines.
@@ -488,7 +487,6 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
   // No share is set against a total that is not the whole money: a chain never read, or a transfer not confirmed (#216).
   const accountTotal = f.money ? (f.money.complete && unreadChains(f.money).length === 0 ? BigInt(f.money.totalUsdc) : null) : s.priced && otherChainsUsdc !== null ? s.total + otherChainsUsdc : null
   const rows = positionRates(f, apy, price, accountTotal)
-  const inRange = f.positions.filter((p) => p.inRange).length
   // An operation in flight says what it is; between operations the engine says whether more is coming and when it looks next.
   const line = progressLine(f.progress) ?? engineLine(f)
   const bridge = f.progress?.bridge
@@ -504,9 +502,8 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
             <TweenUsd raw={s.working} /> <span className="panel-unit">USDC</span>
           </span>
           <span className="panel-meta">
+            {/* otto/mamoru#350 (Brais, 3 Nov): no in-range count; the range is Mamoru's job. */}
             <span className="seg">{plural(n, 'position', 'positions')}</span>
-            {n ? ' · ' : null}
-            {n ? <span className="seg">{`${inRange} ${homeCopy.inRange.toLowerCase()}`}</span> : null}
           </span>
         </>
       }

@@ -92,6 +92,27 @@ describe('Working lists the largest position first; no money map card', () => {
   })
 })
 
+describe('a bridge on its way (Brais, 3 Nov)', () => {
+  test('in the total, and one line under it: X USDC moving from Base to Monad', () => {
+    const text = home(braisFunding('flight', NOW))
+    expect(text).toContain('13.78 USDC')
+    expect(text).toContain('2.07 USDC moving from Base to Monad')
+  })
+
+  test('arrived or failed: no moving line', () => {
+    expect(totalScopeNote(braisFunding('arriving', NOW), true) ?? '').not.toContain('moving')
+    expect(totalScopeNote(withFailedTransfer(braisFunding('before', NOW), NOW), true) ?? '').not.toContain('moving')
+    expect(totalScopeNote(braisFunding('minted', NOW), true)).toBeNull()
+  })
+
+  test('Working says how many positions, never how many are in range', () => {
+    const { f: w, s } = wholeMoney(braisToday(NOW))
+    const text = render(<Working f={w} s={s} onStop={null} />).text
+    expect(text).toContain('3 positions')
+    expect(text).not.toMatch(/in range/i)
+  })
+})
+
 describe('an operator without the money map', () => {
   test('the Base balance stands in and the balance says Base only', () => {
     const f = withoutMoney(braisFunding('minted', NOW))

@@ -2,6 +2,7 @@ import type { BridgeStuckReason, FundingView, MoneyChain, MoneyInFlight, MoneyMa
 import { WALKAWAY_URL } from '../lib/signin.ts'
 import { sleeveChain, txLink } from '../lib/chain.tsx'
 import { shortHex } from '../lib/format.ts'
+import { usd } from '../lib/money.ts'
 import { chainLabel } from '../lib/positions.ts'
 import { clockTime } from '../lib/time.ts'
 import { isMultichainTarget } from './monad-consent.tsx'
@@ -13,6 +14,8 @@ export const moneyCopy = {
   incomplete: (chains: string) => `${chains} could not be read yet, so it is not in this total.`,
   baseOnly: 'Showing Base only. Your other chains are not in this total yet.',
   confirming: 'The total is being confirmed.',
+  // Brais, 3 Nov (literal): a bridge in progress is part of the total and says so under it.
+  moving: (amount: string, from: string, to: string) => `${amount} USDC moving from ${from} to ${to}`,
   // #350 review r1: the card used to say this per chain; a chain read that failed keeps its last value, and says so.
   stale: (chain: string, at: string) => `${chain} could not be read just now. Showing its last value, read at ${at}.`,
   staleNoTime: (chain: string) => `${chain} could not be read just now. Showing its last value.`,
@@ -53,6 +56,8 @@ export function totalScopeNote(f: FundingView | undefined, otherChain: boolean):
   if (!f) return null
   if (!f.money) return otherChain || isMultichainTarget(f.approval?.policyId) ? moneyCopy.baseOnly : null
   const notes: string[] = []
+  // One line per transfer on its way (not arrived, not failed): already counted in the total, absent from Working and Idle.
+  for (const t of f.money.inFlight.filter((t) => t.stage !== 'minted' && t.stage !== 'failed')) notes.push(moneyCopy.moving(usd(t.amountUsdc), chainLabel(t.from), chainLabel(t.to)))
   const unread = unreadChains(f.money)
   if (unread.length) notes.push(moneyCopy.incomplete(names(unread, f.money.chains)))
   // A chain never read is stale too; it is said once, as unread.
