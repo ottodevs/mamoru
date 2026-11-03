@@ -8,7 +8,7 @@
     "apps/*"
   ],
   "scripts": {
-    "typecheck": "tsc -p tsconfig.base.json --noEmit && tsc -p apps/mamoru-app/tsconfig.json --noEmit && tsc -p apps/mamoru-app/test/api --noEmit && tsc -p apps/mamoru-engine/tsconfig.json --noEmit && tsc -p apps/mamoru-operator/tsconfig.json --noEmit && tsc -p apps/mamoru-lab-runner/tsconfig.json --noEmit && tsc -p scripts/release/tsconfig.json --noEmit && tsc -p apps/mamoru-guardian/tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.base.json --noEmit && tsc -p apps/mamoru-app/tsconfig.json --noEmit && tsc -p apps/mamoru-app/test/api --noEmit && tsc -p apps/mamoru-engine/tsconfig.json --noEmit && tsc -p apps/mamoru-operator/tsconfig.json --noEmit && tsc -p apps/mamoru-lab-runner/tsconfig.json --noEmit && tsc -p scripts/release/tsconfig.json --noEmit",
     "test": "bun test packages apps",
     "scenarios": "bun packages/scenarios/runner/cli.ts",
     "scenarios:monad": "bun packages/scenarios/monad/cli.ts",

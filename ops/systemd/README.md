@@ -125,39 +125,9 @@ systemctl --user show mamoru-operatord.service -p Transient -p FragmentPath   # 
 curl -s http://127.0.0.1:8787/health                                          # {"ok":true,"chainId":8453,"live":true,...}
 ```
 
-## Guardian watcher unit (`mamoru-guardian.service`)
+## Guardian watcher unit: retired
 
-Template only (otto/mamoru#293 item 6, spec 010): the user unit for `apps/mamoru-guardian`, the separate process that
-reads remote Safes back before `setReady` and alerts on registry `Queued` events and unprepared remote owner txs. It
-reads `~/.config/mamoru-guardian/env` (names in `apps/mamoru-guardian/README.md`; the key itself stays in its own 0600
-file, never in that env file) and writes only `~/.local/state/mamoru-guardian`. It holds the guardian key, which the
-operator never does. Nothing installs or starts it; to apply: copy or symlink to `~/.config/systemd/user/`, then
-`systemctl --user daemon-reload && systemctl --user enable --now mamoru-guardian` (try `--dry-run` first).
-
-It restarts forever with a growing backoff (`Restart=always`, 30 s up to 1 h, no start limit) on any transient failure
-(exit 1: an RPC down). The guardian pages its own startup failures, at most once an hour per reason, before it exits.
-A configuration error exits 78 (EX_CONFIG: a missing or malformed setting, an unusable webhook file, a key that is not
-`V4.GUARDIAN`, an RPC on another chain). `RestartPreventExitStatus=78` stops the restarts, the unit enters `failed`, and
-`OnFailure=` runs `mamoru-guardian-alert@.service` (copy it beside it).
-
-Which secret file each unit reads (all 0600, none in the repo, none in an env file as a value):
-
-| Unit | Env file | Secret files it names |
-|---|---|---|
-| `mamoru-guardian` | `~/.config/mamoru-guardian/env` | `MAMORU_GUARDIAN_KEY_FILE` (guardian key), `MAMORU_GUARDIAN_WEBHOOK_FILE` (guardian alerts webhook) |
-| `mamoru-guardian-alert@` | `~/.config/mamoru-guardian-alert/env` (and, optional, `~/.config/mamoru-guardian/env`) | posts through `MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE` only: a second Mattermost incoming webhook (e.g. ops-mamoru), its own file |
-
-The alert unit loads the guardian's env file only to learn `MAMORU_GUARDIAN_WEBHOOK_FILE`, and refuses to post when both
-variables name the same webhook (same path or realpath, same device+inode, or the same URL in two files). It never posts
-through the guardian's webhook and never reads the guardian key, so a broken guardian webhook still pages. If the alert
-unit cannot post, for any reason (not configured, the same webhook, an HTTP error), it exits non-zero and lands in
-`failed` itself: fleet-watchdog's backstop below then shows two failed units in `#infra`. Deploy
-step: create the second webhook in Mattermost, write its URL to its own 0600 file (e.g.
-`~/.config/mamoru-guardian-alert/webhook`), and put `MAMORU_GUARDIAN_ALERT_WEBHOOK_FILE=<that path>` in
-`~/.config/mamoru-guardian-alert/env`. Check it with
-`systemctl --user start mamoru-guardian-alert@mamoru-guardian.service` (posts one test line).
-
-Backstop, nothing to install: lady's fleet-watchdog (`~/box/sys/fleet-watchdog/README.md`, check 2, every 15 min) lists
-`failed` user units and crash-looping ones (`auto-restart`, or 5+ restarts in 20 min) and posts them as `sentinel` to
-`#infra` with its own bot token (`~/.config/mm-bots/sentinel.env`, outside this repo). So a guardian in `failed` (EX_CONFIG)
-or restarting with backoff is seen there too, independent of both guardian webhooks.
+The V4 guardian watcher (`apps/mamoru-guardian`, `mamoru-guardian.service`, `mamoru-guardian-ethereum.service` and
+`mamoru-guardian-alert@.service`) is deleted (otto/mamoru#348, spec 010 A1): V4 has no guardian, and readiness is
+proven on chain by `announceReady` and a CCTP message. The units were templates only and were never installed. If a
+copy exists under `~/.config/systemd/user/`, disable and remove it.
