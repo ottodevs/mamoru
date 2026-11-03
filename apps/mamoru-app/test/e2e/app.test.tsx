@@ -717,6 +717,14 @@ describe('renewing the approval', () => {
     expect(plain(ja.html)).toContain(summary[0]!)
   })
 
+    test('#225 review: the head after the pause warning is still the head, and the v5 move names the new version', () => {
+    const safe = '0x967f0e9f4d7aF2F65fCfbdE7b3CcDEe4F320D2dF'
+    const summary = ['A guardian key has paused Mamoru on this Safe. This renewal ends that pause: approve it only if you know why it was paused', `Renew Mamoru's approval on your Safe ${safe} and move it to the new version of its on-chain limits`]
+    const { html } = render(<ApprovalBody lead="x" summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} locale="en" />)
+    expect(plain(html)).toContain(`Renews Mamoru's approval on your Safe and moves it to the new version of its on-chain limits: ${safe}`)
+    expect(html).not.toContain('data-testid="also-signed"')
+  })
+
     test('#225 review: the network fee keeps the gas-price limit per gas, apart from the per-transaction one, in every language', () => {
     const summary = ["Each engine transaction pays at most 0.00052 ETH of network fee (at most 0.1 gwei per gas), from your Safe's ETH; these grants allow 104,064 transactions in all"]
     const fee = (locale: 'en' | 'es' | 'ja') => plain(render(<ApprovalBody lead="x" summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} locale={locale} />).html)

@@ -29,8 +29,11 @@ export type PoolLimits = {
 export type Promise_ = { key: 'nothingMoves' | 'paidToSafe' | 'noAsking' | 'positionsStay'; count?: number; line: number }
 
 export type ApprovalRead = {
-  /** The first line, exactly "Renew Mamoru's approval on your Safe 0x…" (and "… and move it to on-chain limits": `move`). */
-  head: { line: number; move: boolean; safe: string | null } | null
+  /**
+   * The head, exactly "Renew Mamoru's approval on your Safe 0x…" (and "… and move it to on-chain limits": `move`; "… to the
+   * new version of its on-chain limits": also `newVersion`). It is the first line, or the second after the pause warning.
+   */
+  head: { line: number; move: boolean; newVersion: boolean; safe: string | null } | null
   /**
    * The engine key's line. `form` names the sentence when it is one of the two short known ones (a renewal: the same
    * kinds of actions under new limits; the rest of a split approval); any other form (an activation's own list of
@@ -51,7 +54,8 @@ export type ApprovalRead = {
 const ADDR = '(0x[0-9a-fA-F]{40})'
 const NUM = '(\\d[\\d,]*(?:\\.\\d+)?)'
 
-const HEAD = new RegExp(`^Renew Mamoru's approval on your Safe ${ADDR}( and move it to on-chain limits)?$`)
+const HEAD = new RegExp(`^Renew Mamoru's approval on your Safe ${ADDR}( and move it to (the new version of its )?on-chain limits)?$`)
+const PAUSED = 'A guardian key has paused Mamoru on this Safe. This renewal ends that pause: approve it only if you know why it was paused'
 const ENGINE = new RegExp(`^Engine key ${ADDR} may\\b`)
 const ENGINE_DAYS = /for (\d+) (?:more )?days/
 const ENGINE_CAP = new RegExp(`deposits up to ${NUM} USDC`)
@@ -72,7 +76,7 @@ const FIXED: Record<string, { change: Extract<Change, { key: 'onchain' | 'guardi
   'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause': { change: 'guardian', kind: 'safer' },
   'It can add to a position it already holds instead of opening another one': { change: 'add', kind: 'new' },
   'The approval it replaces is revoked in the same transaction': { change: 'revoked', kind: 'replaced' },
-  'A guardian key has paused Mamoru on this Safe. This renewal ends that pause: approve it only if you know why it was paused': { change: 'paused', kind: 'paused' },
+  [PAUSED]: { change: 'paused', kind: 'paused' },
   'Nothing is moved: your positions stay as they are': { promise: 'nothingMoves' },
   'Nothing is moved now: your positions stay as they are': { promise: 'nothingMoves' },
   'Whatever it collects, mints or swaps is paid to your Safe, never to anyone else': { promise: 'paidToSafe' },
@@ -90,8 +94,9 @@ export function readApproval(lines: readonly string[]): ApprovalRead {
       return
     }
     let m: RegExpMatchArray | null
-    if (line === 0 && (m = l.match(HEAD))) {
-      r.head = { line, move: !!m[2], safe: m[1]! }
+    // The operator puts the guardian-pause warning before the head (#225 review:pr).
+    if (!r.head && lines.slice(0, line).every((p) => p === PAUSED) && (m = l.match(HEAD))) {
+      r.head = { line, move: !!m[2], newVersion: !!m[3], safe: m[1]! }
       return
     }
     if (!r.engine && (m = l.match(ENGINE))) {

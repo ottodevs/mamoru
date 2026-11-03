@@ -28,7 +28,7 @@ describe('readApproval', () => {
     const r = readApproval(move)
     expect(linesOf(r)).toEqual(move.map((_, i) => i))
     expect(r.text).toEqual([])
-    expect(r.head).toEqual({ line: 0, move: true, safe: SAFE })
+    expect(r.head).toEqual({ line: 0, move: true, newVersion: false, safe: SAFE })
     expect(r.engine).toMatchObject({ key: KEY, days: 365, capUsdc: '100.00', form: 'renew' })
     expect(r.pools).toEqual([
       { pool: 'USDC/USDT 0.01%', line: 7, band: '0.10%', peg: '0.40%', dayUsdc: '250.00', totalUsdc: '500.00' },

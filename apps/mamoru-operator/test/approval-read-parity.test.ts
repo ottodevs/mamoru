@@ -63,7 +63,7 @@ function sessionsOf(tx: { to: string; data: Hex }) {
 const UID = `0x${'ab'.repeat(32)}`
 const asked: string[] = []
 /** The registry, the policy contracts and the guardian pause answer as a deployed, attested world would. */
-function chain(w: ReturnType<typeof world>, generation: bigint) {
+function chain(w: ReturnType<typeof world>, generation: bigint, paused = false) {
   const client = priv(w.op).client
   const base = client.readContract.bind(client)
   client.readContract = async (a) => {
@@ -74,7 +74,7 @@ function chain(w: ReturnType<typeof world>, generation: bigint) {
     if (a.functionName === 'findAttestation') return { time: 0, expirationTime: 0, revocationTime: 0, attester: `0x${'00'.repeat(20)}` }
     if (a.functionName === 'generationOf') return generation
     if (a.functionName === 'configOf') return { generation }
-    if (a.functionName === 'isPaused') return false
+    if (a.functionName === 'isPaused') return paused
     return base(a)
   }
 }
@@ -146,4 +146,31 @@ describe("the app reads every line of the operator's v6 approvals", () => {
       expect(r.engine?.days).toBe(365)
     })
   }
+
+  // #225 review:pr: the operator puts the guardian-pause warning before the head; the head is still read there, and
+  // the move's new Monad Safe stays a change.
+  test('move v5 -> v6 on a paused Safe', async () => {
+    const w = world(0n, cfg6(fakePeer().peer))
+    running(w, v5)
+    ready(w)
+    chain(w, 7n, true)
+    const t = await w.op.prepareRenew(ctx)
+    const r = readApproval(t.summary)
+    expect(r.text.map((x) => x.text)).toEqual([])
+    expect(linesOf(r)).toEqual(t.summary.map((_, i) => i))
+    expect(r.head).toMatchObject({ line: 1, move: true, newVersion: false })
+    expect(r.changes.map((c) => c.key)).toEqual(expect.arrayContaining(['paused', 'remote']))
+  })
+
+  test('move v4 -> v5 names the new version of the on-chain limits', async () => {
+    const w = world(0n, { registry: reg6, v4Policy: v4, v5Policy: v5, opsFlags: () => ({ onchain_action_policy_v5: true }) })
+    running(w, v4)
+    ready(w)
+    chain(w, 7n)
+    const t = await w.op.prepareRenew(ctx)
+    const r = readApproval(t.summary)
+    expect(r.head).toMatchObject({ line: 0, move: true, newVersion: true })
+    expect(r.text.map((x) => x.text)).toEqual([])
+    expect(linesOf(r)).toEqual(t.summary.map((_, i) => i))
+  })
 })

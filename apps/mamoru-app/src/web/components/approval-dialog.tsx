@@ -39,7 +39,7 @@ const copy = {
       remote: (share: string, bucket: string, chain: string) => `${share} of your savings (${bucket}) moves to your own Safe on ${chain}, which Mamoru creates with no other signature. Same owner: your passkey.`,
       capChange: (from: string, to: string) => `Your cap goes from ${from} to ${to} USDC. The limits below are sized for the new one.`,
     },
-    head: (move: boolean) => (move ? "Renews Mamoru's approval on your Safe and moves it to on-chain limits:" : "Renews Mamoru's approval on your Safe:"),
+    head: (move: boolean, newVersion = false) => (move ? `Renews Mamoru's approval on your Safe and moves it to ${newVersion ? 'the new version of its on-chain limits' : 'on-chain limits'}:` : "Renews Mamoru's approval on your Safe:"),
     sameActions: 'The same kinds of actions as now. Limits start again from zero.',
     finish: (cap: string | null) => `May keep acting for the rest of this approval${cap ? `, within limits sized for deposits up to ${cap} USDC` : ''}.`,
     engineKey: 'Engine key',
@@ -96,7 +96,7 @@ const copy = {
       remote: (share: string, bucket: string, chain: string) => `El ${share} de tus ahorros (${bucket}) pasa a tu propia Safe en ${chain}, que Mamoru crea sin ninguna otra firma. Mismo dueño: tu passkey.`,
       capChange: (from: string, to: string) => `Tu límite pasa de ${from} a ${to} USDC. Los límites de abajo están pensados para el nuevo.`,
     },
-    head: (move: boolean) => (move ? 'Renueva la aprobación de Mamoru en tu Safe y la pasa a límites on-chain:' : 'Renueva la aprobación de Mamoru en tu Safe:'),
+    head: (move: boolean, newVersion = false) => (move ? `Renueva la aprobación de Mamoru en tu Safe y la pasa a ${newVersion ? 'la nueva versión de sus límites on-chain' : 'límites on-chain'}:` : 'Renueva la aprobación de Mamoru en tu Safe:'),
     sameActions: 'Las mismas acciones que ahora. Los límites vuelven a contar desde cero.',
     finish: (cap: string | null) => `Puede seguir actuando el resto de esta aprobación${cap ? `, con límites pensados para depósitos de hasta ${cap} USDC` : ''}.`,
     engineKey: 'Clave del motor',
@@ -153,7 +153,7 @@ const copy = {
       remote: (share: string, bucket: string, chain: string) => `貯蓄の ${share}（${bucket}）を ${chain} 上のあなた自身の Safe に移します。この Safe は Mamoru が他の署名なしで作成します。所有者は同じ（あなたのパスキー）です。`,
       capChange: (from: string, to: string) => `上限が ${from} から ${to} USDC に変わります。下の上限は新しい値に合わせています。`,
     },
-    head: (move: boolean) => (move ? 'あなたの Safe での Mamoru の承認を更新し、オンチェーンの上限に移行します：' : 'あなたの Safe での Mamoru の承認を更新します：'),
+    head: (move: boolean, newVersion = false) => (move ? `あなたの Safe での Mamoru の承認を更新し、${newVersion ? 'オンチェーンの上限の新しいバージョン' : 'オンチェーンの上限'}に移行します：` : 'あなたの Safe での Mamoru の承認を更新します：'),
     sameActions: '今と同じ種類の操作です。上限はゼロから数え直します。',
     finish: (cap: string | null) => `この承認の残りの期間、引き続き操作できます${cap ? `（${cap} USDC までの入金に合わせた上限内）` : ''}。`,
     engineKey: 'エンジン鍵',
@@ -477,7 +477,7 @@ export function ApprovalView({ lines, locale = detectLocale() }: { lines: string
     <>
       {read.head ? (
         <p className="approve-engine">
-          {t.head(read.head.move)} <code className="signed-addr">{read.head.safe}</code>
+          {t.head(read.head.move, read.head.newVersion)} <code className="signed-addr">{read.head.safe}</code>
         </p>
       ) : null}
       <Facts facts={signedFacts(lines)} t={t} />
