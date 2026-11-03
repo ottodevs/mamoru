@@ -3,7 +3,7 @@ import { encodeAbiParameters } from 'viem'
 import { address, monadRegistry } from '@mamoru/registry'
 import { computeCaps, instantiateGrant, policyHash, type GrantContext } from './instantiate.ts'
 import { grantKeyFor } from './grants.ts'
-import { labWmonUsdcMonadV1, liveWmonUsdcMonadV6, labWmonUsdcMonadV6 } from './policies-monad.ts'
+import { labWmonUsdcMonadV1, liveWmonUsdcMonadV6, labWmonUsdcMonadV6, sleeveEnginePolicy } from './policies-monad.ts'
 import { conservadorLiveV5, INCREASE_TOLERANCE_BPS } from './policies-v4.ts'
 import { conservadorLiveV6 } from './policies-v6.ts'
 import { decodeMamoruInitAny, encodeMamoruInit, encodeMamoruInitAtSetup, FAMILY_UNISWAP_AT_SETUP, grantsV5, manageAnyV3Only, MAMORU_INIT_TUPLE, mamoruInitFor, V4_POOLS_MONAD } from './v4-grants.ts'
@@ -82,5 +82,26 @@ describe('MamoruActionPolicyV3 setup-mode Init (otto/mamoru#251)', () => {
 
   test('setup mode admits no position (the contract would refuse it: BadInit 13)', () => {
     expect(() => encodeMamoruInitAtSetup({ ...init, admit: [1n] })).toThrow('admits no position')
+  })
+})
+
+// otto/mamoru#347: the engine runs the sleeve on target weights without touching the signed policy, whose hash salts
+// every remote Safe's sessions and so fixes its address.
+describe('sleeveEnginePolicy', () => {
+  test('target weights for the remote Safe policies, the signed objects and their hash unchanged', () => {
+    const before = policyHash(liveWmonUsdcMonadV6)
+    for (const p of [liveWmonUsdcMonadV6, labWmonUsdcMonadV6]) {
+      const e = sleeveEnginePolicy(p)
+      expect(e).toMatchObject({ policyId: p.policyId, allocation: 'target-weights', minEntry: 100_000n, rebalanceBandBps: 300 })
+      expect(e.session).toBe(p.session)
+      expect(sleeveEnginePolicy(p)).toBe(e)
+      expect(p.allocation).toBeUndefined()
+    }
+    expect(policyHash(liveWmonUsdcMonadV6)).toBe(before)
+  })
+
+  test('any other policy is returned as is', () => {
+    expect(sleeveEnginePolicy(conservadorLiveV6)).toBe(conservadorLiveV6)
+    expect(sleeveEnginePolicy(labWmonUsdcMonadV1)).toBe(labWmonUsdcMonadV1)
   })
 })

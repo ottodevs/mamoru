@@ -74,7 +74,7 @@ export {
   type RegistryPool,
   type RegistryPoolEntry,
 } from './one-auth-v4.ts'
-export { labWmonUsdcMonadV1, labWmonUsdcMonadV6, liveWmonUsdcMonadV6, MONAD_LAB_POLICIES } from './policies-monad.ts'
+export { labWmonUsdcMonadV1, labWmonUsdcMonadV6, liveWmonUsdcMonadV6, MONAD_LAB_POLICIES, sleeveEnginePolicy } from './policies-monad.ts'
 export {
   conservadorLabV4,
   conservadorLabV5,

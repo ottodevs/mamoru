@@ -96,3 +96,24 @@ export const liveWmonUsdcMonadV6: PolicyVersion = {
 
 /** Fork-only twin of liveWmonUsdcMonadV6. */
 export const labWmonUsdcMonadV6: PolicyVersion = { ...liveWmonUsdcMonadV6, policyId: 'lab-wmon-usdc-monad-v6', chain: 'fork' }
+
+/**
+ * otto/mamoru#347: how the engine runs a remote Safe's money. Every bridge brings the Safe new USDC, so it allocates on
+ * target weights as Base does since v2: an entry tops up the held position (#171) instead of stopping at the first one.
+ * `first-entry`, inherited from conservadorV1, left every bridge after the first idle (24.77 USDC on 2 Nov 2026). Kept
+ * out of the policy objects: their hash salts the sessions every remote Safe's setup commits to (`@mamoru/account/remote`),
+ * so a field there would move every remote address. The operator's engine applies it (`enginePolicyOf`).
+ */
+const SLEEVE_ENGINE = { allocation: 'target-weights', minEntry: 100_000n, rebalanceBandBps: 300 } as const satisfies Partial<PolicyVersion>
+const sleeveEngines = new WeakMap<PolicyVersion, PolicyVersion>()
+
+/** `p` as the engine runs it: a remote Safe's policy with SLEEVE_ENGINE, any other policy unchanged. Same object per `p`. */
+export function sleeveEnginePolicy(p: PolicyVersion): PolicyVersion {
+  if (p.policyId !== liveWmonUsdcMonadV6.policyId && p.policyId !== labWmonUsdcMonadV6.policyId) return p
+  let e = sleeveEngines.get(p)
+  if (!e) {
+    e = { ...p, ...SLEEVE_ENGINE }
+    sleeveEngines.set(p, e)
+  }
+  return e
+}

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { conservadorLabV1, conservadorV1, grantKeyFor, liveWmonUsdcMonadV6, type PolicyVersion } from '@mamoru/policy'
+import { conservadorLabV1, conservadorV1, grantKeyFor, liveWmonUsdcMonadV6, sleeveEnginePolicy, type PolicyVersion } from '@mamoru/policy'
 import { address, baseRegistry, entry, monadRegistry, type Registry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { purgaIdentity, registryOf } from './gates/index.ts'
@@ -266,6 +266,34 @@ describe('the Monad v6 Safe enters under its one manage-any session', () => {
     const d = decide(monadObs({ sessions: [], native: 3n * 10n ** 18n, balances: { USDC: 1_880_874n, WMON: 0n } }), liveWmonUsdcMonadV6)
     expect(d.proposal).toBeNull()
     expect(d.reason).toBe('SESSION_MISSING')
+  })
+})
+
+// otto/mamoru#347: Brais's Safe held 24.77 bridged USDC idle beside its in-range position (2 Nov): first-entry never
+// allocates a bucket that already has one. The engine runs the sleeve on target weights; new USDC tops that position up.
+describe('the Monad v6 Safe places every bridge, not only the first', () => {
+  const anyGrant = grantKeyFor(liveWmonUsdcMonadV6, 'manage-any', MONAD_POOL)
+  const session = { grant: anyGrant, permissionId: `0x${'03'.repeat(32)}` as const, validUntil: 10_000, active: true }
+  const held = position({ tokenId: 49_233n, pool: MONAD_POOL, tickLower: MONAD_TICK - 1_500, tickUpper: MONAD_TICK + 1_500, liquidity: 10n ** 12n, admitted: true })
+  const bridged = (balances: Observation['balances']) => monadObs({ sessions: [session], native: 3n * 10n ** 18n, positions: [held], balances })
+
+  test('the signed policy alone holds in range with the bridged USDC idle', () => {
+    const d = decide(bridged({ USDC: 24_774_962n, WMON: 0n }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toBeNull()
+    expect(d.reason).toBe('DECIDE_IN_RANGE')
+  })
+
+  test('as the engine runs it: buys the volatile side, then increases the held position (no second NFT)', () => {
+    const policy = sleeveEnginePolicy(liveWmonUsdcMonadV6)
+    const swap = decide(bridged({ USDC: 24_774_962n, WMON: 0n }), policy)
+    expect(swap.proposal).toMatchObject({ kind: 'enter_swap', grant: anyGrant, pool: MONAD_POOL, tokenIn: 'USDC', tokenOut: 'WMON' })
+    const amountIn = (swap.proposal as { amountIn: bigint }).amountIn
+    expect(amountIn > 0n && amountIn < 24_774_962n).toBe(true)
+    // What the swap buys at the pool price (token1 per token0 = sqrtP² / 2^192), less 1 % for the fee and slippage.
+    const sqrtP = sqrtRatioAtTick(MONAD_TICK)
+    const wmon = (((amountIn << 192n) / (sqrtP * sqrtP)) * 99n) / 100n
+    const inc = decide(bridged({ USDC: 24_774_962n - amountIn, WMON: wmon }), policy)
+    expect(inc.proposal).toMatchObject({ kind: 'increase_liquidity', grant: anyGrant, pool: MONAD_POOL, tokenId: 49_233n })
   })
 })
 

@@ -225,6 +225,14 @@ describe('provision (Monad side)', () => {
     expect(baseKeyOf(m.rctx.accountKey, 143)).toBe(ctx.accountKey)
   })
 
+  test('otto/mamoru#347: its engine runs on target weights, so every bridge is placed, not only the first', async () => {
+    const m = keyed()
+    await m.op.provision(m.rctx)
+    const acc = m.state.accounts[m.rctx.accountKey]!
+    expect(m.op.policyOf(acc).allocation).toBeUndefined()
+    expect(m.op.enginePolicyOf(acc)).toMatchObject({ policyId: liveWmonUsdcMonadV6.policyId, allocation: 'target-weights' })
+  })
+
   test('idempotent: already active answers active again, sends nothing and starts nothing more', async () => {
     const m = keyed()
     await m.op.provision(m.rctx)
