@@ -186,14 +186,16 @@ contract V4RemoteForkTest is V4Fixture {
             Execution[] memory xs = _approved(
                 M_USDC, 10e6, address(v4), abi.encodeCall(MamoruActionPolicyV4.swap, (SwapParams(M_POOL, M_USDC, 10e6, minOut, limit, vm.getBlockTimestamp())))
             );
-            _run(at, _batch(xs), rpid);
+            // #348 (review of #247): the remote's ops on a Monad fork, A1 shape (revm's gas schedule: Monad's own node
+            // charges cold state more; packages/scenarios engine.ts TIGHT_VERIFICATION_GAS).
+            console2.log("Monad remote: swap 10 USDC (approve + V4.swap + reset + assertZero), handleOps gas", _run(at, _batch(xs), rpid));
         }
         assertGt(IERC20T(M_WMON).balanceOf(at), w0, "the remote swapped under V4");
         (ok,) = _runOp(at, _bridgeBatch(3, M_USDC, 10e6), rpid);
         assertFalse(ok, "a remote bridges nowhere but home");
         watchSeen = false;
         (watchEmitter, watchWord) = (TOKEN_MESSENGER, bytes32(uint256(uint160(home))));
-        _run(at, _bridgeBatch(DOMAIN_BASE, M_USDC, 50e6), rpid);
+        console2.log("Monad remote: bridge 50 USDC home (approve + V4.bridge + reset + assertZero), handleOps gas", _run(at, _bridgeBatch(DOMAIN_BASE, M_USDC, 50e6), rpid));
         assertTrue(watchSeen, "bridged back to the home account");
         vm.prank(at);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadBridge.selector, 4));

@@ -116,7 +116,9 @@ const lim = (v: number, c: number, p: number): GasLimits => ({ verificationGasLi
  * (execution 629k, rest 269k) and redeem (execution 510k, rest 269k) plus 50 %; announceReady (execution 164k, rest
  * 192k) and relayMessage (execution 230k, rest 208k) for the operator's lane-1 ops (A1GasFork.t.sol). A chain that charges the gas limit
  * (Monad) resizes the call gas from the simulation (tightUserOpGas) and keeps TIGHT_VERIFICATION_GAS; these are its
- * starting limits.
+ * starting limits. Monad fork (revm's schedule, V4RemoteFork.t.sol): the remote's swap 917k and bridge home 514k of
+ * handleOps, close to Base's; Monad's own node charges cold state more (TIGHT_VERIFICATION_GAS), hence 1M of
+ * verification there.
  */
 export const V4_OP_GAS: Readonly<Record<number, Readonly<Record<V4OpKind, GasLimits>>>> = {
   8453: {
