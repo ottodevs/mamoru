@@ -96,6 +96,9 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       settings: op.settingsStatus(),
       // otto/mamoru#8: Safes below their gas-reserve alert threshold, detection + alert only (no automatic top-up).
       gasReserveLow: op.gasReserveLowCount(),
+      // otto/mamoru#245 (#277): the bridge leg to Monad from its journal (no RPC): USDC in flight, oldest burn age, mint
+      // reverts, stuck burns by reason, the relayer's MON on Monad as last read before a mint. Null without the leg.
+      bridgeMonad: op.cfg.bridgeMonad?.metrics() ?? null,
     },
     rpc: {
       cumulative: rpc.cumulative,

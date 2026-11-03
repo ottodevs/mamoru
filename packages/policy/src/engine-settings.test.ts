@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  bridgeStuckAfterOf,
   canonicalSettingsJson,
+  DEFAULT_BRIDGE_STUCK_AFTER_MIN,
   capBaseUnits,
   DEFAULT_ENGINE_SETTINGS,
   ENGINE_SETTINGS_BOUNDS,
@@ -341,5 +343,31 @@ describe('lazy wait rule (Ot, 1 Nov 2026)', () => {
     expect(out).toContain('a position out of range for a while is moved at any distance from the edge')
     expect(out).toContain('narrow ranges are moved closer to their edge')
     expect(riskyChanges(to, from)).toEqual([])
+  })
+})
+
+// otto/mamoru#245: the deadlines after which a CCTP burn to Monad is flagged stuck.
+describe('bridge.stuckAfterMin', () => {
+  const on = { ...DEFAULT_ENGINE_SETTINGS, bridge: { stuckAfterMin: { sending: 40, burned: 90 } } }
+
+  test('is validated: whole minutes from 20 to 1440 per state, nothing else in the object', () => {
+    expect(validateEngineSettings(on)).toEqual([])
+    expect(validateEngineSettings({ ...on, bridge: { stuckAfterMin: { sending: 5, burned: 90 } } })).toEqual(['bridge.stuckAfterMin.sending must be a whole number from 20 to 1440'])
+    expect(validateEngineSettings({ ...on, bridge: { stuckAfterMin: { sending: 40, burned: 2000 } } })).toHaveLength(1)
+    expect(validateEngineSettings({ ...on, bridge: { stuckAfterMin: { sending: 40 } } })).toHaveLength(1)
+    for (const bad of [null, {}, { stuckAfterMin: null }, { stuckAfterMin: { sending: 40, burned: 90, minted: 1 } }, { stuckAfterMin: { sending: 40, burned: 90 }, extra: 1 }])
+      expect(validateEngineSettings({ ...on, bridge: bad })).toEqual(['bridge must be { stuckAfterMin: { sending, burned } }'])
+  })
+
+  test('absent: the code defaults (sending 30, burned 45 min), and every older version keeps its hash', () => {
+    expect(bridgeStuckAfterOf(DEFAULT_ENGINE_SETTINGS)).toEqual(DEFAULT_BRIDGE_STUCK_AFTER_MIN)
+    expect(DEFAULT_BRIDGE_STUCK_AFTER_MIN).toEqual({ sending: 30, burned: 45 })
+    expect(bridgeStuckAfterOf(on)).toEqual({ sending: 40, burned: 90 })
+    expect(canonicalSettingsJson(DEFAULT_ENGINE_SETTINGS)).not.toContain('bridge')
+  })
+
+  test('a later deadline asks for a confirm; an earlier one does not', () => {
+    expect(riskyChanges(DEFAULT_ENGINE_SETTINGS, on)).toEqual(['a stuck bridge to Monad is flagged and paged later'])
+    expect(riskyChanges(on, DEFAULT_ENGINE_SETTINGS)).toEqual([])
   })
 })

@@ -6,7 +6,7 @@ import { generatePrivateKey } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, chainWritesOptIn, isChainId, type Address } from '@mamoru/domain'
 import { address as registryAddress, baseRegistry, entry, isDeployed, messageTransmitterV2Abi, monadRegistry, registryFor, type Registry } from '@mamoru/registry'
 import { LIVE_CAP_USDC } from '@mamoru/account/live'
-import { assertPolicyChain, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLabV7, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, conservadorLiveV7, liveWmonUsdcMonadV6, MONAD_LAB_POLICIES, oneAuthV4Deployment, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V6_POOLS, type PolicyVersion } from '@mamoru/policy'
+import { assertPolicyChain, bridgeStuckAfterOf, conservadorLabV4, conservadorLabV5, conservadorLabV6, conservadorLabV7, conservadorLiveV4, conservadorLiveV5, conservadorLiveV6, conservadorLiveV7, liveWmonUsdcMonadV6, MONAD_LAB_POLICIES, oneAuthV4Deployment, POLICIES, withActionPolicy, withTestOverrides, V4_GAS_CAPS, V4_POOLS, V6_POOLS, type PolicyVersion } from '@mamoru/policy'
 import { monadV6Deployed } from '@mamoru/account/remote'
 import { RemotePeer } from './remote-peer.ts'
 import { rpcBudget } from './budget.ts'
@@ -706,6 +706,8 @@ export async function bootOperator(o: BootOptions) {
     ? new EngineSettingsSource({ url: o.settingsUrl, secret: o.secret, stateDir: o.stateDir, allocation: policy.allocation, override: settingsOverride(knobs, o), onChange: () => { retune(); syncYieldLedger() } })
     : null
   if (settings && settings.status().override.length) console.log(`[settings] EMERGENCY OVERRIDE from env: ${settings.status().override.join(', ')} win over D1 until removed from the env`)
+  // otto/mamoru#245: the stuck deadlines of each account's burns come from its engine settings (bridge.stuckAfterMin).
+  if (bridgeMonad && settings) bridgeMonad.stuckAfterOf = (accountKey) => bridgeStuckAfterOf(settings.forAccount(accountKey).settings)
   const operator = new Operator(
     {
       chainId,

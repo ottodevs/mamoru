@@ -869,3 +869,188 @@ describe('the bridge view and the attestation time (otto/mamoru#269)', () => {
     expect((await s.bridge.remote('acc-1', MONAD_SAFE, 1_800, 1_005n)).inFlight).toBe(AMOUNT)
   })
 })
+
+// otto/mamoru#245: a burn past its state's deadline is flagged stuck with a reason code, pages ops once (persisted), keeps
+// counting and being retried, and clears when it moves on. A mint by anyone else ends it minted with no operator mint.
+describe('stuck burns (otto/mamoru#245)', () => {
+  const MIN = 60_000
+  const alerts = () => {
+    const lines: string[] = []
+    const was = console.error
+    console.error = (...a: unknown[]) => {
+      const l = a.map(String).join(' ')
+      if (l.startsWith('[alert]')) lines.push(l)
+    }
+    return { lines, restore: () => (console.error = was) }
+  }
+  const burnedAt = async (now: () => number, o: { dir?: string; iris?: Record<string, { message: Hex; attestation: Hex }[]>; relayer?: boolean; monad?: MonadState } = {}) => {
+    const s = setup({ ...o, now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris: o.iris ?? {} })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.state).toBe('burned')
+    return s
+  }
+
+  test('scenario: no attestation reaches the burned deadline (45 min): stuck, one alert, the reason exposed, still counted', async () => {
+    const a = alerts()
+    let now = T0
+    const s = await burnedAt(() => now)
+    now += 44 * MIN
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.stuckAt).toBeUndefined()
+    now += 2 * MIN
+    await s.bridge.tick()
+    const b = s.j().burns[UOP]!
+    expect(b).toMatchObject({ state: 'burned', stuckAt: new Date(now).toISOString(), stuckReason: 'no_attestation', stuckAlertedAt: new Date(now).toISOString() })
+    for (let i = 0; i < 5; i++) {
+      now += MIN
+      await s.bridge.tick()
+    }
+    a.restore()
+    expect(a.lines).toHaveLength(1)
+    expect(a.lines[0]).toContain('acc-1')
+    expect(a.lines[0]).toContain('no_attestation')
+    // Codes and short ids only: no amount, no address in the page.
+    expect(a.lines[0]).not.toContain(AMOUNT.toString())
+    expect(a.lines[0]!.toLowerCase()).not.toContain(MONAD_SAFE)
+    expect(a.lines[0]!.toLowerCase()).not.toContain(ACCOUNT)
+    // A flag, not a state: in flight, in the cap, and Iris is still asked.
+    expect(s.bridge.inFlight('acc-1', 10_000n)).toBe(AMOUNT)
+    expect(s.bridge.capUsdc([ACCOUNT], () => 10_000n)).toBe(AMOUNT)
+    expect(s.urls.length).toBeGreaterThan(1)
+    // Exposed where the app reads in-flight moves: the progress view and the money map rows.
+    expect(s.bridge.view(UOP)).toMatchObject({ state: 'burned', stuckAt: b.stuckAt, stuckReason: 'no_attestation' })
+    const mm = await s.bridge.moneyInFlight('acc-1', undefined, () => ({ block: 5_000n, stale: false }))
+    expect(mm.rows[0]).toMatchObject({ stage: 'burned', stuckAt: b.stuckAt, stuckReason: 'no_attestation' })
+    expect(s.bridge.metrics()).toMatchObject({ inFlightUsdc: AMOUNT.toString(), inFlightCount: 1, stuckCount: 1, stuckReasons: { no_attestation: 1 }, mintReverts: 0, oldestBurnAgeS: 51 * 60 })
+  })
+
+  test('the alert is not sent again after a restart (its mark is on disk)', async () => {
+    const a = alerts()
+    let now = T0
+    const s = await burnedAt(() => now)
+    now += 46 * MIN
+    await s.bridge.tick()
+    const restarted = setup({ dir: s.dir, now: () => now + MIN, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris: {} })
+    await restarted.bridge.tick()
+    await restarted.bridge.tick()
+    a.restore()
+    expect(a.lines).toHaveLength(1)
+    expect(restarted.j().burns[UOP]).toMatchObject({ stuckReason: 'no_attestation', stuckAlertedAt: new Date(T0 + 46 * MIN).toISOString() })
+  })
+
+  test('the deadlines come from the engine setting: a sending burn past it is not_sent; a burned one inside it is not stuck', async () => {
+    const a = alerts()
+    let now = T0
+    const pending = setup({ now: () => now, base: baseClient({ safe: 1_005n }) })
+    pending.bridge.stuckAfterOf = () => ({ sending: 20, burned: 120 })
+    pending.bridge.recordSending('acc-1', signing())
+    now += 21 * MIN
+    await pending.bridge.tick()
+    expect(pending.j().burns[UOP]).toMatchObject({ state: 'sending', stuckReason: 'not_sent' })
+    now = T0
+    const s = await burnedAt(() => now)
+    s.bridge.stuckAfterOf = () => ({ sending: 20, burned: 120 })
+    now += 60 * MIN
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.stuckAt).toBeUndefined()
+    // A settings lookup that throws falls back to the code defaults.
+    s.bridge.stuckAfterOf = () => {
+      throw new Error('no settings')
+    }
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.stuckReason).toBe('no_attestation')
+    a.restore()
+    expect(a.lines).toHaveLength(2)
+  })
+
+  test('the reason follows what holds the mint: relayer without MON, gas ceiling, budget, reverts, no relayer, Monad unreachable', async () => {
+    const a = alerts()
+    const att = await attest(message({ nonce: 42n, executed: true }))
+    const cases: [string, (s: ReturnType<typeof setup>) => void, Partial<Parameters<typeof burnedAt>[1]>?][] = [
+      ['relayer_unfunded', (s) => (s.st.balance = 0n)],
+      ['gas_ceiling', (s) => (s.st.gasPrice = 600_000_000_000n)],
+      ['mint_budget', (s) => ((s.bridge as unknown as { journal: { mintDays: Record<string, unknown> } }).journal.mintDays[new Date(T0).toISOString().slice(0, 10)] = { n: 50, wei: '0' })],
+      ['mint_reverted', (s) => (s.st.mintStatus = 'reverted')],
+      ['mint_off', () => {}, { relayer: false }],
+    ]
+    for (const [reason, arrange, o] of cases) {
+      let now = T0
+      const s = await burnedAt(() => now, { iris: { [BURN_TX]: [att] }, ...o })
+      arrange(s)
+      for (let i = 0; i < 50; i++) {
+        now += MIN
+        await s.bridge.tick()
+      }
+      expect(s.j().burns[UOP]).toMatchObject({ state: 'burned', stuckReason: reason })
+    }
+    let now = T0
+    let up = true
+    const s = setup({ now: () => now, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris: {}, verify: async () => { if (!up) throw new Error('down') } })
+    s.bridge.recordSending('acc-1', signing())
+    await s.bridge.tick()
+    ;(s.bridge as unknown as { verified: boolean }).verified = false
+    up = false
+    now += 46 * MIN
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.stuckReason).toBe('monad_unreachable')
+    a.restore()
+    expect(s.bridge.metrics().relayerMon).toBeNull()
+  })
+
+  test('cleared when it mints; the alert mark stays, so it never pages again', async () => {
+    const a = alerts()
+    let now = T0
+    const iris: Record<string, { message: Hex; attestation: Hex }[]> = {}
+    const s = await burnedAt(() => now, { iris })
+    now += 46 * MIN
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.stuckReason).toBe('no_attestation')
+    iris[BURN_TX] = [await attest(message({ nonce: 42n, executed: true }))]
+    now += 2 * MIN
+    await s.bridge.tick()
+    a.restore()
+    const b = s.j().burns[UOP]!
+    expect(b.state).toBe('minted')
+    expect(b.stuckAt).toBeUndefined()
+    expect(b.stuckReason).toBeUndefined()
+    expect(b.stuckAlertedAt).toBe(new Date(T0 + 46 * MIN).toISOString())
+    expect(s.bridge.view(UOP)!.stuckReason).toBeUndefined()
+    expect(s.bridge.metrics()).toMatchObject({ stuckCount: 0, inFlightCount: 0, inFlightUsdc: '0', oldestBurnAgeS: null })
+    expect(s.bridge.metrics().relayerMon).toMatchObject({ wei: (10n ** 18n).toString() })
+    expect(a.lines).toHaveLength(1)
+  })
+
+  test('scenario: a third party mints (the owner calls receiveMessage): minted with no operator mint, even while Iris is down', async () => {
+    const a = alerts()
+    let now = T0
+    const att = await attest(message({ nonce: 42n, executed: true }))
+    const iris: Record<string, { message: Hex; attestation: Hex }[]> = { [BURN_TX]: [att] }
+    const s = await burnedAt(() => now, { iris })
+    // The relayer has no MON: the nonce is learned and on disk, nothing is sent, and the burn goes stuck.
+    s.st.balance = 0n
+    for (let i = 0; i < 46; i++) {
+      now += MIN
+      await s.bridge.tick()
+    }
+    expect(s.j().burns[UOP]).toMatchObject({ state: 'burned', cctpNonce: u(42n, 32), stuckReason: 'relayer_unfunded' })
+    // Iris goes away, and the owner mints at Monad block 5_007; the operator reads the head at 5_010.
+    delete iris[BURN_TX]
+    s.st.used.add(u(42n, 32).toLowerCase())
+    s.st.usedFrom = 5_007n
+    s.st.block = 5_010n
+    const polls = s.urls.length
+    now += MIN
+    await s.bridge.tick()
+    a.restore()
+    const b = s.j().burns[UOP]!
+    expect(b).toMatchObject({ state: 'minted', mintedBlock: '5010', note: 'minted by someone else (any caller may)' })
+    expect(b.stuckAt).toBeUndefined()
+    expect(s.urls.length).toBe(polls) // seen from the nonce on disk, Iris not asked
+    expect(s.relayer!.sent).toHaveLength(0)
+    // #332: never before the real mint: counted until a read at or after mintedBlock.
+    expect(s.bridge.capUsdc([ACCOUNT], () => 5_009n)).toBe(AMOUNT)
+    expect(s.bridge.capUsdc([ACCOUNT], () => 5_010n)).toBe(0n)
+    expect(a.lines).toHaveLength(1)
+  })
+})

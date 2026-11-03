@@ -50,7 +50,12 @@ account keys are shortened to 8 chars. Example (values illustrative):
     // Spec 006: null without MAMORU_SETTINGS_URL. Else the engine settings versions applied, their source
     // (d1, last-known-good, default), the last pull and error, and any env knob forced as an emergency override.
     "settings": { "url": "https://app.mamoru.lol", "source": "d1", "lastPullAt": "…", "lastError": null, "versions": [{ "id": 3, "env": "prod", "canary": false, "template": "…", "hash": "…" }], "override": [] },
-    "gasReserveLow": 1
+    "gasReserveLow": 1,
+    // otto/mamoru#245 (#277): null without the Monad bridge leg. From its journal, no RPC: raw USDC in flight and how many
+    // burns, the oldest in-flight burn's age, reverts of in-flight mints, burns past their deadline (engine setting
+    // bridge.stuckAfterMin, default sending 30 / burned 45 min) by reason code, and the relayer's MON on Monad as last
+    // read before a mint (null until one).
+    "bridgeMonad": { "inFlightUsdc": "1500000000", "inFlightCount": 1, "oldestBurnAgeS": 2900, "mintReverts": 0, "stuckCount": 1, "stuckReasons": { "no_attestation": 1 }, "relayerMon": { "address": "0xRELAYER…", "wei": "980000000000000000", "at": "…" } }
   },
   "rpc": {
     // provider host (never the path or an API key; "#1"/"#2" when two providers share a host) -> method -> counters,

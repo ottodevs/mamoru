@@ -15,8 +15,10 @@ export {
   type Price,
 } from './instantiate.ts'
 export {
+  bridgeStuckAfterOf,
   canonicalSettingsJson,
   capBaseUnits,
+  DEFAULT_BRIDGE_STUCK_AFTER_MIN,
   DEFAULT_CAP_USDC,
   DEFAULT_ENGINE_SETTINGS,
   ENGINE_SETTINGS_BOUNDS,
@@ -28,6 +30,7 @@ export {
   validateAccountCaps,
   validateEngineSettings,
   withEngineSettings,
+  type BridgeStuckAfterMin,
   type EngineSettings,
   type RerangeSetting,
 } from './engine-settings.ts'

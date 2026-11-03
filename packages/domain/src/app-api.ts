@@ -474,7 +474,20 @@ export type BridgeProgress = {
   mintedAt?: string
   recipient?: Hex0x
   eta?: { from: string; to: string; late: boolean }
+  /** otto/mamoru#245: set while the bridge is past its deadline (a flag: it still counts and is still retried); cleared when it moves on. */
+  stuckAt?: string
+  stuckReason?: BridgeStuckReason
 }
+
+/**
+ * otto/mamoru#245: why a bridge is stuck, a fixed code (never an amount or an address). 'not_sent': the burn has not
+ * settled on Base; 'burn_unmatched': it landed without exactly this burn; 'no_attestation': Circle has not attested it;
+ * 'mint_pending': a mint was sent and has no receipt yet; 'mint_reverted': the mint reverted (retried with backoff, or
+ * past the retry cap); 'gas_ceiling': Monad gas above the mint ceiling; 'mint_budget': the relayer's daily mint budget is
+ * used up; 'relayer_unfunded': the relayer lacks MON; 'mint_off': this operator sends no mints; 'monad_unreachable': Monad
+ * cannot be read.
+ */
+export type BridgeStuckReason = 'not_sent' | 'burn_unmatched' | 'no_attestation' | 'mint_pending' | 'mint_reverted' | 'gas_ceiling' | 'mint_budget' | 'relayer_unfunded' | 'mint_off' | 'monad_unreachable'
 
 /**
  * otto/mamoru#269: where the account's money is, on every chain it has a Safe on, plus what is on its way between them.
@@ -519,6 +532,9 @@ export type MoneyInFlight = {
   finality: 'standard' | 'fast'
   /** A check that this burn is not already in a chain's read failed: it is counted here, and may also be inside a chain total. The map is not `complete`. */
   unsure?: boolean
+  /** otto/mamoru#245: as BridgeProgress, set while the burn is past its deadline. */
+  stuckAt?: string
+  stuckReason?: BridgeStuckReason
 }
 export type MoneyMap = {
   totalUsdc: string

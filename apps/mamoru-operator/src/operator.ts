@@ -547,7 +547,7 @@ export type OperatorConfig = {
    * account's engine reads its remote value from it and records every bridge-out in it before signing. Absent: no
    * account has a remote value, and no bridge-out is ever signed.
    */
-  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs' | 'capUsdc'>
+  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs' | 'capUsdc' | 'metrics'>
   /** otto/mamoru#278 (Base): a V4 home's returns from its remote Safe, followed to the mint here. Absent: none asked. */
   returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'floor' | 'open' | 'request' | 'lastClosedAt' | 'capUsdc' | 'returns' | 'holds' | 'noteReported'>
   /**

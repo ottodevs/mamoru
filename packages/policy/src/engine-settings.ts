@@ -31,6 +31,23 @@ export type EngineSettings = {
    * never under the policy's own minimum (0.10 USDC). Absent = only the policy minimum, so older versions keep their hash.
    */
   minEntry?: { gasMultiple: number }
+  /**
+   * otto/mamoru#245: minutes a CCTP burn to Monad may stay 'sending' or 'burned' before the operator flags it stuck and
+   * pages ops once. A flag only: the burn keeps counting in the cap and keeps being retried. Absent = the code defaults
+   * (DEFAULT_BRIDGE_STUCK_AFTER_MIN), so older versions keep their hash.
+   */
+  bridge?: { stuckAfterMin: BridgeStuckAfterMin }
+}
+
+/** otto/mamoru#245: per journal state, minutes until a burn to Monad is flagged stuck. */
+export type BridgeStuckAfterMin = { sending: number; burned: number }
+
+/** otto/mamoru#245: Standard finality Base to Monad takes 13-19 min; these leave room for a slow attestation before paging. */
+export const DEFAULT_BRIDGE_STUCK_AFTER_MIN: BridgeStuckAfterMin = { sending: 30, burned: 45 }
+
+/** otto/mamoru#245: the deadlines in force under these settings (the code defaults when the version names none). */
+export function bridgeStuckAfterOf(s: EngineSettings): BridgeStuckAfterMin {
+  return s.bridge?.stuckAfterMin ?? DEFAULT_BRIDGE_STUCK_AFTER_MIN
 }
 
 /** `maxPerWeek` (#218): at most this many re-ranges per pool in 7 days, either mode; absent = no cap. */
@@ -59,6 +76,8 @@ export const ENGINE_SETTINGS_BOUNDS = {
   // Live wait rule (Ot, 1 Nov): the buffer as a share of the range width, and the longest a position waits out of range.
   edgeBufferBps: { min: 0, max: 10_000 },
   maxWaitSeconds: { min: 1_800, max: 604_800 },
+  // otto/mamoru#245: never under Standard finality (13-19 min), never past a day without a page.
+  stuckAfterMin: { min: 20, max: 1_440 },
 } as const
 
 export const DEFAULT_ENGINE_SETTINGS: EngineSettings = {
@@ -128,12 +147,22 @@ export function validateEngineSettings(s: unknown): string[] {
   const errors: string[] = []
   if (!s || typeof s !== 'object' || Array.isArray(s)) return ['settings must be an object']
   const o = s as Record<string, unknown>
-  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard', 'rerange', 'bridgeOut', 'minEntry'].includes(k)) errors.push(`unknown setting ${k}`)
+  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard', 'rerange', 'bridgeOut', 'minEntry', 'bridge'].includes(k)) errors.push(`unknown setting ${k}`)
   if (o.bridgeOut !== undefined) {
     const b = o.bridgeOut as Record<string, unknown> | null
     if (!b || typeof b !== 'object' || Array.isArray(b) || Object.keys(b).some((k) => k !== 'enabled') || typeof b.enabled !== 'boolean') errors.push('bridgeOut must be { enabled: true | false }')
   }
   const B = ENGINE_SETTINGS_BOUNDS
+  if (o.bridge !== undefined) {
+    const b = o.bridge as Record<string, unknown> | null
+    const m = b && typeof b === 'object' && !Array.isArray(b) ? (b.stuckAfterMin as Record<string, unknown> | null) : null
+    if (!b || typeof b !== 'object' || Array.isArray(b) || Object.keys(b).some((k) => k !== 'stuckAfterMin') || !m || typeof m !== 'object' || Array.isArray(m) || Object.keys(m).some((k) => k !== 'sending' && k !== 'burned'))
+      errors.push('bridge must be { stuckAfterMin: { sending, burned } }')
+    else {
+      inRange(errors, 'bridge.stuckAfterMin.sending', m.sending, B.stuckAfterMin)
+      inRange(errors, 'bridge.stuckAfterMin.burned', m.burned, B.stuckAfterMin)
+    }
+  }
   if (o.minEntry !== undefined) {
     const m = o.minEntry as Record<string, unknown> | null
     if (!m || typeof m !== 'object' || Array.isArray(m) || Object.keys(m).some((k) => k !== 'gasMultiple')) errors.push('minEntry must be { gasMultiple }')
@@ -243,6 +272,10 @@ export function riskyChanges(from: EngineSettings, to: EngineSettings): string[]
   if (from.depth && !to.depth) out.push('depth sizing turns off')
   // #195: a lower multiple lets through entries whose gas is a larger share of what they place.
   if (from.minEntry && (!to.minEntry || to.minEntry.gasMultiple < from.minEntry.gasMultiple)) out.push('smaller entries go through, where gas is a larger share of what they place')
+  // otto/mamoru#245: a later deadline pages ops later about a stuck bridge.
+  const sf = bridgeStuckAfterOf(from)
+  const st = bridgeStuckAfterOf(to)
+  if (st.sending > sf.sending || st.burned > sf.burned) out.push('a stuck bridge to Monad is flagged and paged later')
   if (!from.bridgeOut?.enabled && to.bridgeOut?.enabled) out.push('owners can move USDC from Ethereum to Base, and the relayer pays the Ethereum gas')
   if (from.depth && to.depth) {
     if (to.depth.impactBps > from.depth.impactBps) out.push('entries may move the pool price more')

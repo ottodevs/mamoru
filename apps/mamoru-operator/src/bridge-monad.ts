@@ -1,7 +1,8 @@
 import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getAddress, isAddressEqual, pad, parseAbiItem, parseEventLogs, type Hex, type Log, type PublicClient, type TransactionReceipt } from 'viem'
-import { ReasonError, type Address, type BridgeProgress, type MoneyChain, type MoneyInFlight } from '@mamoru/domain'
+import { ReasonError, type Address, type BridgeProgress, type BridgeStuckReason, type MoneyChain, type MoneyInFlight } from '@mamoru/domain'
+import { DEFAULT_BRIDGE_STUCK_AFTER_MIN, type BridgeStuckAfterMin } from '@mamoru/policy'
 import { address, baseRegistry, entry, entryPointV07Abi, messageTransmitterV2Abi, monadRegistry, safe7579Abi, smartSessionAbi, tokenMessengerV2Abi, type Registry } from '@mamoru/registry'
 import { userOpLogs } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
@@ -113,6 +114,12 @@ export type BridgeBurn = {
   /** Monad block at (or before) which the mint is known on chain: a sleeve read at an earlier block still counts it in flight. */
   mintedBlock?: string
   note?: string
+  /** otto/mamoru#245: when the burn passed its state's deadline (engine setting bridge.stuckAfterMin); cleared by any state change. */
+  stuckAt?: string
+  /** otto/mamoru#245: what holds it, a fixed code (the latest seen while stuck). */
+  stuckReason?: BridgeStuckReason
+  /** otto/mamoru#245: when ops was paged about it. Never cleared: one alert per burn, across restarts. */
+  stuckAlertedAt?: string
 }
 
 type Journal = {
@@ -224,6 +231,15 @@ export class MonadBridge {
   private verified: boolean
   /** Burns recorded by this process and not signed since: only those may be discarded as never signed. */
   private readonly unsigned = new Set<string>()
+  /**
+   * otto/mamoru#245: the stuck deadlines of an account, from its engine settings. Set by boot once the settings source
+   * exists; the code defaults until then and without one.
+   */
+  stuckAfterOf: (accountKey: string) => BridgeStuckAfterMin = () => DEFAULT_BRIDGE_STUCK_AFTER_MIN
+  /** otto/mamoru#245: per burn, what stopped the last mint pass (memory only: the next pass sees it again). */
+  private readonly blockers = new Map<string, BridgeStuckReason>()
+  /** otto/mamoru#245: the relayer's MON on Monad from the last mint's balance check (for /metrics; no read of its own). */
+  private relayerMon: { wei: bigint; at: string } | null = null
 
   /** Whether Monad is the checked chain; runs the boot check again while it is not. */
   private async monadVerified(): Promise<boolean> {
@@ -526,6 +542,7 @@ export class MonadBridge {
       ...(b.state === 'minted' ? { mintedAt: b.updatedAt } : {}),
       recipient: b.recipient,
       ...(b.state === 'burned' && b.burnedAt ? { eta: etaOf(b.burnedAt, this.now()) } : {}),
+      ...(b.stuckAt && b.stuckReason ? { stuckAt: b.stuckAt, stuckReason: b.stuckReason } : {}),
     }
   }
 
@@ -635,6 +652,7 @@ export class MonadBridge {
           ...(t.mintTx ? { mintTx: t.mintTx } : {}),
           ...(t.mintedAt ? { mintedAt: t.mintedAt } : {}),
           ...(t.eta ? { eta: t.eta } : {}),
+          ...(t.stuckAt && t.stuckReason ? { stuckAt: t.stuckAt, stuckReason: t.stuckReason } : {}),
           feeUsdc: '0',
           finality: 'standard',
           ...(rowUnsure ? { unsure: true } : {}),
@@ -779,19 +797,94 @@ export class MonadBridge {
       for (const b of this.burns()) {
         try {
           if (b.state === 'sending') await this.settleSending(b)
+          if (b.state === 'burned' && !monadOk) this.blockers.set(b.id, 'monad_unreachable')
           if (b.state === 'burned' && monadOk) await this.mint(b)
           if (b.state === 'minted' && monadOk) await this.backfillMinted(b)
         } catch (e) {
           logErr(`[bridge-monad] ${b.account.slice(0, 10)} ${b.id.slice(0, 10)}:`, e)
         }
+        this.flagStuck(b)
       }
       this.prune()
     })
   }
 
   private update(b: BridgeBurn, patch: Partial<BridgeBurn>): void {
-    Object.assign(b, patch, { updatedAt: this.iso() })
+    // otto/mamoru#245: stuck is a flag on one state; any move (burned, minted, failed, dropped) clears it. The alert mark stays.
+    const moved = patch.state !== undefined && patch.state !== b.state && b.stuckAt !== undefined
+    Object.assign(b, patch, { updatedAt: this.iso() }, moved ? { stuckAt: undefined, stuckReason: undefined } : {})
+    if (patch.state !== undefined) this.blockers.delete(b.id)
     this.save()
+    if (moved) console.log(`[bridge-monad] ${b.accountKey.slice(0, 8)} ${b.id.slice(0, 10)}: no longer stuck, now ${b.state}`)
+  }
+
+  /**
+   * otto/mamoru#245: a 'sending' burn older than its deadline (from `at`), or a 'burned' one (from `burnedAt`), is flagged
+   * stuck with the code of what holds it, and ops is paged once per burn: one [alert] line (forwarded to Mattermost by
+   * the ops alert-forward), its mark on disk first so a restart never pages again. Nothing else changes: the burn keeps
+   * counting in flight and in the cap, and the next tick tries it again. Never throws.
+   */
+  private flagStuck(b: BridgeBurn): void {
+    if (!IN_FLIGHT.has(b.state)) return
+    let after: BridgeStuckAfterMin
+    try {
+      after = this.stuckAfterOf(b.accountKey)
+    } catch {
+      after = DEFAULT_BRIDGE_STUCK_AFTER_MIN
+    }
+    const since = Date.parse(b.state === 'sending' ? b.at : (b.burnedAt ?? b.updatedAt))
+    const mins = b.state === 'sending' ? after.sending : after.burned
+    if (!Number.isFinite(since) || this.now() - since < mins * 60_000) return
+    const reason = this.stuckReasonOf(b)
+    const page = b.stuckAlertedAt === undefined
+    if (b.stuckAt !== undefined && b.stuckReason === reason && !page) return
+    // updatedAt is left as it was: the revert backoff and the prune read it.
+    if (b.stuckAt === undefined) b.stuckAt = this.iso()
+    b.stuckReason = reason
+    if (page) b.stuckAlertedAt = this.iso()
+    try {
+      this.save()
+    } catch (e) {
+      // Kept in memory: this process does not page again either.
+      logErr('[bridge-monad] journal write failed (stuck flag kept in memory):', e)
+    }
+    // Codes and short ids only: no amount, no address.
+    if (page) logErr(`[alert] bridge to Monad stuck: account ${b.accountKey.slice(0, 8)} burn ${b.id.slice(0, 10)} ${b.state} for over ${mins} min (${reason}); still counted in flight and retried`, undefined)
+  }
+
+  /** otto/mamoru#245: the code of what holds a burn: what the last pass hit, else what was recorded, else what the journal shows. */
+  private stuckReasonOf(b: BridgeBurn): BridgeStuckReason {
+    const seen = this.blockers.get(b.id)
+    if (seen) return seen
+    if (b.state === 'sending') return b.note?.startsWith('landed in') ? 'burn_unmatched' : 'not_sent'
+    if (b.stuckReason) return b.stuckReason
+    if ((b.mintReverts ?? 0) > 0) return 'mint_reverted'
+    if (b.mintTx) return 'mint_pending'
+    return 'no_attestation'
+  }
+
+  /**
+   * otto/mamoru#245 (#277): the bridge leg's numbers for /metrics, from the journal and the reads mint() already makes
+   * (no RPC here): USDC in flight (raw), the oldest in-flight burn's age, reverts of in-flight mints, stuck burns, and the
+   * relayer's MON on Monad as last read before a mint (null until one).
+   */
+  metrics(): { inFlightUsdc: string; inFlightCount: number; oldestBurnAgeS: number | null; mintReverts: number; stuckCount: number; stuckReasons: Partial<Record<BridgeStuckReason, number>>; relayerMon: { address: Address; wei: string; at: string } | null } {
+    const open = this.burns().filter((b) => IN_FLIGHT.has(b.state))
+    const oldest = open.reduce<number | null>((m, b) => {
+      const t = Date.parse(b.at)
+      return Number.isFinite(t) && (m === null || t < m) ? t : m
+    }, null)
+    const stuckReasons: Partial<Record<BridgeStuckReason, number>> = {}
+    for (const b of open) if (b.stuckAt && b.stuckReason) stuckReasons[b.stuckReason] = (stuckReasons[b.stuckReason] ?? 0) + 1
+    return {
+      inFlightUsdc: open.reduce((s, b) => s + BigInt(b.amount), 0n).toString(),
+      inFlightCount: open.length,
+      oldestBurnAgeS: oldest === null ? null : Math.max(0, Math.round((this.now() - oldest) / 1000)),
+      mintReverts: open.reduce((s, b) => s + (b.mintReverts ?? 0), 0),
+      stuckCount: open.filter((b) => b.stuckAt).length,
+      stuckReasons,
+      relayerMon: this.relayer && this.relayerMon ? { address: this.relayer.address, wei: this.relayerMon.wei.toString(), at: this.relayerMon.at } : null,
+    }
   }
 
   /**
@@ -859,6 +952,7 @@ export class MonadBridge {
     const burn = burnOf(userOpLogs(receipt.logs, ev.logIndex!, this.baseRegistryOf), b, this.baseRegistryOf)
     if (!burn) {
       // Landed, but not as this burn: kept in flight (never under-counted) until someone looks.
+      this.blockers.set(b.id, 'burn_unmatched')
       if (!b.note) this.update(b, { note: `landed in ${txHash} without exactly this burn; kept in flight` })
       logErr(`[bridge-monad] ${b.account.slice(0, 10)}:`, `userOp ${b.id.slice(0, 10)} landed without exactly this burn; kept in flight`)
       return
@@ -895,19 +989,24 @@ export class MonadBridge {
       if (rc) {
         // Reverted: counted once (the hash is cleared here), and the next attempt waits longer (below).
         this.update(b, { mintTx: undefined, mintReverts: (b.mintReverts ?? 0) + 1, note: `receiveMessage ${b.mintTx} reverted` })
+        this.blockers.set(b.id, 'mint_reverted')
       } else {
         // No receipt yet: pending, unless it was signed and never broadcast. After MONAD_MINT_PENDING_MS the attempt below
         // runs again: the used-nonce check stops it if the first landed; a first landing after it makes the second revert.
-        if (this.now() - Date.parse(b.mintAt ?? b.updatedAt) < MONAD_MINT_PENDING_MS) return
+        if (this.now() - Date.parse(b.mintAt ?? b.updatedAt) < MONAD_MINT_PENDING_MS) return void this.blockers.set(b.id, 'mint_pending')
         this.update(b, { mintTx: undefined })
       }
     }
     const now = this.now()
     if (now - Date.parse(b.burnedAt ?? b.updatedAt) < ATTEST_FIRST_POLL_MS) return
+    // otto/mamoru#245: once the CCTP nonce is known, a mint by anyone else (the owner calling receiveMessage on Monad) is
+    // seen on every pass, without waiting for Iris to answer again.
+    if (b.cctpNonce && (await this.mintedElsewhere(b, b.cctpNonce))) return
     if (b.attestPolledAt && now - Date.parse(b.attestPolledAt) < ATTEST_POLL_MS) return
     const atts = await cctpAttestation(b.txHash, this.fetcher, CCTP_DOMAIN_BASE)
     // On disk: a restart does not poll again at once.
     this.update(b, { attestPolledAt: this.iso() })
+    if (!b.mintReverts) this.blockers.set(b.id, 'no_attestation')
     if (!atts) return
     const amount = BigInt(b.amount)
     const att = atts.find((a) => {
@@ -945,13 +1044,12 @@ export class MonadBridge {
     }
     // The CCTP nonce is on disk before anything else is read or sent for it (the duplicate check above reads it).
     if (b.cctpNonce?.toLowerCase() !== msg.nonce.toLowerCase()) this.update(b, { cctpNonce: msg.nonce })
-    const block = await this.monad.getBlockNumber()
-    const used = await this.monad.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'usedNonces', args: [msg.nonce], blockNumber: block })
-    if (used !== 0n) return void this.update(b, { state: 'minted', cctpNonce: msg.nonce, mintedBlock: block.toString(), note: b.mintTx ? b.note : 'minted by someone else (any caller may)' })
-    if (!this.relayer) return
+    if (await this.mintedElsewhere(b, msg.nonce)) return
+    if (!this.relayer) return void this.blockers.set(b.id, 'mint_off')
     // A mint that reverted is not sent again at once: each revert doubles the wait, and past the cap none is sent (a mint by
     // anyone else is still seen by the used-nonce check above).
     const reverts = b.mintReverts ?? 0
+    if (reverts > 0) this.blockers.set(b.id, 'mint_reverted')
     if (reverts >= MONAD_MINT_MAX_REVERTS) {
       logErr(`[bridge-monad] ${b.account.slice(0, 10)}:`, `receiveMessage reverted ${reverts} times; not sent again, kept in flight until someone looks`)
       return
@@ -962,11 +1060,13 @@ export class MonadBridge {
     const est = await this.monad.estimateGas({ account: relayer.address, to: MESSAGE_TRANSMITTER_V2, data })
     const gas = (est * 11n) / 10n
     if (gas > MONAD_MINT_GAS_CAP) {
+      this.blockers.set(b.id, 'gas_ceiling')
       logErr(`[bridge-monad] ${b.account.slice(0, 10)}:`, `receiveMessage estimated at ${est} gas, over the ${MONAD_MINT_GAS_CAP} cap; not minted`)
       return
     }
     const price = await this.monad.getGasPrice()
     if (price > MAX_MONAD_GAS_PRICE_WEI) {
+      this.blockers.set(b.id, 'gas_ceiling')
       logErr(`[bridge-monad] ${b.account.slice(0, 10)}:`, 'Monad gas above the mint ceiling, minting later')
       return
     }
@@ -974,11 +1074,14 @@ export class MonadBridge {
     const estimate = gas * price * 2n
     const m = this.mintDay(day)
     if (m.n >= MONAD_MINTS_PER_DAY || BigInt(m.wei) + estimate > MONAD_MINT_BUDGET_WEI) {
+      this.blockers.set(b.id, 'mint_budget')
       logErr(`[bridge-monad] ${b.account.slice(0, 10)}:`, 'Monad mint budget for today used up, minting tomorrow')
       return
     }
     const balance = await this.monad.getBalance({ address: relayer.address })
+    this.relayerMon = { wei: balance, at: this.iso() }
     if (balance < estimate) {
+      this.blockers.set(b.id, 'relayer_unfunded')
       logErr(`[bridge-monad] ${b.account.slice(0, 10)}:`, `relayer ${relayer.address} has ${balance} wei MON, a mint needs up to ${estimate}: fund it`)
       return
     }
@@ -1010,6 +1113,7 @@ export class MonadBridge {
     } catch (e) {
       if (!signed) charge(0n, -1)
       if (e instanceof MintBudget) {
+        this.blockers.set(b.id, e.message.includes('budget') ? 'mint_budget' : 'gas_ceiling')
         logErr(`[bridge-monad] ${b.account.slice(0, 10)}:`, e.message)
         return
       }
@@ -1018,7 +1122,23 @@ export class MonadBridge {
     // Monad charges the gas limit: the limit at the price paid.
     charge(gas * sent.receipt.effectiveGasPrice)
     if (sent.receipt.status === 'success') this.update(b, { state: 'minted', mintTx: sent.hash, mintedBlock: sent.receipt.blockNumber.toString() })
-    else this.update(b, { mintTx: sent.hash, note: `receiveMessage ${sent.hash} reverted; tried again after the used-nonce check` })
+    else {
+      this.update(b, { mintTx: sent.hash, note: `receiveMessage ${sent.hash} reverted; tried again after the used-nonce check` })
+      this.blockers.set(b.id, 'mint_reverted')
+    }
+  }
+
+  /**
+   * Whether the CCTP nonce of `b` is already used on Monad at the head: then it was minted (by the relayer in an earlier
+   * pass, or by anyone else, e.g. the owner calling receiveMessage), and the burn ends minted with no transaction. The
+   * mintedBlock is the block of that read, at or after the real mint (#332: never before it, or the cap under-counts).
+   */
+  private async mintedElsewhere(b: BridgeBurn, nonce: Hex): Promise<boolean> {
+    const block = await this.monad.getBlockNumber()
+    const used = await this.monad.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'usedNonces', args: [nonce], blockNumber: block })
+    if (used === 0n) return false
+    this.update(b, { state: 'minted', cctpNonce: nonce, mintedBlock: block.toString(), note: b.mintTx ? b.note : 'minted by someone else (any caller may)' })
+    return true
   }
 }
 
