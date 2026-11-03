@@ -184,7 +184,7 @@ contract V4EthereumSiblingForkTest is V4Fixture {
 
     /// approve V4 for exactly `amount`, then V4.bridge (I1: V4 pulls, burns, resets its allowance), reset, assert.
     function _bridgeCall(uint32 domain, uint256 amount) internal view returns (bytes memory) {
-        return _batch(_approved(E_USDC, amount, address(v4), abi.encodeCall(MamoruActionPolicyV4.bridge, (domain, E_USDC, amount))));
+        return _batch(_approved(E_USDC, amount, address(v4), abi.encodeCall(MamoruActionPolicyV4.bridge, (domain, E_USDC, amount, 0))));
     }
 
     /// A1: on Base, anyone calls `announceReady(home, Ethereum)`; V4 there reads the home Safe back and sends a CCTP
@@ -315,7 +315,7 @@ contract V4EthereumSiblingForkTest is V4Fixture {
         assertFalse(ok, "a sibling bridges only to its home domain");
         vm.prank(safe);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadBridge.selector, 2));
-        v4.bridge(DOMAIN_MONAD, E_USDC, usdc);
+        v4.bridge(DOMAIN_MONAD, E_USDC, usdc, 0);
     }
 
     function test_sibling_readinessRules() public {
@@ -340,7 +340,7 @@ contract V4EthereumSiblingForkTest is V4Fixture {
         uint256 usdc = IERC20T(E_USDC).balanceOf(safe);
         vm.prank(safe);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.RemoteNotReady.selector, DOMAIN_BASE));
-        v4.bridge(DOMAIN_BASE, E_USDC, usdc);
+        v4.bridge(DOMAIN_BASE, E_USDC, usdc, 0);
     }
 
     /// Unwrapping pays the account back through WETH9's 2300-gas transfer: the Safe proxy, warm inside its own

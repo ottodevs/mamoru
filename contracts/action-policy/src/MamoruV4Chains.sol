@@ -25,6 +25,9 @@ pragma solidity ^0.8.28;
  *  - Pool classes, reference pools and the exact vault list: MamoruV4Classes (spec 010 A1 "Eligibility rules").
  *  - Gas: the per-op caps a remote session carries, and the chain's gas allowance G per window W of
  *    MamoruGasPolicyV2's rate (spec 010 I6, A1): Base 0.002 ETH a day, Monad 1 MON a day, Ethereum 0.01 ETH a day.
+ *  - CCTP fee cap (`cctpFeeCapBps`, #345 P2-5): the most `MamoruActionPolicyV4.bridge` lets a burn's maxFee be, in bps
+ *    of the amount: 10 bps (0.1 %) on every chain. Standard transfers carry no fee today (the engine passes 0); the cap
+ *    keeps the bridge working if Circle adds a Standard fee up to it, without a new V4.
  * Left out, because nothing in the repo pins them yet (each needs its own verification before a V4 lists it):
  * Arbitrum, Optimism, Unichain. A chain outside the table refuses everything (fail closed); adding one is a new V4.
  */
@@ -55,6 +58,7 @@ library MamoruV4Chains {
         uint128 gasPerWindow; // G: MamoruGasPolicyV2's gas allowance per window, wei (I6)
         uint32 gasWindow; // W, seconds
         GasCaps remoteCaps; // the gas policy init of a remote session on this chain
+        uint16 cctpFeeCapBps; // #345 P2-5: the most a CCTP burn's maxFee may be, in bps of the amount
     }
 
     function byChainId(uint256 chainId) internal pure returns (Chain memory c) {
@@ -70,6 +74,7 @@ library MamoruV4Chains {
             // packages/policy V4_GAS_CAPS (0.01 gwei priority, 3M / 2M / 200k, 0.1 gwei); G = 0.002 ETH a day.
             (c.gasPerWindow, c.gasWindow) = (0.002 ether, 1 days);
             c.remoteCaps = GasCaps(10_000_000, 3_000_000, 2_000_000, 200_000, 100_000_000, 0);
+            c.cctpFeeCapBps = 10;
         } else if (chainId == MONAD) {
             c.chainId = MONAD;
             c.domain = 15;
@@ -82,6 +87,7 @@ library MamoruV4Chains {
             // packages/policy MONAD_GAS_CAPS (1 gwei priority, 3M / 2M / 200k, 1,000 gwei); G = 1 MON a day.
             (c.gasPerWindow, c.gasWindow) = (1 ether, 1 days);
             c.remoteCaps = GasCaps(1_000_000_000, 3_000_000, 2_000_000, 200_000, 1_000_000_000_000, 0);
+            c.cctpFeeCapBps = 10;
         } else if (chainId == ETHEREUM) {
             c.chainId = ETHEREUM;
             c.domain = 0;
@@ -95,6 +101,7 @@ library MamoruV4Chains {
             // ~0.3 gwei). Ethereum is a chain where funds arrive and leave, not one the engine trades on every hour.
             (c.gasPerWindow, c.gasWindow) = (0.01 ether, 1 days);
             c.remoteCaps = GasCaps(100_000_000, 3_000_000, 2_000_000, 200_000, 5_000_000_000, 0);
+            c.cctpFeeCapBps = 10;
         }
     }
 

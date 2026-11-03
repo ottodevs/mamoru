@@ -46,6 +46,10 @@ contract V4RemoteForkTest is V4Fixture {
         address monadGas = address(gasPol);
         address monadInit = address(v4.REMOTE_INIT());
         address(M_POOL).call(abi.encodeWithSignature("increaseObservationCardinalityNext(uint16)", uint16(1800)));
+        // #345 P2-2: rule 4 reads the FILLED ring (1,000 at the fork block; 1,800 live today, read 3 Nov): stand in for
+        // the blocks that filled it, by writing slot0's observationCardinality (bits 200-215 of slot 0).
+        uint256 w = uint256(vm.load(M_POOL, bytes32(0)));
+        vm.store(M_POOL, bytes32(0), bytes32((w & ~(uint256(0xffff) << 200)) | (uint256(1800) << 200)));
         // Base
         vm.selectFork(baseFork);
         _deployStack();
@@ -99,7 +103,7 @@ contract V4RemoteForkTest is V4Fixture {
     }
 
     function _bridgeBatch(uint32 domain, address token, uint256 amount) internal view returns (bytes memory) {
-        return _batch(_approved(token, amount, address(v4), abi.encodeCall(MamoruActionPolicyV4.bridge, (domain, token, amount))));
+        return _batch(_approved(token, amount, address(v4), abi.encodeCall(MamoruActionPolicyV4.bridge, (domain, token, amount, 0))));
     }
 
     /// A readiness message as the same V4 on `from` would send it, delivered by the pinned transmitter (pranked: the
@@ -213,7 +217,7 @@ contract V4RemoteForkTest is V4Fixture {
         _approveV4(home, USDC, 100e6);
         vm.prank(home);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.RemoteNotReady.selector, DOMAIN_MONAD));
-        v4.bridge(DOMAIN_MONAD, USDC, 100e6);
+        v4.bridge(DOMAIN_MONAD, USDC, 100e6, 0);
         // the old remote announcing again, under the old owners: refused (stale owners hash)
         vm.prank(MESSAGE_TRANSMITTER);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadMessage.selector, 6));
@@ -229,7 +233,45 @@ contract V4RemoteForkTest is V4Fixture {
         v4.handleReceiveFinalizedMessage(DOMAIN_MONAD, bytes32(uint256(uint160(address(v4)))), 2000, abi.encode(home, r1.remote, r1.ownersHash));
         _handle(DOMAIN_MONAD, home, r2, v4.remoteOf(home, DOMAIN_MONAD).ownersHash);
         vm.prank(home);
-        v4.bridge(DOMAIN_MONAD, USDC, 100e6);
+        v4.bridge(DOMAIN_MONAD, USDC, 100e6, 0);
+    }
+
+    /// #345 P2-5: the caller names CCTP's maxFee, up to the chain's pinned cap (10 bps of the amount). Above it the burn
+    /// is refused; at it the burn carries that maxFee and the ceiling is charged to the account-wide limits (bucket, 24 h,
+    /// 30 days); zero passes and charges nothing, as before. Finality stays Standard (2000).
+    function test_345_bridgeMaxFeeCappedAndCharged() public {
+        vm.prank(home);
+        v4.registerRemote(DOMAIN_MONAD, remoteSk);
+        MamoruActionPolicyV4.Remote memory r = v4.remoteOf(home, DOMAIN_MONAD);
+        _handle(DOMAIN_MONAD, home, r.remote, r.ownersHash);
+        uint256 amount = 1_000e6;
+        assertEq(table.chain(block.chainid).cctpFeeCapBps, 10);
+        uint256 cap = amount * 10 / 10_000;
+        _approveV4(home, USDC, amount);
+        vm.prank(home);
+        vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadBridge.selector, 6));
+        v4.bridge(DOMAIN_MONAD, USDC, amount, cap + 1);
+        (uint256 b0,, uint256 m0, uint256 d0) = v4.budgetLeft(home, TOKEN_MESSENGER, 10_000);
+        vm.prank(home);
+        v4.bridge(DOMAIN_MONAD, USDC, amount, 0);
+        (uint256 b1,, uint256 m1, uint256 d1) = v4.budgetLeft(home, TOKEN_MESSENGER, 10_000);
+        assertEq(b1, b0, "zero fee: nothing charged");
+        assertEq(d1, d0);
+        _approveV4(home, USDC, amount);
+        vm.expectCall(
+            TOKEN_MESSENGER,
+            abi.encodeWithSignature(
+                "depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)",
+                amount, DOMAIN_MONAD, bytes32(uint256(uint160(r.remote))), USDC, bytes32(0), cap, uint32(2000)
+            )
+        );
+        vm.prank(home);
+        v4.bridge(DOMAIN_MONAD, USDC, amount, cap);
+        (uint256 b2,, uint256 m2, uint256 d2) = v4.budgetLeft(home, TOKEN_MESSENGER, 10_000);
+        assertEq(b2, b1 - cap, "the fee ceiling is charged to the bucket");
+        assertEq(m2, m1 - cap, "and to the 30-day cap");
+        assertEq(d2, d1 - cap, "and to the 24 h cap");
+        assertEq(m1, m0);
     }
 
     /// I4: registerRemote acts on msg.sender only. Another account computes its own remote from its own owners and

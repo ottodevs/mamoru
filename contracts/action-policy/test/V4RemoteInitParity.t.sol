@@ -73,7 +73,7 @@ contract V4RemoteInitParityTest is Test {
         // MamoruV4Helper.sessions is public: the remote's one session, abi.encode(Session[1]).
         (bool ok, bytes memory out) = address(v4.HELPER()).staticcall(
             abi.encodeWithSignature(
-                "sessions(address,address,uint128,uint32,(uint256,uint32,address,address,address,address[2],address[2],address,uint128,uint32,(uint64,uint32,uint32,uint32,uint64,uint32)))",
+                "sessions(address,address,uint128,uint32,(uint256,uint32,address,address,address,address[2],address[2],address,uint128,uint32,(uint64,uint32,uint32,uint32,uint64,uint32),uint16))",
                 home,
                 vm.parseJsonAddress(j, ".sessionKey"),
                 uint128(vm.parseJsonUint(j, ".capUsd")),
@@ -131,6 +131,7 @@ contract V4RemoteInitParityTest is Test {
         uint128 gasPerWindow;
         uint32 gasWindow;
         GasCapsT remoteCaps;
+        uint16 cctpFeeCapBps; // #345 P2-5
     }
 
     function _monad() internal pure returns (ChainT memory c) {
@@ -144,5 +145,6 @@ contract V4RemoteInitParityTest is Test {
         c.wrapped = 0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A;
         (c.gasPerWindow, c.gasWindow) = (1 ether, 1 days);
         c.remoteCaps = GasCapsT(1_000_000_000, 3_000_000, 2_000_000, 200_000, 1_000_000_000_000, 0);
+        c.cctpFeeCapBps = 10;
     }
 }

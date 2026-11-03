@@ -25,7 +25,7 @@ function run(calls: Execution[]): string {
 }
 const approve = (token: Address, spender: Address): Execution => ({ target: token, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [spender, 5n] }) })
 const swap: Execution = { target: V4, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'swap', args: [{ pool: USDC, tokenIn: USDC, amountIn: 5n, amountOutMinimum: 1n, sqrtPriceLimitX96: 1n, deadline: 1n }] }) }
-const bridge: Execution = { target: V4, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'bridge', args: [15, USDC, 5n] }) }
+const bridge: Execution = { target: V4, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'bridge', args: [15, USDC, 5n, 0n] }) }
 const collect: Execution = { target: NPM, value: 0n, callData: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'collect', args: [{ tokenId: 1n, recipient: ACCOUNT, amount0Max: 1n, amount1Max: 1n }] }) }
 
 describe('V4 session precheck', () => {

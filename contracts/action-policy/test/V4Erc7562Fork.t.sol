@@ -203,7 +203,7 @@ contract V4Erc7562ForkTest is V4Fixture {
 
     function test_T1c_bridgeAndRelayOpValidationFollowsErc7562() public {
         Execution[] memory xs =
-            _approved(USDC, 1e6, address(v4), abi.encodeCall(MamoruActionPolicyV4.bridge, (DOMAIN_MONAD, USDC, 1e6)));
+            _approved(USDC, 1e6, address(v4), abi.encodeCall(MamoruActionPolicyV4.bridge, (DOMAIN_MONAD, USDC, 1e6, 0)));
         (Violation[] memory v, uint256 n) = _violations(_batch(xs));
         assertEq(_report("bridge batch", v, n), 0, "V4 and the gas policy");
         assertEq(n, 0, "the whole validation");

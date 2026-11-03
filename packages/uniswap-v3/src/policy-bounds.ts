@@ -93,6 +93,24 @@ export function priceRange(o: OracleRead, bandTicks: number, anchor?: PriceAncho
 }
 
 /**
+ * Mirrors `MamoruV4Helper.exitRange` (otto/mamoru#345): the range V4 prices an exit's minimums at. No anchor (LeftClaw
+ * M-6). While the two TWAPs agree it is `priceRange` without the anchor (the intersection of the band around each);
+ * when that is empty (the TWAPs about 2 x band apart: a fast move the long window has not caught up with) it is the
+ * UNION of the two bands, [min - band + 1, max + band], so a crash never blocks an exit. Never null.
+ *
+ * `narrowTicks` (the engine's narrower band, spec 007 T3): the mode is decided at the contract's `bandTicks`, then the
+ * range is built at `narrowTicks` in that same mode, so it always lies inside the contract's (higher minimums). An
+ * intersection that the narrower band empties falls back to the contract's own.
+ */
+export function exitRange(o: OracleRead, bandTicks: number, narrowTicks: number = bandTicks): PriceRange {
+  const top = Math.max(o.twapLong, o.twapShort)
+  const bottom = Math.min(o.twapLong, o.twapShort)
+  if (top - bandTicks + 1 > bottom + bandTicks) return { lo: clampTick(bottom - narrowTicks + 1), hi: clampTick(top + narrowTicks) }
+  const b = top - narrowTicks + 1 <= bottom + narrowTicks ? narrowTicks : bandTicks
+  return { lo: clampTick(top - b + 1), hi: clampTick(bottom + b) }
+}
+
+/**
  * Mirrors Uniswap v3-periphery `OracleLibrary.getQuoteAtTick`, branch for branch. BigInt has no 256-bit overflow,
  * but the contract picks one of two algebraically-different roundings depending on `sqrtRatioX96`'s magnitude (to
  * stay inside `FullMath.mulDiv`'s 512-bit intermediate); matching that branch, not just the limit as precision

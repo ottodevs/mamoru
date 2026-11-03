@@ -1897,7 +1897,7 @@ export class BridgeOut {
       amount = usdcHeld
       calls = [
         { target: L1_USDC, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [d.policy, amount] }) },
-        { target: d.policy, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'bridge', args: [CCTP_DOMAIN_BASE, L1_USDC, amount] }) },
+        { target: d.policy, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'bridge', args: [CCTP_DOMAIN_BASE, L1_USDC, amount, 0n] }) },
       ]
     } else {
       // This op's prefund, and the bridge home's at the highest fee a sibling op ever pays (review r1 of #238: a rise in

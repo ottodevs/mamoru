@@ -406,9 +406,11 @@ contract MamoruV4Helper {
         (e, key, ref, mask) = classEntry(p.token0, p.token1);
         if (MamoruV4Classes.feeBit(p.fee) & mask == 0) revert NotEligible(pool, 3);
         // Rule 4 (T6 L-4, kept from V3): an observation ring at least the long window's length, so the window is served
-        // at block granularity, not interpolated across a sparse ring (review r1 of #228).
-        (,,,, uint16 next,,) = IUniswapV3Pool(pool).slot0();
-        if (next < e.twapWindow) revert NotEligible(pool, 4);
+        // at block granularity, not interpolated across a sparse ring (review r1 of #228). #345 P2-2: the ring the pool
+        // HOLDS, slot0's `observationCardinality` (index 3), not `observationCardinalityNext` (index 4), the size it will
+        // grow to, which anyone raises with one `increaseObservationCardinalityNext` call before any slot is written.
+        (,,, uint16 filled,,,) = IUniswapV3Pool(pool).slot0();
+        if (filled < e.twapWindow) revert NotEligible(pool, 4);
         if (pool != ref) {
             int24 band = int24(e.bandTicks);
             int24 d = _longTwap(pool, e.twapWindow) - _longTwap(ref, e.twapWindow);
@@ -492,22 +494,55 @@ contract MamoruV4Helper {
         _requireSpotIn(pool, lo, hi);
     }
 
-    /// V3's decrease check: minimums at the edges of the TWAP range WITHOUT the anchor (LeftClaw M-6). `ok` false when
-    /// that range is empty.
+    /// V3's decrease check: minimums at the edges of `exitRange` (the TWAP range WITHOUT the anchor, LeftClaw M-6, and
+    /// never empty, #345). A spot anywhere in that range returns at least these from the decrease.
     function exitMins(address pool, PoolEntryV4 calldata e, address npm, uint256 tokenId, uint128 liquidity)
         external
         view
-        returns (bool ok, uint256 min0, uint256 min1)
+        returns (uint256 min0, uint256 min1)
     {
-        int24 lo;
-        int24 hi;
-        (ok, lo, hi) = _range(e, pool, false);
-        if (!ok) return (false, 0, 0);
+        (int24 lo, int24 hi) = exitRange(pool, e);
         (,,,,, int24 lower, int24 upper,,,,,) = INPMV4(npm).positions(tokenId);
         uint160 sa = TickMath.getSqrtRatioAtTick(lower);
         uint160 sb = TickMath.getSqrtRatioAtTick(upper);
         (min0,) = LiquidityAmounts.getAmountsForLiquidity(TickMath.getSqrtRatioAtTick(hi), sa, sb, liquidity);
         (, min1) = LiquidityAmounts.getAmountsForLiquidity(TickMath.getSqrtRatioAtTick(lo), sa, sb, liquidity);
+    }
+
+    /**
+     * The range an exit's minimums are priced at (spec 010 "Exits are never gated by eligibility"; #345 P2-1). No anchor
+     * (LeftClaw M-6). When the long and short TWAPs agree it is V3's range, the INTERSECTION of the band around each:
+     * [max(long, short) - band + 1, min(long, short) + band]. When they are more than about 2 x band apart, that
+     * intersection is empty. V3 (M-6) then refused every exit, and after a fast move (the short TWAP has followed the
+     * market, the long one has not) a session could not decrease for up to the long window (30 min): a crash blocked the
+     * exit. Here the range is then the UNION of the two bands: [min(long, short) - band + 1, max(long, short) + band].
+     *
+     * Why the union, and not the band around one TWAP alone:
+     *  - The long TWAP's band alone fails the case it is for: after a crash the spot sits near the short TWAP, outside
+     *    the long band, so the position holds less of one token than the long band's edge assumes and the position
+     *    manager's own minimum check refuses the decrease. The exit stays blocked, by another check.
+     *  - The short TWAP's band alone is tighter but follows a whipsaw only one way: a rebound toward the long TWAP before
+     *    the short window catches up leaves the spot outside it again.
+     *  - The union is the smallest range that holds the spot within one band of either average, and it still never
+     *    accepts a spot more than one band past BOTH TWAPs. A sandwich moves the spot inside one block; it moves a 5 min
+     *    TWAP by at most (displacement x block time / window) and the 30 min one by a sixth of that, so it cannot open
+     *    the union (that needs the TWAPs 2 x band apart) and cannot push the edges. Widening the range needs the pool
+     *    held away from the market for a good part of the short window against arbitrage: the multi-block cost V3's
+     *    short TWAP already rests on (LeftClaw M-1).
+     *  - What is bounded is a decrease: the tokens go to the account, never to the session's controller, and swapping
+     *    them afterwards is a separate priced, charged call with the intersection range. Entries keep the intersection
+     *    (and the anchor), so nothing new can be opened at a union price.
+     * Same math in TS: `exitRange` in packages/uniswap-v3/src/policy-bounds.ts.
+     */
+    function exitRange(address pool, PoolEntryV4 calldata e) public view returns (int24 lo, int24 hi) {
+        (int24 tl, int24 ts) = _oracle(e, pool);
+        (int24 bottom, int24 top) = tl < ts ? (tl, ts) : (ts, tl);
+        int256 band = int256(uint256(e.bandTicks));
+        int256 l = int256(top) - band + 1;
+        int256 h = int256(bottom) + band;
+        if (l > h) (l, h) = (int256(bottom) - band + 1, int256(top) + band);
+        lo = _clamp(l);
+        hi = _clamp(h);
     }
 
     function priceRangeAt(address pool, PoolEntryV4 calldata e) external view returns (int24 lo, int24 hi) {
@@ -540,7 +575,7 @@ contract MamoruV4Helper {
     }
 
     /// V3 `_range`: lo = max(long, short) - band + 1, hi = min(long, short) + band, clipped to the anchor when
-    /// `anchored` (every action but decrease: LeftClaw M-6). `ok` false when empty.
+    /// `anchored`. `ok` false when empty. Every entry uses it anchored; an exit uses `exitRange`.
     function _range(PoolEntryV4 calldata e, address pool, bool anchored) internal view returns (bool ok, int24 lo, int24 hi) {
         (int24 tl, int24 ts) = _oracle(e, pool);
         int24 top = tl > ts ? tl : ts;
@@ -760,7 +795,12 @@ library RollingSum {
  *    (they move no tokens out of the account); `receiveMessage` on the pinned CCTP transmitter; wrap and unwrap of the
  *    native coin. Everything else is refused, direct router, position manager, messenger and vault calls included.
  *  - I9, ERC-7562-compliant validation (spec 009 POL-12): `checkAction` reads only storage keyed by the account (every
- *    mapping has the account as its last key) and makes no external call. The price, depth, budget and position checks
+ *    mapping has the account as its last key) and no market or account state anywhere else. Its one external call is
+ *    `TABLE.chain(block.chainid)`: a `pure` function of MamoruV4Table, which has no storage at all, so it reads only
+ *    code, and the table is V4's own constructor argument, the same address and code for every account. ERC-7562
+ *    restricts the storage a validation touches and the opcodes it runs, not a call into a contract that has code
+ *    (OP-041 bans only calls to an address without code): this call touches no storage slot and runs no banned opcode
+ *    (test/V4Erc7562Fork.t.sol). The price, depth, budget and position checks
  *    run at execution, inside V4's own functions, and an exit's price check in `checkExit`, which MamoruGasPolicyV2
  *    requires right before every `decreaseLiquidity` of the batch. So any standard bundler can take a session op.
  *  - Eligibility by rule (A1): pools of the pinned factory, pinned tokens, the class's fee set, depth, the parity anchor
@@ -805,8 +845,10 @@ contract MamoruActionPolicyV4 {
     address public constant TOKEN_MESSENGER = 0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d;
     /// CCTP V2 MessageTransmitterV2 (`localDomain()` 6 on Base, 15 on Monad, 0 on Ethereum; read on chain 2 Nov).
     address public constant MESSAGE_TRANSMITTER = 0x81D40F21F12A8F0E3252Bccb954D722d4c464B64;
-    /// CCTP V2 Standard (attested at finality, no fee), for burns and readiness messages; Fast (1000) never.
+    /// CCTP V2 Standard (attested at finality), for burns and readiness messages; Fast (1000) never.
     uint32 public constant CCTP_MIN_FINALITY = 2000;
+    /// #345 P2-5: the hard bound on a table row's `cctpFeeCapBps` (checked by the deploy script and a unit test).
+    uint16 public constant MAX_CCTP_FEE_CAP_BPS = 100;
     /// S: how far `clock(T)` may be from the block's time (MamoruGasPolicyV2.CLOCK_SLACK).
     uint256 public constant CLOCK_SLACK = 5 minutes;
 
@@ -1015,7 +1057,8 @@ contract MamoruActionPolicyV4 {
 
     /// I1: the fallback action's only policy. Admits V4's own functions, approvals to V4, the position manager's exits
     /// of admitted positions, a CCTP readiness message relayed by the account, and wrap/unwrap; refuses every other
-    /// call. I9: reads only the account's own storage and the code-pinned table, no external call (ERC-7562).
+    /// call. I9 (ERC-7562): reads only the account's own storage; its one external call, `TABLE.chain`, is a pure
+    /// function of a contract with no storage (code only, the same for every account), so it reads no state.
     function checkAction(ConfigIdV4 id, address account, address target, uint256 value, bytes calldata data)
         external
         view
@@ -1087,14 +1130,16 @@ contract MamoruActionPolicyV4 {
     /// I9: the price check of an exit, at execution, right before the position manager's `decreaseLiquidity` with the
     /// same arguments (MamoruGasPolicyV2 checks the pairing). As V3's decrease check: a position admitted for the
     /// account that it owns; the minimums at the edges of the pool's TWAP range WITHOUT the anchor (LeftClaw M-6), with
-    /// the pair's class, never its eligibility, so a crash or a depeg does not block the exit.
+    /// the pair's class, never its eligibility, so a depeg does not block the exit. #345 P2-1: that range is never
+    /// empty (MamoruV4Helper.exitRange: the union of the two TWAP bands when they disagree), so a crash does not block
+    /// it either.
     function checkExit(uint256 tokenId, uint128 liquidity, uint256 amount0Min, uint256 amount1Min) external view {
         address account = msg.sender;
         address pool = _admitted[tokenId][account];
         address npm = _chain().npm;
         if (!_isAdmitted(pool) || INPMV4(npm).ownerOf(tokenId) != account) revert NotAdmitted(tokenId);
-        (bool ok, uint256 min0, uint256 min1) = HELPER.exitMins(pool, HELPER.exitEntry(pool), npm, tokenId, liquidity);
-        if (!ok || amount0Min < min0 || amount1Min < min1) revert ExitBelowBand();
+        (uint256 min0, uint256 min1) = HELPER.exitMins(pool, HELPER.exitEntry(pool), npm, tokenId, liquidity);
+        if (amount0Min < min0 || amount1Min < min1) revert ExitBelowBand();
     }
 
     /// Spec 009 POL-07: after an approval's reset, the account's allowance to V4 on `token` is zero.
@@ -1246,13 +1291,26 @@ contract MamoruActionPolicyV4 {
      * only to (a) the account's remote on `domain` (a chain of the table), proven ready for the account's CURRENT owners
      * hash by a message from that chain's V4 (A1), the owners unchanged since; or (b) on a remote Safe, the home account
      * on its home domain, always (bridge-back); on a sibling, its own address on the home domain once proven ready.
-     * Open destinationCaller, no fee, as V3. Not charged: the value stays the user's (the remote's own V4 bounds it).
+     * Open destinationCaller, as V3. The amount is not charged: the value stays the user's (the remote's own V4 bounds
+     * it).
+     *
+     * #345 P2-5, `maxFee`: the most Circle may keep of `amount` on the destination (CCTP V2 `depositForBurn`'s maxFee).
+     * Standard transfers carry no fee today, so the engine passes 0. V3, and V4 before #345, hard-coded 0: a fee added
+     * to Standard would have reverted every burn, bridge-back included, until a new V4. The caller names it, up to the chain's pinned
+     * `cctpFeeCapBps` of `amount` (MamoruV4Chains, at most MAX_CCTP_FEE_CAP_BPS). The fee goes to Circle's fee
+     * recipient, never to the session's controller, so it is not value a leaked key can take; a leaked key could still
+     * burn it to Circle hop after hop, so a non-zero maxFee is charged in full (the ceiling, the executed fee is not
+     * known yet) to the account bucket, the 24 h cap and the 30-day cap, under its own sub-bucket key (the messenger,
+     * at 100 % of C, so only the account-wide limits bind). With maxFee 0 nothing is charged, exactly as before. No
+     * absolute ceiling: the bps cap already scales with the amount, Circle's `burnLimitsPerMessage` bounds the amount,
+     * and a flat ceiling would only turn a large bridge into a refused one again.
      */
-    function bridge(uint32 domain, address token, uint256 amount) external nonReentrant {
+    function bridge(uint32 domain, address token, uint256 amount, uint256 maxFee) external nonReentrant {
         address account = msg.sender;
         Config memory c = _live(account);
         MamoruV4Chains.Chain memory ch = _chain();
         if (amount == 0) revert ZeroAmount();
+        if (maxFee > amount * ch.cctpFeeCapBps / MAX_RATIO_BPS) revert BadBridge(6);
         if (!MamoruV4Chains.isStable(ch, token)) revert NotPinned(token);
         if (ITokenMinterV4(ITokenMessengerV2V4(TOKEN_MESSENGER).localMinter()).burnLimitsPerMessage(token) == 0) {
             revert BadBridge(1);
@@ -1270,10 +1328,11 @@ contract MamoruActionPolicyV4 {
             if (!isReady(account, domain)) revert RemoteNotReady(domain);
             recipient = _remote[domain][account].remote;
         }
+        if (maxFee != 0) _charge(account, c, TOKEN_MESSENGER, MAX_RATIO_BPS, maxFee);
         _pull(token, account, amount);
         _approve(token, TOKEN_MESSENGER, amount);
         ITokenMessengerV2V4(TOKEN_MESSENGER).depositForBurn(
-            amount, domain, bytes32(uint256(uint160(recipient))), token, bytes32(0), 0, CCTP_MIN_FINALITY
+            amount, domain, bytes32(uint256(uint160(recipient))), token, bytes32(0), maxFee, CCTP_MIN_FINALITY
         );
         _approve(token, TOKEN_MESSENGER, 0);
         emit Bridged(account, domain, recipient, token, amount);

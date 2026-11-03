@@ -471,6 +471,107 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         v4.checkExit(tokenId, liq, min0, min1); // the price check at execution passes too
     }
 
+    // ------------------------------------------------------------ #345 P2-1: a fast crash does not block the exit
+
+    function _floorDiv(int56 d, uint32 w) internal pure returns (int24 t) {
+        t = int24(d / int56(uint56(w)));
+        if (d < 0 && d % int56(uint56(w)) != 0) t--;
+    }
+
+    /// Both TWAPs as V4 reads them (MamoruV4Helper._oracle).
+    function _twaps(address pool, PoolEntryV4 memory e) internal view returns (int24 tl, int24 ts) {
+        uint32[] memory ago = new uint32[](3);
+        (ago[0], ago[1]) = (e.twapWindow, e.twapShortWindow);
+        (int56[] memory tc,) = IUniswapV3Pool(pool).observe(ago);
+        (tl, ts) = (_floorDiv(tc[2] - tc[0], e.twapWindow), _floorDiv(tc[2] - tc[1], e.twapShortWindow));
+    }
+
+    /// A position, then the market moves 450 ticks in one block (cbBTC dumped) and stays there 10 min: the 5 min TWAP
+    /// has followed it, the 30 min one about a third of the way, so they are about 300 ticks apart, more than 2 x band.
+    function _crash() internal returns (uint256 tokenId, uint128 liq, PoolEntryV4 memory e) {
+        (tokenId, liq) = _mintThroughV4(acct, 1_000e6, 0.01e8);
+        e = helper.exitEntry(POOL_BTC);
+        vm.roll(vm.getBlockNumber() + 1);
+        vm.warp(vm.getBlockTimestamp() + 2);
+        _push(POOL_BTC, CBBTC, USDC, 500, 450);
+        vm.roll(vm.getBlockNumber() + 300);
+        vm.warp(vm.getBlockTimestamp() + 600);
+    }
+
+    /// #345 P2-1 (spec 010 "a crash or a depeg does not block the exit"): in the crash above V3's range (the
+    /// intersection of the two TWAP bands) is empty, so entries are refused, and V3 refused the exit too for up to the
+    /// long window. V4 prices the exit on the union of the two bands: the spot is inside it, `checkExit` passes at the
+    /// minimums the lens gives, and the position manager pays at least them.
+    function test_345_fastCrashDoesNotBlockTheExit() public {
+        (uint256 tokenId, uint128 liq, PoolEntryV4 memory e) = _crash();
+        int24 band = int24(e.bandTicks);
+        (int24 tl, int24 ts) = _twaps(POOL_BTC, e);
+        assertGt(ts - tl, 2 * band, "the TWAPs are more than 2 x band apart");
+        vm.expectPartialRevert(MamoruV4Helper.RangeEmpty.selector);
+        lens.priceRange(POOL_BTC); // entries: the intersection is empty
+        (int24 lo, int24 hi) = helper.exitRange(POOL_BTC, e);
+        assertEq(lo, tl - band + 1, "union: one band below the lower TWAP");
+        assertEq(hi, ts + band, "union: one band above the upper TWAP");
+        int24 spot = _spot(POOL_BTC);
+        assertTrue(spot >= lo && spot <= hi, "the spot is inside the exit range");
+        (uint256 min0, uint256 min1) = lens.decreaseMins(acct, tokenId, liq);
+        assertGt(min0, 0, "sane: some USDC");
+        assertGt(min1, 0, "sane: some cbBTC");
+        bytes memory dec = abi.encodeCall(INPMT.decreaseLiquidity, (DecreaseLiquidityParams(tokenId, liq, min0, min1, vm.getBlockTimestamp())));
+        assertEq(_check(acct, NPM, dec), 0, "the decrease validates");
+        vm.prank(acct);
+        vm.expectRevert(MamoruActionPolicyV4.ExitBelowBand.selector);
+        v4.checkExit(tokenId, liq, min0 - 1, min1); // still a floor: one unit under it is refused
+        vm.prank(acct);
+        v4.checkExit(tokenId, liq, min0, min1);
+        vm.prank(acct);
+        (uint256 got0, uint256 got1) =
+            INPMT(NPM).decreaseLiquidity(DecreaseLiquidityParams(tokenId, liq, min0, min1, vm.getBlockTimestamp()));
+        assertGe(got0, min0);
+        assertGe(got1, min1);
+    }
+
+    /// #345 P2-1: the union gives a sandwich nothing new. (a) With the TWAPs agreeing, a one-block push of the same 450
+    /// ticks moves the 5 min TWAP by a few ticks only, so the exit range stays V3's intersection and the decrease at
+    /// `checkExit`'s minimums reverts in the position manager while the spot is pushed; `checkExit` refuses anything
+    /// lower. (b) In the crash, a push of the spot one band past the union's edge is refused the same way: the exit never
+    /// executes more than one band past both TWAPs.
+    function test_345_manipulatedSpotCannotExtractBeyondTheBand() public {
+        (uint256 tokenId, uint128 liq) = _mintThroughV4(acct, 1_000e6, 0.01e8);
+        PoolEntryV4 memory e = helper.exitEntry(POOL_BTC);
+        int24 band = int24(e.bandTicks);
+        vm.roll(vm.getBlockNumber() + 1);
+        vm.warp(vm.getBlockTimestamp() + 2);
+        _push(POOL_BTC, CBBTC, USDC, 500, 450);
+        vm.roll(vm.getBlockNumber() + 1);
+        vm.warp(vm.getBlockTimestamp() + 2);
+        (int24 lo, int24 hi) = helper.exitRange(POOL_BTC, e);
+        assertLt(hi - lo, 2 * band, "(a) still the intersection: a one-block push cannot open the union");
+        assertGt(_spot(POOL_BTC), hi, "(a) the pushed spot is outside it");
+        (uint256 min0, uint256 min1) = lens.decreaseMins(acct, tokenId, liq);
+        vm.prank(acct);
+        vm.expectRevert(bytes("Price slippage check"));
+        INPMT(NPM).decreaseLiquidity(DecreaseLiquidityParams(tokenId, liq, min0, min1, vm.getBlockTimestamp()));
+        vm.prank(acct);
+        vm.expectRevert(MamoruActionPolicyV4.ExitBelowBand.selector);
+        v4.checkExit(tokenId, liq, 0, 0);
+    }
+
+    function test_345_crashThenPushPastTheUnionRefused() public {
+        (uint256 tokenId, uint128 liq, PoolEntryV4 memory e) = _crash();
+        (, int24 hi) = helper.exitRange(POOL_BTC, e);
+        (uint256 min0, uint256 min1) = lens.decreaseMins(acct, tokenId, liq);
+        _push(POOL_BTC, CBBTC, USDC, 500, hi + int24(e.bandTicks) - _spot(POOL_BTC)); // one band past the edge
+        assertGt(_spot(POOL_BTC), hi);
+        (, int24 hiNow) = helper.exitRange(POOL_BTC, e);
+        assertEq(hiNow, hi, "a same-block push does not move the union's edge");
+        vm.prank(acct);
+        v4.checkExit(tokenId, liq, min0, min1);
+        vm.prank(acct);
+        vm.expectRevert(bytes("Price slippage check"));
+        INPMT(NPM).decreaseLiquidity(DecreaseLiquidityParams(tokenId, liq, min0, min1, vm.getBlockTimestamp()));
+    }
+
     // ------------------------------------------------------------ A1: exits are never gated by eligibility
 
     /// A position whose pool stops being eligible (here: the factory no longer names it) is exit-only: no swap, no
@@ -525,7 +626,11 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         // rule 4 first: USDC/cbBTC 0.3 %'s ring holds 300 observations, under the class's 1,800 s window
         vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.NotEligible.selector, POOL_BTC_30, 4));
         helper.priced(POOL_BTC_30);
-        IUniswapV3Pool(POOL_BTC_30).increaseObservationCardinalityNext(1800); // anyone may raise it
+        // #345 P2-2: raising `observationCardinalityNext` (anyone may) writes no observation: still refused
+        IUniswapV3Pool(POOL_BTC_30).increaseObservationCardinalityNext(1800);
+        vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.NotEligible.selector, POOL_BTC_30, 4));
+        helper.priced(POOL_BTC_30);
+        _fillRing(POOL_BTC_30, 1800);
         assertEq(_key(POOL_BTC_30), CBBTC, "cbBTC's sub-bucket");
         assertEq(_key(POOL_BTC), CBBTC, "the same sub-bucket as the reference pool");
         assertEq(_key(POOL_ETH_05), WETH);
@@ -543,6 +648,17 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         helper.priced(POOL_BTC_30);
     }
 
+    /// The ring of `pool` filled to `n` slots (slot0's `observationCardinality`, bits 200-215 of storage slot 0): what
+    /// about n more blocks with a swap each would do once `observationCardinalityNext` is n. The slots past the old
+    /// cardinality stay uninitialized, which `observe` skips, so the window is served by the observations already there.
+    function _fillRing(address pool, uint16 n) internal {
+        uint256 w = uint256(vm.load(pool, bytes32(0)));
+        w = (w & ~(uint256(0xffff) << 200)) | (uint256(n) << 200);
+        vm.store(pool, bytes32(0), bytes32(w));
+        (,,, uint16 filled,,,) = IUniswapV3Pool(pool).slot0();
+        assertEq(filled, n);
+    }
+
     /// Nothing outside the code's tables can be named: not a "pool" that is a router, not a vault outside the exact
     /// list (a messenger, a position manager, a real MetaMorpho vault V4 does not list), not a chain outside the table.
     function test_A1_nothingOutsideTheTables() public {
@@ -558,7 +674,7 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         vm.expectRevert(abi.encodeWithSelector(MamoruV4Helper.BadVault.selector, STEAK_USDC));
         v4.deposit(STEAK_USDC, 1_000e6);
         vm.expectRevert(abi.encodeWithSelector(MamoruActionPolicyV4.BadBridge.selector, 3));
-        v4.bridge(3, USDC, 1e6); // Arbitrum's CCTP domain
+        v4.bridge(3, USDC, 1e6, 0); // Arbitrum's CCTP domain
         vm.stopPrank();
         assertEq(v4.TOKEN_MESSENGER(), TOKEN_MESSENGER);
     }

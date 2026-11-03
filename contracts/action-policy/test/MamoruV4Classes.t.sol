@@ -17,6 +17,7 @@ contract MamoruV4ClassesTest is Test {
     uint24 constant MAX_BAND = 500;
     uint16 constant MAX_RATIO_BPS = 10_000;
     uint16 constant MAX_VAULT_RATIO_BPS = 5_000;
+    uint16 constant MAX_CCTP_FEE_CAP_BPS = 100; // MamoruActionPolicyV4.MAX_CCTP_FEE_CAP_BPS (#345 P2-5)
 
     function _checkClass(uint256 chainId, address a, address b) internal pure returns (MamoruV4Classes.Class memory c) {
         c = MamoruV4Classes.classOf(chainId, a, b);
@@ -109,5 +110,16 @@ contract MamoruV4ClassesTest is Test {
             assertGe(ch.gasWindow, 2 * 5 minutes, "W well over twice the clock slack");
         }
         assertEq(MamoruV4Chains.byChainId(42161).gasPerWindow, 0, "off the table: every op refused");
+    }
+
+    /// #345 P2-5: every chain caps a CCTP burn's maxFee at 10 bps of the amount, inside V4's hard bound.
+    function test_cctpFeeCap() public pure {
+        uint256[3] memory ids = [uint256(8453), 143, 1];
+        for (uint256 i; i < 3; i++) {
+            MamoruV4Chains.Chain memory ch = MamoruV4Chains.byChainId(ids[i]);
+            assertEq(ch.cctpFeeCapBps, 10, "10 bps");
+            assertLe(ch.cctpFeeCapBps, MAX_CCTP_FEE_CAP_BPS, "hard bound");
+        }
+        assertEq(MamoruV4Chains.byChainId(42161).cctpFeeCapBps, 0, "off the table");
     }
 }

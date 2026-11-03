@@ -139,7 +139,7 @@ contract V4UserOpForkTest is V4Fixture {
         v4.handleReceiveFinalizedMessage(DOMAIN_MONAD, bytes32(uint256(uint160(address(v4)))), 2000, abi.encode(safe, r.remote, r.ownersHash));
         assertTrue(v4.isReady(safe, DOMAIN_MONAD));
         address remote = r.remote;
-        xs = _approved(USDC, 100e6, address(v4), abi.encodeCall(MamoruActionPolicyV4.bridge, (DOMAIN_MONAD, USDC, 100e6)));
+        xs = _approved(USDC, 100e6, address(v4), abi.encodeCall(MamoruActionPolicyV4.bridge, (DOMAIN_MONAD, USDC, 100e6, 0)));
         uint256 u0 = IERC20T(USDC).balanceOf(safe);
         (watchEmitter, watchWord) = (TOKEN_MESSENGER, bytes32(uint256(uint160(remote))));
         uint256 bridgeGas = _run(safe, _batch(xs), pid);
@@ -166,7 +166,7 @@ contract V4UserOpForkTest is V4Fixture {
         v4.checkAction(id, safe, address(v4), 0, sw);
         uint256 gSwap = vm.lastCallGas().gasTotalUsed;
         vm.prank(SMART_SESSION);
-        v4.checkAction(id, safe, address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.bridge, (DOMAIN_MONAD, USDC, 1)));
+        v4.checkAction(id, safe, address(v4), 0, abi.encodeCall(MamoruActionPolicyV4.bridge, (DOMAIN_MONAD, USDC, 1, 0)));
         uint256 gBridge = vm.lastCallGas().gasTotalUsed;
         uint256 tokenId = INPMT(NPM).tokenOfOwnerByIndex(safe, 0);
         (,,,,,,, uint128 liq,,,,) = INPMT(NPM).positions(tokenId);

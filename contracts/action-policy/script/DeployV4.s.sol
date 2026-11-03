@@ -30,6 +30,15 @@ import {IModuleRegistry} from "./Deploy.s.sol";
  * POL-01). Pools, vaults and chains are the table's constants (MamoruV4Chains, MamoruV4Classes in MamoruV4Table).
  * `run()` refuses any other deployer, and any chain outside V4's table; it skips what is already deployed, so a run
  * that stopped half-way resumes, and checks every address and wiring after.
+ *
+ * After every broadcast, on EACH chain, run `verify()` against that chain's LIVE RPC (#345 P2-3), not a fork:
+ *
+ *   forge script script/DeployV4.s.sol --sig "verify()" --rpc-url <chain>
+ *
+ * `run()`'s own `check` runs inside forge's simulation, and DeployV4Fork.t.sol on a fork: neither proves what the chain
+ * holds after the transactions landed (a reorg, a dropped transaction, a resumed run on another RPC). `verify()` is
+ * `check(predict())` with the pinned addresses, read from the chain itself. Nothing is announced or adopted on a chain
+ * until it passes there.
  */
 contract DeployMamoruV4 is Script {
     address constant MODULE_REGISTRY = 0x000000000069E2a187AEFFb852bF3cCdC95151B2;
@@ -45,9 +54,9 @@ contract DeployMamoruV4 is Script {
 
     /// The addresses `predict()` gives for this source and compiler (identical on Base, Monad and Ethereum). A source
     /// or compiler change moves them: `run()` then refuses, and re-pinning is a deliberate commit.
-    address public constant EXPECTED_TABLE = 0xEbC30bC42631f2c8C2B0b03F6B91aD52d70b402C;
-    address public constant EXPECTED_GAS_POLICY = 0xB13ca2e96a0ae2387AAF547285E928CE3A2C942b;
-    address public constant EXPECTED_POLICY = 0xa5312681D0fa9550C0A4c6Db6f8e1DFC1487f9A0;
+    address public constant EXPECTED_TABLE = 0xDa201a0A72660e885b5314C1b889255bcE78a4eD;
+    address public constant EXPECTED_GAS_POLICY = 0x16d11189D987E123a7317b5786F1B20a84dFd28A;
+    address public constant EXPECTED_POLICY = 0xe495F8676f989f0813A2227db56586B1a183B2e7;
     address public constant EXPECTED_CHECK = 0xc04046b4649471875372FA9e800143491cD4fB31;
 
     /// Selectors no V4 contract may carry (spec 010 I7, spec 009 POL-01): guardian, pause, review, readiness setter.
@@ -144,6 +153,19 @@ contract DeployMamoruV4 is Script {
         console2.log("MamoruMigrationCheck  ", s.check);
     }
 
+    /// #345 P2-3: the post-broadcast audit of one chain, read-only. Run it against each chain's live RPC (contract
+    /// notice). Reverts unless the pinned addresses are the predicted ones and `check` passes on this chain now.
+    function verify() external view returns (Stack memory s) {
+        require(MamoruV4Chains.byChainId(block.chainid).chainId != 0, "DeployV4: chain outside V4's table");
+        s = predict();
+        require(
+            s.table == EXPECTED_TABLE && s.gasPolicy == EXPECTED_GAS_POLICY && s.policy == EXPECTED_POLICY
+                && s.check == EXPECTED_CHECK,
+            "DeployV4: predicted addresses moved (source or compiler change): re-pin deliberately"
+        );
+        check(s);
+    }
+
     function _viaDeterministic(bytes32 salt, bytes memory initCode) internal {
         (bool ok,) = CREATE2_DEPLOYER.call(abi.encodePacked(salt, initCode));
         require(ok, "DeployV4: deterministic deployer");
@@ -154,6 +176,7 @@ contract DeployMamoruV4 is Script {
     /// listed vault's asset() is its pinned stable. A row outside them stays until a new version: refused here first.
     function checkTable(IMamoruV4Table t, MamoruActionPolicyV4 p) public view {
         MamoruV4Chains.Chain memory ch = t.chain(block.chainid);
+        require(ch.cctpFeeCapBps <= p.MAX_CCTP_FEE_CAP_BPS(), "table: CCTP fee cap"); // #345 P2-5
         address[2][] memory pairs = t.pairsOf(block.chainid);
         for (uint256 i; i < pairs.length; i++) {
             MamoruV4Classes.Class memory c = t.classOf(block.chainid, pairs[i][0], pairs[i][1]);

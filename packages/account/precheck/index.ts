@@ -16,7 +16,7 @@ const V4_ENTRY = new Set(
     'function increase((uint256,uint256,uint256,uint256,uint256,uint256))',
     'function deposit(address,uint256)',
     'function redeem(address,uint256)',
-    'function bridge(uint32,address,uint256)',
+    'function bridge(uint32,address,uint256,uint256)',
     'function registerRemote(uint32,address)',
   ].map((s) => toFunctionSelector(s).toLowerCase()),
 )

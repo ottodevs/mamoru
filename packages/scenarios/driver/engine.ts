@@ -29,7 +29,7 @@ import type { Execution } from '@mamoru/account/safe'
 import { policyIncrease, uniswapV3, type UniswapV3, type V3Call } from '@mamoru/uniswap-v3'
 import { minOut, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { diverges, swapMinimum, twapFloor as deviationFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
-import { DEFAULT_BAND_FACTOR_BPS, decreaseMinsInRange, oracleFromObserve, priceRange, swapBoundsInRange, type OracleRead, type PriceAnchor, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
+import { DEFAULT_BAND_FACTOR_BPS, decreaseMinsInRange, exitRange as v4ExitRange, oracleFromObserve, priceRange, swapBoundsInRange, type OracleRead, type PriceAnchor, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
 import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
 import { MemoryJournal, type DecisionRecord, type OpRecord } from './journal.ts'
 
@@ -140,7 +140,7 @@ function isV4Policy(ap: PolicyVersion['actionPolicy'] | undefined): ap is NonNul
 const v4SwapAbi = parseAbi([
   'struct SwapParams { address pool; address tokenIn; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; uint256 deadline; }',
   'function swap(SwapParams s) returns (uint256 amountOut)',
-  'function bridge(uint32 domain, address token, uint256 amount)',
+  'function bridge(uint32 domain, address token, uint256 amount, uint256 maxFee)',
 ])
 
 /** CCTP V2 Standard finality: attested at finality, no fee. The only threshold the bridge-out grant allows (>= 2000). */
@@ -1590,7 +1590,7 @@ export class Engine {
       expiresAt: null,
       calls: [
         { target: token, value: 0n, callData: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [v4, p.amount] }) },
-        { target: v4, value: 0n, callData: encodeFunctionData({ abi: v4SwapAbi, functionName: 'bridge', args: [domain, token, p.amount] }) },
+        { target: v4, value: 0n, callData: encodeFunctionData({ abi: v4SwapAbi, functionName: 'bridge', args: [domain, token, p.amount, 0n] }) },
       ],
     }
   }
@@ -1807,8 +1807,13 @@ export class Engine {
           const oracle = await this.poolOracle(p.pool, this.longWindow(p.pool, this.cfg.policy.execution.twapWindowSeconds), v4.twapShortSeconds, blockNumber)
           // LeftClaw M-6: MamoruActionPolicyV2 prices a decrease off the TWAP range alone, so a depeg past the anchor
           // does not lock the exit; V1 still clips it to the anchor.
-          const exitRange = atLeastV2(this.cfg.policy.actionPolicy) ? { bandTicks: v4.bandTicks } : v4
-          const bound = decreaseMinsInRange({ range: this.v4Range(p.pool, exitRange, oracle), tickLower: pos[5], tickUpper: pos[6], liquidity })
+          // #345: V4 never finds the exit range empty (the union of the two TWAP bands in a fast move): mirror it, the
+          // mode picked at V4's own band, the range built at the narrower one.
+          const ap = this.cfg.policy.actionPolicy
+          const range = isV4Policy(ap)
+            ? v4ExitRange(oracle, ap.bandTicksByPool[p.pool] ?? v4.bandTicks, v4.bandTicks)
+            : this.v4Range(p.pool, atLeastV2(ap) ? { bandTicks: v4.bandTicks } : v4, oracle)
+          const bound = decreaseMinsInRange({ range, tickLower: pos[5], tickUpper: pos[6], liquidity })
           if (bound.amount0Min > amount0Min) amount0Min = bound.amount0Min
           if (bound.amount1Min > amount1Min) amount1Min = bound.amount1Min
         }

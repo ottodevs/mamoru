@@ -61,7 +61,8 @@ export const mamoruActionPolicyV4Abi = parseAbi([
   'function increase(IncreaseLiquidityParams n) returns (uint128 liquidity, uint256 amount0, uint256 amount1)',
   'function deposit(address vault, uint256 assets) returns (uint256 shares)',
   'function redeem(address vault, uint256 shares) returns (uint256 assets)',
-  'function bridge(uint32 domain, address token, uint256 amount)',
+  // #345 P2-5: maxFee is CCTP's, up to the chain's MamoruV4Chains.cctpFeeCapBps of amount (10 bps); 0 for Standard today.
+  'function bridge(uint32 domain, address token, uint256 amount, uint256 maxFee)',
   'function registerRemote(uint32 domain, address sessionKey) returns (address remote)',
   'function announceReady(address safe, uint32 toDomain, address sessionKey, bytes32 permissionId)',
   'function remoteOf(address account, uint32 domain) view returns (Remote)',
@@ -97,7 +98,7 @@ export const mamoruV4HelperAbi = parseAbi([
 /** MamoruV4Table (A1): the per-chain table, pure data at the same CREATE2 address on every chain. */
 export const mamoruV4TableAbi = parseAbi([
   'struct GasCaps { uint64 maxPriorityFeePerGas; uint32 maxVerificationGasLimit; uint32 maxCallGasLimit; uint32 maxPreVerificationGas; uint64 maxFeePerGas; uint32 maxPaymasterGas; }',
-  'struct Chain { uint256 chainId; uint32 domain; address factory; address npm; address router; address[2] stables; address[2] assets; address wrapped; uint128 gasPerWindow; uint32 gasWindow; GasCaps remoteCaps; }',
+  'struct Chain { uint256 chainId; uint32 domain; address factory; address npm; address router; address[2] stables; address[2] assets; address wrapped; uint128 gasPerWindow; uint32 gasWindow; GasCaps remoteCaps; uint16 cctpFeeCapBps; }',
   'struct Class { address ref; address key; uint32 twapWindow; uint32 twapShortWindow; uint24 bandTicks; uint24 anchorBand; uint16 ratioBps; uint8 feeMask; }',
   'struct Vault { address asset; uint16 ratioBps; }',
   'function chain(uint256 chainId) pure returns (Chain)',

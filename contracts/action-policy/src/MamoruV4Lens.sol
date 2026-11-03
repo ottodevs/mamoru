@@ -13,7 +13,6 @@ contract MamoruV4Lens {
     MamoruActionPolicyV4 public immutable POLICY;
     MamoruV4Helper public immutable HELPER;
 
-    error RangeEmpty();
     error UnknownRemote(uint32 domain);
 
     constructor(MamoruActionPolicyV4 policy) {
@@ -44,10 +43,7 @@ contract MamoruV4Lens {
         returns (uint256, uint256)
     {
         address pool = POLICY.admittedPool(account, tokenId);
-        (bool ok, uint256 min0, uint256 min1) =
-            HELPER.exitMins(pool, HELPER.exitEntry(pool), POLICY.TABLE().chain(block.chainid).npm, tokenId, liquidity);
-        if (!ok) revert RangeEmpty();
-        return (min0, min1);
+        return HELPER.exitMins(pool, HELPER.exitEntry(pool), POLICY.TABLE().chain(block.chainid).npm, tokenId, liquidity);
     }
 
     /// The relayer's permissionless deployment of `account`'s registered remote on `domain`, from the account's current
