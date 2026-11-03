@@ -1,7 +1,7 @@
 // otto/mamoru#215: the bridge leg's journal, its settlement from Base, the mint relay on Monad and the remote value.
 // Every client here is a mock: no RPC, no key, no transaction. Iris is a mocked fetch.
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { concat, getAddress, encodeAbiParameters, encodeEventTopics, encodeFunctionResult, keccak256, pad, parseAbiItem, toHex, zeroHash, type Hex, type Log, type PublicClient } from 'viem'
@@ -901,7 +901,7 @@ describe('stuck burns (otto/mamoru#245)', () => {
     now += 2 * MIN
     await s.bridge.tick()
     const b = s.j().burns[UOP]!
-    expect(b).toMatchObject({ state: 'burned', stuckAt: new Date(now).toISOString(), stuckReason: 'no_attestation', stuckAlertedAt: new Date(now).toISOString() })
+    expect(b).toMatchObject({ state: 'burned', stuckAt: new Date(now).toISOString(), stuckReason: 'no_attestation', stuckAlertedAt: { burned: new Date(now).toISOString() } })
     for (let i = 0; i < 5; i++) {
       now += MIN
       await s.bridge.tick()
@@ -936,7 +936,7 @@ describe('stuck burns (otto/mamoru#245)', () => {
     await restarted.bridge.tick()
     a.restore()
     expect(a.lines).toHaveLength(1)
-    expect(restarted.j().burns[UOP]).toMatchObject({ stuckReason: 'no_attestation', stuckAlertedAt: new Date(T0 + 46 * MIN).toISOString() })
+    expect(restarted.j().burns[UOP]).toMatchObject({ stuckReason: 'no_attestation', stuckAlertedAt: { burned: new Date(T0 + 46 * MIN).toISOString() } })
   })
 
   test('the deadlines come from the engine setting: a sending burn past it is not_sent; a burned one inside it is not stuck', async () => {
@@ -1014,7 +1014,7 @@ describe('stuck burns (otto/mamoru#245)', () => {
     expect(b.state).toBe('minted')
     expect(b.stuckAt).toBeUndefined()
     expect(b.stuckReason).toBeUndefined()
-    expect(b.stuckAlertedAt).toBe(new Date(T0 + 46 * MIN).toISOString())
+    expect(b.stuckAlertedAt).toEqual({ burned: new Date(T0 + 46 * MIN).toISOString() })
     expect(s.bridge.view(UOP)!.stuckReason).toBeUndefined()
     expect(s.bridge.metrics()).toMatchObject({ stuckCount: 0, inFlightCount: 0, inFlightUsdc: '0', oldestBurnAgeS: null })
     expect(s.bridge.metrics().relayerMon).toMatchObject({ wei: (10n ** 18n).toString() })
@@ -1052,5 +1052,108 @@ describe('stuck burns (otto/mamoru#245)', () => {
     expect(s.bridge.capUsdc([ACCOUNT], () => 5_009n)).toBe(AMOUNT)
     expect(s.bridge.capUsdc([ACCOUNT], () => 5_010n)).toBe(0n)
     expect(a.lines).toHaveLength(1)
+  })
+
+  // Gate round 1 of #258.
+  test('paged once per state: stuck sending, then stuck burned, pages twice; never more', async () => {
+    const a = alerts()
+    let now = T0
+    const base = { safe: 1_005n } as { safe: bigint; landed?: { block: bigint } }
+    const s = setup({ now: () => now, base: baseClient(base), iris: {} })
+    s.bridge.recordSending('acc-1', signing())
+    now += 31 * MIN
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]).toMatchObject({ state: 'sending', stuckReason: 'not_sent', stuckAlertedAt: { sending: new Date(now).toISOString() } })
+    // It lands: no longer stuck; burned at this time, then no attestation for 45 min.
+    Object.assign(base, { safe: 1_020n, landed: { block: 1_010n } })
+    now += MIN
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.state).toBe('burned')
+    expect(s.j().burns[UOP]!.stuckAt).toBeUndefined()
+    now += 44 * MIN
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.stuckAt).toBeUndefined()
+    now += 2 * MIN
+    await s.bridge.tick()
+    await s.bridge.tick()
+    a.restore()
+    expect(s.j().burns[UOP]!.stuckAlertedAt).toEqual({ sending: new Date(T0 + 31 * MIN).toISOString(), burned: new Date(now).toISOString() })
+    expect(a.lines).toHaveLength(2)
+    expect(a.lines[0]).toContain('sending')
+    expect(a.lines[1]).toContain('burned')
+  })
+
+  test('a legacy string stuckAlertedAt on disk is read as paged for the state the burn is in', async () => {
+    const a = alerts()
+    let now = T0
+    const s = await burnedAt(() => now)
+    now += 46 * MIN
+    await s.bridge.tick()
+    const file = join(s.dir, 'bridge-monad.json')
+    const j = JSON.parse(readFileSync(file, 'utf8'))
+    j.burns[UOP].stuckAlertedAt = '2026-10-27T10:46:00.000Z'
+    writeFileSync(file, JSON.stringify(j))
+    const restarted = setup({ dir: s.dir, now: () => now + MIN, base: baseClient({ safe: 1_020n, landed: { block: 1_010n } }), iris: {} })
+    await restarted.bridge.tick()
+    a.restore()
+    expect(a.lines).toHaveLength(1)
+    expect(restarted.j().burns[UOP]!.stuckAlertedAt).toEqual({ burned: '2026-10-27T10:46:00.000Z' })
+  })
+
+  test('a burned entry without burnedAt (old journals) reaches its deadline from `at`, though every Iris poll moves updatedAt', async () => {
+    const a = alerts()
+    let now = T0
+    const s = await burnedAt(() => now)
+    delete (s.bridge as unknown as { journal: { burns: Record<string, BridgeBurn> } }).journal.burns[UOP]!.burnedAt
+    for (let i = 0; i < 46; i++) {
+      now += MIN
+      await s.bridge.tick()
+    }
+    a.restore()
+    const b = s.j().burns[UOP]!
+    expect(Date.parse(b.updatedAt)).toBeGreaterThan(T0 + 40 * MIN)
+    expect(b).toMatchObject({ state: 'burned', stuckReason: 'no_attestation' })
+    expect(a.lines).toHaveLength(1)
+  })
+
+  test('an entry without accountKey neither stops the pass nor the prune', async () => {
+    const a = alerts()
+    let now = T0
+    const s = await burnedAt(() => now)
+    const burns = (s.bridge as unknown as { journal: { burns: Record<string, BridgeBurn> } }).journal.burns
+    const bad = `0x${'33'.repeat(32)}` as Hex
+    burns[bad] = { ...burns[UOP]!, id: bad, accountKey: undefined as unknown as string, txHash: undefined }
+    const old = `0x${'44'.repeat(32)}` as Hex
+    burns[old] = { ...burns[UOP]!, id: old, state: 'failed', updatedAt: new Date(T0 - 31 * 86_400_000).toISOString() }
+    now += 46 * MIN
+    await s.bridge.tick()
+    a.restore()
+    expect(s.j().burns[UOP]!.stuckReason).toBe('no_attestation')
+    expect(s.j().burns[bad]!.stuckReason).toBe('no_attestation')
+    expect(s.j().burns[old]).toBeUndefined()
+    expect(a.lines).toHaveLength(2)
+  })
+
+  test('with the CCTP nonce known, a pass reads usedNonces once, on the poll timer', async () => {
+    let now = T0
+    const att = await attest(message({ nonce: 42n, executed: true }))
+    const s = await burnedAt(() => now, { iris: { [BURN_TX]: [att] } })
+    s.st.balance = 0n
+    now += 6 * MIN
+    await s.bridge.tick()
+    expect(s.j().burns[UOP]!.cctpNonce).toBe(u(42n, 32))
+    let reads = 0
+    const monad = (s.bridge as unknown as { monad: PublicClient }).monad
+    const read = monad.readContract.bind(monad)
+    ;(monad as { readContract: unknown }).readContract = async (a: { functionName: string }) => {
+      if (a.functionName === 'usedNonces') reads++
+      return read(a as never)
+    }
+    now += 30_000
+    await s.bridge.tick()
+    expect(reads).toBe(0) // inside ATTEST_POLL_MS
+    now += 31_000
+    await s.bridge.tick()
+    expect(reads).toBe(1)
   })
 })

@@ -45,9 +45,18 @@ export type BridgeStuckAfterMin = { sending: number; burned: number }
 /** otto/mamoru#245: Standard finality Base to Monad takes 13-19 min; these leave room for a slow attestation before paging. */
 export const DEFAULT_BRIDGE_STUCK_AFTER_MIN: BridgeStuckAfterMin = { sending: 30, burned: 45 }
 
-/** otto/mamoru#245: the deadlines in force under these settings (the code defaults when the version names none). */
+/**
+ * otto/mamoru#245: the deadlines in force under these settings. Clamped here, per field, whatever the settings came from
+ * (D1, last-known-good, the local file): a value that is not a whole number within the bounds is that field's default.
+ */
 export function bridgeStuckAfterOf(s: EngineSettings): BridgeStuckAfterMin {
-  return s.bridge?.stuckAfterMin ?? DEFAULT_BRIDGE_STUCK_AFTER_MIN
+  const m = s.bridge?.stuckAfterMin as Record<string, unknown> | undefined
+  const { min, max } = ENGINE_SETTINGS_BOUNDS.stuckAfterMin
+  const pick = (k: keyof BridgeStuckAfterMin): number => {
+    const v = m && typeof m === 'object' ? m[k] : undefined
+    return typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max ? v : DEFAULT_BRIDGE_STUCK_AFTER_MIN[k]
+  }
+  return { sending: pick('sending'), burned: pick('burned') }
 }
 
 /** `maxPerWeek` (#218): at most this many re-ranges per pool in 7 days, either mode; absent = no cap. */

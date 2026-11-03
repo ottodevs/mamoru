@@ -370,4 +370,14 @@ describe('bridge.stuckAfterMin', () => {
     expect(riskyChanges(DEFAULT_ENGINE_SETTINGS, on)).toEqual(['a stuck bridge to Monad is flagged and paged later'])
     expect(riskyChanges(on, DEFAULT_ENGINE_SETTINGS)).toEqual([])
   })
+
+  test('clamped per field whatever the source: a value that is not a whole number in bounds is that field\'s default', () => {
+    const of = (m: unknown) => bridgeStuckAfterOf({ ...DEFAULT_ENGINE_SETTINGS, bridge: { stuckAfterMin: m } } as never)
+    expect(of({ sending: 5, burned: 90 })).toEqual({ sending: 30, burned: 90 })
+    expect(of({ sending: 40, burned: 5000 })).toEqual({ sending: 40, burned: 45 })
+    expect(of({ sending: Number.NaN, burned: Number.POSITIVE_INFINITY })).toEqual(DEFAULT_BRIDGE_STUCK_AFTER_MIN)
+    expect(of({ sending: '40', burned: 40.5 })).toEqual(DEFAULT_BRIDGE_STUCK_AFTER_MIN)
+    expect(of(null)).toEqual(DEFAULT_BRIDGE_STUCK_AFTER_MIN)
+    expect(of({ sending: 20, burned: 1440 })).toEqual({ sending: 20, burned: 1440 })
+  })
 })

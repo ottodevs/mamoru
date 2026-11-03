@@ -118,8 +118,11 @@ export type BridgeBurn = {
   stuckAt?: string
   /** otto/mamoru#245: what holds it, a fixed code (the latest seen while stuck). */
   stuckReason?: BridgeStuckReason
-  /** otto/mamoru#245: when ops was paged about it. Never cleared: one alert per burn, across restarts. */
-  stuckAlertedAt?: string
+  /**
+   * otto/mamoru#245: when ops was paged about it, per state. Never cleared: one alert per (burn, state), across restarts.
+   * A journal written before it was per state holds a string: read as paged for the state the burn was then in.
+   */
+  stuckAlertedAt?: { sending?: string; burned?: string }
 }
 
 type Journal = {
@@ -279,6 +282,12 @@ export class MonadBridge {
       if (b.state === 'failed' || b.state === 'dropped') continue
       const list = (past[b.accountKey] ??= [])
       if (!list.some((a) => a.toLowerCase() === b.recipient.toLowerCase())) list.push(b.recipient)
+    }
+    // otto/mamoru#245: a stuckAlertedAt from before it was per state counts as paged for the state the burn is in.
+    for (const b of Object.values(j.burns ?? {})) {
+      const was = b.stuckAlertedAt as unknown
+      if (typeof was === 'string') b.stuckAlertedAt = b.state === 'sending' ? { sending: was } : { burned: was }
+      else if (was !== undefined && (was === null || typeof was !== 'object')) delete b.stuckAlertedAt
     }
     return { burns: j.burns ?? {}, mintDays: j.mintDays ?? {}, sleeves: j.sleeves ?? {}, cooldowns: j.cooldowns ?? {}, shown: j.shown ?? {}, pastRecipients: past }
   }
@@ -803,7 +812,12 @@ export class MonadBridge {
         } catch (e) {
           logErr(`[bridge-monad] ${b.account.slice(0, 10)} ${b.id.slice(0, 10)}:`, e)
         }
-        this.flagStuck(b)
+        // otto/mamoru#245: one bad entry never skips the rest of the pass nor the prune.
+        try {
+          this.flagStuck(b)
+        } catch (e) {
+          logErr(`[bridge-monad] stuck check of ${String(b.id).slice(0, 10)}:`, e)
+        }
       }
       this.prune()
     })
@@ -815,13 +829,15 @@ export class MonadBridge {
     Object.assign(b, patch, { updatedAt: this.iso() }, moved ? { stuckAt: undefined, stuckReason: undefined } : {})
     if (patch.state !== undefined) this.blockers.delete(b.id)
     this.save()
-    if (moved) console.log(`[bridge-monad] ${b.accountKey.slice(0, 8)} ${b.id.slice(0, 10)}: no longer stuck, now ${b.state}`)
+    if (moved) console.log(`[bridge-monad] ${(b.accountKey ?? '').slice(0, 8)} ${(b.id ?? '').slice(0, 10)}: no longer stuck, now ${b.state}`)
   }
 
   /**
    * otto/mamoru#245: a 'sending' burn older than its deadline (from `at`), or a 'burned' one (from `burnedAt`), is flagged
-   * stuck with the code of what holds it, and ops is paged once per burn: one [alert] line (forwarded to Mattermost by
-   * the ops alert-forward), its mark on disk first so a restart never pages again. Nothing else changes: the burn keeps
+   * stuck with the code of what holds it, and ops is paged once per burn and state: one [alert] line (forwarded to
+   * Mattermost by the ops alert-forward), its mark on disk first so a restart never pages again. A burn paged while
+   * sending is paged again if it then sticks while burned. `burnedAt` missing (old entries): from `at`, never `updatedAt`
+   * (every Iris poll moves that). Nothing else changes: the burn keeps
    * counting in flight and in the cap, and the next tick tries it again. Never throws.
    */
   private flagStuck(b: BridgeBurn): void {
@@ -832,16 +848,17 @@ export class MonadBridge {
     } catch {
       after = DEFAULT_BRIDGE_STUCK_AFTER_MIN
     }
-    const since = Date.parse(b.state === 'sending' ? b.at : (b.burnedAt ?? b.updatedAt))
+    const since = Date.parse(b.state === 'sending' ? b.at : (b.burnedAt ?? b.at))
     const mins = b.state === 'sending' ? after.sending : after.burned
     if (!Number.isFinite(since) || this.now() - since < mins * 60_000) return
     const reason = this.stuckReasonOf(b)
-    const page = b.stuckAlertedAt === undefined
+    const state = b.state as 'sending' | 'burned'
+    const page = b.stuckAlertedAt?.[state] === undefined
     if (b.stuckAt !== undefined && b.stuckReason === reason && !page) return
     // updatedAt is left as it was: the revert backoff and the prune read it.
     if (b.stuckAt === undefined) b.stuckAt = this.iso()
     b.stuckReason = reason
-    if (page) b.stuckAlertedAt = this.iso()
+    if (page) b.stuckAlertedAt = { ...b.stuckAlertedAt, [state]: this.iso() }
     try {
       this.save()
     } catch (e) {
@@ -849,7 +866,7 @@ export class MonadBridge {
       logErr('[bridge-monad] journal write failed (stuck flag kept in memory):', e)
     }
     // Codes and short ids only: no amount, no address.
-    if (page) logErr(`[alert] bridge to Monad stuck: account ${b.accountKey.slice(0, 8)} burn ${b.id.slice(0, 10)} ${b.state} for over ${mins} min (${reason}); still counted in flight and retried`, undefined)
+    if (page) logErr(`[alert] bridge to Monad stuck: account ${(b.accountKey ?? '').slice(0, 8)} burn ${(b.id ?? '').slice(0, 10)} ${b.state} for over ${mins} min (${reason}); still counted in flight and retried`, undefined)
   }
 
   /** otto/mamoru#245: the code of what holds a burn: what the last pass hit, else what was recorded, else what the journal shows. */
@@ -999,10 +1016,12 @@ export class MonadBridge {
     }
     const now = this.now()
     if (now - Date.parse(b.burnedAt ?? b.updatedAt) < ATTEST_FIRST_POLL_MS) return
-    // otto/mamoru#245: once the CCTP nonce is known, a mint by anyone else (the owner calling receiveMessage on Monad) is
-    // seen on every pass, without waiting for Iris to answer again.
-    if (b.cctpNonce && (await this.mintedElsewhere(b, b.cctpNonce))) return
     if (b.attestPolledAt && now - Date.parse(b.attestPolledAt) < ATTEST_POLL_MS) return
+    // otto/mamoru#245: once the CCTP nonce is known, a mint by anyone else (the owner calling receiveMessage on Monad) is
+    // seen on the burn's poll timer even when Iris does not answer; the check after the attestation is then skipped, so
+    // a pass reads usedNonces once, as before.
+    const checkedNonce = b.cctpNonce?.toLowerCase()
+    if (b.cctpNonce && (await this.mintedElsewhere(b, b.cctpNonce))) return
     const atts = await cctpAttestation(b.txHash, this.fetcher, CCTP_DOMAIN_BASE)
     // On disk: a restart does not poll again at once.
     this.update(b, { attestPolledAt: this.iso() })
@@ -1044,7 +1063,7 @@ export class MonadBridge {
     }
     // The CCTP nonce is on disk before anything else is read or sent for it (the duplicate check above reads it).
     if (b.cctpNonce?.toLowerCase() !== msg.nonce.toLowerCase()) this.update(b, { cctpNonce: msg.nonce })
-    if (await this.mintedElsewhere(b, msg.nonce)) return
+    if (checkedNonce !== msg.nonce.toLowerCase() && (await this.mintedElsewhere(b, msg.nonce))) return
     if (!this.relayer) return void this.blockers.set(b.id, 'mint_off')
     // A mint that reverted is not sent again at once: each revert doubles the wait, and past the cap none is sent (a mint by
     // anyone else is still seen by the used-nonce check above).

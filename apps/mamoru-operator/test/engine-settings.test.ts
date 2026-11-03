@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { settingsResponseSignature, verifyMetricsSignature } from '@mamoru/operator-auth'
 import { createHash } from 'node:crypto'
-import { canonicalSettingsJson, DEFAULT_ENGINE_SETTINGS, ENGINE_SETTINGS_TEMPLATES, type EngineSettings } from '@mamoru/policy'
+import { bridgeStuckAfterOf, canonicalSettingsJson, DEFAULT_ENGINE_SETTINGS, ENGINE_SETTINGS_TEMPLATES, type EngineSettings } from '@mamoru/policy'
 import { checkPayload, describeAccountCaps, ENGINE_SETTINGS_PATH, LOCAL_OVERRIDE_FILE, EngineSettingsSource, resolveFor, type SettingsVersion } from '../src/engine-settings.ts'
 
 const SECRET = 'op-secret'
@@ -327,5 +327,31 @@ describe('operator scopedFlags (otto/mamoru#217)', () => {
   })
   test('a non-object field refuses the pull', () => {
     expect(() => checkPayload({ ...base, scopedFlags: 'k' }, null)).toThrow('scopedFlags must be an object')
+  })
+})
+
+// otto/mamoru#245 (gate round 1 of #258): bridge.stuckAfterMin survives the pull, the per-account resolution, the env
+// override merge and the last-known-good file; nothing on the way drops the key.
+describe('bridge.stuckAfterMin through forAccount', () => {
+  test('a D1 version with bridge: wide, canary and last-known-good all resolve it; an account without one gets the defaults', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'settings-'))
+    const wide = { ...DEFAULT_ENGINE_SETTINGS, bridge: { stuckAfterMin: { sending: 60, burned: 120 } } }
+    const canary = { ...DEFAULT_ENGINE_SETTINGS, bridge: { stuckAfterMin: { sending: 25, burned: 50 } } }
+    const w = worker(() => ({ versions: [v(1, 'prod', wide), v(2, 'prod', canary, ['canary-acct']), v(3, 'beta', DEFAULT_ENGINE_SETTINGS)], betaAccounts: ['beta-acct'], servedAt: '2026-10-16T12:00:00.000Z' }))
+    const s = source(w.fetch, dir, { override: { depth: null } })
+    expect(await s.pull()).toBe(true)
+    expect(bridgeStuckAfterOf(s.forAccount('any').settings)).toEqual({ sending: 60, burned: 120 })
+    expect(bridgeStuckAfterOf(s.forAccount('canary-acct').settings)).toEqual({ sending: 25, burned: 50 })
+    expect(bridgeStuckAfterOf(s.forAccount('beta-acct').settings)).toEqual({ sending: 30, burned: 45 })
+    const again = source(worker(() => ({}), { status: 503 }).fetch, dir)
+    expect(again.status().source).toBe('last-known-good')
+    expect(bridgeStuckAfterOf(again.forAccount('any').settings)).toEqual({ sending: 60, burned: 120 })
+  })
+
+  test('a version out of bounds is refused at the pull: the defaults run', async () => {
+    const bad = { ...DEFAULT_ENGINE_SETTINGS, bridge: { stuckAfterMin: { sending: 5, burned: 120 } } }
+    const s = source(worker(() => ({ versions: [v(1, 'prod', bad)], betaAccounts: [], servedAt: '2026-10-16T12:00:00.000Z' })).fetch)
+    expect(await s.pull()).toBe(false)
+    expect(bridgeStuckAfterOf(s.forAccount('any').settings)).toEqual({ sending: 30, burned: 45 })
   })
 })
