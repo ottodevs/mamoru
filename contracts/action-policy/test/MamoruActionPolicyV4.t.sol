@@ -486,21 +486,52 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         (tl, ts) = (_floorDiv(tc[2] - tc[0], e.twapWindow), _floorDiv(tc[2] - tc[1], e.twapShortWindow));
     }
 
-    /// A position, then the market moves 450 ticks in one block (cbBTC dumped) and stays there 10 min: the 5 min TWAP
-    /// has followed it, the 30 min one about a third of the way, so they are about 300 ticks apart, more than 2 x band.
-    function _crash() internal returns (uint256 tokenId, uint128 liq, PoolEntryV4 memory e) {
+    /// A position, then the market moves `step` ticks in one block (cbBTC dumped) and stays there `secs` seconds.
+    function _crashAt(int24 step, uint256 secs) internal returns (uint256 tokenId, uint128 liq, PoolEntryV4 memory e) {
         (tokenId, liq) = _mintThroughV4(acct, 1_000e6, 0.01e8);
         e = helper.exitEntry(POOL_BTC);
         vm.roll(vm.getBlockNumber() + 1);
         vm.warp(vm.getBlockTimestamp() + 2);
-        _push(POOL_BTC, CBBTC, USDC, 500, 450);
-        vm.roll(vm.getBlockNumber() + 300);
-        vm.warp(vm.getBlockTimestamp() + 600);
+        _push(POOL_BTC, CBBTC, USDC, 500, step);
+        vm.roll(vm.getBlockNumber() + secs / 2);
+        vm.warp(vm.getBlockTimestamp() + secs);
+    }
+
+    /// 450 ticks, 10 min later: the 5 min TWAP has followed the move, the 30 min one about a third of the way, so they
+    /// are about 300 ticks apart, more than 2 x band (V3's range is empty).
+    function _crash() internal returns (uint256 tokenId, uint128 liq, PoolEntryV4 memory e) {
+        return _crashAt(450, 600);
+    }
+
+    /// #345 P2-1, gate r1 of #246: the exit passes at EVERY moment of a crash once the short TWAP has caught up with the
+    /// spot (5 min), for a step between band and 2 x band (230: V3's intersection leaves out the spot without ever being
+    /// empty) and one past 2 x band (450), sampled from 5 to 30 min.
+    function test_345_exitPassesThroughoutACrash() public {
+        int24[2] memory steps = [int24(230), 450];
+        uint16[10] memory mins = [uint16(5), 7, 10, 12, 15, 17, 20, 22, 25, 30];
+        for (uint256 i; i < steps.length; i++) {
+            for (uint256 k; k < mins.length; k++) {
+                uint256 snap = vm.snapshotState();
+                (uint256 tokenId, uint128 liq, PoolEntryV4 memory e) = _crashAt(steps[i], uint256(mins[k]) * 60);
+                (int24 lo, int24 hi) = helper.exitRange(POOL_BTC, e);
+                int24 spot = _spot(POOL_BTC);
+                assertTrue(spot >= lo && spot <= hi, "the spot is inside the exit range");
+                (uint256 min0, uint256 min1) = lens.decreaseMins(acct, tokenId, liq);
+                vm.prank(acct);
+                v4.checkExit(tokenId, liq, min0, min1);
+                vm.prank(acct);
+                (uint256 got0, uint256 got1) =
+                    INPMT(NPM).decreaseLiquidity(DecreaseLiquidityParams(tokenId, liq, min0, min1, vm.getBlockTimestamp()));
+                assertGe(got0, min0);
+                assertGe(got1, min1);
+                vm.revertToState(snap);
+            }
+        }
     }
 
     /// #345 P2-1 (spec 010 "a crash or a depeg does not block the exit"): in the crash above V3's range (the
     /// intersection of the two TWAP bands) is empty, so entries are refused, and V3 refused the exit too for up to the
-    /// long window. V4 prices the exit on the union of the two bands: the spot is inside it, `checkExit` passes at the
+    /// long window. V4 prices the exit on the hull of the two bands: the spot is inside it, `checkExit` passes at the
     /// minimums the lens gives, and the position manager pays at least them.
     function test_345_fastCrashDoesNotBlockTheExit() public {
         (uint256 tokenId, uint128 liq, PoolEntryV4 memory e) = _crash();
@@ -510,8 +541,8 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         vm.expectPartialRevert(MamoruV4Helper.RangeEmpty.selector);
         lens.priceRange(POOL_BTC); // entries: the intersection is empty
         (int24 lo, int24 hi) = helper.exitRange(POOL_BTC, e);
-        assertEq(lo, tl - band + 1, "union: one band below the lower TWAP");
-        assertEq(hi, ts + band, "union: one band above the upper TWAP");
+        assertEq(lo, tl - band + 1, "hull: one band below the lower TWAP");
+        assertEq(hi, ts + band, "hull: one band above the upper TWAP");
         int24 spot = _spot(POOL_BTC);
         assertTrue(spot >= lo && spot <= hi, "the spot is inside the exit range");
         (uint256 min0, uint256 min1) = lens.decreaseMins(acct, tokenId, liq);
@@ -531,10 +562,10 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         assertGe(got1, min1);
     }
 
-    /// #345 P2-1: the union gives a sandwich nothing new. (a) With the TWAPs agreeing, a one-block push of the same 450
-    /// ticks moves the 5 min TWAP by a few ticks only, so the exit range stays V3's intersection and the decrease at
-    /// `checkExit`'s minimums reverts in the position manager while the spot is pushed; `checkExit` refuses anything
-    /// lower. (b) In the crash, a push of the spot one band past the union's edge is refused the same way: the exit never
+    /// #345 P2-1: the hull gives a sandwich nothing new. (a) With the TWAPs agreeing, a one-block push of the same 450
+    /// ticks moves the 5 min TWAP by a few ticks only, so the hull's edges barely move and the decrease at `checkExit`'s
+    /// minimums reverts in the position manager while the spot is pushed; `checkExit` refuses anything lower. (b) In the
+    /// crash, a push of the spot one band past the hull's edge is refused the same way (next test): the exit never
     /// executes more than one band past both TWAPs.
     function test_345_manipulatedSpotCannotExtractBeyondTheBand() public {
         (uint256 tokenId, uint128 liq) = _mintThroughV4(acct, 1_000e6, 0.01e8);
@@ -542,11 +573,14 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         int24 band = int24(e.bandTicks);
         vm.roll(vm.getBlockNumber() + 1);
         vm.warp(vm.getBlockTimestamp() + 2);
+        (int24 lo0, int24 hi0) = helper.exitRange(POOL_BTC, e);
         _push(POOL_BTC, CBBTC, USDC, 500, 450);
         vm.roll(vm.getBlockNumber() + 1);
         vm.warp(vm.getBlockTimestamp() + 2);
         (int24 lo, int24 hi) = helper.exitRange(POOL_BTC, e);
-        assertLt(hi - lo, 2 * band, "(a) still the intersection: a one-block push cannot open the union");
+        assertLe(hi - hi0, 10, "(a) a one-block push moves the hull's top edge a few ticks only");
+        assertEq(lo, lo0, "(a) and not its bottom edge");
+        assertLt(hi - lo, 2 * band + 10, "(a) the hull stays about 2 x band wide");
         assertGt(_spot(POOL_BTC), hi, "(a) the pushed spot is outside it");
         (uint256 min0, uint256 min1) = lens.decreaseMins(acct, tokenId, liq);
         vm.prank(acct);
@@ -557,14 +591,14 @@ contract MamoruActionPolicyV4Test is V4Fixture {
         v4.checkExit(tokenId, liq, 0, 0);
     }
 
-    function test_345_crashThenPushPastTheUnionRefused() public {
+    function test_345_crashThenPushPastTheHullRefused() public {
         (uint256 tokenId, uint128 liq, PoolEntryV4 memory e) = _crash();
         (, int24 hi) = helper.exitRange(POOL_BTC, e);
         (uint256 min0, uint256 min1) = lens.decreaseMins(acct, tokenId, liq);
         _push(POOL_BTC, CBBTC, USDC, 500, hi + int24(e.bandTicks) - _spot(POOL_BTC)); // one band past the edge
         assertGt(_spot(POOL_BTC), hi);
         (, int24 hiNow) = helper.exitRange(POOL_BTC, e);
-        assertEq(hiNow, hi, "a same-block push does not move the union's edge");
+        assertEq(hiNow, hi, "a same-block push does not move the hull's edge");
         vm.prank(acct);
         v4.checkExit(tokenId, liq, min0, min1);
         vm.prank(acct);

@@ -1807,8 +1807,8 @@ export class Engine {
           const oracle = await this.poolOracle(p.pool, this.longWindow(p.pool, this.cfg.policy.execution.twapWindowSeconds), v4.twapShortSeconds, blockNumber)
           // LeftClaw M-6: MamoruActionPolicyV2 prices a decrease off the TWAP range alone, so a depeg past the anchor
           // does not lock the exit; V1 still clips it to the anchor.
-          // #345: V4 never finds the exit range empty (the union of the two TWAP bands in a fast move): mirror it, the
-          // mode picked at V4's own band, the range built at the narrower one.
+          // #345: V4 prices exits on the hull of the two TWAP bands (never empty): mirror it at the narrower band, which
+          // stays inside V4's.
           const ap = this.cfg.policy.actionPolicy
           const range = isV4Policy(ap)
             ? v4ExitRange(oracle, ap.bandTicksByPool[p.pool] ?? v4.bandTicks, v4.bandTicks)

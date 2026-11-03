@@ -494,8 +494,8 @@ contract MamoruV4Helper {
         _requireSpotIn(pool, lo, hi);
     }
 
-    /// V3's decrease check: minimums at the edges of `exitRange` (the TWAP range WITHOUT the anchor, LeftClaw M-6, and
-    /// never empty, #345). A spot anywhere in that range returns at least these from the decrease.
+    /// V3's decrease check: minimums at the edges of `exitRange` (the hull of the two TWAP bands WITHOUT the anchor,
+    /// LeftClaw M-6, #345). A spot anywhere in that range returns at least these from the decrease.
     function exitMins(address pool, PoolEntryV4 calldata e, address npm, uint256 tokenId, uint128 liquidity)
         external
         view
@@ -511,38 +511,38 @@ contract MamoruV4Helper {
 
     /**
      * The range an exit's minimums are priced at (spec 010 "Exits are never gated by eligibility"; #345 P2-1). No anchor
-     * (LeftClaw M-6). When the long and short TWAPs agree it is V3's range, the INTERSECTION of the band around each:
-     * [max(long, short) - band + 1, min(long, short) + band]. When they are more than about 2 x band apart, that
-     * intersection is empty. V3 (M-6) then refused every exit, and after a fast move (the short TWAP has followed the
-     * market, the long one has not) a session could not decrease for up to the long window (30 min): a crash blocked the
-     * exit. Here the range is then the UNION of the two bands: [min(long, short) - band + 1, max(long, short) + band].
+     * (LeftClaw M-6). Always the HULL of the bands around the long and the short TWAP:
+     * [min(long, short) - band + 1, max(long, short) + band]. V3 (M-6) priced exits on their INTERSECTION,
+     * [max - band + 1, min + band]: after a fast move the short TWAP follows the market within its 5 min window while the
+     * long one lags up to 30 min, and once they are more than band apart the intersection leaves out the spot (more than
+     * 2 x band apart, it is empty), so the position manager's own minimum check, or V3's empty range, refused the exit.
      *
-     * Why the union, and not the band around one TWAP alone:
+     * Why the hull, and not the band around one TWAP alone:
      *  - The long TWAP's band alone fails the case it is for: after a crash the spot sits near the short TWAP, outside
      *    the long band, so the position holds less of one token than the long band's edge assumes and the position
-     *    manager's own minimum check refuses the decrease. The exit stays blocked, by another check.
+     *    manager's own minimum check refuses the decrease.
      *  - The short TWAP's band alone is tighter but follows a whipsaw only one way: a rebound toward the long TWAP before
      *    the short window catches up leaves the spot outside it again.
-     *  - The union is the smallest range that holds the spot within one band of either average, and it still never
-     *    accepts a spot more than one band past BOTH TWAPs. A sandwich moves the spot inside one block; it moves a 5 min
-     *    TWAP by at most (displacement x block time / window) and the 30 min one by a sixth of that, so it cannot open
-     *    the union (that needs the TWAPs 2 x band apart) and cannot push the edges. Widening the range needs the pool
-     *    held away from the market for a good part of the short window against arbitrage: the multi-block cost V3's
-     *    short TWAP already rests on (LeftClaw M-1).
+     *  - The hull holds the spot whenever it is within one band of either average, always contains V3's intersection,
+     *    and never accepts a spot more than one band past BOTH TWAPs. A sandwich moves the spot inside one block; it moves
+     *    a 5 min TWAP by at most (displacement x block time / window) and the 30 min one by a sixth of that, so it cannot
+     *    move the edges. Widening the hull needs the pool held away from the market for a good part of the short window
+     *    against arbitrage: the multi-block cost V3's short TWAP already rests on (LeftClaw M-1). In calm markets the two
+     *    TWAPs sit within a few ticks, so the hull is about 2 x band wide, as V3's range was.
      *  - What is bounded is a decrease: the tokens go to the account, never to the session's controller, and swapping
-     *    them afterwards is a separate priced, charged call with the intersection range. Entries keep the intersection
-     *    (and the anchor), so nothing new can be opened at a union price.
+     *    them afterwards is a separate priced, charged call. Entries keep the anchored intersection, so nothing new can
+     *    be opened at a hull price.
+     * Residual: in the first minutes of a move (at most the short window, 5 min), before the short TWAP has caught up
+     * with the spot, a spot more than one band past both TWAPs is still refused; the exit works again once the short
+     * TWAP is within one band of it.
      * Same math in TS: `exitRange` in packages/uniswap-v3/src/policy-bounds.ts.
      */
     function exitRange(address pool, PoolEntryV4 calldata e) public view returns (int24 lo, int24 hi) {
         (int24 tl, int24 ts) = _oracle(e, pool);
         (int24 bottom, int24 top) = tl < ts ? (tl, ts) : (ts, tl);
         int256 band = int256(uint256(e.bandTicks));
-        int256 l = int256(top) - band + 1;
-        int256 h = int256(bottom) + band;
-        if (l > h) (l, h) = (int256(bottom) - band + 1, int256(top) + band);
-        lo = _clamp(l);
-        hi = _clamp(h);
+        lo = _clamp(int256(bottom) - band + 1);
+        hi = _clamp(int256(top) + band);
     }
 
     function priceRangeAt(address pool, PoolEntryV4 calldata e) external view returns (int24 lo, int24 hi) {
@@ -1130,9 +1130,9 @@ contract MamoruActionPolicyV4 {
     /// I9: the price check of an exit, at execution, right before the position manager's `decreaseLiquidity` with the
     /// same arguments (MamoruGasPolicyV2 checks the pairing). As V3's decrease check: a position admitted for the
     /// account that it owns; the minimums at the edges of the pool's TWAP range WITHOUT the anchor (LeftClaw M-6), with
-    /// the pair's class, never its eligibility, so a depeg does not block the exit. #345 P2-1: that range is never
-    /// empty (MamoruV4Helper.exitRange: the union of the two TWAP bands when they disagree), so a crash does not block
-    /// it either.
+    /// the pair's class, never its eligibility, so a depeg does not block the exit. #345 P2-1: that range is the hull of
+    /// the two TWAP bands (MamoruV4Helper.exitRange), so once the short TWAP has caught up with a fast move (at most
+    /// its 5 min window) the spot is inside it and the exit passes.
     function checkExit(uint256 tokenId, uint128 liquidity, uint256 amount0Min, uint256 amount1Min) external view {
         address account = msg.sender;
         address pool = _admitted[tokenId][account];

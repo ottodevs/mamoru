@@ -194,31 +194,36 @@ describe('decreaseMinsInRange', () => {
 })
 
 describe('exitRange (MamoruV4Helper.exitRange, #345)', () => {
-  test('TWAPs that agree: the intersection without the anchor, as priceRange', () => {
-    const o = { twapLong: 0, twapShort: 50 }
-    expect(exitRange(o, 100)).toEqual(priceRange(o, 100)!)
-    expect(exitRange(o, 100)).toEqual({ lo: -49, hi: 100 })
-  })
-
-  test('a fast move (TWAPs more than 2 x band apart): the union of the two bands, never empty', () => {
-    const o = { twapLong: 150, twapShort: 450 }
-    expect(priceRange(o, 100)).toBeNull()
-    expect(exitRange(o, 100)).toEqual({ lo: 51, hi: 550 })
+  test('always the hull of the two bands, whatever the TWAPs do', () => {
+    expect(exitRange({ twapLong: 0, twapShort: 0 }, 100)).toEqual({ lo: -99, hi: 100 })
+    expect(exitRange({ twapLong: 0, twapShort: 50 }, 100)).toEqual({ lo: -99, hi: 150 })
+    expect(exitRange({ twapLong: 150, twapShort: 450 }, 100)).toEqual({ lo: 51, hi: 550 })
     expect(exitRange({ twapLong: 450, twapShort: 150 }, 100)).toEqual({ lo: 51, hi: 550 }) // either direction
   })
 
-  test('the boundary: 2 x band - 1 apart is still the intersection (one tick wide), 2 x band apart is the union', () => {
-    expect(exitRange({ twapLong: 0, twapShort: 199 }, 100)).toEqual({ lo: 100, hi: 100 })
-    expect(exitRange({ twapLong: 0, twapShort: 200 }, 100)).toEqual({ lo: -99, hi: 300 })
+  test('between band and 2 x band apart the hull still holds the short TWAP, where the intersection did not', () => {
+    const o = { twapLong: 0, twapShort: 170 }
+    expect(priceRange(o, 100)).toEqual({ lo: 71, hi: 100 }) // V3's intersection: the short TWAP is outside
+    const r = exitRange(o, 100)
+    expect(r.lo).toBeLessThanOrEqual(170)
+    expect(r.hi).toBeGreaterThanOrEqual(170)
   })
 
-  test("the engine's narrower band stays inside the contract's range in both modes", () => {
+  test('the hull always contains the intersection', () => {
+    for (const o of [{ twapLong: 0, twapShort: 50 }, { twapLong: 0, twapShort: 170 }, { twapLong: -30, twapShort: 10 }]) {
+      const i = priceRange(o, 100)!
+      const h = exitRange(o, 100)
+      expect(h.lo).toBeLessThanOrEqual(i.lo)
+      expect(h.hi).toBeGreaterThanOrEqual(i.hi)
+    }
+  })
+
+  test("the engine's narrower band stays inside the contract's hull", () => {
     for (const o of [{ twapLong: 0, twapShort: 50 }, { twapLong: 0, twapShort: 170 }, { twapLong: 150, twapShort: 450 }]) {
       const full = exitRange(o, 100)
       const narrow = exitRange(o, 100, 80)
       expect(narrow.lo).toBeGreaterThanOrEqual(full.lo)
       expect(narrow.hi).toBeLessThanOrEqual(full.hi)
-      expect(narrow.lo).toBeLessThanOrEqual(narrow.hi)
     }
   })
 })

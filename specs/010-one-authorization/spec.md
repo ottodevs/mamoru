@@ -141,14 +141,16 @@ re-parameterize an entry.
 - **Exits are never gated by eligibility.** `decrease`, `collect` and `burn` of an admitted position, and `redeem`
   from a listed vault, stay allowed whatever the pool's or vault's eligibility is now (V3's LeftClaw M-6: the anchor
   never locks an exit). `checkExit` (I9) checks only that the decrease minimums are within the band of the pool's
-  TWAP, never eligibility or the anchor, so a crash or a depeg does not block the exit. The band is V3's range (the
-  intersection of the bands around the long and the short TWAP) while it is not empty. After a fast move the two TWAPs
-  are more than about 2 x band apart and that range is empty; V3 then refused every exit for up to the long window
-  (30 min). V4 then prices the exit on the **union** of the two bands (#345, `MamoruV4Helper.exitRange`): the spot near
-  the short TWAP is inside it, and it still never accepts a spot more than one band past both TWAPs, which a one-block
-  sandwich cannot move (it moves the 5 min TWAP by a few ticks, so it can neither open the union nor push its edges).
-  The band around the long TWAP alone would leave the crash blocked by the position manager's own minimum check; the
-  short TWAP's alone would not cover a rebound. Entries keep the intersection and the anchor. Converting the proceeds back to
+  TWAP, never eligibility or the anchor, so a depeg does not block the exit. The band is the **hull** of the bands
+  around the long and the short TWAP, [min - band + 1, max + band] (#345, `MamoruV4Helper.exitRange`). V3 used their
+  intersection: after a fast move the short TWAP follows the market within its 5 min window while the long one lags up
+  to 30 min, and once they are more than band apart the intersection leaves out the spot (past 2 x band it is empty),
+  so the exit was refused for up to the long window. The hull holds the spot whenever it is within one band of either
+  TWAP, and never accepts a spot more than one band past both, which a one-block sandwich cannot change (it moves the
+  5 min TWAP by a few ticks). The band around the long TWAP alone would leave the crash blocked by the position
+  manager's own minimum check; the short TWAP's alone would not cover a rebound. Residual: in the first minutes of a
+  move (at most the short window), before the short TWAP catches up, a spot more than one band past both TWAPs is still
+  refused. Entries keep the anchored intersection. Converting the proceeds back to
   the budget token is a priced swap: it needs an eligible pool of that pair and is **charged** to the bucket like any
   swap. If there is no eligible pool, the tokens stay in the user's Safe, where the owner can always move them.
 - **Swaps are single-hop** (`exactInputSingle` on the pinned router), in either direction, and every swap is charged
@@ -457,7 +459,7 @@ guardian or the registry, A1 replaces it:
 | r5 P1 | A userOp policy cannot count gas actually paid | Charge at validation from capped fields | Unchanged, charged into the GCRA |
 
 PR #228 review (Opus, otto/mamoru#345), all fixed before T7: P2-1 a fast crash blocked the exit for up to the long
-window (V3 M-6's empty range): the exit prices on the union of the two TWAP bands when their intersection is empty.
+window (V3 M-6's intersection leaves out the spot, then empties): the exit prices on the hull of the two TWAP bands.
 P2-2 rule 4 read `observationCardinalityNext`: it reads the filled ring. P2-3 the deploy script's checks ran only in
 simulation: `DeployV4.s.sol verify()` runs `check(predict())` against each chain's live RPC after the broadcast. P2-4
 I9 said "no external reads" while `checkAction` calls `TABLE.chain`: stated as a code-only call. P2-5 `bridge` pinned
