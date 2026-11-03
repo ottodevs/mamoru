@@ -56,7 +56,7 @@ const copy = {
     bridge: (chain: string) => `Bridge to ${chain}`,
     perTime: 'Per transfer',
     bridgeBody: (pause: boolean) => `Only to your own address, never any fee.${pause ? ' A guardian pause stops it.' : ''}`,
-    fee: (eth: string, gwei: string, txs: string) => `Network fee: at most ${eth} ETH per engine transaction (at most ${gwei} gwei), from your Safe's ETH. Up to ${txs} transactions.`,
+    fee: (eth: string, gwei: string, txs: string) => `Network fee: at most ${eth} ETH per engine transaction (at most ${gwei} gwei per gas), from your Safe's ETH. Up to ${txs} transactions.`,
     always: 'Always',
     promise: {
       nothingMoves: 'Nothing moves now: your positions stay as they are.',
@@ -113,7 +113,7 @@ const copy = {
     bridge: (chain: string) => `Bridge a ${chain}`,
     perTime: 'Por envío',
     bridgeBody: (pause: boolean) => `Solo a tu propia dirección, nunca con comisión.${pause ? ' Una pausa de la clave guardiana lo detiene.' : ''}`,
-    fee: (eth: string, gwei: string, txs: string) => `Comisión de red: como mucho ${eth} ETH por transacción del motor (como mucho ${gwei} gwei), del ETH de tu Safe. Hasta ${txs} transacciones.`,
+    fee: (eth: string, gwei: string, txs: string) => `Comisión de red: como mucho ${eth} ETH por transacción del motor (como mucho ${gwei} gwei por unidad de gas), del ETH de tu Safe. Hasta ${txs} transacciones.`,
     always: 'Siempre',
     promise: {
       nothingMoves: 'Ahora no se mueve nada: tus posiciones siguen como están.',
@@ -170,7 +170,7 @@ const copy = {
     bridge: (chain: string) => `${chain} へのブリッジ`,
     perTime: '1回あたり',
     bridgeBody: (pause: boolean) => `送り先はあなた自身のアドレスのみ、手数料なし。${pause ? 'ガーディアンの一時停止で止まります。' : ''}`,
-    fee: (eth: string, gwei: string, txs: string) => `ネットワーク手数料：エンジンのトランザクション 1 件あたり最大 ${eth} ETH（最大 ${gwei} gwei）、Safe の ETH から支払います。最大 ${txs} 件。`,
+    fee: (eth: string, gwei: string, txs: string) => `ネットワーク手数料：エンジンのトランザクション 1 件あたり最大 ${eth} ETH（ガス価格はガス 1 単位あたり最大 ${gwei} gwei）、Safe の ETH から支払います。最大 ${txs} 件。`,
     always: '常に',
     promise: {
       nothingMoves: '今は何も動きません。ポジションはそのままです。',

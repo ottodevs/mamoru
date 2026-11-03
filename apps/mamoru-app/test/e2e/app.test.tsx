@@ -717,6 +717,14 @@ describe('renewing the approval', () => {
     expect(plain(ja.html)).toContain(summary[0]!)
   })
 
+    test('#225 review: the network fee keeps the gas-price limit per gas, apart from the per-transaction one, in every language', () => {
+    const summary = ["Each engine transaction pays at most 0.00052 ETH of network fee (at most 0.1 gwei per gas), from your Safe's ETH; these grants allow 104,064 transactions in all"]
+    const fee = (locale: 'en' | 'es' | 'ja') => plain(render(<ApprovalBody lead="x" summary={summary} busy={null} error={null} onPrepare={() => {}} onApprove={() => {}} onLater={() => {}} locale={locale} />).html)
+    expect(fee('en')).toContain('at most 0.00052 ETH per engine transaction (at most 0.1 gwei per gas)')
+    expect(fee('es')).toContain('como mucho 0.00052 ETH por transacción del motor (como mucho 0.1 gwei por unidad de gas)')
+    expect(fee('ja')).toContain('ガス 1 単位あたり最大 0.1 gwei')
+  })
+
     test('history reads an extension in its own words', () => {
     const op: OpView = { opId: 'own-5-renew', kind: 'renew', state: 'confirmed', updatedAt: '2026-10-15T10:00:00Z', extend: true }
     expect(opLine(op)).toBe('Approval extended')
