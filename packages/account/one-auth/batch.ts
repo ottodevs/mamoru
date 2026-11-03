@@ -61,6 +61,15 @@ export const A1_CHAINS: Readonly<Record<number, A1ChainTargets>> = {
 export const A1_MESSAGE_TRANSMITTER: Address = '0x81D40F21F12A8F0E3252Bccb954D722d4c464B64'
 /** MamoruGasPolicyV2.CLOCK_SLACK = MamoruActionPolicyV4.CLOCK_SLACK (S, seconds). */
 export const A1_CLOCK_SLACK = 300n
+
+/**
+ * The last second an op claiming time `t` can be included: the gas policy returns validUntil = T + S, and the
+ * EntryPoint v0.7 refuses an op once block.timestamp > validUntil (and while block.timestamp <= validAfter = T - S).
+ * Every V4 op is dead after it, whatever its deadline: the engine settles a dropped one from there (`expiresAt`).
+ */
+export function a1ExpiresAt(t: bigint): bigint {
+  return t + A1_CLOCK_SLACK
+}
 /** MamoruActionPolicyV4.MAX_RATIO_BPS (the bps denominator of cctpFeeCapBps). */
 const BPS = 10_000n
 const UINT48_MAX = (1n << 48n) - 1n
@@ -143,12 +152,13 @@ export type A1Intent =
   | { kind: 'increase'; token0: Address; token1: Address; params: A1IncreaseParams }
   /**
    * An exit: `checkExit` then the position manager's decreaseLiquidity (same tokenId, liquidity and minimums), then
-   * `collect` to the account unless `collect === false`, then `burn` when asked (the whole position out).
+   * `collect` to the account unless `collect === false`, then `burn` when asked. A burn needs the collect and the whole
+   * position out: `positionLiquidity` (the position's liquidity as read) must equal `liquidity`.
    */
-  | { kind: 'decrease'; tokenId: bigint; liquidity: bigint; amount0Min: bigint; amount1Min: bigint; deadline: bigint; collect?: boolean; burn?: boolean }
+  | { kind: 'decrease'; tokenId: bigint; liquidity: bigint; amount0Min: bigint; amount1Min: bigint; deadline: bigint; collect?: boolean; burn?: boolean; positionLiquidity?: bigint }
   /** The position manager's collect of everything owed, to the account (a harvest). */
   | { kind: 'collect'; tokenId: bigint }
-  /** The position manager's burn of an emptied position. */
+  /** The position manager's burn of a position with no liquidity left, after its `collect` in the same batch. */
   | { kind: 'burn'; tokenId: bigint }
   /** V4.deposit into a vault of the table: approve(asset, assets) first. */
   | { kind: 'deposit'; vault: Address; asset: Address; assets: bigint }
@@ -221,10 +231,13 @@ export function buildA1Batch(ctx: A1Context, intents: readonly A1Intent[]): Exec
     const live = pulls.filter(([, a]) => a > 0n)
     return [...live.map(([t, a]) => approve(t, a)), action, ...live.flatMap(([t]) => reset(t))]
   }
+  // Review of #247 (P2): the op can be included until T + S; a deadline before that lets it validate (and charge the
+  // account and its gas rate) and then revert in V4 with Expired. So a deadline covers the whole window.
   const notExpired = (deadline: bigint, what: string) => {
-    if (deadline < ctx.t) fail(`${what} deadline ${deadline} is before the claimed time ${ctx.t}`)
+    if (deadline < a1ExpiresAt(ctx.t)) fail(`${what} deadline ${deadline} ends before the op's window (T + S = ${a1ExpiresAt(ctx.t)})`)
   }
   const xs: Execution[] = [onV4(encodeFunctionData({ abi: a1Abi, functionName: 'clock', args: [ctx.t] }))]
+  const collected = new Set<bigint>()
   for (const i of intents) {
     switch (i.kind) {
       case 'swap': {
@@ -253,16 +266,24 @@ export function buildA1Batch(ctx: A1Context, intents: readonly A1Intent[]): Exec
       case 'decrease': {
         if (i.liquidity <= 0n || i.liquidity >= 1n << 128n) fail(`decrease of liquidity ${i.liquidity}`)
         notExpired(i.deadline, 'decrease')
+        // Review of #247 (P2): the manager's burn reverts unless the position is emptied and collected first.
+        if (i.burn && (i.collect === false || i.positionLiquidity === undefined || i.positionLiquidity !== i.liquidity)) fail('burn without the collect, or without taking all of the position\'s liquidity out')
         xs.push(onV4(encodeFunctionData({ abi: a1Abi, functionName: 'checkExit', args: [i.tokenId, i.liquidity, i.amount0Min, i.amount1Min] })))
         xs.push(call(ch.npm, encodeFunctionData({ abi: a1Abi, functionName: 'decreaseLiquidity', args: [{ tokenId: i.tokenId, liquidity: i.liquidity, amount0Min: i.amount0Min, amount1Min: i.amount1Min, deadline: i.deadline }] })))
-        if (i.collect !== false) xs.push(collectCall(ch.npm, account, i.tokenId))
+        if (i.collect !== false) {
+          collected.add(i.tokenId)
+          xs.push(collectCall(ch.npm, account, i.tokenId))
+        }
         if (i.burn) xs.push(call(ch.npm, encodeFunctionData({ abi: a1Abi, functionName: 'burn', args: [i.tokenId] })))
         break
       }
       case 'collect':
+        collected.add(i.tokenId)
         xs.push(collectCall(ch.npm, account, i.tokenId))
         break
       case 'burn':
+        // Review of #247 (P2): a bare burn only of a position with no liquidity, collected earlier in the same batch.
+        if (!collected.has(i.tokenId)) fail(`burn of ${i.tokenId} without its collect before it in the batch`)
         xs.push(call(ch.npm, encodeFunctionData({ abi: a1Abi, functionName: 'burn', args: [i.tokenId] })))
         break
       case 'deposit':
@@ -364,6 +385,12 @@ function decodeBatch(callData: Hex): { xs: Execution[] } | { reason: string } {
   }
 }
 
+/** The calls of a batch-mode `execute` callData, or null when it is not one (single mode, another exec type, bad bytes). */
+export function a1Calls(callData: Hex): Execution[] | null {
+  const d = decodeBatch(callData)
+  return 'reason' in d ? null : d.xs
+}
+
 /**
  * MamoruGasPolicyV2._shape, line for line: the userOp callData (or its decoded batch) against the chain's position
  * manager `npm`. Returns the claimed time of the leading `clock`.
@@ -454,7 +481,7 @@ export function a1CallRefusal(c: Execution, ctx: Pick<A1Context, 'chainId' | 'ac
 /**
  * Everything the operator can check before signing a V4 session op: the gas policy's shape (`a1Shape`), V4's static
  * checkAction rules on every call, the leading `clock` on V4 itself, and, when `now` is given, the claimed time within
- * CLOCK_SLACK of it (the EntryPoint refuses the op outside [T - S, T + S]).
+ * CLOCK_SLACK of it (the EntryPoint admits the op only while T - S < now <= T + S).
  */
 export function checkA1Batch(batch: Hex | readonly Execution[], ctx: Pick<A1Context, 'chainId' | 'account' | 'policy'> & { now?: bigint }): A1Verdict {
   const ch = A1_CHAINS[ctx.chainId]
@@ -473,6 +500,7 @@ export function checkA1Batch(batch: Hex | readonly Execution[], ctx: Pick<A1Cont
     const why = a1CallRefusal(xs[i]!, ctx)
     if (why) return { ok: false, reason: `call ${i}: ${why}` }
   }
-  if (ctx.now !== undefined && (shape.t + A1_CLOCK_SLACK < ctx.now || shape.t > ctx.now + A1_CLOCK_SLACK)) return { ok: false, reason: `claimed time ${shape.t} is more than ${A1_CLOCK_SLACK} s from ${ctx.now}` }
+  // EntryPoint v0.7: valid while validAfter < block.timestamp <= validUntil, i.e. T - S < now <= T + S (validAfter strict).
+  if (ctx.now !== undefined && (ctx.now > shape.t + A1_CLOCK_SLACK || ctx.now <= shape.t - A1_CLOCK_SLACK)) return { ok: false, reason: `claimed time ${shape.t} outside (now - ${A1_CLOCK_SLACK}, now + ${A1_CLOCK_SLACK}] for now = ${ctx.now}` }
   return shape
 }

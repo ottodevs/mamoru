@@ -75,6 +75,19 @@ contract A1GasForkTest is V4Fixture {
         return _batch(xs);
     }
 
+    /// A V2 message as the transmitter carries it, from `m`'s header with source 15 (Monad), destination 6 (Base) and `body`.
+    function _readyFromMonad(bytes memory m, bytes memory body) internal pure returns (bytes memory out) {
+        out = new bytes(148 + body.length);
+        for (uint256 i; i < 148; i++) {
+            out[i] = m[i];
+        }
+        (out[4], out[5], out[6], out[7]) = (0, 0, 0, bytes1(uint8(15)));
+        (out[8], out[9], out[10], out[11]) = (0, 0, 0, bytes1(uint8(6)));
+        for (uint256 i; i < body.length; i++) {
+            out[148 + i] = body[i];
+        }
+    }
+
     function _mintBatch(MintParams memory m) internal view returns (bytes memory) {
         Execution[] memory xs = new Execution[](7);
         xs[0] = Execution(USDC, 0, abi.encodeCall(IERC20T.approve, (address(v4), m.amount0Desired)));
@@ -112,9 +125,24 @@ contract A1GasForkTest is V4Fixture {
         address sk = makeAddr("remote session key");
         _measure("registerRemote", _single(address(v4), abi.encodeCall(MamoruActionPolicyV4.registerRemote, (DOMAIN_MONAD, sk))));
         MamoruActionPolicyV4.Remote memory r = v4.remoteOf(safe, DOMAIN_MONAD);
-        vm.prank(v4.MESSAGE_TRANSMITTER());
-        v4.handleReceiveFinalizedMessage(DOMAIN_MONAD, bytes32(uint256(uint160(address(v4)))), 2000, abi.encode(safe, r.remote, r.ownersHash));
+        // announceReady from the account's own session (noema-d3's op): the home proves itself to a sibling on Ethereum.
+        _measure("announceReady (home -> Ethereum, read back + sendMessage)", _single(address(v4), abi.encodeCall(MamoruActionPolicyV4.announceReady, (safe, 0, address(0), pid))));
+        vm.recordLogs(); // a message header to build the remote's from (anyone may announce)
+        v4.announceReady(safe, 0, address(0), pid);
+        bytes memory m = _sentMessage(vm.getRecordedLogs());
+        // relayMessage: the remote chain's readiness message (V4 on Monad -> V4 here), relayed by the account's own session.
+        // Built from the message just sent: source Monad (15), destination Base (6), body (home, remote, owners hash).
+        m = _readyFromMonad(m, abi.encode(safe, r.remote, r.ownersHash));
+        bytes memory a = _attestable(m, 2000);
+        bytes memory att = _attest(a);
+        _measure("relayMessage (MessageTransmitterV2.receiveMessage -> V4, readiness)", _single(MESSAGE_TRANSMITTER, abi.encodeWithSignature("receiveMessage(bytes,bytes)", a, att)));
+        assertTrue(v4.isReady(safe, DOMAIN_MONAD), "the relayed message made the remote ready");
         _measure("bridge 100 USDC (approve + V4.bridge + reset + assertZero)", _batch(_pulled1(USDC, 100e6, abi.encodeCall(MamoruActionPolicyV4.bridge, (DOMAIN_MONAD, USDC, 100e6, 0)))));
+        // vault deposit (V4.deposit into gtUSDCp) and redeem (V4 pulls the shares: approve of the vault's shares)
+        _measure("vault deposit 1,000 USDC (approve + V4.deposit + reset + assertZero)", _batch(_pulled1(USDC, 1_000e6, abi.encodeCall(MamoruActionPolicyV4.deposit, (GT_USDCP, 1_000e6)))));
+        uint256 shares = IERC20T(GT_USDCP).balanceOf(safe);
+        assertGt(shares, 0, "deposited");
+        _measure("vault redeem (approve shares + V4.redeem + reset + assertZero)", _batch(_pulled1(GT_USDCP, shares, abi.encodeCall(MamoruActionPolicyV4.redeem, (GT_USDCP, shares)))));
         console2.log("max handleOps gas of an engine op", maxTotal);
         console2.log("max execution gas of an engine op", maxExec);
         console2.log("max rest (validation + EntryPoint) of an engine op", maxRest);

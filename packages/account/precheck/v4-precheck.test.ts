@@ -37,9 +37,9 @@ const ctx = { chainId: 8453, account: ACCOUNT, policy: V4, t: T }
 
 describe('V4 session precheck', () => {
   test('swaps, bridges and exits from the builder are accepted', () => {
-    expect(run(buildA1Batch(ctx, [{ kind: 'swap', params: { pool: USDC, tokenIn: USDC, amountIn: 5n, amountOutMinimum: 1n, sqrtPriceLimitX96: 1n, deadline: T } }]))).toBe('ACCEPT')
+    expect(run(buildA1Batch(ctx, [{ kind: 'swap', params: { pool: USDC, tokenIn: USDC, amountIn: 5n, amountOutMinimum: 1n, sqrtPriceLimitX96: 1n, deadline: T + 300n } }]))).toBe('ACCEPT')
     expect(run(buildA1Batch(ctx, [{ kind: 'bridge', domain: 15, token: USDC, amount: 5n, maxFee: 0n }]))).toBe('ACCEPT')
-    expect(run(buildA1Batch(ctx, [{ kind: 'decrease', tokenId: 1n, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline: T, burn: true }]))).toBe('ACCEPT')
+    expect(run(buildA1Batch(ctx, [{ kind: 'decrease', tokenId: 1n, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline: T + 300n, burn: true, positionLiquidity: 1n }]))).toBe('ACCEPT')
     expect(run([clock, approve(USDC, V4), swap, ...reset(USDC)])).toBe('ACCEPT')
     expect(run([clock, collect])).toBe('ACCEPT')
   })
@@ -59,5 +59,13 @@ describe('V4 session precheck', () => {
     expect(run([collect])).toBe('POLICY_DENIED_CALLTYPE')
     const dec: Execution = { target: NPM, value: 0n, callData: encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'decreaseLiquidity', args: [{ tokenId: 1n, liquidity: 1n, amount0Min: 0n, amount1Min: 0n, deadline: T }] }) }
     expect(run([clock, dec, collect])).toBe('POLICY_DENIED_CALLTYPE')
+  })
+
+  test('review of #247: a claimed time the EntryPoint would refuse now is refused before signing', () => {
+    const at = (t: bigint): Execution => ({ target: V4, value: 0n, callData: encodeFunctionData({ abi: parseAbi(['function clock(uint256)']), functionName: 'clock', args: [t] }) })
+    expect(run([at(T + 300n), collect])).toBe('POLICY_DENIED_CALLTYPE') // now == T - S: validAfter is strict
+    expect(run([at(T + 299n), collect])).toBe('ACCEPT')
+    expect(run([at(T - 300n), collect])).toBe('ACCEPT') // now == T + S: validUntil inclusive
+    expect(run([at(T - 301n), collect])).toBe('POLICY_DENIED_CALLTYPE')
   })
 })

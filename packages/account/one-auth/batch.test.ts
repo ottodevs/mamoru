@@ -6,12 +6,12 @@ import type { Address } from '@mamoru/domain'
 import { address, baseRegistry, ethereumRegistry, monadRegistry } from '@mamoru/registry'
 import { V4_DOMAIN_BY_CHAIN } from '@mamoru/policy'
 import { A1_FIXTURE_CTX, A1_FIXTURE_INTENTS, A1_FIXTURE_PATH, a1Fixture, a1FixtureJson } from './a1-batch-fixture.ts'
-import { a1Abi, a1CallData, A1_CHAINS, A1_CLOCK_SLACK, a1Shape, A1BatchError, buildA1Batch, buildA1CallData, checkA1Batch, type A1Intent } from './batch.ts'
+import { a1Abi, a1CallData, a1ExpiresAt, A1_CHAINS, A1_CLOCK_SLACK, a1Shape, A1BatchError, buildA1Batch, buildA1CallData, checkA1Batch, type A1Intent } from './batch.ts'
 
 const ctx = A1_FIXTURE_CTX
 const USDC = A1_CHAINS[8453]!.stables[0]!
 const CBBTC: Address = '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf'
-const DL = ctx.t + 60n
+const DL = ctx.t + 300n
 const swap = (amountIn: bigint, deadline = DL): A1Intent => ({ kind: 'swap', params: { pool: USDC, tokenIn: USDC, amountIn, amountOutMinimum: 1n, sqrtPriceLimitX96: 1n, deadline } })
 const fnOf = (data: Hex) => decodeFunctionData({ abi: a1Abi, data }).functionName
 
@@ -58,7 +58,7 @@ describe('buildA1Batch', () => {
   })
 
   test('an exit is checkExit immediately before the decrease, then collect and burn', () => {
-    const xs = buildA1Batch(ctx, [{ kind: 'decrease', tokenId: 9n, liquidity: 5n, amount0Min: 1n, amount1Min: 2n, deadline: DL, burn: true }])
+    const xs = buildA1Batch(ctx, [{ kind: 'decrease', tokenId: 9n, liquidity: 5n, amount0Min: 1n, amount1Min: 2n, deadline: DL, burn: true, positionLiquidity: 5n }])
     expect(xs.map((x) => fnOf(x.callData))).toEqual(['clock', 'checkExit', 'decreaseLiquidity', 'collect', 'burn'])
     expect(xs[2]!.target).toBe(A1_CHAINS[8453]!.npm)
     const c = decodeFunctionData({ abi: a1Abi, data: xs[3]!.callData })
@@ -83,6 +83,11 @@ describe('buildA1Batch', () => {
       ['no intent', []],
       ['swap of 0', [swap(0n)]],
       ['expired swap', [swap(5n, ctx.t - 1n)]],
+      ['a swap deadline inside the op window (T + S - 1)', [swap(5n, ctx.t + A1_CLOCK_SLACK - 1n)]],
+      ['burn without taking all the liquidity', [{ kind: 'decrease', tokenId: 1n, liquidity: 4n, amount0Min: 0n, amount1Min: 0n, deadline: DL, burn: true, positionLiquidity: 5n }]],
+      ['burn without the position liquidity read', [{ kind: 'decrease', tokenId: 1n, liquidity: 4n, amount0Min: 0n, amount1Min: 0n, deadline: DL, burn: true }]],
+      ['burn without the collect', [{ kind: 'decrease', tokenId: 1n, liquidity: 5n, amount0Min: 0n, amount1Min: 0n, deadline: DL, burn: true, positionLiquidity: 5n, collect: false }]],
+      ['a bare burn without its collect first', [{ kind: 'burn', tokenId: 1n }, { kind: 'collect', tokenId: 1n }]],
       ['mint to someone else', [{ kind: 'mint', params: { token0: USDC, token1: CBBTC, fee: 500, tickLower: -10, tickUpper: 10, amount0Desired: 1n, amount1Desired: 2n, amount0Min: 0n, amount1Min: 0n, recipient: CBBTC, deadline: DL } }]],
       ['bridge maxFee over 10 bps', [{ kind: 'bridge', domain: 15, token: USDC, amount: 10_000n, maxFee: 11n }]],
       ['bridge to its own domain', [{ kind: 'bridge', domain: 6, token: USDC, amount: 1n, maxFee: 0n }]],
@@ -108,5 +113,9 @@ describe('buildA1Batch', () => {
     expect(checkA1Batch(callData, { ...ctx, now: ctx.t + A1_CLOCK_SLACK }).ok).toBe(true)
     expect(checkA1Batch(callData, { ...ctx, now: ctx.t + A1_CLOCK_SLACK + 1n }).ok).toBe(false)
     expect(checkA1Batch(callData, { ...ctx, now: ctx.t - A1_CLOCK_SLACK - 1n }).ok).toBe(false)
+    // validAfter is strict in the EntryPoint: now == T - S is still too early
+    expect(checkA1Batch(callData, { ...ctx, now: ctx.t - A1_CLOCK_SLACK }).ok).toBe(false)
+    expect(checkA1Batch(callData, { ...ctx, now: ctx.t - A1_CLOCK_SLACK + 1n }).ok).toBe(true)
+    expect(a1ExpiresAt(ctx.t)).toBe(ctx.t + A1_CLOCK_SLACK)
   })
 })

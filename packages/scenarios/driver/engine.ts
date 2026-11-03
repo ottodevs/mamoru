@@ -26,7 +26,7 @@ import { BundlerClient, BundlerRpcError } from '@mamoru/erc4337'
 import { SessionLedger, precheck, type ActionPolicyPoolConfig } from '@mamoru/account/precheck'
 import { draftUserOp, executeCallData, handleOpsData, sessionNonceKey, signSessionUserOp, useModeSignature, userOpHash, type GasSettings } from '@mamoru/account/sessions'
 import type { Execution } from '@mamoru/account/safe'
-import { A1BatchError, buildA1Batch, type A1Intent } from '@mamoru/account/one-auth'
+import { A1BatchError, a1ExpiresAt, buildA1Batch, type A1Intent } from '@mamoru/account/one-auth'
 import { policyIncrease, uniswapV3, type UniswapV3, type V3Call } from '@mamoru/uniswap-v3'
 import { minOut, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { diverges, swapMinimum, twapFloor as deviationFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
@@ -56,9 +56,9 @@ import { reconcileReceipt } from './receipt.ts'
  * Measured on a Base fork at block 53,140,000, cold, in the builder's shape (contracts/action-policy/test/A1GasFork.t.sol):
  * handleOps / execution / validation + EntryPoint, in thousands of gas: swap 1,111 / 790 / 321; mint 1,457 / 1,117 / 340;
  * increase 1,196 / 858 / 338; harvest 350 / 140 / 210; reduce 644 / 390 / 254; re-range exit 659 / 383 / 277;
- * registerRemote 423 / 223 / 200; bridge 555 / 283 / 271. Largest execution 1.12M (mint, 1.8x under 2M), largest
- * validation 340k. The gas policy charges the limits, not the use: 5.1M x maxFeePerGas per op against Base's
- * G = 0.002 ETH a day (at the 0.1 gwei cap: about 4 ops a day), sized at the T8 pin.
+ * registerRemote 423 / 223 / 200; bridge 555 / 283 / 271; announceReady 357 / 164 / 192; relayMessage 438 / 230 / 208;
+ * vault deposit 898 / 629 / 269; vault redeem 779 / 510 / 269. Largest execution 1.12M (mint), largest validation 340k.
+ * The gas policy charges the limits, not the use, so a V4 op does not carry these: V4_OP_GAS sizes each kind.
  */
 export const LAB_GAS_LIMITS = { verificationGasLimit: 3_000_000n, callGasLimit: 2_000_000n, preVerificationGas: 100_000n } as const
 export const MAX_PRIORITY_FEE_PER_GAS = 1_000_000n
@@ -79,6 +79,100 @@ export function engineGas(baseFee: bigint, caps?: GasCaps): GasSettings | null {
   if (want <= caps.maxFeePerGas) return gas
   if (baseFee + MAX_PRIORITY_FEE_PER_GAS > caps.maxFeePerGas) return null
   return { ...gas, maxFeePerGas: caps.maxFeePerGas }
+}
+/** What a V4 op's gas limits are sized by (decide's proposal kinds, exits together). */
+export type V4OpKind = 'swap' | 'mint' | 'increase' | 'exit' | 'harvest' | 'bridge' | 'vault' | 'registerRemote' | 'announceReady' | 'relayMessage'
+export type GasLimits = { verificationGasLimit: bigint; callGasLimit: bigint; preVerificationGas: bigint }
+
+/** The V4 op kind of an engine proposal. */
+export function v4OpKind(kind: Proposal['kind']): V4OpKind {
+  switch (kind) {
+    case 'enter_swap':
+      return 'swap'
+    case 'enter_mint':
+      return 'mint'
+    case 'increase_liquidity':
+      return 'increase'
+    case 'rerange':
+    case 'reduce':
+      return 'exit'
+    case 'harvest':
+      return 'harvest'
+    case 'bridge_out':
+      return 'bridge'
+    case 'vault_deposit':
+    case 'vault_redeem':
+      return 'vault'
+  }
+}
+
+const lim = (v: number, c: number, p: number): GasLimits => ({ verificationGasLimit: BigInt(v), callGasLimit: BigInt(c), preVerificationGas: BigInt(p) })
+
+/**
+ * Review of #247, gas-rate sizing (operator side; MamoruGasPolicyV2 is unchanged): the gas policy charges each op its
+ * LIMITS x maxFeePerGas against the chain's G per window (V4_GAS_RATE_BY_CHAIN), so a V4 op carries limits sized from
+ * the A1 fork measurements (see LAB_GAS_LIMITS), not the 5.1M of LAB_GAS_LIMITS. Base: verification 500k over a
+ * measured 190-340k (validation + EntryPoint); call gas ~1.5x the measured execution; vault: the measured deposit
+ * (execution 629k, rest 269k) and redeem (execution 510k, rest 269k) plus 50 %; announceReady (execution 164k, rest
+ * 192k) and relayMessage (execution 230k, rest 208k) for the operator's lane-1 ops (A1GasFork.t.sol). A chain that charges the gas limit
+ * (Monad) resizes the call gas from the simulation (tightUserOpGas) and keeps TIGHT_VERIFICATION_GAS; these are its
+ * starting limits.
+ */
+export const V4_OP_GAS: Readonly<Record<number, Readonly<Record<V4OpKind, GasLimits>>>> = {
+  8453: {
+    swap: lim(500_000, 1_200_000, 100_000),
+    mint: lim(500_000, 1_700_000, 100_000),
+    increase: lim(500_000, 1_300_000, 100_000),
+    exit: lim(500_000, 600_000, 100_000),
+    harvest: lim(500_000, 250_000, 100_000),
+    bridge: lim(500_000, 450_000, 100_000),
+    vault: lim(410_000, 950_000, 100_000),
+    registerRemote: lim(500_000, 350_000, 100_000),
+    announceReady: lim(500_000, 250_000, 100_000),
+    relayMessage: lim(500_000, 350_000, 100_000),
+  },
+  143: {
+    swap: lim(1_000_000, 1_200_000, 100_000),
+    mint: lim(1_000_000, 1_700_000, 100_000),
+    increase: lim(1_000_000, 1_300_000, 100_000),
+    exit: lim(1_000_000, 600_000, 100_000),
+    harvest: lim(1_000_000, 250_000, 100_000),
+    bridge: lim(1_000_000, 450_000, 100_000),
+    vault: lim(1_000_000, 950_000, 100_000),
+    registerRemote: lim(1_000_000, 350_000, 100_000),
+    announceReady: lim(1_000_000, 250_000, 100_000),
+    relayMessage: lim(1_000_000, 350_000, 100_000),
+  },
+}
+
+/**
+ * The highest maxFeePerGas a V4 op signs, per chain: Base 0.03 gwei (basefee ~0.005 gwei today), Monad 102 gwei (its
+ * basefee sits at the 100 gwei floor). Above it (basefee + priority over it) the engine waits rather than sign.
+ *
+ * Ops a day at the ceiling, G / (sum of the limits x ceiling), V4_GAS_RATE_BY_CHAIN:
+ *  - Base (G = 0.002 ETH): swap 37, mint 29, increase 35, exit 55, harvest 78, bridge 63, vault 45, registerRemote 70,
+ *    announceReady 78, relayMessage 70.
+ *  - Monad (G = 1 MON; starting limits, the call gas is then resized from the simulation): swap 4.3, mint 3.5,
+ *    increase 4.1, exit 5.8, harvest 7.3, bridge 6.3, vault 4.8, registerRemote 6.8. Fewer than 20 a day even at the
+ *    100 gwei floor basefee: Monad's G in MamoruV4Chains must rise before T8 (about 5 MON a day for 20 swaps; a
+ *    contract change, not made here).
+ */
+export const V4_MAX_FEE_BY_CHAIN: Readonly<Record<number, bigint>> = { 8453: 30_000_000n, 143: 102_000_000_000n }
+
+/**
+ * The gas of a V4 engine op: its kind's limits (V4_OP_GAS) and maxFeePerGas = min(2 x basefee + priority, the chain's
+ * ceiling); null (wait) when basefee + priority is over the ceiling, or a limit or the fee is over the session's caps.
+ * A chain with no V4 row keeps engineGas.
+ */
+export function v4EngineGas(kind: V4OpKind, chainId: number, baseFee: bigint, caps?: GasCaps): GasSettings | null {
+  const limits = V4_OP_GAS[chainId]?.[kind]
+  const ceiling = V4_MAX_FEE_BY_CHAIN[chainId]
+  if (!limits || ceiling === undefined) return engineGas(baseFee, caps)
+  if (baseFee + MAX_PRIORITY_FEE_PER_GAS > ceiling) return null
+  const want = baseFee * 2n + MAX_PRIORITY_FEE_PER_GAS
+  const maxFeePerGas = want < ceiling ? want : ceiling
+  if (caps && (limits.verificationGasLimit > caps.maxVerificationGasLimit || limits.callGasLimit > caps.maxCallGasLimit || limits.preVerificationGas > caps.maxPreVerificationGas || MAX_PRIORITY_FEE_PER_GAS > caps.maxPriorityFeePerGas || maxFeePerGas > caps.maxFeePerGas)) return null
+  return { ...limits, maxFeePerGas, maxPriorityFeePerGas: MAX_PRIORITY_FEE_PER_GAS }
 }
 const OP_GAS_UNITS = LAB_GAS_LIMITS.verificationGasLimit + LAB_GAS_LIMITS.callGasLimit + LAB_GAS_LIMITS.preVerificationGas
 
@@ -895,7 +989,8 @@ export class Engine {
     if (!pre.ok && pre.code.startsWith('SESSION_')) return void j.move(op.opId, 'discarded', pre.code, {}, pre.detail)
     const nonce = await this.entryPointNonce(block.number)
     const baseFee = block.baseFeePerGas ?? 0n
-    const gas = engineGas(baseFee, this.cfg.policy.actionPolicy?.gasPolicy?.caps)
+    // Review of #247: a V4 op carries its kind's measured limits and the chain's fee ceiling (gas-rate sizing).
+    const gas = isV4Policy(this.cfg.policy.actionPolicy) ? v4EngineGas(v4OpKind(proposal.kind), this.cfg.chainId, baseFee, this.cfg.policy.actionPolicy.gasPolicy?.caps) : engineGas(baseFee, this.cfg.policy.actionPolicy?.gasPolicy?.caps)
     // Spec 007 T7: a v4 session's MamoruGasPolicy refuses an op over its owner-signed caps; at a basefee that leaves no
     // room under maxFeePerGas the engine waits instead of sending one that cannot validate.
     if (!gas) return void j.move(op.opId, 'discarded', 'GAS_PRICE_OVER_CAP', {}, `basefee ${baseFee}`)
@@ -1708,12 +1803,25 @@ export class Engine {
     return null
   }
 
-  /** FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. */
+  /**
+   * FR-UNI-001 to FR-UNI-006: calls from fresh quotes, exact approvals, nothing left approved. Review of #247 (P1): under
+   * V4 every op is dead after T + S (MamoruGasPolicyV2's validUntil, T the prepare block's time), whatever it prices: its
+   * `expiresAt` is never later, so a dropped op is settled (settleUnincluded) and frees its slot and nonce from there.
+   */
   private async prepareCalls(p: Proposal, blockNumber: bigint, timestamp: bigint, session: EngineSession): Promise<Prepared> {
+    const prepared = await this.prepareCallsOf(p, blockNumber, timestamp, session)
+    if (!isV4Policy(this.cfg.policy.actionPolicy)) return prepared
+    const dead = a1ExpiresAt(timestamp)
+    return { ...prepared, expiresAt: prepared.expiresAt === null || prepared.expiresAt > dead ? dead : prepared.expiresAt }
+  }
+
+  private async prepareCallsOf(p: Proposal, blockNumber: bigint, timestamp: bigint, session: EngineSession): Promise<Prepared> {
     const acct = this.cfg.account
     const slippage = this.cfg.policy.execution.slippageBps
     // Every priced call of the batch expires on chain at the same time (NonfungiblePositionManager and SwapRouter02).
-    const deadline = timestamp + BigInt(this.cfg.policy.execution.observationTtlSeconds)
+    // Review of #247 (P2): under V4 the deadline covers the op's whole window (T + S): one inside it lets the op
+    // validate, charge the account and its gas rate, and then revert in V4 with Expired.
+    const deadline = isV4Policy(this.cfg.policy.actionPolicy) ? a1ExpiresAt(timestamp) : timestamp + BigInt(this.cfg.policy.execution.observationTtlSeconds)
     await this.refuseWhilePaused(blockNumber)
     if (p.kind === 'bridge_out') return isV4Policy(this.cfg.policy.actionPolicy) ? this.prepareBridgeOutV4(p, timestamp) : this.prepareBridgeOut(p)
     if (p.kind === 'vault_deposit' || p.kind === 'vault_redeem') return this.prepareVault(p, blockNumber, timestamp)
@@ -1837,7 +1945,7 @@ export class Engine {
         }
         if (isV4Policy(this.cfg.policy.actionPolicy)) {
           // #348 (I9): checkExit with the decrease's own arguments right before it, then collect (and burn).
-          return { calls: this.a1([{ kind: 'decrease', tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline, burn: p.kind === 'rerange' }], timestamp), expiresAt: deadline }
+          return { calls: this.a1([{ kind: 'decrease', tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline, burn: p.kind === 'rerange', positionLiquidity: pos[7] }], timestamp), expiresAt: deadline }
         }
         calls.push(this.v3.decreaseLiquidity({ tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline }))
       }

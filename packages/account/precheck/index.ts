@@ -261,7 +261,8 @@ export function precheck(op: SessionUserOp, ctx: { chainId: number; now: number;
       const why = a1CallRefusal(c, a1)
       if (why) return deny(why.startsWith('native value') || why.startsWith('wrap') || why.startsWith('unwrap') ? 'POLICY_DENIED_VALUE' : 'POLICY_DENIED_TARGET', why, permissionId)
     }
-    const shape = checkA1Batch(op.callData, a1)
+    // Review of #247 (P1): the claimed time against now as well (the EntryPoint admits only T - S < now <= T + S).
+    const shape = checkA1Batch(op.callData, { ...a1, now: BigInt(ctx.now) })
     if (!shape.ok) return deny('POLICY_DENIED_CALLTYPE', `A1 batch shape: ${shape.reason}`, permissionId)
     return { ok: true, permissionId, calls: decoded.calls }
   }

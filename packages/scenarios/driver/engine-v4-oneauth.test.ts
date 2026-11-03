@@ -16,7 +16,7 @@ import { executeCallData, useModeSignature } from '@mamoru/account/sessions'
 import { checkA1Batch } from '@mamoru/account/one-auth'
 import type { Execution } from '@mamoru/account/safe'
 import { FakeChain, Revert } from '../../rpc/test/fake-chain.ts'
-import { Engine, type BridgeSigning, type EngineHooks, type EngineSession } from './engine.ts'
+import { Engine, settleUnincluded, v4EngineGas, V4_OP_GAS, type BridgeSigning, type EngineHooks, type EngineSession } from './engine.ts'
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa' as Address
 const V4 = '0x00000000000000000000000000000000000000b4' as Address
@@ -51,12 +51,12 @@ async function withEngine<T>(fn: (e: Engine, chain: FakeChain) => Promise<T>, ho
     rpc.stop()
   }
 }
-const prepare = (e: Engine, p: Proposal): Promise<{ calls: Execution[] }> => (e as unknown as { prepareCalls: (p: Proposal, b: bigint, t: bigint, s: EngineSession) => Promise<{ calls: Execution[] }> }).prepareCalls(p, 1000n, 1_790_002_000n, session)
+const prepare = (e: Engine, p: Proposal): Promise<{ calls: Execution[]; expiresAt: bigint | null }> => (e as unknown as { prepareCalls: (p: Proposal, b: bigint, t: bigint, s: EngineSession) => Promise<{ calls: Execution[]; expiresAt: bigint | null }> }).prepareCalls(p, 1000n, 1_790_002_000n, session)
 
 const passesV4Precheck = (calls: Execution[]) => {
   const ledger = new SessionLedger()
   ledger.activate(session.permissionId, grant)
-  return precheck({ sender: ACCOUNT, callData: executeCallData(calls), signature: useModeSignature(session.permissionId, '0x') }, { chainId: 8453, now: 1_000, ledger })
+  return precheck({ sender: ACCOUNT, callData: executeCallData(calls), signature: useModeSignature(session.permissionId, '0x') }, { chainId: 8453, now: 1_790_002_000, ledger })
 }
 
 const kinds: [string, Proposal][] = [
@@ -88,6 +88,13 @@ describe('V4: every engine step goes through V4 or the manager exits, never Swap
         if (p.kind === 'enter_swap') expect(out.calls.at(-3)!.callData.startsWith(toFunctionSelector('function swap((address,address,uint256,uint256,uint160,uint256))'))).toBe(true)
         if (p.kind === 'rerange' || p.kind === 'reduce') expect(out.calls[1]!.callData.startsWith(toFunctionSelector('function checkExit(uint256,uint128,uint256,uint256)'))).toBe(true)
         expect(passesV4Precheck(out.calls)).toMatchObject({ ok: true })
+        // Review of #247 (P1): every V4 op is dead after T + S; a dropped one is released from there, never held.
+        const T = 1_790_002_000n
+        expect(out.expiresAt).not.toBeNull()
+        expect(out.expiresAt! <= T + 300n).toBe(true)
+        const dropped = { opNonce: 5n, nonceAtSafe: 5n, eventFound: false, expiresAt: out.expiresAt, permissionEnabledAtSafe: true, rejected: false }
+        expect(settleUnincluded({ ...dropped, safeTimestamp: T + 300n })).toBeNull()
+        expect(settleUnincluded({ ...dropped, safeTimestamp: T + 301n })).toMatchObject({ to: 'failed', code: 'RECON_UNINCLUDABLE' })
       })
     })
   }
@@ -114,5 +121,20 @@ describe('V4 bridge to this chain (#278): refused before any call is built', () 
     await withEngine(async (e) => {
       await expect(prepare(e, p)).rejects.toThrow('POLICY_DENIED_TARGET')
     })
+  })
+})
+
+describe('review of #247: V4 gas-rate sizing', () => {
+  test("each kind's measured limits, maxFee = min(2 x base + prio, 0.03 gwei), wait above the ceiling", () => {
+    const caps = policy.actionPolicy!.gasPolicy!.caps
+    const g = v4EngineGas('mint', 8453, 5_000_000n, caps)!
+    expect(g).toMatchObject({ ...V4_OP_GAS[8453]!.mint, maxFeePerGas: 11_000_000n })
+    expect(v4EngineGas('swap', 8453, 20_000_000n, caps)!.maxFeePerGas).toBe(30_000_000n) // clamped to the ceiling
+    expect(v4EngineGas('swap', 8453, 29_000_000n, caps)!.maxFeePerGas).toBe(30_000_000n)
+    expect(v4EngineGas('swap', 8453, 29_000_001n, caps)).toBeNull() // basefee + priority over 0.03 gwei: wait
+    // every limit under MamoruGasPolicyV2's Base caps
+    for (const l of Object.values(V4_OP_GAS[8453]!)) {
+      expect(l.verificationGasLimit <= caps.maxVerificationGasLimit && l.callGasLimit <= caps.maxCallGasLimit && l.preVerificationGas <= caps.maxPreVerificationGas).toBe(true)
+    }
   })
 })

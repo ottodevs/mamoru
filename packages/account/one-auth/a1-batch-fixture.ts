@@ -4,15 +4,15 @@
 // checkAction rules); batch.test.ts fails while the committed file differs from what this builds, and checks that
 // `a1Shape` gives `shape` for every case. Regenerate: bun packages/account/one-auth/a1-batch-fixture.ts --write
 import { writeFileSync } from 'node:fs'
-import { encodeFunctionData, parseAbi, type Hex } from 'viem'
+import { encodeFunctionData, getAddress, parseAbi, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { encodeBatchExecution, encodeMode, encodeSingleExecution, type Execution } from '../safe/index.ts'
-import { a1Abi, a1CallData, A1_CHAINS, buildA1Batch, type A1Context, type A1Intent } from './batch.ts'
+import { a1Abi, a1CallData, a1CallRefusal, a1Calls, A1_CHAINS, buildA1Batch, type A1Context, type A1Intent } from './batch.ts'
 
 export const A1_FIXTURE_PATH = new URL('../../../contracts/action-policy/test/fixtures/a1-batches.json', import.meta.url)
 
 const BASE = A1_CHAINS[8453]!
-export const A1_FIXTURE_CTX: A1Context = { chainId: 8453, account: '0x0000000000000000000000000000000000A11CE0', policy: '0x0000000000000000000000000000000000004444', t: 1_800_000_000n }
+export const A1_FIXTURE_CTX: A1Context = { chainId: 8453, account: getAddress('0x0000000000000000000000000000000000a11ce0'), policy: '0x0000000000000000000000000000000000004444', t: 1_800_000_000n }
 const USDC = BASE.stables[0]!
 const USDT = BASE.stables[1]!
 const WETH = BASE.wrapped
@@ -31,9 +31,10 @@ export const A1_FIXTURE_INTENTS: readonly (readonly [string, readonly A1Intent[]
   ['engine mint', [mint]],
   ['engine increase', [{ kind: 'increase', token0: USDC, token1: CBBTC, params: { tokenId: 7n, amount0Desired: 5_000_000n, amount1Desired: 5_000n, amount0Min: 4_000_000n, amount1Min: 4_000n, deadline: DL } }]],
   ['engine increase, one side only', [{ kind: 'increase', token0: USDC, token1: CBBTC, params: { tokenId: 7n, amount0Desired: 5_000_000n, amount1Desired: 0n, amount0Min: 0n, amount1Min: 0n, deadline: DL } }]],
-  ['engine rerange exit (checkExit + decrease + collect + burn)', [decrease(7n, { burn: true })]],
+  ['engine rerange exit (checkExit + decrease + collect + burn)', [decrease(7n, { burn: true, positionLiquidity: 123_456_789n })]],
   ['engine reduce exit (checkExit + decrease + collect)', [decrease(7n)]],
   ['engine harvest (collect)', [{ kind: 'collect', tokenId: 7n }]],
+  ['engine rerange of an emptied position (collect + burn)', [{ kind: 'collect', tokenId: 7n }, { kind: 'burn', tokenId: 7n }]],
   ['engine bridge out', [{ kind: 'bridge', domain: 15, token: USDC, amount: 25_000_000n, maxFee: 0n }]],
   ['engine bridge out, maxFee at the cap', [{ kind: 'bridge', domain: 15, token: USDC, amount: 25_000_000n, maxFee: 25_000n }]],
   ['engine vault deposit', [{ kind: 'deposit', vault: VAULT, asset: USDC, assets: 10_000_000n }]],
@@ -43,7 +44,7 @@ export const A1_FIXTURE_INTENTS: readonly (readonly [string, readonly A1Intent[]
   ['registerRemote', [{ kind: 'registerRemote', domain: 15, sessionKey: '0x00000000000000000000000000000000005e55e5' }]],
   ['announceReady (noema-d3)', [{ kind: 'announceReady', safe: A1_FIXTURE_CTX.account, toDomain: 0, sessionKey: '0x0000000000000000000000000000000000000000', permissionId: `0x${'0d'.repeat(32)}` }]],
   ['relay a readiness message', [{ kind: 'relayMessage', message: '0x0102', attestation: '0x0304' }]],
-  ['two exits and a swap in one op', [decrease(7n), decrease(8n, { burn: true }), swap(CBBTC, 1_000n)]],
+  ['two exits and a swap in one op', [decrease(7n), decrease(8n, { burn: true, positionLiquidity: 123_456_789n }), swap(CBBTC, 1_000n)]],
   ['two swaps of the same token', [swap(USDC, 1_000_000n), swap(USDC, 2_000_000n)]],
   ['mint then bridge (USDT and USDC)', [mint, { kind: 'bridge', domain: 0, token: USDT, amount: 1_000_000n, maxFee: 0n }]],
 ]
@@ -59,6 +60,12 @@ const checkExit = (liq: bigint) => x(V4, encodeFunctionData({ abi: a1Abi, functi
 const dec = (target: Address = BASE.npm) => x(target, encodeFunctionData({ abi: a1Abi, functionName: 'decreaseLiquidity', args: [{ tokenId: 7n, liquidity: 99n, amount0Min: 1_000n, amount1Min: 2_000n, deadline: DL }] }))
 const raw = (mode: Hex, xs: Execution[]) => encodeFunctionData({ abi: parseAbi(['function execute(bytes32,bytes)']), functionName: 'execute', args: [mode, encodeBatchExecution(xs)] })
 const BATCH = encodeMode(1, 0)
+const WRAP_DATA: Hex = '0xd0e30db0'
+/** approve(V4, n) with the spender word's top byte set (Solidity's abi.decode of an address reverts on it). */
+const dirtyApprove = (n: bigint): Hex => {
+  const d = encodeFunctionData({ abi: a1Abi, functionName: 'approve', args: [V4, n] })
+  return `${d.slice(0, 10)}01${d.slice(12)}` as Hex
+}
 const T = ctx.t
 
 /** Hand-made batches, each with the gas policy's verdict (`shape`) and checkA1Batch's (`check`). */
@@ -81,6 +88,18 @@ export const A1_FIXTURE_RAW: readonly { name: string; callData: Hex; shape: bool
   { name: 'decrease without checkExit', callData: raw(BATCH, [clock(T), dec()]), shape: false, check: false },
   { name: 'checkExit with another liquidity', callData: raw(BATCH, [clock(T), checkExit(98n), dec()]), shape: false, check: false },
   { name: 'checkExit not right before the decrease', callData: raw(BATCH, [clock(T), checkExit(99n), v4swap, dec()]), shape: false, check: false },
+  { name: 'checkExit differing only in amount0Min', callData: raw(BATCH, [clock(T), x(V4, encodeFunctionData({ abi: a1Abi, functionName: 'checkExit', args: [7n, 99n, 999n, 2_000n] })), dec()]), shape: false, check: false },
+  { name: 'checkExit differing only in amount1Min', callData: raw(BATCH, [clock(T), x(V4, encodeFunctionData({ abi: a1Abi, functionName: 'checkExit', args: [7n, 99n, 1_000n, 2_001n] })), dec()]), shape: false, check: false },
+  // Review of #247: checkAction's own rules, where the gas policy's shape passes.
+  { name: 'wrap with value 0 (checkAction refuses it)', callData: raw(BATCH, [clock(T), x(WETH, WRAP_DATA, 0n)]), shape: true, check: false },
+  { name: 'unwrap with value (checkAction refuses it)', callData: raw(BATCH, [clock(T), x(WETH, encodeFunctionData({ abi: a1Abi, functionName: 'withdraw', args: [1n] }), 1n)]), shape: true, check: false },
+  { name: 'wrap with value (accepted)', callData: raw(BATCH, [clock(T), x(WETH, WRAP_DATA, 1n)]), shape: true, check: true },
+  { name: 'value to a target other than the wrapped native (checkAction refuses it)', callData: raw(BATCH, [clock(T), { ...v4swap, value: 1n }]), shape: true, check: false },
+  { name: 'collect to another recipient (checkAction refuses it)', callData: raw(BATCH, [clock(T), x(BASE.npm, encodeFunctionData({ abi: a1Abi, functionName: 'collect', args: [{ tokenId: 7n, recipient: CBBTC, amount0Max: 1n, amount1Max: 1n }] }))]), shape: true, check: false },
+  { name: 'approve on the position manager, reset (checkAction refuses it)', callData: raw(BATCH, [clock(T), approve(BASE.npm, 5n), approve(BASE.npm, 0n), x(V4, encodeFunctionData({ abi: a1Abi, functionName: 'assertZero', args: [BASE.npm] }))]), shape: true, check: false },
+  { name: 'receiveMessage on another target (checkAction refuses it)', callData: raw(BATCH, [clock(T), x(USDC, encodeFunctionData({ abi: a1Abi, functionName: 'receiveMessage', args: ['0x01', '0x02'] }))]), shape: true, check: false },
+  { name: 'approve with a dirty spender word, reset alike (checkAction refuses it)', callData: raw(BATCH, [clock(T), x(USDC, dirtyApprove(5n)), v4swap, x(USDC, dirtyApprove(0n)), assertZero(USDC)]), shape: true, check: false },
+  { name: 'collect with a dirty recipient word (checkAction refuses it)', callData: raw(BATCH, [clock(T), x(BASE.npm, `${encodeFunctionData({ abi: a1Abi, functionName: 'collect', args: [{ tokenId: 7n, recipient: ctx.account, amount0Max: 1n, amount1Max: 1n }] }).slice(0, 74)}01${encodeFunctionData({ abi: a1Abi, functionName: 'collect', args: [{ tokenId: 7n, recipient: ctx.account, amount0Max: 1n, amount1Max: 1n }] }).slice(76)}` as Hex)]), shape: true, check: false },
   { name: 'checkExit + decrease by hand', callData: raw(BATCH, [clock(T), checkExit(99n), dec()]), shape: true, check: true },
   // What the gas policy leaves to V4's checkAction: its shape passes, the call itself is refused.
   { name: 'decrease elsewhere than the position manager (checkAction refuses it)', callData: raw(BATCH, [clock(T), dec(USDC)]), shape: true, check: false },
@@ -100,7 +119,12 @@ export function a1Fixture() {
     npm: BASE.npm,
     t: Number(ctx.t),
     count: cases.length,
-    cases: cases.map((c) => ({ name: c.name, callData: c.callData, shape: c.shape, check: c.check })),
+    // `decodable`: a batch-mode execute; `actions`: V4's checkAction (static mirror, a1CallRefusal) admits every call of it,
+    // with tokenIds 7 and 8 admitted for the account (A1CheckActionParityFork.t.sol runs each call through the real V4).
+    cases: cases.map((c) => {
+      const xs = a1Calls(c.callData)
+      return { name: c.name, callData: c.callData, shape: c.shape, check: c.check, decodable: xs !== null, actions: xs !== null && xs.every((x) => a1CallRefusal(x, ctx) === null) }
+    }),
   }
 }
 
