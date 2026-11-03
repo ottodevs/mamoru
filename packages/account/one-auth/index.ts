@@ -44,6 +44,11 @@ export const migrationCheckAbi = parseAbi([
   'function assertOnly(address account, bytes32[] keep) view',
 ])
 
+/**
+ * MamoruActionPolicyV4 as spec 010 A1 declares it (contracts/action-policy/src/MamoruActionPolicyV4.sol): no guardian,
+ * no pause, no registry. Readiness is proven on chain: `announceReady` on the chain where the Safe lives sends a CCTP
+ * message to the same V4 on the other chain, which records it (`readyOf`, `isReady`).
+ */
 export const mamoruActionPolicyV4Abi = parseAbi([
   'struct SwapParams { address pool; address tokenIn; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; uint256 deadline; }',
   'struct MintParams { address token0; address token1; uint24 fee; int24 tickLower; int24 tickUpper; uint256 amount0Desired; uint256 amount1Desired; uint256 amount0Min; uint256 amount1Min; address recipient; uint256 deadline; }',
@@ -58,53 +63,58 @@ export const mamoruActionPolicyV4Abi = parseAbi([
   'function redeem(address vault, uint256 shares) returns (uint256 assets)',
   'function bridge(uint32 domain, address token, uint256 amount)',
   'function registerRemote(uint32 domain, address sessionKey) returns (address remote)',
-  'function setReady(address account, uint32 domain, address remote)',
-  'function clearReady(address account, uint32 domain)',
+  'function announceReady(address safe, uint32 toDomain, address sessionKey, bytes32 permissionId)',
   'function remoteOf(address account, uint32 domain) view returns (Remote)',
   'function readyOf(address account, uint32 domain) view returns (Ready)',
   'function isReady(address account, uint32 domain) view returns (bool)',
-  'function isPaused(address account) view returns (bool)',
-  'function budgetLeft(address account, address key, uint16 ratioBps) view returns (uint256 bucket, uint256 sub, uint256 cap30, uint256 breaker, uint256 untilReview)',
+  'function budgetLeft(address account, address key, uint16 ratioBps) view returns (uint256 bucket, uint256 sub, uint256 cap30, uint256 cap24h)',
   'function configOf(address account) view returns (Config)',
   'function generationOf(address account) view returns (uint64)',
   'function admittedPool(address account, uint256 tokenId) view returns (address)',
   'function HELPER() view returns (address)',
   'function REMOTE_INIT() view returns (address)',
-  'function GUARDIAN() view returns (address)',
-  'function REGISTRY() view returns (address)',
+  'function GAS_POLICY() view returns (address)',
+  'function TABLE() view returns (address)',
   'event RemoteRegistered(address indexed account, uint32 indexed domain, address remote, bytes32 ownersHash, address sessionKey)',
   'event RemoteReady(address indexed account, uint32 indexed domain, address remote, bytes32 ownersHash)',
+  'event ReadyAnnounced(address indexed home, address indexed safe, uint32 indexed toDomain, bytes32 ownersHash)',
   'event Bridged(address indexed account, uint32 indexed domain, address indexed recipient, address token, uint256 amount)',
-  'event Paused(address indexed account, uint8 reasons, uint64 generation)',
 ])
 
+/** MamoruV4Helper (V4's child at CREATE nonce 2): the checks V4 runs, as views. `priced` reverts for a pool that is not eligible. */
 export const mamoruV4HelperAbi = parseAbi([
-  'function remote(address account, uint32 domain, address sessionKey, uint128 capUsd, uint32 homeDomain) view returns (address at, bytes32 ownersHash, bytes createCall)',
-  'function remoteDeployment(address account, uint32 domain) view returns (address at, bytes createCall)',
-  'function ownersHashOf(address account) view returns (bytes32)',
-  'function swapBounds(address pool, address tokenIn, uint256 amountIn) view returns (uint256 minOut, uint160 sqrtPriceLimitX96)',
   'struct PoolInfoV4 { address token0; address token1; uint24 fee; bool in1; bool stablePair; }',
   'struct PoolEntryV4 { uint32 twapWindow; uint32 twapShortWindow; uint24 bandTicks; int24 anchorTick; uint24 anchorBand; uint16 ratioBps; bool active; }',
+  'function remote(address account, uint32 domain, address sessionKey, uint128 capUsd, uint32 homeDomain) view returns (address at, bytes32 ownersHash, bytes createCall)',
+  'function ownersHashOf(address account) view returns (bytes32)',
   'function poolInfo(address pool) view returns (PoolInfoV4)',
+  'function priced(address pool) view returns (PoolInfoV4 p, PoolEntryV4 e, address key)',
+  'function exitEntry(address pool) view returns (PoolEntryV4)',
+  'function swapBoundsAt(address pool, PoolInfoV4 p, PoolEntryV4 e, bool zeroForOne, uint256 amountIn) view returns (uint256 minOut, uint160 sqrtPriceLimitX96)',
   'function swapValue(address pool, PoolInfoV4 p, PoolEntryV4 e, bool zeroForOne, uint256 amountIn, uint256 minOutIn, uint160 limitIn) view returns (uint256 v)',
 ])
 
-export const mamoruRegistryAbi = parseAbi([
-  'struct PoolEntry { uint32 twapWindow; uint32 twapShortWindow; uint24 bandTicks; int24 anchorTick; uint24 anchorBand; uint16 ratioBps; bool active; }',
-  'struct VaultEntry { uint16 ratioBps; bool active; }',
-  'function activePools() view returns (address[])',
-  'function activeVaults() view returns (address[])',
-  'function poolOf(address pool) view returns (PoolEntry)',
-  'function vaultOf(address vault) view returns (VaultEntry)',
-  'function routeOn(uint32 domain) view returns (bool)',
-  'function queue(uint8 kind, bytes32 key, bytes params) returns (bytes32 id)',
-  'function execute(uint8 kind, bytes32 key, bytes params, uint256 n)',
-  'function cancel(bytes32 id)',
-  'function DELAY() view returns (uint256)',
-  'event Queued(bytes32 indexed id, uint8 indexed kind, bytes32 indexed key, bytes params, uint256 nonce, uint256 eta)',
-  'event Executed(bytes32 indexed id, uint8 indexed kind, bytes32 indexed key, bytes params)',
-  'event Cancelled(bytes32 indexed id, address indexed by)',
+/** MamoruV4Table (A1): the per-chain table, pure data at the same CREATE2 address on every chain. */
+export const mamoruV4TableAbi = parseAbi([
+  'struct GasCaps { uint64 maxPriorityFeePerGas; uint32 maxVerificationGasLimit; uint32 maxCallGasLimit; uint32 maxPreVerificationGas; uint64 maxFeePerGas; uint32 maxPaymasterGas; }',
+  'struct Chain { uint256 chainId; uint32 domain; address factory; address npm; address router; address[2] stables; address[2] assets; address wrapped; uint128 gasPerWindow; uint32 gasWindow; GasCaps remoteCaps; }',
+  'struct Class { address ref; address key; uint32 twapWindow; uint32 twapShortWindow; uint24 bandTicks; uint24 anchorBand; uint16 ratioBps; uint8 feeMask; }',
+  'struct Vault { address asset; uint16 ratioBps; }',
+  'function chain(uint256 chainId) pure returns (Chain)',
+  'function chainOf(uint32 domain) pure returns (uint256)',
+  'function classOf(uint256 chainId, address a, address b) pure returns (Class)',
+  'function vaultOf(uint256 chainId, address vault) pure returns (Vault)',
+  'function pairsOf(uint256 chainId) pure returns (address[2][])',
+  'function vaultsOf(uint256 chainId) pure returns (address[])',
 ])
+
+/** MamoruV4Classes' FEE_* bits, by fee tier (pips). */
+export const V4_FEE_BITS: readonly (readonly [fee: number, bit: number])[] = [
+  [100, 1],
+  [500, 2],
+  [3000, 4],
+  [10_000, 8],
+]
 
 const SESSIONS_PARAM = smartSessionAbi.find((f) => f.type === 'function' && f.name === 'enableSessions')!.inputs
 const remoteInitAbi = parseAbi(['function init(bytes sessions)'])

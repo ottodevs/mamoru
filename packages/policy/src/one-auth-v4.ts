@@ -1,9 +1,11 @@
 // otto/mamoru#293, spec 010 (one authorization): the policy of an account whose ONE session per chain is a fallback
 // action with MamoruActionPolicyV4 as its only action policy and MamoruGasPolicyV2 as its only userOp policy. The owner
-// signs the rules once (InitV4: C, the generation, and for a remote Safe its home); which pools, vaults and chain
-// routes the engine may use come from MamoruRegistry on chain (timelocked), never from owner-signed data. Nothing here
-// is live until the `one_auth_v4` ops flag is on for an account AND the four contracts are pinned in the chain's
-// registry file (base.json / monad.json list them under `undeployed` until T7 deploys them: fail closed).
+// signs the rules once (InitV4: C, the generation, and for a remote Safe its home); which pools and vaults the engine
+// may use follow from V4's own rules over MamoruV4Table (spec 010 A1: pool classes, reference pools, the exact vault
+// list, all in code; no registry, no admin, no guardian), never from owner-signed data. Nothing here is live until the
+// `one_auth_v4` ops flag is on for an account AND the stack is pinned in the chain's registry file (the registry files
+// list A1's contracts under `undeployed` until T8 deploys them: fail closed). T7, the guardian-era stack deployed on
+// 2 Nov, is retired unused (otto/mamoru#348): its addresses are under `retired`, never here.
 import { decodeAbiParameters, encodeAbiParameters, getAddress, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { address, entry, isDeployed, type Registry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
@@ -17,12 +19,16 @@ export const ONE_AUTH_V4 = 'one-auth-v4'
 /** The policy id of a V4 remote Safe (its Init names its home), the RemoteSpec's `policyId`. */
 export const ONE_AUTH_V4_REMOTE = 'one-auth-v4-remote'
 
-/** The four contracts of spec 010, by registry name. All four must be pinned on a chain before anything V4 runs there. */
-export const ONE_AUTH_V4_CONTRACTS = ['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'] as const
+/**
+ * The contracts of spec 010 A1 (contracts/action-policy/script/DeployV4.s.sol), by registry name. All four must be
+ * pinned on a chain before anything V4 runs there. MamoruV4Table is the per-chain table V4 and the gas policy read
+ * (pool classes, reference pools, vaults); the operator reads it too, to list the candidate pools.
+ */
+export const ONE_AUTH_V4_CONTRACTS = ['MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck', 'MamoruV4Table'] as const
 export type OneAuthV4Contract = (typeof ONE_AUTH_V4_CONTRACTS)[number]
 
 /** The deployed V4 stack of one chain (same CREATE2 addresses on every chain, contracts notice). */
-export type OneAuthV4Deployment = { registry: Address; policy: Address; gasPolicy: Address; migrationCheck: Address }
+export type OneAuthV4Deployment = { policy: Address; gasPolicy: Address; migrationCheck: Address; table: Address }
 
 /**
  * The V4 stack pinned in `registry`, or null when any of the four is not (an `undeployed` name, or absent). The
@@ -31,7 +37,7 @@ export type OneAuthV4Deployment = { registry: Address; policy: Address; gasPolic
 export function oneAuthV4Deployment(registry: Registry): OneAuthV4Deployment | null {
   if (!ONE_AUTH_V4_CONTRACTS.every((n) => isDeployed(n, registry))) return null
   const a = (n: OneAuthV4Contract) => address(n, registry)
-  const d = { registry: a('MamoruRegistry'), policy: a('MamoruActionPolicyV4'), gasPolicy: a('MamoruGasPolicyV2'), migrationCheck: a('MamoruMigrationCheck') }
+  const d = { policy: a('MamoruActionPolicyV4'), gasPolicy: a('MamoruGasPolicyV2'), migrationCheck: a('MamoruMigrationCheck'), table: a('MamoruV4Table') }
   if (Object.values(d).some((x) => BigInt(x) === 0n)) return null
   return d
 }
@@ -173,6 +179,16 @@ export const GAS_CAPS_V2_BY_CHAIN: Readonly<Record<number, GasCapsV2>> = {
 }
 
 /**
+ * Spec 010 A1 (otto/mamoru#317): MamoruGasPolicyV2's rate per chain, MamoruV4Chains' `gasPerWindow` (G, wei) and
+ * `gasWindow` (W, seconds). Pinned in V4's table, never owner-signed: Base 0.002 ETH, Monad 1 MON, Ethereum 0.01 ETH a day.
+ */
+export const V4_GAS_RATE_BY_CHAIN: Readonly<Record<number, { perWindow: bigint; window: number }>> = {
+  8453: { perWindow: 2_000_000_000_000_000n, window: 86_400 },
+  143: { perWindow: 1_000_000_000_000_000_000n, window: 86_400 },
+  1: { perWindow: 10_000_000_000_000_000n, window: 86_400 },
+}
+
+/**
  * MamoruV4Chains: the CCTP domain of each chain V4 pins, and back. A chain or domain V4 does not pin is ABSENT
  * (`=== undefined`), never 0: CCTP domain 0 is Ethereum (#307).
  */
@@ -222,8 +238,8 @@ export function v4BridgeTemplate(): GrantTemplate {
 /**
  * The home policy of spec 010 on Base: v6's mix (Stable 50 %, Balance 35 % on Base, Growth 15 % on the account's own
  * Safe on Monad, spec 010 open question 3), engine, range and execution as v6. The buckets' pools here are the defaults
- * the registry is expected to list at deploy; the engine runs on `withRegistryPools` of it, re-resolved against
- * MamoruRegistry's active pools at every review. No session grants: nothing of this is ever renewed.
+ * V4's table makes eligible at deploy; the engine runs on `withRegistryPools` of it, re-resolved against the pools V4
+ * finds eligible (MamoruV4Table classes, MamoruV4Helper.priced) at every review. No session grants: nothing of this is ever renewed.
  */
 export const oneAuthV4Live: PolicyVersion = {
   ...conservadorLiveV6,
@@ -248,12 +264,14 @@ export const oneAuthV4RemoteMonad: PolicyVersion = {
   session: { validitySeconds: 0, renewalWindowSeconds: 0, caps: [], grants: [] },
 }
 
-// ---- pools from MamoruRegistry ---------------------------------------------------------------------------------
+// ---- eligible pools (spec 010 A1: MamoruV4Table's classes, checked by MamoruV4Helper.priced) ------------------------
+// The names keep "Registry" from the pre-A1 MamoruRegistry they replaced: they are the on-chain pool set the engine runs
+// on, now derived by V4's rules instead of listed by an admin.
 
-/** MamoruRegistry.PoolEntry, field for field. */
+/** PoolEntryV4 (MamoruActionPolicyV4.sol), field for field: what MamoruV4Helper.priced returns for an eligible pool. */
 export type RegistryPoolEntry = { twapWindow: number; twapShortWindow: number; bandTicks: number; anchorTick: number; anchorBand: number; ratioBps: number; active: boolean }
 
-/** One active pool read from MamoruRegistry: its address, identity (token0, token1, fee, tick spacing read on chain) and entry. */
+/** One eligible pool V4's rules give: its address, identity (token0, token1, fee, tick spacing read on chain) and entry. */
 export type RegistryPool = { address: Address; token0: Address; token1: Address; fee: number; tickSpacing: number; entry: RegistryPoolEntry }
 
 const SYMBOLS: readonly RegistryName[] = ['USDC', 'USDT', 'WETH', 'cbBTC', 'WMON']
@@ -279,16 +297,16 @@ export function registryPoolEntry(p: RegistryPool, registry: Registry, opts: { u
   const known = registry.entries.find((e) => e.kind === 'pool' && e.address.toLowerCase() === p.address.toLowerCase())
   if (known) return known
   // Review of #202 (P0-4): the operator's own reads (funding, withdrawals, Stop) resolve pools in the chain's registry
-  // json and nothing else, so the engine never enters a pool they could not see: a MamoruRegistry pool that the json does
-  // not pin is not used (pinning it is a reviewed PR, still no owner signature).
+  // json and nothing else, so the engine never enters a pool they could not see: an eligible pool that the json does not
+  // pin is not used (pinning it is a reviewed PR, still no owner signature).
   if (!opts.unpinned) return null
-  return { name: `pool:${t0}/${t1}/${p.fee}`, kind: 'pool', role: 'MamoruRegistry (spec 010), read on chain', address: getAddress(p.address), codeHash: null, token0: t0, token1: t1, fee: p.fee, tickSpacing: p.tickSpacing }
+  return { name: `pool:${t0}/${t1}/${p.fee}`, kind: 'pool', role: 'eligible by V4 rules (spec 010 A1), read on chain', address: getAddress(p.address), codeHash: null, token0: t0, token1: t1, fee: p.fee, tickSpacing: p.tickSpacing }
 }
 
 /**
- * A V4 policy whose buckets serve the registry's active pools: a pool of two pinned stables goes to `stables`, any other
- * (a stable and an asset) to `risk`, each bucket keeping its preference (a bucket with no active pool keeps its weight; its share waits as savings). `registry` gains an entry for every pool it did not know. The engine's actionPolicy
- * carries each pool's band, anchor and windows exactly as the registry states them, so its bounds are V4's own.
+ * A V4 policy whose buckets serve the eligible pools: a pool of two pinned stables goes to `stables`, any other
+ * (a stable and an asset) to `risk`, each bucket keeping its preference (a bucket with no eligible pool keeps its weight; its share waits as savings). `registry` gains an entry for every pool it did not know. The engine's actionPolicy
+ * carries each pool's band, anchor and windows exactly as V4's class states them, so its bounds are V4's own.
  * Returns the extended registry too: the engine resolves every pool name in it.
  */
 export function withRegistryPools(policy: PolicyVersion, deployment: Pick<OneAuthV4Deployment, 'policy' | 'gasPolicy'>, pools: readonly RegistryPool[], registry: Registry): { policy: PolicyVersion; registry: Registry; pools: RegistryName[] } {
@@ -355,7 +373,7 @@ export function withRegistryPools(policy: PolicyVersion, deployment: Pick<OneAut
   return { policy: out, registry: extended, pools: named.map((n) => n.name) }
 }
 
-/** A stable signature of an active pool set (what changes when the registry lists, removes or re-parametrizes a pool). */
+/** A stable signature of an eligible pool set (what changes when a pool becomes eligible or stops being so). */
 export function registryPoolsKey(pools: readonly RegistryPool[]): string {
   return pools
     .filter((p) => p.entry.active)

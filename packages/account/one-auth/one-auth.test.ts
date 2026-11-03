@@ -2,13 +2,13 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { decodeFunctionData, getAddress, keccak256, toHex, zeroAddress, type Hex } from 'viem'
 import { address, baseRegistry, ethereumRegistry, monadRegistry, moduleRegistryAbi, multiSendCallOnlyAbi, smartSessionAbi } from '@mamoru/registry'
-import { decodeGasCapsV2, decodeInitV4, GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment } from '@mamoru/policy'
+import { decodeGasCapsV2, decodeInitV4, GAS_CAPS_V2_BY_CHAIN, ONE_AUTH_V4_CONTRACTS, oneAuthV4Deployment } from '@mamoru/policy'
 import { permissionIdOf } from '../sessions/index.ts'
 import { webAuthnSigner } from '../safe/index.ts'
 import { FIXTURE_PATH, fixtureJson } from './fixture.ts'
 import { buildMigrateV4, FALLBACK_SELECTOR, FALLBACK_TARGET, inventoryOf, migrationCalls, migrationCheckAbi, migrationTx, ownerStateOf, smartSessionV4Abi, v4Children, v4CreateSetup, v4HomeSession, V4_REMOTE_SESSION_SALT } from './index.ts'
 
-const D = { registry: '0x00000000000000000000000000000000000000a1', policy: '0x00000000000000000000000000000000000000a2', gasPolicy: '0x00000000000000000000000000000000000000a3', migrationCheck: '0x00000000000000000000000000000000000000a4' } as const
+const D = { table: '0x00000000000000000000000000000000000000a1', policy: '0x00000000000000000000000000000000000000a2', gasPolicy: '0x00000000000000000000000000000000000000a3', migrationCheck: '0x00000000000000000000000000000000000000a4' } as const
 const KEY = '0x00000000000000000000000000000000005e55e5' as const
 const SAFE = '0x000000000000000000000000000000000000cafe' as const
 const id = (n: number) => `0x${n.toString(16).padStart(64, '0')}` as Hex
@@ -57,11 +57,17 @@ describe('the V4 session', () => {
     expect(a.address).not.toBe(b.address) // the Init is part of the address
   })
 
-  test('T7 (2 Nov): the four contracts are pinned at the same addresses on Base, Monad and Ethereum', () => {
-    const want = { registry: '0x2a70976970964faB1FBadaFF2f0b3851C2Cb74C7', policy: '0xb1383F8E5045aFdcfF2031743d3c25082C8858a4', gasPolicy: '0xe58dad8B381FF93A28Aa2A43De80acb96F535C7B', migrationCheck: '0xc04046b4649471875372FA9e800143491cD4fB31' }
-    for (const r of [baseRegistry, monadRegistry, ethereumRegistry]) expect(oneAuthV4Deployment(r) as Record<string, string> | null).toEqual(want)
-    // and the address is the script's pinned one (contracts/action-policy/script/DeployV4.s.sol EXPECTED_POLICY)
-    expect(readFileSync(new URL('../../../contracts/action-policy/script/DeployV4.s.sol', import.meta.url), 'utf8')).toContain(`EXPECTED_POLICY = ${want.policy}`)
+  test('#348: T7 is retired and not pinned; A1 is undeployed until T8, so no chain has a V4 deployment', () => {
+    const t7 = ['0x2a70976970964faB1FBadaFF2f0b3851C2Cb74C7', '0xb1383F8E5045aFdcfF2031743d3c25082C8858a4', '0xe58dad8B381FF93A28Aa2A43De80acb96F535C7B']
+    const script = readFileSync(new URL('../../../contracts/action-policy/script/DeployV4.s.sol', import.meta.url), 'utf8')
+    for (const r of [baseRegistry, monadRegistry, ethereumRegistry]) {
+      expect(oneAuthV4Deployment(r), r.chain).toBeNull()
+      for (const a of t7) expect(r.entries.some((e) => e.address === a), `${r.chain} ${a}`).toBe(false)
+      expect(r.entries.some((e) => e.name === 'MamoruRegistry'), r.chain).toBe(false)
+      for (const n of ['MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruV4Table']) expect(r.undeployed, `${r.chain} ${n}`).toContain(n)
+    }
+    // A1's deploy script predicts none of T7's addresses: T8 lands at new ones.
+    for (const a of t7) expect(script.includes(a)).toBe(false)
   })
 })
 
@@ -120,7 +126,8 @@ describe('inventory (spec 010 r1 finding 4)', () => {
 })
 
 describe('buildMigrateV4 (the builder the operator prepares with and the Worker rebuilds with)', () => {
-  const pinnedBase = { ...baseRegistry, undeployed: [], entries: [...baseRegistry.entries.filter((e) => !['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'].includes(e.name)), ...(['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck'] as const).map((name, i) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: [D.registry, D.policy, D.gasPolicy, D.migrationCheck][i]!, codeHash: null }) as never)] }
+  const at = { MamoruActionPolicyV4: D.policy, MamoruGasPolicyV2: D.gasPolicy, MamoruMigrationCheck: D.migrationCheck, MamoruV4Table: D.table } as const
+  const pinnedBase = { ...baseRegistry, undeployed: [], entries: [...baseRegistry.entries.filter((e) => !(ONE_AUTH_V4_CONTRACTS as readonly string[]).includes(e.name)), ...ONE_AUTH_V4_CONTRACTS.map((name) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: at[name], codeHash: null }) as never)] }
   const input = { chainId: 8453, safe: SAFE, safeNonce: '4', step: 0 as const, capUsdc: '300000000', sessionKey: KEY, generation: '1', admit: ['7'], oldPermissionIds: [id(1), id(2)], removeIds: [id(1)], noncesBefore: ['0', '3'], home: zeroAddress, homeDomain: 0 }
 
   test('deterministic, refund fields zero, the hash is the SafeTx EIP-712 hash of its fields', () => {

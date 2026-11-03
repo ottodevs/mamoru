@@ -40,7 +40,7 @@ describe('V4 session precheck', () => {
     expect(run([approve(NPM, V4)])).toBe('POLICY_DENIED_TARGET')
     expect(run([{ target: address('SwapRouter02', baseRegistry), value: 0n, callData: '0x04e45aaf' }])).toBe('POLICY_DENIED_TARGET')
     expect(run([{ ...swap, value: 1n }])).toBe('POLICY_DENIED_VALUE')
-    expect(run([{ target: V4, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'setReady', args: [ACCOUNT, 15, ACCOUNT] }) }])).toBe('POLICY_DENIED_TARGET')
+    expect(run([{ target: V4, value: 0n, callData: encodeFunctionData({ abi: mamoruActionPolicyV4Abi, functionName: 'readyOf', args: [ACCOUNT, 15] }) }])).toBe('POLICY_DENIED_TARGET')
     expect(run([{ target: ACCOUNT, value: 0n, callData: '0x12345678' }])).toBe('POLICY_DENIED_TARGET')
   })
 })

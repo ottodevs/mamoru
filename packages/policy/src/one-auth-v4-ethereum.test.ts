@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { zeroAddress } from 'viem'
 import { address, ethereumRegistry, registryFor } from '@mamoru/registry'
-import { decodeInitV4, encodeInitV4, GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment, V4_CHAIN_BY_DOMAIN, V4_DOMAIN_BY_CHAIN, V4_HOME_CHAINS, V4_PINNED } from './index.ts'
+import { decodeInitV4, encodeInitV4, GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment, V4_GAS_RATE_BY_CHAIN, V4_CHAIN_BY_DOMAIN, V4_DOMAIN_BY_CHAIN, V4_HOME_CHAINS, V4_PINNED } from './index.ts'
 
 const CHAINS_SOL = readFileSync(new URL('../../../contracts/action-policy/src/MamoruV4Chains.sol', import.meta.url), 'utf8')
 const HOME = '0x000000000000000000000000000000000000cafe' as const
@@ -39,23 +39,33 @@ describe('Ethereum in the V4 tables (otto/mamoru#307, #308)', () => {
     expect(V4_PINNED[1]).toEqual({ stables: ['USDC'], assets: ['WETH'] })
   })
 
-  test("the L1 gas caps are MamoruV4Chains' remoteCaps for Ethereum, under its GAS_REVIEW", () => {
+  test("the L1 gas caps are MamoruV4Chains' remoteCaps for Ethereum, and the rate (G, W) is the table's (A1)", () => {
     const c = GAS_CAPS_V2_BY_CHAIN[1]!
     const m = ETH_BLOCK.match(/GasCaps\(([^)]*)\)/)
     expect(m).not.toBeNull()
-    const [prio, verif, call, pre, maxFee, pm, perWindow, window] = m![1]!.split(',').map((x) => x.trim().replaceAll('_', ''))
+    const parts = m![1]!.split(',').map((x) => x.trim().replaceAll('_', ''))
+    expect(parts).toHaveLength(6) // A1 (#317): no perWindow / window in the per-op caps
+    const [prio, verif, call, pre, maxFee, pm] = parts
     expect([BigInt(prio!), BigInt(verif!), BigInt(call!), BigInt(pre!), BigInt(maxFee!), BigInt(pm!)]).toEqual([c.maxPriorityFeePerGas, c.maxVerificationGasLimit, c.maxCallGasLimit, c.maxPreVerificationGas, c.maxFeePerGas, c.maxPaymasterGas])
-    expect([perWindow, window]).toEqual(['0.01 ether', '1 days'])
     expect([c.maxPriorityFeePerGas, c.maxVerificationGasLimit, c.maxCallGasLimit, c.maxPreVerificationGas, c.maxFeePerGas, c.maxPaymasterGas]).toEqual([100_000_000n, 3_000_000n, 2_000_000n, 200_000n, 5_000_000_000n, 0n])
-    expect(c.perWindow).toBe(10n ** 16n)
-    expect(c.window).toBe(86_400)
-    expect(ETH_BLOCK).toContain('c.gasReview = 0.02 ether;')
-    expect(c.perWindow).toBeLessThanOrEqual(2n * 10n ** 16n) // the policy refuses a bucket above GAS_REVIEW
+    expect(ETH_BLOCK).toContain('(c.gasPerWindow, c.gasWindow) = (0.01 ether, 1 days);')
+    expect(V4_GAS_RATE_BY_CHAIN[1]).toEqual({ perWindow: 10n ** 16n, window: 86_400 })
+    expect(c).not.toHaveProperty('perWindow')
   })
 
-  test('the ethereum registry resolves, with V4 pinned there by T7 (same address as Base)', () => {
+  test("every chain's rate is MamoruV4Chains' (G, W)", () => {
+    const want: Record<number, string> = { 8453: '(0.002 ether, 1 days)', 143: '(1 ether, 1 days)', 1: '(0.01 ether, 1 days)' }
+    const wei: Record<string, bigint> = { '0.002 ether': 2n * 10n ** 15n, '1 ether': 10n ** 18n, '0.01 ether': 10n ** 16n }
+    for (const [chain, txt] of Object.entries(want)) {
+      expect(CHAINS_SOL).toContain(`(c.gasPerWindow, c.gasWindow) = ${txt};`)
+      expect(V4_GAS_RATE_BY_CHAIN[Number(chain)]).toEqual({ perWindow: wei[txt.slice(1, txt.indexOf(','))]!, window: 86_400 })
+    }
+  })
+
+  test('the ethereum registry resolves; V4 is not pinned anywhere until T8 (#348: T7 retired, A1 undeployed)', () => {
     expect(registryFor(1)).toBe(ethereumRegistry)
-    expect(oneAuthV4Deployment(ethereumRegistry)?.policy).toBe(oneAuthV4Deployment(registryFor(8453))!.policy)
+    expect(oneAuthV4Deployment(ethereumRegistry)).toBeNull()
+    expect(oneAuthV4Deployment(registryFor(8453))).toBeNull()
   })
 })
 
