@@ -38,6 +38,8 @@ import type { ReturnHome } from './return-home.ts'
 import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
 import { baseStepLines, monadStepLines, readEligiblePools, readHeldPools, readPaused, readV4Remote, RegistryPoolsCache, v4StoredGrant, whatsNewOf, type OneAuthState } from './one-auth.ts'
 import type { RemotePeer } from './remote-peer.ts'
+import { attestationValid, cctpAttestation } from './cctp.ts'
+import { peerAnnounce, readinessMismatch, stepReady, userOpOutcome, type AnnounceAnswer, type AnnouncePorts, type OpOutcome, type PeerAnnounceAnswer, type ReadyPorts, type SentOp } from './readiness.ts'
 import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
@@ -314,6 +316,14 @@ const BUDGET_CODES = new Set(['OWNER_TX_FAILED', 'OWNER_TX_ERROR', 'DEPLOY_FAILE
 const RELAYABLE_KINDS = new Set<string>(['activate', 'renew', 'migrate-v4'])
 /** otto/mamoru#293 (review of #202 r2, Opus 6): the least time between two registerRemote userOps of one account. */
 const REREGISTER_MS = 600_000
+/** otto/mamoru#348: Ethereum, the chain of a V4 home's sibling (CCTP domain 0). */
+const ETHEREUM_CHAIN_ID = 1
+/**
+ * otto/mamoru#348: reading a lane-1 op back from the EntryPoint's logs: blocks per eth_getLogs (Monad's RPCs serve 100),
+ * and at most this many blocks from the one it was signed at (its A1 window, T + 300 s, at the chain's block time, twice).
+ */
+const LANE1_LOG_CHUNK: Readonly<Record<number, bigint>> = { 8453: 1_000n, 143: 100n }
+const LANE1_SCAN_BLOCKS: Readonly<Record<number, bigint>> = { 8453: 400n, 143: 2_000n }
 /** otto/mamoru#293 (review of #202, P1-11): the InitV4 C of a retired design-C Safe: one unit, so its session moves no value. */
 const RETIRED_SAFE_CAP_USD = 1n
 /** otto/mamoru#293 (review of #202, P1-8): SessionCreated pages one background scan pass reads at most, and how far behind the head it may be when a prepare finishes it. */
@@ -543,7 +553,9 @@ export type OperatorConfig = {
    * (remote-peer.ts), by chain id. A v6 approval asks the remote one for its session key, commits to the Safe that gives,
    * and once it lands asks it to provision that Safe. Absent for a chain: no v6 approval is built for it.
    */
-  remotePeers?: Partial<Record<number, Pick<RemotePeer, 'key' | 'provision'> & Partial<Pick<RemotePeer, 'migrateV4' | 'release' | 'releaseStatus'>>>>
+  remotePeers?: Partial<Record<number, Pick<RemotePeer, 'key' | 'provision'> & Partial<Pick<RemotePeer, 'migrateV4' | 'release' | 'releaseStatus' | 'announce'>>>>
+  /** otto/mamoru#348: Circle's iris API (the readiness attestations). Absent: fetch. */
+  irisFetch?: (input: string, init?: RequestInit) => Promise<Response>
   /** otto/mamoru#251: the registry a remote Safe is derived against, by chain. Absent: the pinned one (`registryFor`). */
   remoteRegistry?: (chainId: number) => Registry
   /**
@@ -6560,13 +6572,127 @@ export class Operator {
       // ready, restarts the loop so the bridge follows V4's readiness.
       if (acc.active && (rec?.ready === true) !== now0.ready) this.startLoop(acc)
     }
-    // #348: announceReady by the operator, noema-d3 (until then a provisioned remote stays not ready and nothing is bridged):
-    // on Monad, the Monad operator's `sendV4SessionOp(remote account, [{ kind: 'announceReady', ... }])` (the A1 builder).
+    if (now0.ready && acc.oneAuth?.remoteReady) {
+      delete acc.oneAuth.remoteReady
+      this.store.save()
+    }
+    // #348 (A1): a provisioned remote is proven ready by its own V4 on Monad (announceReady, sent by the Monad operator from
+    // the remote's session), a CCTP message Circle attests, relayed here by the home's own session (relayMessage). Until
+    // Base's V4 holds it ready, nothing is bridged to it (remoteOf reads `ready` from the chain).
     if (!now0.ready && peer) {
       // Review of #202 (P0-3): with a design-C Safe still under remoteAccountKey there, the V4 remote has a key of its own.
-      const res = await peer.provision({ accountKey: acc.oneAuth!.remote!.accountKey!, chainId: BRIDGE_MONAD_CHAIN_ID, address: now0.remote, owners: acc.ctx.owners, saltNonce: acc.ctx.saltNonce, passkey: acc.ctx.passkey, remote: target.spec })
+      const ctx: AccountContext = { accountKey: acc.oneAuth!.remote!.accountKey!, chainId: BRIDGE_MONAD_CHAIN_ID, address: now0.remote, owners: acc.ctx.owners, saltNonce: acc.ctx.saltNonce, passkey: acc.ctx.passkey, remote: target.spec }
+      const res = await peer.provision(ctx)
       if (res.state !== 'active') logErr(`[v4] ${acc.accountKey} remote ${now0.remote} not provisioned yet:`, res.code)
+      else if (this.oneAuthOnly(acc)) await this.stepRemoteReady(acc, ctx, peer)
     }
+  }
+
+  /** otto/mamoru#348: the iris client (Circle's attestation API); a config port so tests stand in for Circle. */
+  private iris(): (input: string, init?: RequestInit) => Promise<Response> {
+    return this.cfg.irisFetch ?? fetch
+  }
+
+  /**
+   * otto/mamoru#348, Base side: one step of the Monad remote's readiness flow (readiness.ts), persisted on the account
+   * (`oneAuth.remoteReady`) so a restart resumes it. The announce is the Monad operator's (`POST remote-announce`, the
+   * remote's own session there); the attestation is Circle's, checked here against Base's enabled attesters and V4's
+   * message shape; the relay is the home's own session op (lane 1). Readiness is read from Base's V4 first: ready, and
+   * nothing is sent.
+   */
+  private async stepRemoteReady(acc: AccountState, ctx: AccountContext, peer: NonNullable<OperatorConfig['remotePeers']>[number]): Promise<void> {
+    const d = this.cfg.oneAuth
+    if (!d || !peer?.announce) return
+    const home = acc.ctx.address as Address
+    const remote = ctx.address as Address
+    const domain = V4_DOMAIN_BY_CHAIN[BRIDGE_MONAD_CHAIN_ID]!
+    const homeDomain = V4_DOMAIN_BY_CHAIN[this.cfg.chainId]!
+    // A flow for another remote (re-registered since) starts over.
+    let prev = acc.oneAuth?.remoteReady
+    if (prev && prev.target?.toLowerCase() !== remote.toLowerCase()) prev = undefined
+    const ports: ReadyPorts = {
+      isReady: async () => {
+        const r = await readV4Remote(this.client, d.policy, home, domain)
+        if (!r) throw new Error('V4 readiness unreadable')
+        return r.ready && r.remote.toLowerCase() === remote.toLowerCase()
+      },
+      announce: async (again) => {
+        const a = await peer.announce!(ctx, again)
+        if (a.state === 'announced') return { txHash: a.txHash }
+        if (a.state === 'pending' && (a.code === 'ANNOUNCE_SENT' || a.code === 'ANNOUNCE_PENDING')) return { pending: a.code }
+        return { wait: a.state === 'ready' ? 'the Monad operator reads it ready already' : a.code }
+      },
+      outcome: async (_side, op) => this.lane1Outcome(op),
+      attestations: (srcTx) => cctpAttestation(srcTx, this.iris(), domain),
+      reject: async (m, a) => readinessMismatch(m, { source: domain, destination: homeDomain, v4: d.policy, home, safe: remote }) ?? ((await attestationValid(this.client, m, a)) ? null : 'not signed by the attesters enabled on Base'),
+      relay: async (message, attestation) => {
+        const op = await this.sendV4SessionOpAt(acc, [{ kind: 'relayMessage', message, attestation }])
+        return op ? { op } : { wait: 'relay not sent (another lane-1 op open, gas over the ceiling, or the simulation refused it)' }
+      },
+    }
+    const step = await stepReady(prev, ports, Date.now())
+    if (step.note) console.log(`[v4] ${acc.accountKey} remote ${remote} readiness: ${step.note}`)
+    if (step.changed || prev !== acc.oneAuth?.remoteReady) {
+      const next = { ...acc.oneAuth }
+      if (step.flow) next.remoteReady = { ...step.flow, target: remote }
+      else delete next.remoteReady
+      acc.oneAuth = next
+      this.store.save()
+    }
+  }
+
+  /** otto/mamoru#348: where a lane-1 op of this operator stands, from the EntryPoint's logs (readiness.ts userOpOutcome). */
+  lane1Outcome(op: SentOp): Promise<OpOutcome> {
+    return userOpOutcome(this.client, address('EntryPointV07', this.cfg.registry), op, { expiresAt: a1ExpiresAt(BigInt(op.t)), chunk: LANE1_LOG_CHUNK[this.cfg.chainId] ?? 1_000n, maxBlocks: LANE1_SCAN_BLOCKS[this.cfg.chainId] ?? 1_000n })
+  }
+
+  /**
+   * otto/mamoru#348, Base side, for BridgeOut: the home's announceReady to its Ethereum sibling (toDomain 0), from the
+   * home's own session (lane 1). Only an active V4 home (never a remote) in the one-authorization scope; otherwise not sent.
+   */
+  async announceSiblingHome(accountKey: string): Promise<AnnounceAnswer> {
+    const acc = this.store.state.accounts[accountKey]
+    const g = acc?.grants[0]
+    if (!acc || !acc.active || !this.onV4(acc) || acc.policyId === ONE_AUTH_V4_REMOTE || !this.oneAuthOnly(acc)) return { wait: 'not an active V4 home in scope' }
+    if (!g?.grant.oneAuthV4 || !acc.sessionKey) return { wait: 'no V4 session' }
+    const op = await this.sendV4SessionOpAt(acc, [{ kind: 'announceReady', safe: acc.ctx.address as Address, toDomain: V4_DOMAIN_BY_CHAIN[ETHEREUM_CHAIN_ID]!, sessionKey: privateKeyToAccount(acc.sessionKey).address, permissionId: g.permissionId }])
+    return op ? { op } : { wait: 'announce not sent (another lane-1 op open, gas over the ceiling, or the simulation refused it)' }
+  }
+
+  /**
+   * otto/mamoru#348, remote side (`POST remote-announce`, from the home's operator): the V4 remote Safe of this context
+   * proves itself ready to its home's chain: announceReady from its own session (lane 1), toDomain its home domain.
+   * Idempotent (readiness.ts peerAnnounce): the announce that ran is answered again, and a new one is sent only when the
+   * home names that one as unusable (`again`), or when none ran; at most READY_ROUNDS_PER_DAY a day. Persisted on the
+   * account (`readyAnnounce`), so a restart reads its op back from the chain.
+   */
+  announceRemote(ctx: AccountContext, body: unknown): Promise<PeerAnnounceAnswer> {
+    return this.lock(ctx.accountKey).run(async () => {
+      const acc = this.releaseAccount(ctx, true)
+      const d = this.cfg.oneAuth
+      const g = acc.grants[0]
+      const home = releaseHomeOf(acc)
+      if (!d || !g?.grant.oneAuthV4 || !acc.sessionKey || !home) throw new HttpError(404, 'NOT_A_REMOTE', 'no running V4 remote Safe of this account here')
+      const raw = (body as { again?: unknown } | null)?.again
+      if (raw !== undefined && (typeof raw !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(raw))) throw new HttpError(400, 'BAD_REQUEST', 'again must be a transaction hash')
+      const safe = acc.ctx.address as Address
+      const ports: AnnouncePorts = {
+        ...(this.cfg.homeClient ? { alreadyReady: async () => ((await this.cfg.homeClient!.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [home.home as Address, V4_DOMAIN_BY_CHAIN[this.cfg.chainId]!] }).catch(() => false)) as boolean) } : {}),
+        send: async () => {
+          const op = await this.sendV4SessionOpAt(acc, [{ kind: 'announceReady', safe, toDomain: home.homeDomain, sessionKey: privateKeyToAccount(acc.sessionKey!).address, permissionId: g.permissionId }])
+          return op ? { op } : { wait: 'ANNOUNCE_NOT_SENT' }
+        },
+        outcome: (op) => this.lane1Outcome(op),
+      }
+      const r = await peerAnnounce(acc.readyAnnounce, raw as Hex | undefined, ports, Date.now())
+      if (r.changed) {
+        if (r.record) acc.readyAnnounce = r.record
+        else delete acc.readyAnnounce
+        this.store.save()
+      }
+      if (r.answer.state !== 'pending' || r.answer.code === 'ANNOUNCE_SENT') console.log(`[v4] ${acc.accountKey} announceReady to domain ${home.homeDomain}: ${r.answer.state === 'announced' ? `ran in ${r.answer.txHash}` : r.answer.state === 'ready' ? 'already ready there' : `userOp ${r.record?.op?.userOpHash}`}`)
+      return r.answer
+    })
   }
 
   /**
@@ -6615,6 +6741,11 @@ export class Operator {
    * the simulation refused).
    */
   private async sendV4SessionOp(acc: AccountState, intents: A1Intent[]): Promise<Hex | null> {
+    return (await this.sendV4SessionOpAt(acc, intents))?.userOpHash ?? null
+  }
+
+  /** sendV4SessionOp, with the block the op was signed at and its claimed time T (the readiness flow reads it back from there). */
+  private async sendV4SessionOpAt(acc: AccountState, intents: A1Intent[]): Promise<SentOp | null> {
     let lock = this.lane1Locks.get(acc.accountKey)
     if (!lock) this.lane1Locks.set(acc.accountKey, (lock = new Lock()))
     return lock.run(async () => {
@@ -6642,7 +6773,8 @@ export class Operator {
       }
       const op = await signSessionUserOp(draftUserOp(account, nonce, callData, gas), this.cfg.chainId, g.permissionId, privateKeyToAccount(acc.sessionKey), this.cfg.registry)
       this.lane1Sent.set(acc.accountKey, { nonce, expiresAt: a1ExpiresAt(block.timestamp) })
-      return this.lane1Bundler().sendUserOperation(op)
+      const userOpHash = await this.lane1Bundler().sendUserOperation(op)
+      return { userOpHash, fromBlock: block.number!.toString(), t: block.timestamp.toString() }
     })
   }
 

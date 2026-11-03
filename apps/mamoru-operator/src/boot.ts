@@ -855,6 +855,8 @@ export async function bootOperator(o: BootOptions) {
     bo.siblingCapUsd = (ctx) => operator.siblingCapUsd(ctx)
     bo.siblingInScope = (ctx) => operator.siblingInScope(ctx)
     operator.siblingHoldingsUsdc = (ctx) => bo.siblingHoldingsUsdc(ctx)
+    // otto/mamoru#348 (A1): the home's announceReady to its sibling goes from its own session on Base (lane 1), and is read back there.
+    if (chainId === BASE_CHAIN_ID && oneAuth) bo.home = { announce: (accountKey) => operator.announceSiblingHome(accountKey), outcome: (op) => operator.lane1Outcome(op) }
     setInterval(() => void bo.tick(), 60_000)
     void bo.tick()
     if (aa) console.log(`[operator] bridge-out uses userOps on Ethereum: gas paid in USDC through the ${paymaster!.name} paymaster, bundled by the operator`)

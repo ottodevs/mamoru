@@ -294,7 +294,8 @@ describe('the sibling engine (#309 c)', () => {
     const leg = m.journal().siblings.k.leg!
     const sum = (g: { verificationGasLimit: bigint; callGasLimit: bigint; preVerificationGas: bigint }) => g.verificationGasLimit + g.callGasLimit + g.preVerificationGas
     expect(sum(SIBLING_GAS.swap)).toBe(1_530_000n) // review of #247: the measured limits
-    expect(BigInt(leg.amount)).toBe(10n ** 17n - sum(SIBLING_GAS.swap) * (2n * 50_000_000n + 100_000_000n) - sum(SIBLING_GAS.bridge) * SIBLING_MAX_FEE)
+    // #348: not ready yet, so the readiness relay's prefund at the highest fee is kept too
+    expect(BigInt(leg.amount)).toBe(10n ** 17n - sum(SIBLING_GAS.swap) * (2n * 50_000_000n + 100_000_000n) - sum(SIBLING_GAS.bridge) * SIBLING_MAX_FEE - sum(SIBLING_GAS.relay) * SIBLING_MAX_FEE)
   })
 
   test('review r1 of #238: a send refused before signing gives the day its bound back and keeps the previous leg', async () => {

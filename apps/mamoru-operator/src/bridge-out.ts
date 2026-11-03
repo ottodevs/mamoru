@@ -13,12 +13,13 @@ import { browserOwnerSignature, deployCall, encodeWebAuthnSignature, liveAccount
 import { execTransactionData, type SafeTx } from '@mamoru/account/safe'
 import { draftUserOp, handleOpsData, sessionNonceKey, signSessionUserOp, userOpHash } from '@mamoru/account/sessions'
 import { maxGasCostWei, OWNER_NONCE_KEY, ownerUserOp, ownerUserOpSignature, safeOpHash, userOpLogs, type PaymasterFields, type UserOpGas } from '@mamoru/account/userop'
-import { attestationValid, burnMatches, CCTP_DOMAIN_BASE, cctpAttestation, cctpCalls, cctpMessageKey, FINALITY_FAST, FINALITY_STANDARD, cctpFees, cctpMaxFee, decodeCctpMessage, FAST_FILL_SEC, MESSAGE_TRANSMITTER_V2, messageTransmitterV2Abi, mintIsFor, receiveMessageData, STANDARD_FILL_SEC, type Burn } from './cctp.ts'
+import { attestationValid, burnMatches, CCTP_DOMAIN_BASE, CCTP_DOMAIN_ETHEREUM, cctpAttestation, cctpCalls, cctpMessageKey, FINALITY_FAST, FINALITY_STANDARD, cctpFees, cctpMaxFee, decodeCctpMessage, FAST_FILL_SEC, MESSAGE_TRANSMITTER_V2, messageTransmitterV2Abi, mintIsFor, receiveMessageData, STANDARD_FILL_SEC, type Burn } from './cctp.ts'
 import type { BundlerGuard } from './bundler.ts'
 import { L1Bundler, MAX_CONSTANT_FEE, PaymasterError, RATE_SLACK_BPS, RpcRefused, type Erc20Paymaster, type GasPrice } from './paymaster.ts'
 import { Lock } from './lock.ts'
 import { HttpError } from './operator.ts'
 import { logErr } from './metrics.ts'
+import { readinessMismatch, stepReady, userOpOutcome, type AnnounceAnswer, type OpOutcome, type ReadyFlow, type ReadyPorts, type SentOp } from './readiness.ts'
 
 // Bridge-out (otto/mamoru#133, first instance of the routing layer). USDC that reached a Mamoru account's address on
 // Ethereum, where the account has never been deployed (otto/mamoru#117), goes to the same account on Base. The owner
@@ -107,6 +108,10 @@ export const SIBLING_STUCK_POLL_MS = 10 * 60_000
 export const SIBLING_GAS = {
   swap: { verificationGasLimit: 450_000n, callGasLimit: 1_000_000n, preVerificationGas: 80_000n },
   bridge: { verificationGasLimit: 450_000n, callGasLimit: 420_000n, preVerificationGas: 80_000n },
+  // #348: clock + MessageTransmitterV2.receiveMessage of the home's readiness (V4's handler writes it). A1GasFork.t.sol
+  // measured relayMessage at execution 230k, validation + EntryPoint 208k on Base; the call limit is V4_OP_GAS's 350k
+  // (1.5x), the verification limit the sibling's 450k. Not yet re-measured on an Ethereum fork.
+  relay: { verificationGasLimit: 450_000n, callGasLimit: 350_000n, preVerificationGas: 80_000n },
 } as const
 const opGasOf = (k: keyof typeof SIBLING_GAS) => SIBLING_GAS[k].verificationGasLimit + SIBLING_GAS[k].callGasLimit + SIBLING_GAS[k].preVerificationGas
 /** The relayer's handleOps for one sibling op: the op's limits plus the EntryPoint's own work. */
@@ -365,6 +370,11 @@ export type StoredSibling = {
    * first block an op with it was signed, `scan` where the search for what ran with it continues. Cleared once read.
    */
   opNonce?: { nonce: string; from: string; scan: string }
+  /**
+   * #348 (A1): the home's readiness on Ethereum under way (readiness.ts): announceReady on Base by the home's session,
+   * Circle's attestation, relayMessage here by the sibling's session. Absent: ready, or not started.
+   */
+  ready?: ReadyFlow
   at: string
 }
 
@@ -374,7 +384,7 @@ export type StoredSibling = {
  * is unspent, so at most one of them ever runs; `nonceFrom` is the first block any op with that nonce was sent from.
  */
 export type SiblingLeg = {
-  kind: 'swap' | 'bridge'
+  kind: 'swap' | 'bridge' | 'relay'
   userOpHash: Hex
   nonce: string
   nonceFrom: string
@@ -1449,6 +1459,12 @@ export class BridgeOut {
   siblingInScope: (ctx: AccountContext) => boolean = () => false
   /** The account's C on Base (USD units), set by boot from the operator (the same C a Base V4 home signs). Null: unknown. */
   siblingCapUsd: (ctx: AccountContext) => bigint | null = () => null
+
+  /**
+   * #348 (A1), set by boot from the Base operator: the home's announceReady to its sibling here (its own session, lane 1),
+   * and where such an op stands on Base. Unset: nothing is announced, so no sibling becomes ready.
+   */
+  home: { announce: (accountKey: string) => Promise<AnnounceAnswer>; outcome: (op: SentOp) => Promise<OpOutcome> } | null = null
   private readonly preparedSibling = new Map<string, PreparedSibling>()
 
   private get keyFile(): string {
@@ -1931,7 +1947,9 @@ export class BridgeOut {
     } else {
       // This op's prefund, and the bridge home's at the highest fee a sibling op ever pays (review r1 of #238: a rise in
       // gas after the swap can never leave the USDC without the ETH to bridge it).
-      const reserve = opGasOf('swap') * maxFee + opGasOf('bridge') * SIBLING_MAX_FEE
+      // #348: and, while the home is not ready here, the readiness relay's at the highest fee (the swap never leaves the
+      // sibling unable to pay the op that unlocks its bridge home).
+      const reserve = opGasOf('swap') * maxFee + opGasOf('bridge') * SIBLING_MAX_FEE + (ready ? 0n : opGasOf('relay') * SIBLING_MAX_FEE)
       let wrap = eth > reserve ? eth - reserve : 0n
       amount = weth + wrap
       if (amount < SIBLING_MIN_SWAP_WEI) return
@@ -1977,13 +1995,28 @@ export class BridgeOut {
       }
       intents = [...(wrap > 0n ? [{ kind: 'wrap', amount: wrap } as const] : []), { kind: 'swap', params: { pool: SIBLING_POOL, tokenIn: L1_WETH, amountIn: amount, amountOutMinimum: minOut, sqrtPriceLimitX96: limit, deadline: BigInt(nowSec + SIBLING_SWAP_DEADLINE_SEC) } }]
     }
+    await this.sendLeg(accountKey, c, kind, intents, amount, { policy: d.policy, key, nonce, block, maxFee, prio, now })
+  }
+
+  /**
+   * One session userOp of the sibling (`intents`, of `kind`), from the A1 builder, signed with the outstanding nonce and
+   * bundled by the relayer (the account pays its gas): the shared tail of the engine's legs and of the readiness relay
+   * (#348). Returns the op's hash once its leg is on the journal and its send reached signing; null when nothing left this
+   * host (not built, provider behind, simulation refused, the send refused before signing).
+   */
+  private async sendLeg(accountKey: string, c: StoredSibling, kind: SiblingLeg['kind'], intents: A1Intent[], amount: bigint, at: { policy: Address; key: Hex; nonce: bigint; block: { number: bigint | null; timestamp: bigint }; maxFee: bigint; prio: bigint; now: number }): Promise<Hex | null> {
+    const { key, nonce, block, maxFee, prio, now } = at
+    const d = { policy: at.policy }
+    const safe = c.safe
+    const ep = address('EntryPointV07', ethereumRegistry)
     // #348: the A1 shape from the one builder (clock at this block's time first, the approval of V4 reset and asserted),
     // checked by its validator before anything is signed.
     let callData: Hex
     try {
       callData = buildA1CallData({ chainId: ETHEREUM_CHAIN_ID, account: safe, policy: d.policy, t: block.timestamp }, intents).callData
     } catch (e) {
-      return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} not built, nothing signed:`, e instanceof Error ? e.message : e)
+      logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} not built, nothing signed:`, e instanceof Error ? e.message : e)
+      return null
     }
     const gas = SIBLING_GAS[kind]
     const draft = draftUserOp(safe, nonce, callData, { ...gas, maxFeePerGas: maxFee, maxPriorityFeePerGas: prio })
@@ -1994,7 +2027,10 @@ export class BridgeOut {
     // The nonce's ledger entry, from the first op ever signed with it, before anything else sees this one (the simulation
     // shows it to the RPC: review r2 of #238); a later one with the same nonce keeps it.
     // Never backwards: a nonce below the ledger's is a provider behind the chain (a higher one went to recoverNonce above).
-    if (c.opNonce && nonce < BigInt(c.opNonce.nonce)) return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: provider behind (nonce ${nonce} < ${c.opNonce.nonce}), nothing signed`, undefined)
+    if (c.opNonce && nonce < BigInt(c.opNonce.nonce)) {
+      logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: provider behind (nonce ${nonce} < ${c.opNonce.nonce}), nothing signed`, undefined)
+      return null
+    }
     if (!c.opNonce) {
       c.opNonce = { nonce: nonce.toString(), from: block.number!.toString(), scan: block.number!.toString() }
       this.save()
@@ -2004,7 +2040,8 @@ export class BridgeOut {
       await this.l1.call({ account: ep, to: safe, data: op.callData })
       await this.l1.call({ account: this.relayer.address, to: ep, data, gas: txGas })
     } catch (e) {
-      return logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} simulation refused, nothing sent:`, e instanceof Error ? e.message.split('\n')[0] : e)
+      logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} simulation refused, nothing sent:`, e instanceof Error ? e.message.split('\n')[0] : e)
+      return null
     }
     const prev = c.leg
     const leg: SiblingLeg = { kind, userOpHash: hash, nonce: nonce.toString(), nonceFrom: c.opNonce.from, amount: amount.toString(), state: 'sending', at: new Date(now).toISOString(), validUntil: a1ExpiresAt(block.timestamp).toString() }
@@ -2041,6 +2078,71 @@ export class BridgeOut {
       this.save()
       logErr(`[bridge-out] sibling ${accountKey.slice(0, 8)}: ${kind} send:`, e instanceof Error ? e.message.split('\n')[0] : e)
     }
+    return c.leg === leg ? hash : null
+  }
+
+  // ---------------------------------------------------------------- #348 (A1): the home's readiness on Ethereum
+
+  /**
+   * One step of the home's readiness flow on Ethereum (readiness.ts), for a sibling set up and enabled, in the
+   * one-authorization scope: readiness read here first (V4.isReady(sibling, Base): ready, nothing sent); else
+   * announceReady on Base by the home's session (the Base operator, `home`), Circle's attestation of that transaction
+   * (iris, source domain 6), checked against V4's message shape and Ethereum's enabled attesters, then relayMessage here
+   * by the sibling's own session (a leg like the engine's, paid from the sibling's ETH). Persisted in the journal.
+   */
+  private async driveReadiness(accountKey: string): Promise<void> {
+    const c = this.journal.siblings?.[accountKey]
+    const d = oneAuthV4Deployment(ethereumRegistry)
+    if (!c || c.state !== 'done' || !d || !this.home || !this.enabledFor(accountKey) || !this.siblingInScope({ accountKey } as AccountContext)) return
+    const home = this.home
+    const ports: ReadyPorts = {
+      isReady: async () => (await this.l1.readContract({ address: d.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [c.safe, CCTP_DOMAIN_BASE] })) as boolean,
+      announce: () => home.announce(accountKey),
+      outcome: (side, op) => (side === 'source' ? home.outcome(op) : userOpOutcome(this.l1, address('EntryPointV07', ethereumRegistry), op, { expiresAt: a1ExpiresAt(BigInt(op.t)), maxBlocks: 100n })),
+      attestations: (srcTx) => cctpAttestation(srcTx, this.fetcher, CCTP_DOMAIN_BASE),
+      reject: async (m, a) => readinessMismatch(m, { source: CCTP_DOMAIN_BASE, destination: CCTP_DOMAIN_ETHEREUM, v4: d.policy, home: c.safe, safe: c.safe }) ?? ((await attestationValid(this.l1, m, a)) ? null : 'not signed by the attesters enabled on Ethereum'),
+      relay: (message, attestation) => this.relayLeg(accountKey, c, d.policy, message, attestation),
+    }
+    const step = await stepReady(c.ready, ports, this.now())
+    if (step.note) console.log(`[bridge-out] sibling ${accountKey.slice(0, 8)} readiness: ${step.note}`)
+    if (step.changed) {
+      if (step.flow) c.ready = step.flow
+      else delete c.ready
+      this.save()
+    }
+  }
+
+  /**
+   * #348: relayMessage of the home's attested readiness, as one sibling leg (clock + MessageTransmitterV2.receiveMessage),
+   * under the engine's guards: nothing beside another send or a move to Base being minted, an outstanding nonce read
+   * first, the day's failed ops, Ethereum's fee ceiling, the op's prefund from the sibling's own ETH, and the simulation.
+   */
+  private async relayLeg(accountKey: string, c: StoredSibling, policy: Address, message: Hex, attestation: Hex): Promise<{ op: SentOp } | { wait: string }> {
+    const key = this.siblingSessionKey(accountKey)
+    if (!key) return { wait: 'no sibling session key' }
+    if (c.leg?.state === 'sending' || c.leg?.state === 'unconfirmed') return { wait: 'another sibling op in flight' }
+    if (c.legFails?.day === this.day() && c.legFails.n >= SIBLING_LEG_FAILS) return { wait: `${c.legFails.n} failed sibling ops today` }
+    if (this.inFlight || this.bundling.size > 0 || (await this.blocking(this.journal.routes[accountKey]))) return { wait: 'a move from Ethereum is under way' }
+    const nonce = await this.siblingNonce(c.safe)
+    if (c.opNonce && nonce > BigInt(c.opNonce.nonce)) {
+      await this.recoverNonce(accountKey, c)
+      return { wait: 'the outstanding sibling op is read first' }
+    }
+    const [eth, deposit, block] = await Promise.all([
+      this.l1.getBalance({ address: c.safe }),
+      this.l1.readContract({ address: address('EntryPointV07', ethereumRegistry), abi: entryPointV07Abi, functionName: 'balanceOf', args: [c.safe] }),
+      this.l1.getBlock({ blockTag: 'latest' }),
+    ])
+    const prio = GAS_CAPS_V2_BY_CHAIN[ETHEREUM_CHAIN_ID]!.maxPriorityFeePerGas
+    const base = block.baseFeePerGas ?? 0n
+    if (base + prio > SIBLING_MAX_FEE) return { wait: 'Ethereum gas over the sibling ceiling' }
+    const maxFee = 2n * base + prio < SIBLING_MAX_FEE ? 2n * base + prio : SIBLING_MAX_FEE
+    if (eth + deposit < opGasOf('relay') * maxFee) return { wait: 'the sibling holds too little ETH for the relay' }
+    const now = this.now()
+    c.legAt = new Date(now).toISOString()
+    const hash = await this.sendLeg(accountKey, c, 'relay', [{ kind: 'relayMessage', message, attestation }], 0n, { policy, key, nonce, block, maxFee, prio, now })
+    if (!hash) return { wait: 'relay not sent (built, simulated or sent: refused)' }
+    return { op: { userOpHash: hash, fromBlock: block.number!.toString(), t: block.timestamp.toString() } }
   }
 
   private async siblingNonce(safe: Address): Promise<bigint> {
@@ -2219,6 +2321,7 @@ export class BridgeOut {
   async tick(): Promise<void> {
     await this.settleReservations().catch((e) => logErr('[bridge-out] tick reservations:', e instanceof Error ? e.message : e))
     for (const accountKey of Object.keys(this.journal.siblings ?? {})) await this.reconcileSibling(accountKey).catch((e) => logErr('[bridge-out] tick sibling:', e instanceof Error ? e.message : e))
+    for (const accountKey of Object.keys(this.journal.siblings ?? {})) await this.driveReadiness(accountKey).catch((e) => logErr('[bridge-out] tick sibling readiness:', e instanceof Error ? e.message : e))
     for (const accountKey of Object.keys(this.journal.siblings ?? {})) await this.driveSibling(accountKey).catch((e) => logErr('[bridge-out] tick sibling engine:', e instanceof Error ? e.message : e))
     for (const [accountKey, r] of Object.entries(this.journal.routes)) {
       // Every unfinished CCTP move, so a burn left 'sending' or 'unconfirmed' by a crash is reconciled and minted too.

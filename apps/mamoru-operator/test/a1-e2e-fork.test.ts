@@ -10,17 +10,17 @@
 //      reduce (checkExit + decrease + collect), re-range exit (checkExit + decrease + collect + burn), bridge with maxFee at
 //      the chain's CCTP cap;
 //   4. readiness across chains with the operator's own lane-1 sender (`Operator.sendV4SessionOp`, its bundler stood in by
-//      the local one): registerRemote on Base for Monad, the remote deployed on Monad from the TypeScript derivation,
-//      announceReady on Monad (the CCTP message to Base), relayMessage on Base with an attestation by a test attester the
-//      transmitter's attester manager enabled (impersonated, as V4Fixture._attest pranks it), then readyOf / isReady;
+//      the local one): registerRemote on Base for Monad, the remote deployed on Monad from the TypeScript derivation, then
+//      the operators' readiness flow (#348): announceReady on Monad (the CCTP message to Base), relayMessage on Base with
+//      an attestation by a test attester the transmitter's attester manager enabled (impersonated, as V4Fixture._attest
+//      pranks it), then readyOf / isReady;
 //   5. the owner's exit with no Mamoru service: the recovery key removes the session and withdraws through the Safe;
 //   6. refusals at validation: a claimed time outside T +- 300, an approve without its reset + assertZero, a
 //      decreaseLiquidity without checkExit.
 //
-// TODO(noema-d3): the operator's own announceReady/relay wiring (the Monad operator calling
-// `sendV4SessionOp(remote, [{ kind: 'announceReady', ... }])` once the remote is deployed, and the Base operator relaying the
-// attested message) does not exist yet: this test drives the builder intents through `sendV4SessionOp` directly and should
-// switch to the operator's tick once noema-d3 lands it.
+// #348: step 4's announce and relay are the operators' own readiness flow (readiness.ts): the Base operator's step asks the
+// Monad operator to announce from the remote's session, reads Circle's attestation (a fake iris over the fork's
+// MessageSent, signed by the test attester) and relays it from the home's session.
 //
 // Not part of `bun test` by default (it needs anvil, forge and two archive RPCs). Run:
 //   nix shell nixpkgs#foundry --command bash -c 'cd contracts/action-policy && ./install.sh && forge build && cd ../.. &&
@@ -58,7 +58,7 @@ import { privateKeyToAccount, sign } from 'viem/accounts'
 import { toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import type { AccountContext, Address } from '@mamoru/domain'
 import { address, baseRegistry, entryPointV07Abi, erc20Abi, monadRegistry, safeAbi, smartSessionErrorsAbi, smartSessionValidateAbi, type Registry } from '@mamoru/registry'
-import { GAS_CAPS_V2_BY_CHAIN, ONE_AUTH_V4, ONE_AUTH_V4_CONTRACTS, POLICIES, type OneAuthV4Deployment } from '@mamoru/policy'
+import { GAS_CAPS_V2_BY_CHAIN, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, ONE_AUTH_V4_CONTRACTS, POLICIES, type OneAuthV4Deployment } from '@mamoru/policy'
 import {
   a1Abi,
   a1CallData,
@@ -268,6 +268,8 @@ function revertData(e: unknown): Hex | undefined {
 class LocalBundler {
   readonly beneficiary = devAccount(1)
   last: OpResult | null = null
+  /** Ops included (executed or reverted in execution). */
+  count = 0
   constructor(readonly lab: Lab) {}
 
   /** handleOps([op]): an op the EntryPoint refuses at validation is never sent (its FailedOp is returned). */
@@ -281,14 +283,15 @@ class LocalBundler {
     }
     const sent = await this.lab.send(this.beneficiary, ep, data, 0n, 15_000_000n)
     const ev = parseEventLogs({ abi: entryPointV07Abi, logs: sent.receipt.logs, eventName: 'UserOperationEvent' })[0]
+    if (sent.ok && ev) this.count++
     return (this.last = { op, included: sent.ok && !!ev, success: !!ev?.args.success, failedOp: null, receipt: sent.receipt, actualGasCost: ev?.args.actualGasCost })
   }
 
-  /** The operator's lane-1 bundler (`Operator.lane1Bundler().sendUserOperation`). */
+  /** The operator's lane-1 bundler (`Operator.lane1Bundler().sendUserOperation`): the userOp hash, as a bundler answers. */
   async sendUserOperation(op: UserOperation<'0.7'>): Promise<Hex> {
     const r = await this.handle(op)
     if (!r.included || !r.success) throw new Error(`local bundler: op not executed (${r.failedOp?.reason ?? 'execution reverted'})`)
-    return r.receipt!.transactionHash
+    return userOpHash(op, this.lab.chainId, this.lab.registry)
   }
 }
 
@@ -610,7 +613,7 @@ describe.skipIf(!RUN)('#348 A1 end to end on Base and Monad forks (gate of T8)',
     expect(await lab.client.readContract({ address: BASE_NPM, abi: npmAbi, functionName: 'balanceOf', args: [home] })).toBe(0n)
   }, LONG)
 
-  test('7. readiness across chains: registerRemote (Base, lane 1), announceReady (Monad, lane 1), relayMessage (Base, lane 1), isReady', async () => {
+  test('7. readiness across chains: registerRemote (Base, lane 1), then the operators\' flow: announceReady (Monad), iris, relayMessage (Base), isReady', async () => {
     const remoteSk = privateKeyToAccount(REMOTE_SESSION_KEY).address
     // Base: the operator's lane-1 sender registers the Monad remote
     expect(await (baseOp as unknown as Lane1).sendV4SessionOp(homeAcc, [{ kind: 'registerRemote', domain: DOMAIN_MONAD, sessionKey: remoteSk }])).not.toBeNull()
@@ -637,24 +640,64 @@ describe.skipIf(!RUN)('#348 A1 end to end on Base and Monad forks (gate of T8)',
     // Monad's basefee floor is 100 gwei; the operator's ceiling there is 102 (V4_MAX_FEE_BY_CHAIN): mine at the floor first
     await monad.lab.rpc('anvil_setNextBlockBaseFeePerGas', [toHex(100_000_000_000n)])
     await monad.lab.rpc('evm_mine')
-    // Monad: the remote's own session announces it (the A1 builder's announceReady intent through the operator's lane-1
-    // sender; TODO(noema-d3): the Monad operator's tick sends this once the remote is deployed)
+    // The operators' own readiness flow (#348), not hand-built intents: the Base operator's step (stepRemoteReady, what
+    // oneAuthRemote runs every minute once the remote is provisioned) asks the Monad operator (announceRemote, its
+    // `POST remote-announce`, here called in process) to announce from the remote's own session; Circle's iris is stood in
+    // by a fake that reads the MessageSent of the transaction it is asked about on the Monad fork and signs it as the test
+    // attester; the Base operator checks it (V4's message shape, Base's enabled attesters) and relays it from the home's
+    // own session (lane 1).
     const remoteAcc = v4Account('home.v4', remote, 143, REMOTE_SESSION_KEY, r.permissionId, V4_REMOTE_SESSION_SALT, D, monadReg)
-    expect(await (monadOp as unknown as Lane1).sendV4SessionOp(remoteAcc, [{ kind: 'announceReady', safe: remote, toDomain: DOMAIN_BASE, sessionKey: remoteSk, permissionId: r.permissionId }])).not.toBeNull()
-    kinds.push(`announceReady on Monad (lane 1): gas cost ${monadBundler.last?.actualGasCost} wei`)
-    const sent = parseEventLogs({ abi: transmitterAbi, logs: monadBundler.last!.receipt!.logs, eventName: 'MessageSent' }).filter((l) => isAddressEqual(l.address, MESSAGE_TRANSMITTER))
-    expect(sent).toHaveLength(1)
-    const message = sent[0]!.args.message
+    remoteAcc.policyId = ONE_AUTH_V4_REMOTE
+    const remoteCtx = { accountKey: 'home.v4', chainId: 143, address: remote, owners: owners.owners, saltNonce: '0', passkey: PASSKEY, remote: { chainId: 143, policyId: ONE_AUTH_V4_REMOTE, sessionKey: remoteSk, validAfter: 0, validUntil: 0, capUsdc: C.toString(), home, homeDomain: DOMAIN_BASE } } as unknown as AccountContext
+    remoteAcc.ctx = remoteCtx
+    ;(monadOp as unknown as { store: StateStore }).store.state.accounts['home.v4'] = remoteAcc
+    ;(monadOp as unknown as { cfg: OperatorConfig }).cfg.homeClient = base.lab.client
+    ;(baseOp as unknown as { store: StateStore }).store.state.accounts[homeAcc.accountKey] = homeAcc
+    const attested: { message?: Hex; sent?: Hex } = {}
+    ;(baseOp as unknown as { cfg: OperatorConfig }).cfg.irisFetch = async (url: string) => {
+      const m = /\/v2\/messages\/(\d+)\?transactionHash=(0x[0-9a-fA-F]{64})$/.exec(url)
+      expect(m?.[1]).toBe(String(DOMAIN_MONAD))
+      const receipt = await monad.lab.client.getTransactionReceipt({ hash: m![2] as Hex })
+      const sent = parseEventLogs({ abi: transmitterAbi, logs: receipt.logs, eventName: 'MessageSent' }).filter((l) => isAddressEqual(l.address, MESSAGE_TRANSMITTER))
+      expect(sent).toHaveLength(1)
+      attested.sent = sent[0]!.args.message
+      attested.message ??= attestable(attested.sent, 2000)
+      const attestation = await attest(base.lab, attested.message)
+      return new Response(JSON.stringify({ messages: [{ status: 'complete', message: attested.message, attestation }] }), { status: 200 })
+    }
+    const peer = {
+      key: async () => remoteSk,
+      provision: async () => ({ state: 'active' as const, address: remote }),
+      announce: (ctx: AccountContext, again?: Hex) => monadOp.announceRemote(ctx, again ? { again } : {}),
+    }
+    const monadOps = () => monadBundler.count
+    const baseOps = () => baseBundler.count
+    const [monad0, base0] = [monadOps(), baseOps()]
+    const step = () => (baseOp as unknown as { stepRemoteReady(a: AccountState, c: AccountContext, p: typeof peer): Promise<void> }).stepRemoteReady(homeAcc, remoteCtx, peer)
+    const states: string[] = []
+    for (let i = 0; i < 8 && !(await base.lab.client.readContract({ address: D.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [home, DOMAIN_MONAD] })); i++) {
+      await step()
+      states.push(homeAcc.oneAuth?.remoteReady?.state ?? 'none')
+      await monad.lab.rpc('evm_mine')
+      await base.lab.rpc('evm_mine')
+    }
+    kinds.push(`readiness flow states on Base: ${states.join(' -> ')}`)
+    // one announce on Monad (the remote's own session), one relay on Base (the home's), nothing else
+    expect([monadOps() - monad0, baseOps() - base0]).toEqual([1, 1])
+    expect(homeAcc.oneAuth?.remoteReady?.state).toBe('relayed')
+    expect(remoteAcc.readyAnnounce?.txHash).toMatch(/^0x[0-9a-f]{64}$/)
+    kinds.push(`announceReady on Monad (operator flow, lane 1): tx ${remoteAcc.readyAnnounce?.txHash}`)
+    const message = attested.sent!
     // the CCTP V2 header: Monad -> Base, sender and recipient the same V4, open destination caller, finality 2000
     const word = (o: number, n: number) => BigInt(`0x${message.slice(2 + 2 * o, 2 + 2 * (o + n))}`)
     expect([word(4, 4), word(8, 4), word(44, 32), word(76, 32), word(108, 32), word(140, 4)]).toEqual([BigInt(DOMAIN_MONAD), BigInt(DOMAIN_BASE), BigInt(D.policy), BigInt(D.policy), 0n, 2000n])
     const [bh, bs, bo] = decodeAbiParameters([{ type: 'address' }, { type: 'address' }, { type: 'bytes32' }], `0x${message.slice(2 + 2 * 148)}`)
     expect([bh, bs, bo]).toEqual([home, remote, r.ownersHash])
-    // Base: attested (test attester, threshold 1), then relayed by the home's own session (the user pays)
-    const a = attestable(message, 2000)
-    const att = await attest(base.lab, a)
-    expect(await (baseOp as unknown as Lane1).sendV4SessionOp(homeAcc, [{ kind: 'relayMessage', message: a, attestation: att }])).not.toBeNull()
-    kinds.push(`relayMessage on Base (lane 1): gas cost ${baseBundler.last?.actualGasCost} wei`)
+    // no double announce: once ready, neither side sends anything again (Base reads it ready; Monad answers the same tx)
+    await step()
+    expect(homeAcc.oneAuth?.remoteReady).toBeUndefined() // the next step reads it ready: the flow ends, nothing sent
+    expect(await monadOp.announceRemote(remoteCtx, {})).toEqual({ state: 'announced', txHash: remoteAcc.readyAnnounce!.txHash! })
+    expect([monadOps() - monad0, baseOps() - base0]).toEqual([1, 1])
     expect(await base.lab.client.readContract({ address: D.policy, abi: mamoruActionPolicyV4Abi, functionName: 'isReady', args: [home, DOMAIN_MONAD] })).toBe(true)
     const ready = await base.lab.client.readContract({ address: D.policy, abi: mamoruActionPolicyV4Abi, functionName: 'readyOf', args: [home, DOMAIN_MONAD] })
     expect([ready.remote, ready.ownersHash]).toEqual([remote, r.ownersHash])

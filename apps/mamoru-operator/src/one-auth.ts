@@ -3,6 +3,7 @@
 // the account's one V4 session, and the pools V4's rules make eligible, read on chain (cached per review; spec 010 A1:
 // MamoruV4Table's classes checked by MamoruV4Helper.priced, no registry). Everything here is reached only for an account
 // in the `one_auth_v4` scope on a chain whose registry pins the V4 stack, or for an account that already runs on V4.
+import type { ReadyFlow } from './readiness.ts'
 import { decodeFunctionResult, encodeFunctionData, keccak256, parseAbi, toHex, zeroAddress, type Hex, type PublicClient } from 'viem'
 import type { Address, WhatsNew } from '@mamoru/domain'
 import { address, type Registry } from '@mamoru/registry'
@@ -32,6 +33,8 @@ export type OneAuthState = {
   remote?: { domain: number; address: Hex; sessionKey: Hex; ready?: boolean; registeredAt?: string; tx?: Hex; accountKey?: string; capUsd?: string }
   /** The account's pause from the last read: the V2/V3 guardian's before V4 (V4 has no pause, A1: always false there). */
   paused?: boolean
+  /** otto/mamoru#348: the remote's readiness flow under way (readiness.ts), for the remote at `target`. Absent: ready or not started. */
+  remoteReady?: ReadyFlow & { target?: string }
 }
 
 /**

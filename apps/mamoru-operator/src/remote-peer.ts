@@ -1,7 +1,8 @@
 import type { AccountContext, Address } from '@mamoru/domain'
-import { getAddress } from 'viem'
+import { getAddress, type Hex } from 'viem'
 import { operatorSignature } from './server.ts'
 import type { ReleaseView } from './release.ts'
+import type { PeerAnnounceAnswer } from './readiness.ts'
 
 /** What the remote operator answers a provision with: the Safe runs (`active`), or it is not provisioned yet and why. */
 export type RemoteProvision = { state: 'active'; address: Address } | { state: 'pending'; code: string }
@@ -14,6 +15,7 @@ export type RemoteProvision = { state: 'active'; address: Address } | { state: '
  * - `key`: the session key the remote operator signs that Safe's userOps with (generated there once, never sent here).
  * - `provision`: deploy that Safe if it has no code, check it on chain, and run it. Idempotent.
  * - `release` / `releaseStatus` (#278): send savings of that Safe home, one request one burn.
+ * - `announce` (#348): prove that Safe ready to its home's chain (A1: announceReady from its own session there).
  */
 export class RemotePeer {
   constructor(
@@ -52,6 +54,19 @@ export class RemotePeer {
     const { status, body } = await this.post(remote, 'provision')
     const b = body as { state?: unknown; address?: unknown; code?: unknown } | null
     if (status === 200 && b?.state === 'active' && typeof b.address === 'string') return { state: 'active', address: getAddress(b.address) }
+    return { state: 'pending', code: typeof b?.code === 'string' ? b.code : `HTTP_${status}` }
+  }
+
+  /**
+   * otto/mamoru#348 (A1): ask the peer to prove the V4 remote Safe of `remote` ready to its home's chain (announceReady from
+   * that Safe's own session there). Idempotent on the peer: the announce that ran is answered again (`announced`, its
+   * transaction), unless `again` names it as unusable. An HTTP error or an unknown answer is `pending` with its code.
+   */
+  async announce(remote: AccountContext, again?: Hex): Promise<PeerAnnounceAnswer> {
+    const { status, body } = await this.post(remote, 'remote-announce', again ? { again } : {})
+    const b = body as { state?: unknown; txHash?: unknown; code?: unknown } | null
+    if (status === 200 && b?.state === 'announced' && typeof b.txHash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(b.txHash)) return { state: 'announced', txHash: b.txHash as Hex }
+    if (status === 200 && b?.state === 'ready') return { state: 'ready' }
     return { state: 'pending', code: typeof b?.code === 'string' ? b.code : `HTTP_${status}` }
   }
 

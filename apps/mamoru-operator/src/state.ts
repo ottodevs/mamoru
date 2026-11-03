@@ -10,6 +10,7 @@ import type { SponsorEntry } from './sponsorship.ts'
 import type { OpFacts } from './yield-receipts.ts'
 import type { OneAuthState } from './one-auth.ts'
 import type { ReleaseState } from './release.ts'
+import type { AnnounceRecord } from './readiness.ts'
 
 /** An op as GET /ops serves it, plus what the operator keeps: repeat count of an identical failure, and for a confirmed engine op the session and calls it used (ledger replay on restart). */
 export type StoredOp = OpView & {
@@ -196,6 +197,8 @@ export type AccountState = {
   release?: ReleaseState
   /** otto/mamoru#278: the last finished requests (burned, cancelled), newest first, for status by id. */
   releasesDone?: ReleaseState[]
+  /** otto/mamoru#348: on a V4 remote Safe, its announceReady to its home's chain (readiness.ts peerAnnounce). */
+  readyAnnounce?: AnnounceRecord
 }
 
 export type RemoteSafeRecord = { chainId: number; address: Hex; spec: RemoteSpec; permissionIds: Hex[]; ready?: boolean; lastCode?: string; checkedAt?: string }
