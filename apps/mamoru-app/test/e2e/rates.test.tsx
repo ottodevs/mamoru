@@ -190,19 +190,15 @@ describe('idle breakdown without the operator list', () => {
     expect(text).toContain('0.00005 cbBTC')
     expect(text).not.toContain('nothing idle')
   })
-  test('compact rows keep the token line and range in the markup', () => {
+  test('compact rows keep the token line in the markup', () => {
     const { html } = render(<Working f={placed} s={split(placed, null)} apy={apy} onStop={null} />)
     expect(html).toContain('class="wc-legs"')
-    expect(html).toContain('In range')
   })
-  test('otto/mamoru#233: the range gauge shows where the price sits when the operator sends the ticks, and nothing when it does not', () => {
-    expect(render(<Working f={placed} s={split(placed, null)} apy={apy} onStop={null} />).html).not.toContain('class="gauge')
+  test('otto/mamoru#350: no row says In range or draws a range gauge, even with the ticks', () => {
     const ranged = { ...placed, positions: placed.positions.map((p) => ({ ...p, range: { lower: -100, upper: 100, tick: 0 } })) }
     const { html } = render(<Working f={ranged} s={split(ranged, null)} apy={apy} onStop={null} />)
-    expect(html).toMatch(/class="gauge"[^>]*aria-hidden="true"/)
-    // The price at the middle of the range: the dot at the middle of the gauge (the range is its middle 60 %).
-    expect(html).toContain('left:50.0%')
-    expect(html).toContain('In range')
+    expect(html).not.toContain('class="gauge')
+    expect(html).not.toContain('In range')
   })
   test('a single non-USDC idle token is named on the line', () => {
     const only = { ...old, usdc: '0' }
