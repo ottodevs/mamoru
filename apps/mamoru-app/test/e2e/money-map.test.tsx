@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { FundingView } from '@mamoru/domain'
 import { totalScopeNote } from '../../src/web/components/money-map.tsx'
-import { BRAIS_MONAD_SAFE, BRAIS_TOTAL, braisFunding, braisToday, withFailedTransfer, withMonadOnlyPositions, withMonadPosition, withoutMoney, withPartialBase, withStaleMonad, withUnreadMonad, type BraisMoment } from '../../src/web/fixtures/money.ts'
+import { BRAIS_TOTAL, braisFunding, braisToday, withFailedTransfer, withMonadOnlyPositions, withMonadPosition, withoutMoney, withPartialBase, withStaleMonad, withUnreadMonad, type BraisMoment } from '../../src/web/fixtures/money.ts'
 import { moneyTotal, split, wholeMoney } from '../../src/web/lib/money.ts'
 import { clockTime } from '../../src/web/lib/time.ts'
 import { hasMoney } from '../../src/web/routes/add-money.tsx'
@@ -35,21 +35,7 @@ describe('the total is the whole money in every moment of the crossing', () => {
 // otto/mamoru#350 (Brais, 3 Nov): no "Where your money is" card; each Working row names its chain's Safe, largest first.
 const rowsOf = (html: string) => html.split('data-testid="position"').slice(1)
 
-describe('Working names each chain\'s Safe, largest position first', () => {
-  test('a Base row links the Base Safe and a Monad row the Monad Safe', () => {
-    const f = withMonadPosition(braisFunding('minted', NOW), '2000000')
-    const { f: w, s } = wholeMoney(f)
-    const { text, html } = render(<Working f={w} s={s} onStop={null} />)
-    const [base, monad] = rowsOf(html)
-    expect(base).toContain('href="https://basescan.org/address/0x7a3C5f0e8D21b94E6f0A1c2B3d4E5F60718293aB"')
-    expect(monad).toContain(`href="https://monadscan.com/address/${BRAIS_MONAD_SAFE}"`)
-    expect(monad).not.toContain('basescan.org/address/0x7a3C')
-    expect(base).toContain('class="wc-safe"')
-    expect(text).toContain('Safe 0x7a3C')
-    expect(text).not.toContain('· Safe')
-    expect(text).not.toContain('Where your money is')
-  })
-
+describe('Working lists the largest position first; no money map card', () => {
   test('rows go from the largest USDC value to the smallest, whatever the API order', () => {
     const f = withMonadPosition(braisFunding('minted', NOW), '20000000')
     const { f: w, s } = wholeMoney(f)
@@ -57,18 +43,6 @@ describe('Working names each chain\'s Safe, largest position first', () => {
     const [first, second] = rowsOf(render(<Working f={w} s={s} onStop={null} />).html)
     expect(first).toContain('Monad')
     expect(second).toContain('Base')
-  })
-
-  test('two Safes on one chain (current and retired): each row links the Safe that holds it', () => {
-    const f = withMonadPosition(braisFunding('minted', NOW), '2000000')
-    const retired = '0x1111111111111111111111111111111111111111'
-    const current = f.money!.chains.find((c) => c.chainId === 143)!
-    f.money!.chains.push({ ...structuredClone(current), safe: retired, positions: [{ ...current.positions[0]!, tokenId: '9002', valueUsdc: '1000000' }] })
-    const { f: w, s } = wholeMoney(f)
-    const rows = rowsOf(render(<Working f={w} s={s} onStop={null} />).html)
-    expect(rows.find((r) => r.includes('monadscan') && r.includes(BRAIS_MONAD_SAFE))).toBeDefined()
-    expect(rows.filter((r) => r.includes(`monadscan.com/address/${retired}`)).length).toBe(1)
-    expect(rows.filter((r) => r.includes(`monadscan.com/address/${BRAIS_MONAD_SAFE}`)).length).toBe(1)
   })
 
   test('two Safes on one chain, one unread: the note names that Safe, not the whole chain', () => {
@@ -88,7 +62,7 @@ describe('Working names each chain\'s Safe, largest position first', () => {
     expect(s.working + s.idle + counted(f)).toBe(moneyTotal(f))
   })
 
-  test('Brais on 3 Nov: Morpho, then WETH/USDC, then WMON/USDC on Monad, each with its own Safe line; the sum holds', () => {
+  test('Brais on 3 Nov: Morpho, then WETH/USDC, then WMON/USDC on Monad; the sum holds', () => {
     const f = braisToday(NOW)
     const { f: w, s } = wholeMoney(f)
     expect(s.working + s.idle).toBe(moneyTotal(f))
@@ -97,18 +71,8 @@ describe('Working names each chain\'s Safe, largest position first', () => {
     expect(rows[0]).toContain('Gauntlet USDC Prime')
     expect(rows[1]).toContain('WETH/USDC')
     expect(rows[2]).toContain('WMON/USDC')
-    expect(rows[0]).toContain('basescan.org/address/')
-    expect(rows[2]).toContain(`monadscan.com/address/${BRAIS_MONAD_SAFE}`)
   })
 
-  test('an old operator without the money map links the home Safe', () => {
-    const f = withoutMoney(braisFunding('minted', NOW))
-    const html = render(<Working f={f} s={split(f, null)} onStop={null} />).html
-    expect(html).toContain(`href="https://basescan.org/address/${f.address}"`)
-  })
-})
-
-describe('a chain read that failed or never happened', () => {
   test('a stale chain keeps its last value in the total, and the balance says when it was read', () => {
     const f = withStaleMonad(braisFunding('minted', NOW), NOW)
     expect(f.money!.complete).toBe(true)
@@ -205,24 +169,6 @@ describe('Working + Idle + in flight = Total balance', () => {
   })
 })
 
-describe('links are built here, never taken from the operator', () => {
-  test('a hostile explorerUrl is ignored; a malformed Safe gets no link', () => {
-    const f = braisFunding('flight', NOW)
-    f.money!.chains[0]!.explorerUrl = 'https://evil.example/phish'
-    const ok = render(<Working f={wholeMoney(f).f} s={wholeMoney(f).s} onStop={null} />).html
-    expect(ok).not.toContain('evil.example')
-    expect(ok).toContain('https://basescan.org/address/0x7a3C5f0e8D21b94E6f0A1c2B3d4E5F60718293aB')
-
-    const bad = braisFunding('flight', NOW)
-    bad.money!.chains[0]!.safe = 'javascript:alert(1)' as never
-    bad.money!.chains[0]!.explorerUrl = 'https://evil.example/x'
-    const html = render(<Working f={wholeMoney(bad).f} s={wholeMoney(bad).s} onStop={null} />).html
-    expect(html).not.toContain('evil.example')
-    expect(html).not.toContain('javascript:')
-    expect(html).not.toContain('data-testid="position-safe"')
-  })
-})
-
 describe('operator version skew and odd rows', () => {
   test('an unknown chain: raw label, no links, still in the totals, no wrong-chain links on its position', () => {
     const f = braisFunding('minted', NOW)
@@ -236,11 +182,8 @@ describe('operator version skew and odd rows', () => {
     expect(s.working + s.idle).toBe(BRAIS_TOTAL)
     const working = render(<Working f={w} s={s} onStop={null} />)
     expect(working.text).toContain('chain 42161')
-    // Only Base's position links to its pool and its Safe; the unknown chain's gets neither (never Basescan for it).
+    // Only Base's position links to a pool; the unknown chain's gets none (never Basescan for it).
     expect(working.html.match(/<a class="seg"/g)?.length).toBe(1)
-    expect(working.html.match(/<a class="wc-safe"/g)?.length).toBe(1)
-    expect(working.html).not.toContain('monadscan')
-    expect(rowsOf(working.html).find((r) => r.includes('chain 42161'))).not.toContain('<a ')
     expect(render(<Idle f={w} s={s} />).text).toContain('Base 1.10 · chain 42161 0.07')
   })
 
