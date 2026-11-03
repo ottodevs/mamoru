@@ -12,7 +12,7 @@ type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
  * only when an independent provider witnesses the hash of the range's last
  * block.
  */
-const DEFAULT_FALLBACKS = 'https://base-rpc.publicnode.com,https://base.drpc.org,https://mainnet.base.org'
+export const BASE_PUBLIC_FALLBACKS = 'https://base-rpc.publicnode.com,https://base.drpc.org,https://mainnet.base.org'
 
 type Env = Record<string, string | undefined>
 
@@ -23,6 +23,32 @@ type Env = Record<string, string | undefined>
  */
 export const L1_PUBLIC_FALLBACKS = 'https://rpc.mevblocker.io,https://ethereum-rpc.publicnode.com,https://public.1rpc.io/eth,https://eth.drpc.org,https://eth-mainnet.public.blastapi.io'
 export const MONAD_PUBLIC_FALLBACKS = 'https://rpc.monad.xyz,https://rpc2.monad.xyz,https://rpc3.monad.xyz,https://monad-mainnet.rpc.sentio.xyz,https://monad-mainnet.drpc.org'
+
+/**
+ * otto/mamoru#261: the public list the main proxy takes without MAMORU_RPC_FALLBACKS, by the chain its upstream
+ * answers. A chain not listed gets none: another chain's RPCs are never a default (the Monad operator once fell back
+ * to Base's and could not witness its logs).
+ */
+const PUBLIC_FALLBACKS_BY_CHAIN: Readonly<Record<number, string>> = {
+  1: L1_PUBLIC_FALLBACKS,
+  143: MONAD_PUBLIC_FALLBACKS,
+  8453: BASE_PUBLIC_FALLBACKS,
+}
+
+/**
+ * otto/mamoru#261: the chain the first of these RPCs to answer eth_chainId is on, or null when none answers. Never
+ * throws, never names a URL.
+ */
+export async function chainIdOf(urls: readonly string[], send: (url: string, init: RequestInit) => Promise<Response> = fetch, timeoutMs = 8_000): Promise<number | null> {
+  for (const url of urls) {
+    const n = await send(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'eth_chainId', params: [] }), signal: AbortSignal.timeout(timeoutMs) })
+      .then((r) => r.json() as Promise<{ result?: unknown }>)
+      .then((j) => (typeof j?.result === 'string' ? Number(j.result) : null))
+      .catch(() => null)
+    if (n !== null && Number.isSafeInteger(n)) return n
+  }
+  return null
+}
 
 /**
  * otto/mamoru#285: how many of these configured RPCs answer a chain id other than `chainId`. One that does not answer
@@ -45,9 +71,12 @@ export function urlsFromEnv(name: string, fallback: string, env: Env = process.e
   return (env[name] ?? fallback).split(',').map((u) => u.trim()).filter(Boolean)
 }
 
-/** Read when the proxy starts, never at module load: main.ts fills process.env from the env file after its imports ran. */
-export function fallbacksFromEnv(env: Env = process.env): string[] {
-  return (env.MAMORU_RPC_FALLBACKS ?? DEFAULT_FALLBACKS).split(',').map((u) => u.trim()).filter(Boolean)
+/**
+ * Read when the proxy starts, never at module load: main.ts fills process.env from the env file after its imports ran.
+ * Unset, the public list of `chainId` (otto/mamoru#261); without a chain, none.
+ */
+export function fallbacksFromEnv(env: Env = process.env, chainId?: number): string[] {
+  return urlsFromEnv('MAMORU_RPC_FALLBACKS', chainId === undefined ? '' : (PUBLIC_FALLBACKS_BY_CHAIN[chainId] ?? ''), env)
 }
 
 /**
@@ -263,7 +292,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   }
   const send = async (url: string, init: RequestInit): Promise<Response> =>
     (await onChain(url)) ? rawSend(url, init) : Response.json({ jsonrpc: '2.0', id: null, error: { code: -32603, message: 'provider not on this chain' } }, { status: 503 })
-  const fallbacks = opts.fallbacks ?? fallbacksFromEnv()
+  const fallbacks = opts.fallbacks ?? fallbacksFromEnv(process.env, opts.chainId)
   const maxLogRange = opts.maxLogRange ?? Number(process.env.MAMORU_LOG_RANGE ?? 10)
   const metrics = opts.metrics
   /** The component that made the request being served: the path the proxy was called on (`/c/<component>`), for the counters only. */

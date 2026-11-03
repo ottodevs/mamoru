@@ -21,7 +21,7 @@ import { ReturnHome } from './return-home.ts'
 import { CCTP_DOMAIN_MONAD, MESSAGE_TRANSMITTER_V2 } from './cctp.ts'
 import { BridgeOut, ETHEREUM_CHAIN_ID, L1_BUNDLER_TIMEOUT_MS, L1_HANDLE_OPS_GAS, L1_USDC } from './bridge-out.ts'
 import { L1Bundler, paymasterFromEnv } from './paymaster.ts'
-import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, startRpcProxy, urlsFromEnv, wrongChainCount } from './rpc-proxy.ts'
+import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, chainIdOf, startRpcProxy, trustedFromEnv, urlsFromEnv, wrongChainCount } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
 import { readSnapshot, SnapshotLoop, snapshotIntervalMs, type Snapshot } from './snapshot.ts'
 import { MULTICALL3 } from '@mamoru/rpc'
@@ -558,7 +558,11 @@ export async function bootOperator(o: BootOptions) {
   const gitSha = await gitShaOnce(process.cwd())
   const rpcMetrics = new RpcMetrics(o.stateDir)
   // Every RPC call of the operator, engine and bundler goes through the loopback proxy (getLogs splitting, no keyed URL in errors).
-  const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics })
+  // otto/mamoru#261: the proxy knows its chain before it starts, so its public fallbacks are that chain's and every
+  // provider proves the chain before its first use. Asked of the RPCs the operator trusts, never of a public one.
+  const proxyChain = await chainIdOf([o.rpcUrl, ...trustedFromEnv()])
+  if (proxyChain === null) throw new Error('neither BASE_RPC_URL (RPC_URL) nor MAMORU_RPC_TRUSTED answered eth_chainId')
+  const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics, chainId: proxyChain })
   // One path per component, for the counters only: the proxy serves them all the same way.
   const via = (component: string) => `${proxy.url}c/${component}`
   o = { ...o, rpcUrl: via('engine') }
