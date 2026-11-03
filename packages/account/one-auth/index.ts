@@ -18,6 +18,9 @@ import { accountSetup, counterfactualAddress, SAFE_PROXY_141_CREATION_CODE } fro
 import { multiSendCallOnly, OPERATION_DELEGATECALL, safeTxTypedData, type MultiSendCall, type SafeSetup, type WebAuthnSigner } from '../safe/index.ts'
 import { ATTESTATION_SCHEMA_UID, ownableValidatorInitData, permissionIdOf, type SmartSessionStruct } from '../sessions/index.ts'
 
+// otto/mamoru#348: the one builder (and validator) of a V4 session batch, A1 shape.
+export * from './batch.ts'
+
 /** SmartSession FALLBACK_TARGET_FLAG / FALLBACK_TARGET_SELECTOR_FLAG (MamoruV4Helper.FALLBACK_TARGET/_SELECTOR). */
 export const FALLBACK_TARGET: Address = '0x0000000000000000000000000000000000000001'
 export const FALLBACK_SELECTOR: Hex = '0x00000001'
