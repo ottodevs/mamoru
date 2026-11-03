@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { getAddress, isAddress, isHash } from 'viem'
 import { ReasonError } from '@mamoru/domain'
-import { address, assertRegistryChain, baseRegistry, entry, ethereumRegistry, isDeployed, monadRegistry, nameOf, registries, registryFor, type Registry } from './index.ts'
+import { address, assertRegistryChain, baseRegistry, entry, ethereumRegistry, isDeployed, loadRegistryFile, monadRegistry, nameOf, registries, registryFor, type Registry } from './index.ts'
 
 const ACCOUNT_STACK = [
   'EntryPointV07',
@@ -159,14 +159,11 @@ describe('MamoruActionPolicyV2 (spec 007, otto/mamoru#151)', () => {
   test('is deployed on Base at the address and code hash read on chain; the guardian is an EOA, not an entry', () => {
     // otto/mamoru#213: MamoruPauseGate is named before its deployment (contracts/action-policy/script/DeployPauseGate.s.sol).
     // otto/mamoru#251: MamoruPauseGate re-deployed bound to V3 on Base 2026-11-01 (DeployPauseGate.s.sol, nonce 5) and pinned.
-    // otto/mamoru#293: the four contracts of spec 010 were named before T7; T7 deployed them on 2 Nov (#292) and pinned
-    // them at the same addresses on Base, Monad and Ethereum.
-    const v4 = ['MamoruRegistry', 'MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruMigrationCheck']
-    expect(baseRegistry.undeployed).toEqual([])
-    for (const n of v4) expect(address(n, baseRegistry), n).toBe(address(n, monadRegistry))
+    // otto/mamoru#293, #348: spec 010's T7 (deployed 2 Nov, guardian era) is retired unused; A1 is undeployed until T8.
+    expect(baseRegistry.undeployed).toEqual(['MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruV4Table'])
     expect(address('MamoruPauseGate', baseRegistry)).toBe('0xf939c0FF7F095BA2ED7DDaaCD2D75da9A8cdF4e7')
     // otto/mamoru#214: deployed on Monad 2026-10-27 (DeployMonad.s.sol) and pinned.
-    expect(monadRegistry.undeployed).toEqual([])
+    expect(monadRegistry.undeployed).toEqual(['MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruV4Table'])
     expect(isDeployed('MamoruGasPolicy', monadRegistry)).toBe(true)
     expect(address('MamoruGasPolicy', monadRegistry)).toBe('0xD62ab993c37A0b48E4593d83aF6C3555fc1B34fe')
     expect(address('MamoruActionPolicyV2', monadRegistry)).toBe('0xc50408916C253B9E9EeBC0308813eD6B470466Ac')
@@ -217,5 +214,41 @@ describe('ethereum registry (#307)', () => {
     for (const name of ['TimeFramePolicy', 'UsageLimitPolicy', 'MamoruActionPolicyV3']) {
       expect(code(() => entry(name, ethereumRegistry)), name).toBe('POLICY_TARGET_NOT_IN_REGISTRY')
     }
+  })
+})
+
+describe('spec 010 T7, retired unused (otto/mamoru#348)', () => {
+  const T7 = {
+    MamoruRegistry: '0x2a70976970964faB1FBadaFF2f0b3851C2Cb74C7',
+    MamoruActionPolicyV4: '0xb1383F8E5045aFdcfF2031743d3c25082C8858a4',
+    MamoruGasPolicyV2: '0xe58dad8B381FF93A28Aa2A43De80acb96F535C7B',
+  } as const
+
+  test('no chain pins a T7 address; each lists the three as retired, and A1 as undeployed', () => {
+    for (const r of registries) {
+      for (const [name, a] of Object.entries(T7)) {
+        expect(nameOf(a, r), `${r.chain} ${name}`).toBeUndefined()
+        expect(r.retired?.find((x) => x.address === a)?.name, `${r.chain} ${name}`).toBe(name)
+      }
+      expect(isDeployed('MamoruRegistry', r)).toBe(false)
+      for (const n of ['MamoruActionPolicyV4', 'MamoruGasPolicyV2', 'MamoruV4Table']) {
+        expect(isDeployed(n, r), `${r.chain} ${n}`).toBe(false)
+        expect(r.undeployed, r.chain).toContain(n)
+      }
+      // The migration check is A1's too: same source, same CREATE2 salt, DeployV4.s.sol EXPECTED_CHECK.
+      expect(address('MamoruMigrationCheck', r)).toBe('0xc04046b4649471875372FA9e800143491cD4fB31')
+    }
+  })
+
+  test('a retired address pinned again is refused at load', () => {
+    const raw = JSON.parse(readFileSync(new URL('../base.json', import.meta.url), 'utf8')) as { entries: unknown[]; retired: { name: string; address: string; codeHash: string }[] }
+    const t7 = raw.retired[0]!
+    raw.entries.push({ name: t7.name, kind: 'read', role: 'pinned again by mistake', address: t7.address, codeHash: t7.codeHash })
+    expect(() => loadRegistryFile(raw)).toThrow(/retired/)
+  })
+
+  test('DeployV4.s.sol (A1) does not predict any T7 address', () => {
+    const src = readFileSync(new URL('../../../contracts/action-policy/script/DeployV4.s.sol', import.meta.url), 'utf8').toLowerCase()
+    for (const a of Object.values(T7)) expect(src.includes(a.toLowerCase().slice(2))).toBe(false)
   })
 })

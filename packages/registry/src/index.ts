@@ -51,9 +51,17 @@ export type Registry = {
    * `isDeployed` says which they are. Deploying one moves it into `entries` with its address and code hash.
    */
   undeployed: string[]
+  /**
+   * Contracts that were deployed on this chain and then retired before any use (otto/mamoru#348: spec 010's T7, the
+   * guardian-era V4 stack, replaced by A1). Kept so nobody pins them again by mistake: `load` refuses an entry at a
+   * retired address. Never resolved by `entry`/`address`.
+   */
+  retired?: RetiredEntry[]
 }
 
-type RegistryFile = { chain: string; chainId: number; block: number; blockHash: string; entries: unknown[]; undeployed?: { name: string; address: null }[] }
+export type RetiredEntry = { name: string; address: Address; codeHash: Hex; reason: string }
+
+type RegistryFile = { chain: string; chainId: number; block: number; blockHash: string; entries: unknown[]; undeployed?: { name: string; address: null }[]; retired?: { name: string; address: string; codeHash: string; reason: string }[] }
 
 function load(file: RegistryFile): Registry {
   const entries = (file.entries as RegistryEntry[]).map((e) => ({ ...e, address: getAddress(e.address) }))
@@ -62,8 +70,17 @@ function load(file: RegistryFile): Registry {
     if (entries.some((e) => e.name === u.name)) throw new Error(`${file.chain} registry: ${u.name} is both deployed and undeployed`)
     return u.name
   })
-  return { chain: file.chain, chainId: file.chainId, block: file.block, blockHash: file.blockHash as Hex, entries, undeployed }
+  const retired = (file.retired ?? []).map((r) => {
+    const a = getAddress(r.address)
+    if (entries.some((e) => e.address === a)) throw new Error(`${file.chain} registry: ${a} (${r.name}) is retired; it cannot be pinned again`)
+    if (!r.reason) throw new Error(`${file.chain} registry: retired ${r.name} gives no reason`)
+    return { name: r.name, address: a, codeHash: r.codeHash as Hex, reason: r.reason }
+  })
+  return { chain: file.chain, chainId: file.chainId, block: file.block, blockHash: file.blockHash as Hex, entries, undeployed, retired }
 }
+
+/** `load`, for the registry tests (a retired address pinned again is refused). */
+export const loadRegistryFile = (file: unknown): Registry => load(file as RegistryFile)
 
 export const baseRegistry: Registry = load(base)
 export const monadRegistry: Registry = load(monad)

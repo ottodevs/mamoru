@@ -7,10 +7,22 @@ Noema `1-projects/mamoru/decisions/2026-11-02-firmar-solo-crear-y-retirar.md`.
 **Amendment A1 (Ot, 2 Nov 18:30)**: noema `1-projects/mamoru/decisions/2026-11-02-v4-sin-guardian-registro-sin-admin.md`.
 V4 is aligned with spec 009 (`specs/009-hermetic-infra`) before it goes on chain: **no guardian** and **no registry
 admin**. What A1 changes is listed in "Amendment A1" below; the sections that follow are already written as amended.
-Status: spec r2 + A1. Contracts #200/#209 and operator #202 are merged behind `one_auth_v4`; nothing is deployed
-(`packages/registry/*.json` lists `MamoruRegistry`, `MamoruActionPolicyV4`, `MamoruGasPolicyV2` and
-`MamoruMigrationCheck` as undeployed). The T7 deploy is on hold until A1 lands (otto/mamoru#292 comment 23892, #307,
-#83).
+Status: spec r2 + A1. T7, the guardian-era V4 stack (`MamoruRegistry`, `MamoruActionPolicyV4`, `MamoruGasPolicyV2`
+and `MamoruMigrationCheck`), was deployed on Base, Monad and Ethereum on 2 Nov and is retired unused (otto/mamoru#348):
+no account ever ran on it. A1 deploys as T8 at new addresses after #345. Until then `packages/registry/*.json` lists
+`MamoruActionPolicyV4`, `MamoruGasPolicyV2` and `MamoruV4Table` as undeployed, so every V4 path stays off.
+
+**T7 retired (otto/mamoru#348).** The three T7 contracts with a guardian or an admin are recorded under `retired` in each
+registry file, which refuses an entry at a retired address. Never pin them again:
+
+| Contract | Address (same on Base, Monad, Ethereum) |
+|---|---|
+| `MamoruRegistry` | `0x2a70976970964faB1FBadaFF2f0b3851C2Cb74C7` |
+| `MamoruActionPolicyV4` (T7) | `0xb1383F8E5045aFdcfF2031743d3c25082C8858a4` |
+| `MamoruGasPolicyV2` (T7) | `0xe58dad8B381FF93A28Aa2A43De80acb96F535C7B` |
+
+`MamoruMigrationCheck` (`0xc04046b4649471875372FA9e800143491cD4fB31`) stays pinned: it has no argument and no state,
+and A1's `DeployV4.s.sol` predicts the same CREATE2 address (`EXPECTED_CHECK`), so T8 reuses it.
 
 ## Problem
 
@@ -181,7 +193,7 @@ re-parameterize an entry.
        V4 there reads back, locally: code at `safe` with the Safe proxy's `EXTCODEHASH`; owners, threshold and
        shared-signer (x, y), from which it computes `ownersHash`; the 7579 adapter and the SmartSession installed; and a
        V4 session bound for `safe`. All of this is what the guardian used to read back off chain
-       (`apps/mamoru-guardian/src/watcher.ts`). The destination is fixed, never free:
+       (`apps/mamoru-guardian/src/watcher.ts`, deleted in #348). The destination is fixed, never free:
        - for a remote, `toDomain` must be its recorded home domain, and V4 also checks that `safe` equals
          `remoteOf(homeOf[safe], localDomain)` recomputed from those owners, so a look-alike Safe with the victim's
          owners cannot announce;
@@ -325,7 +337,7 @@ re-parameterize an entry.
   - The usage refresh.
   - This applies to V4 accounts only.
 - **Changed:** the engine's pools are the candidates that pass V4's eligibility views, not `registry.activePools()`.
-- **Retired (A1):** the guardian watchdog `apps/mamoru-guardian` and every call to `setReady`, `pause`, `unpause` and
+- **Retired (A1):** the guardian watchdog `apps/mamoru-guardian` (deleted in #348) and every call to `setReady`, `pause`, `unpause` and
   `review`. Its read-back checks move into V4's `announceReady` (I4).
 
 ## Ethereum and siblings (#307, before T7)
