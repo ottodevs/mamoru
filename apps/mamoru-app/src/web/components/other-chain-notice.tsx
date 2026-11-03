@@ -1,8 +1,9 @@
-import type { BridgeOutRoute, BridgeOutToSign, EthConvert, EthConvertToSign, OtherChainFunds, OtherChainsView } from '@mamoru/domain'
+import type { BridgeOutRoute, BridgeOutToSign, EthConvert, EthConvertToSign, EthereumSiblingView, OtherChainFunds, OtherChainsView } from '@mamoru/domain'
 import { useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 import { useApi } from '../api/client.ts'
-import { queryKeys, useBridgeOut, useOtherChains } from '../api/queries.ts'
+import { queryKeys, useBridgeOut, useEthereumSibling, useOtherChains } from '../api/queries.ts'
+import { EthereumApprovalAction, ethereumCopy } from './one-approval.tsx'
 import { BASE_SLEEVE, useChain } from '../lib/chain.tsx'
 import { errorText } from '../lib/owner-flow.ts'
 import { signOwnerTx, storedCredential } from '../lib/passkey-sign.ts'
@@ -76,23 +77,26 @@ export const otherChainCopy = {
 }
 
 /** Money sent on the wrong network: where it is and that it is not in the balance. Renders nothing when there is none. */
-export function OtherChainNotice({ view, action, canMove = false }: { view: OtherChainsView | undefined; action?: (c: Found) => ReactNode; canMove?: boolean }) {
+export function OtherChainNotice({ view, action, canMove = false, ethereum }: { view: OtherChainsView | undefined; action?: (c: Found) => ReactNode; canMove?: boolean; /** #311: Mamoru takes over what is on Ethereum (one approval): its own body and action replace convert and move. */ ethereum?: { body: (c: Found) => string; action: ReactNode } }) {
   const found = fundsElsewhere(view)
   if (found.length === 0) return null
   return (
     <>
-      {found.map((c) => (
-        <section key={c.chainId} className="card" data-testid="other-chain" data-chain-id={c.chainId} role="status">
-          <span className="max-w-[40rem]">
-            <span className="title text-alert-ink">{otherChainCopy.title(c)}</span>
-            <span className="sub">{otherChainCopy.body(c, canMove)}</span>
-            <span className="mt-1 block font-mono text-[0.72rem] text-stone">
-              {c.name} block {c.block} · Checked {localTime(c.observedAt)}
+      {found.map((c) => {
+        const own = ethereum && c.chainId === BRIDGE_CHAIN_ID ? ethereum : null
+        return (
+          <section key={c.chainId} className="card" data-testid="other-chain" data-chain-id={c.chainId} role="status">
+            <span className="max-w-[40rem]">
+              <span className="title text-alert-ink">{otherChainCopy.title(c)}</span>
+              <span className="sub">{own ? own.body(c) : otherChainCopy.body(c, canMove)}</span>
+              <span className="mt-1 block font-mono text-[0.72rem] text-stone">
+                {c.name} block {c.block} · Checked {localTime(c.observedAt)}
+              </span>
+              {own ? own.action : action && canMove && (movable(c) || convertible(c)) ? action(c) : null}
             </span>
-            {action && canMove && (movable(c) || convertible(c)) ? action(c) : null}
-          </span>
-        </section>
-      ))}
+          </section>
+        )
+      })}
     </>
   )
 }
@@ -274,19 +278,54 @@ export function EthConvertAction({ accountKey }: { accountKey: string }) {
   )
 }
 
+/**
+ * #311: what the Ethereum notice says and offers once Mamoru can take over the funds there (EthereumSiblingView). Offered:
+ * one approval (or Start, when it is still to be approved, which covers it). Set up or on its way: its state, no button.
+ * Neither: undefined, and the notice keeps convert and move.
+ */
+export function ethereumTakeover(view: EthereumSiblingView | undefined, startPending: boolean, accountKey: string): { body: (c: Found) => string; action: ReactNode } | undefined {
+  if (!view) return undefined
+  if (view.offered) {
+    return startPending
+      ? { body: (c) => ethereumCopy.withStart(c.name), action: null }
+      : {
+          body: (c) => ethereumCopy.offered(c.name),
+          action: (
+            <>
+              {view.state === 'failed' ? <span className="err mt-2 block">{ethereumCopy.state.failed}</span> : null}
+              <EthereumApprovalAction accountKey={accountKey} />
+            </>
+          ),
+        }
+  }
+  if (view.state === 'sending' || view.state === 'unconfirmed' || view.state === 'done') {
+    return {
+      body: (c) => ethereumCopy.underway(c.name),
+      action: (
+        <span className="mt-2 block text-[0.88rem]" data-testid="ethereum-state" data-state={view.state} role="status">
+          {ethereumCopy.state[view.state]}
+        </span>
+      ),
+    }
+  }
+  return undefined
+}
+
 /** The notice for the signed-in account. A check that failed shows nothing: an amount seen earlier is not claimed to be there now. */
-export function WrongNetwork({ accountKey: sleeveKey }: { accountKey: string | undefined }) {
+export function WrongNetwork({ accountKey: sleeveKey, startPending = false }: { accountKey: string | undefined; /** #311: Start is still to be approved, and it covers Ethereum too. */ startPending?: boolean }) {
   // otto/mamoru#67: the notice and its move are about reaching Base; a Monad sleeve reads nothing here.
   const accountKey = useChain().chainId === BASE_SLEEVE.chainId ? sleeveKey : undefined
   const other = useOtherChains(accountKey)
   const status = useBridgeOut(accountKey)
+  const sibling = useEthereumSibling(accountKey)
+  const ethereum = accountKey ? ethereumTakeover(sibling.isError ? undefined : sibling.data, startPending, accountKey) : undefined
   // Off on /ops, or the operator has no Ethereum RPC (the route answers 404): the notice stays as it was, no button.
   const canMove = !status.isError && status.data?.enabled === true
   const route = status.isError ? null : (status.data?.route ?? null)
   const recent = route !== null && (UNDERWAY.includes(route.state) || (route.state === 'filled' && Date.now() - Date.parse(route.at) < 86_400_000))
   return (
     <>
-      <OtherChainNotice view={other.isError ? undefined : other.data} canMove={canMove} action={accountKey ? (c) => (movable(c) ? <BridgeOutAction accountKey={accountKey} /> : <EthConvertAction accountKey={accountKey} />) : undefined} />
+      <OtherChainNotice view={other.isError ? undefined : other.data} canMove={canMove} ethereum={ethereum} action={accountKey ? (c) => (movable(c) ? <BridgeOutAction accountKey={accountKey} /> : <EthConvertAction accountKey={accountKey} />) : undefined} />
       {/* Once the USDC has left Ethereum the notice above is gone; the move's state stays in view until it lands. */}
       {route && recent && fundsElsewhere(other.data).every((c) => !movable(c)) ? (
         <section className="card" data-testid="bridge-route" role="status">

@@ -7,6 +7,8 @@ import type {
   BridgeOutToSign,
   BridgeOutView,
   EthConvertToSign,
+  EthereumSiblingToSign,
+  EthereumSiblingView,
   DashboardPayload,
   FeedbackRequest,
   FeedbackResponse,
@@ -68,6 +70,10 @@ export type ApiClient = {
   /** #211: swap the ETH found on Ethereum to USDC in the same account there, so it can be moved. */
   ethConvertPrepare(accountKey: string): Promise<EthConvertToSign>
   ethConvert(accountKey: string, sig: OwnerSignature): Promise<BridgeOutView>
+  /** #311: Mamoru's session on the account's own Safe on Ethereum, the second half of the one approval. */
+  ethereumSiblingStatus(accountKey: string): Promise<EthereumSiblingView>
+  ethereumSiblingPrepare(accountKey: string): Promise<EthereumSiblingToSign>
+  ethereumSibling(accountKey: string, sig: OwnerSignature): Promise<EthereumSiblingView>
   /** Works with or without a session. */
   feedback(body: FeedbackRequest): Promise<FeedbackResponse>
 }
@@ -154,6 +160,9 @@ export const httpClient: ApiClient = {
   bridgeOutStatus: (k) => request<BridgeOutView>(acct(k, 'bridge-out')),
   ethConvertPrepare: (k) => post<EthConvertToSign>(acct(k, 'eth-convert/prepare')),
   ethConvert: (k, sig) => post<BridgeOutView>(acct(k, 'eth-convert'), sig),
+  ethereumSiblingStatus: (k) => request<EthereumSiblingView>(acct(k, 'ethereum-sibling')),
+  ethereumSiblingPrepare: (k) => post<EthereumSiblingToSign>(acct(k, 'ethereum-sibling/prepare')),
+  ethereumSibling: (k, sig) => post<EthereumSiblingView>(acct(k, 'ethereum-sibling'), sig),
   feedback: (body) => post<FeedbackResponse>('/api/feedback', body),
 }
 

@@ -2,7 +2,7 @@ import type { ApyView, FundingView, Hex0x, OpView, OverCap, PriceDivergenceWarni
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { depositArrived, FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useFreshFunding, useFunding, useOps, usePools, useSession, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
+import { depositArrived, FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useEthereumSibling, useFreshFunding, useFunding, useOps, useOtherChains, usePools, useSession, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
 import { WithdrawReview } from '../components/withdraw-review.tsx'
@@ -24,7 +24,9 @@ import { localTime } from '../lib/time.ts'
 import { BASE_SLEEVE, explorerAddress, explorerTx, knownChain, sleeveChain, useChain } from '../lib/chain.tsx'
 import { JPYT_CAPTION, receiveLine, withdrawOptions } from '../lib/withdraw-assets.ts'
 import { DepositDetails, hasMoney } from './add-money.tsx'
-import { WrongNetwork } from '../components/other-chain-notice.tsx'
+import { BRIDGE_CHAIN_ID, fundsElsewhere, WrongNetwork } from '../components/other-chain-notice.tsx'
+import { OneApprovalStart } from '../components/one-approval.tsx'
+import { useOneApproval, type OneApproval } from '../lib/one-approval.ts'
 import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
 import { HowItWorks, howCopy } from '../components/how-it-works.tsx'
 import { Chevron, Fold, LiveSync, PullToRefresh, Spark, TweenPct, TweenUsd } from '../components/motion.tsx'
@@ -1271,7 +1273,16 @@ export function ActivateScope({ summary }: { summary: string[] }) {
   )
 }
 
-function StartRow({ accountKey, funded }: { accountKey: string; funded: boolean }) {
+function StartRow({ accountKey, funded, one }: { accountKey: string; funded: boolean; one: OneApproval }) {
+  // otto/mamoru#311: with funds on Ethereum that Mamoru can take over, Start is the one approval for Base and Ethereum.
+  const sibling = useEthereumSibling(accountKey)
+  const other = useOtherChains(accountKey)
+  const onEthereum = fundsElsewhere(other.isError ? undefined : other.data).some((c) => c.chainId === BRIDGE_CHAIN_ID)
+  if (one.parts || (!sibling.isError && sibling.data?.offered && onEthereum)) return <OneApprovalStart flow={one} title={funded ? homeCopy.notRunning : homeCopy.armFirst} startLabel={funded ? homeCopy.start : 'Approve'} />
+  return <PlainStartRow accountKey={accountKey} funded={funded} />
+}
+
+function PlainStartRow({ accountKey, funded }: { accountKey: string; funded: boolean }) {
   const flow = useOwnerAction(accountKey, 'activate')
   const tap = () => void (flow.prepared ? flow.approve() : flow.prepare())
   if (flow.result) return null
@@ -1411,6 +1422,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // chain and says why when it cannot.
   const canRestart = stopped
   const canStart = !!f && !fromChain && !f.active && !inFlight && !armed && !stopped
+  const one = useOneApproval(accountKey, true)
+  const oneOpen = !!one.parts && !one.finished
   // otto/mamoru#135 review: whether this card offers Stop or a restart turns on f.positions, part of the
   // operator's cache (up to 60 s behind) — never invalidated by an engine move this client did not just submit
   // itself (another tab's stop, say). The moment the account looks idle, ask for a fresh (<=2 s) read instead
@@ -1479,7 +1492,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         scopeNote={past && !cached ? moneyCopy.pastScope : totalScopeNote(f, !!monadSleeve)}
       />
       <Indicators f={noPositions ? undefined : whole?.f} apy={apy.data} price={price} noRead={(!f && liveDown) || noPositions} />
-      <WrongNetwork accountKey={accountKey} />
+      <WrongNetwork accountKey={accountKey} startPending={canStart || oneOpen} />
       {past ? (
         <section className="card" data-testid="past-notice" role="status">
           <span className="title">{homeCopy.pastTitle}</span>
@@ -1506,7 +1519,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
               {/* otto/mamoru#135 review: this notice reads the same (up to 60 s stale) poll as everything else on
                   this page. Start stays reachable next to it; its prepare reads the chain and is what actually
                   refuses one that is still over the cap, with the real reason. */}
-              {canStart ? <StartRow accountKey={accountKey} funded={hasMoney(f)} /> : null}
+              {canStart ? <StartRow accountKey={accountKey} funded={hasMoney(f)} one={one} /> : null}
             </>
           ) : below ? (
             <>
@@ -1521,13 +1534,16 @@ export function HomeView({ accountKey }: { accountKey: string }) {
               </section>
               {/* otto/mamoru#135: the top-up that clears this is a deposit, which the poll can be 15-60 s behind:
                   Start stays offered, and its prepare reads the chain and refuses below the minimum. */}
-              {canStart ? <StartRow accountKey={accountKey} funded={hasMoney(f)} /> : null}
+              {canStart ? <StartRow accountKey={accountKey} funded={hasMoney(f)} one={one} /> : null}
             </>
           ) : canStart ? (
-            <StartRow accountKey={accountKey} funded={hasMoney(f)} />
+            <StartRow accountKey={accountKey} funded={hasMoney(f)} one={one} />
           ) : f.active && f.approval && approvalOpen && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) && !renewing ? (
             <ApprovalRow key={approvalRowKey(f.approval)} approval={f.approval} onOpen={openApproval} />
           ) : null}
+          {/* otto/mamoru#311: Base is approved and the account is starting, so Start's row is gone; the one approval stays
+              on screen for its Ethereum part, and says when it is done. */}
+          {!canStart && (oneOpen || one.finished) ? <OneApprovalStart flow={one} title={homeCopy.notRunning} startLabel={homeCopy.start} /> : null}
           {showsMoneyMap(f.money) ? <MoneyMapCard money={f.money} /> : null}
           {noPositions ? null : <Working f={whole!.f} s={whole!.s} apy={apy.data} price={price} otherChainsUsdc={otherChainsUsdc} onStop={!fromChain && (f.active || whole!.f.positions.length > 0) ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />}
           <Idle f={whole!.f} s={whole!.s} home={s as Split} />

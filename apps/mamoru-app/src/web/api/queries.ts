@@ -14,6 +14,7 @@ export const queryKeys = {
   funding: (accountKey: string) => ['funding', accountKey] as const,
   otherChains: (accountKey: string) => ['other-chains', accountKey] as const,
   bridgeOut: (accountKey: string) => ['bridge-out', accountKey] as const,
+  ethereumSibling: (accountKey: string) => ['ethereum-sibling', accountKey] as const,
   yieldLedger: (accountKey: string) => ['yield-ledger', accountKey] as const,
   ops: (accountKey: string) => ['ops', accountKey] as const,
   withdrawAssets: (accountKey: string) => ['withdraw-assets', accountKey] as const,
@@ -172,6 +173,21 @@ export function useBridgeOut(accountKey: string | undefined) {
     enabled: accountKey !== undefined,
     retry: false,
     refetchInterval: (q) => (q.state.data?.route && ['sending', 'deposited', 'unconfirmed', 'expired'].includes(q.state.data.route.state) ? (q.state.data.route.state === 'expired' ? 60_000 : 5_000) : false),
+  })
+}
+
+/**
+ * #311: Mamoru's session on the account's own Safe on Ethereum. Polls every 5 s while its setup is being sent, every
+ * minute once it runs (it moves the funds by itself); a failed read shows nothing (an operator without Ethereum: 404).
+ */
+export function useEthereumSibling(accountKey: string | undefined) {
+  const api = useApi()
+  return useQuery({
+    queryKey: queryKeys.ethereumSibling(accountKey ?? ''),
+    queryFn: () => api.ethereumSiblingStatus(accountKey as string),
+    enabled: accountKey !== undefined,
+    retry: false,
+    refetchInterval: (q) => (q.state.data && (q.state.data.state === 'sending' || q.state.data.state === 'unconfirmed') ? 5_000 : q.state.data?.state === 'done' ? 60_000 : false),
   })
 }
 

@@ -1,4 +1,4 @@
-import { overCap, PRODUCTION_BANNER, type AppConfig, type BridgeOutView, type FundingView, type Hex0x, type OpView, type OwnerResponse, type OwnerTxToSign, type PriceDivergenceWarning, type SessionView, type SleeveView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
+import { overCap, PRODUCTION_BANNER, type AppConfig, type BridgeOutView, type EthereumSiblingView, type FundingView, type Hex0x, type OpView, type OwnerResponse, type OwnerTxToSign, type PriceDivergenceWarning, type SessionView, type SleeveView, type TransferPlan, type WithdrawAsset } from '@mamoru/domain'
 import { ApiRequestError, type ApiClient } from '../api/client.ts'
 import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-account.ts'
 import { poolsResponse } from './pools.ts'
@@ -236,6 +236,8 @@ const liveState = {
   // ?wrongchaineth (#211): 0.05537835 ETH on Ethereum until the owner converts it.
   ethereumEth: param('wrongchaineth') ? '55378350000000000' : '0',
   bridge: { route: null, enabled: true } as BridgeOutView,
+  // ?sibling (dev only, #311): Mamoru can take over what is on Ethereum with one approval (with ?wrongchaineth for the ETH).
+  sibling: { state: 'none', offered: param('sibling') } as EthereumSiblingView,
   owner: !fresh,
   transferUsdc: 0n,
 }
@@ -487,6 +489,28 @@ export const fixtureClient: ApiClient = {
     liveState.ethereumUsdc = '128145513'
     liveState.bridge = { ...liveState.bridge, convert: { state: 'done', ethWei: '55378350000000000', minUsdc: '127504785', usdcOut: '128145513', l1Tx: `0x${'3'.repeat(64)}`, at: new Date().toISOString() } }
     return delay(liveState.bridge)
+  },
+  ethereumSiblingStatus: () => delay(liveState.sibling),
+  // The operator's lines (bridge-out.ts siblingStepLines) for the ETH of ?wrongchaineth and a 125 USDC limit.
+  ethereumSiblingPrepare: () =>
+    liveState.sibling.offered
+      ? delay({
+          ...fixtureTx([
+            `Lets Mamoru move what your Safe on Ethereum holds (${Number(liveState.ethereumEth) / 1e18} ETH) to your own Safe on Base, the same address, with no further signature`,
+            'Mamoru may only turn ETH into USDC there (Uniswap, under the same price limits as on Base) and send the USDC to your Safe on Base. It can send it nowhere else',
+            "At most 125 USDC of value a day, and nothing leaves until Mamoru's guardian has checked your Safe on Base",
+            'Mamoru pays the Ethereum gas to set this up; the moves after it are paid from the ETH in this Safe',
+          ]),
+          chainId: 1,
+          built: { input: {} as never, safeTxHash: `0x${'e'.repeat(64)}` as const },
+        })
+      : Promise.reject(new ApiRequestError(404, { error: 'Mamoru on Ethereum is not available for this account yet', code: 'SIBLING_NOT_OFFERED' })),
+  ethereumSibling: () => {
+    liveState.sibling = { state: 'sending', offered: false, safe: FIXTURE_ADDRESS }
+    setTimeout(() => {
+      liveState.sibling = { ...liveState.sibling, state: 'done', l1Tx: `0x${'4'.repeat(64)}` }
+    }, 4_000)
+    return delay(liveState.sibling)
   },
   // The real lines of a v6 renewal and a v5 -> v6 move (operator planRenew on main, #225), so the dialog is reviewed on the text it gets.
   renewPrepare: () =>

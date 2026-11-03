@@ -230,6 +230,12 @@ export type BridgeOutView = { route: BridgeOutRoute | null; enabled: boolean; co
 export type EthConvertToSign = OwnerTxToSign & { convert: { ethWei: string; quotedUsdc: string; minUsdc: string } }
 // gasUsdc (userOp path, #180): the most the account pays for Ethereum gas, in USDC. Absent: Mamoru pays it.
 export type BridgeOutToSign = OwnerTxToSign & { route: { outputUsdc: string; feeUsdc: string; fillSec: number; gasUsdc?: string; bridge?: 'across' | 'cctp' } }
+// otto/mamoru#309 (b) x #311: the account's own Safe on Ethereum gets Mamoru's session there with one owner Safe tx; from
+// then on Mamoru turns what it holds into USDC and brings it to the same account on Base with no further signature.
+// POST /api/accounts/:accountKey/ethereum-sibling/prepare -> EthereumSiblingToSign; POST .../ethereum-sibling -> EthereumSiblingView
+export type EthereumSiblingToSign = OwnerTxToSign & { built: { input: MigrateV4Input; safeTxHash: Hex0x } }
+// GET /api/accounts/:accountKey/ethereum-sibling. `offered`: the account may set it up now (none yet, or the last one failed).
+export type EthereumSiblingView = { state: 'none' | 'sending' | 'unconfirmed' | 'done' | 'failed'; offered: boolean; safe?: Hex0x; l1Tx?: Hex0x; sessionKey?: Hex0x }
 
 // What the operator found when a deposit is above the per-account cap. Amounts in USDC base units.
 export type OverCap = { code: 'DEPOSIT_OVER_CAP'; usdc: string; capUsdc: string; excessUsdc: string }
