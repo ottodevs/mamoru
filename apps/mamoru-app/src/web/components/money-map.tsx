@@ -58,7 +58,12 @@ export function totalScopeNote(f: FundingView | undefined, otherChain: boolean):
   const notes: string[] = []
   // One line per transfer the total counts outside Working and Idle: on its way, or minted before the destination's read
   // catches up (#350 review r9). A failed one is not in the total and says nothing here.
-  for (const t of f.money.inFlight.filter((t) => t.stage !== 'failed')) notes.push(moneyCopy.moving(usd(t.amountUsdc), chainLabel(t.from), chainLabel(t.to)))
+  // A stuck one (#245) also says why and that the money is safe, on the same line: the card that said it is gone, and
+  // Working capital says it only while the engine's progress carries the bridge (Brais, 4 Nov, option A).
+  for (const t of f.money.inFlight.filter((t) => t.stage !== 'failed')) {
+    const moving = moneyCopy.moving(usd(t.amountUsdc), chainLabel(t.from), chainLabel(t.to))
+    notes.push(isStuck(t) ? `${moving}. ${stuckReasonText(t.stuckReason)} ${moneyCopy.stuckSafe}` : moving)
+  }
   const unread = unreadChains(f.money)
   if (unread.length) notes.push(moneyCopy.incomplete(names(unread, f.money.chains)))
   // A chain never read is stale too; it is said once, as unread.
