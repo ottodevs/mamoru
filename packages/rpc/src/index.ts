@@ -713,6 +713,14 @@ export async function simulateCalls(client: PublicClient, calls: SimCall[], bloc
   }))
 }
 
+/**
+ * otto/mamoru#260, #287: Monad's eth_simulateV1 refuses a call whose sender has code ("sender not eoa"), as the
+ * EHG_SIM_UNAVAILABLE `simulateCalls` throws for it.
+ */
+export function senderNotEoa(e: unknown): boolean {
+  return e instanceof ReasonError && /sender not eoa/i.test(e.detail ?? e.message)
+}
+
 export type Simulation = {
   block: bigint
   ok: boolean
@@ -746,7 +754,7 @@ export async function simulateFromEntryPoint(client: PublicClient, account: Addr
   try {
     res = await simulateCalls(client, batch, blockNumber)
   } catch (e) {
-    if (!(e instanceof ReasonError) || !/sender not eoa/i.test(e.detail ?? e.message)) throw e
+    if (!senderNotEoa(e)) throw e
     res = await simulateCalls(client, batch, blockNumber, { [ep]: { code: '0x' } })
   }
   const n = reads.length

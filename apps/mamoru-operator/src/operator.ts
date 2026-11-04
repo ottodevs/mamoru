@@ -5,7 +5,7 @@ import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountCo
 import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
-import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, simulateCalls, SharedGuardReads, type SimCallResult } from '@mamoru/rpc'
+import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, senderNotEoa, SIM_CALL_GAS, simulateCalls, SharedGuardReads, type SimCall, type SimCallResult } from '@mamoru/rpc'
 import { MONAD_LAB_POLICIES, POLICIES, sleeveEnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, registryPoolsKey, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
@@ -2650,15 +2650,27 @@ export class Operator {
    * calls' 63/64 rule; the passkey (WebAuthn) check replaces the fork's EOA signature.
    */
   private async ownerTxGasLimit(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], block: bigint): Promise<bigint | null> {
+    const run = await this.batchInSafe(live.safe, calls, block)
+    // otto/mamoru#287: Monad reports the whole gas a simulated call is given as its gasUsed; that measured nothing.
+    if (!run?.success || run.gasUsed >= SIM_CALL_GAS) return null
+    return (run.gasUsed * 9n) / 8n + PASSKEY_VERIFY_GAS
+  }
+
+  /**
+   * The owner batch run once in the Safe's own context: `Safe.simulateAndRevert(MultiSendCallOnly, multiSend)`, sent by
+   * the relayer, delegatecalls the batch exactly as execTransaction does, then reverts with the inner success as its
+   * first word. One call or many, through MultiSendCallOnly (a single call is sent to its target directly; through
+   * MultiSend it costs a little more, so a gas figure stays on the safe side). Null when it could not be read (no
+   * provider answer, an undeployed Safe). otto/mamoru#287: the relayer is an EOA, so Monad runs it too.
+   */
+  private async batchInSafe(safe: Address, calls: readonly { to: Address; data: Hex; value?: bigint }[], block: bigint): Promise<{ success: boolean; gasUsed: bigint } | null> {
     if (!calls.length) return null
     try {
-      // One call or many, through MultiSendCallOnly: the same execution as the owner transaction (a single call is sent
-      // to its target directly; through MultiSend it costs a little more, so the figure stays on the safe side).
       const ms = multiSendCallOnly(calls.map((c) => ({ to: c.to, value: c.value ?? 0n, data: c.data })), this.cfg.registry)
       const data = encodeFunctionData({ abi: storageAccessibleAbi, functionName: 'simulateAndRevert', args: [ms.to, ms.data] })
-      const [res] = await simulateCalls(this.client, [{ from: this.relayer.address, to: live.safe, data }], block)
-      if (!res || res.returnData.length < 2 + 64 * 2 || BigInt(res.returnData.slice(0, 66)) !== 1n) return null
-      return (res.gasUsed * 9n) / 8n + PASSKEY_VERIFY_GAS
+      const [res] = await simulateCalls(this.client, [{ from: this.relayer.address, to: safe, data }], block)
+      if (!res || res.returnData.length < 2 + 64 * 2) return null
+      return { success: BigInt(res.returnData.slice(0, 66)) === 1n, gasUsed: res.gasUsed }
     } catch {
       return null
     }
@@ -2668,11 +2680,20 @@ export class Operator {
   private async activationGasOf(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], sessions: number, block: bigint, fallback?: bigint): Promise<{ gas: bigint; simulated: boolean }> {
     const bytes = calls.reduce((n, c) => n + BigInt((c.data.length - 2) / 2), 0n)
     const overhead = 16n * bytes + ACTIVATION_OVERHEAD_GAS
+    let res: SimCallResult[] | null = null
     try {
-      const res = await simulateCalls(this.client, calls.map((c) => ({ from: live.safe, to: c.to, data: c.data })), block)
-      if (res.every((x) => x.status === 'success')) return { gas: res.reduce((n, x) => n + x.gasUsed, 0n) + overhead, simulated: true }
+      res = await simulateCalls(this.client, calls.map((c) => ({ from: live.safe, to: c.to, data: c.data })), block)
     } catch {
       // fall through to the static estimate
+    }
+    // otto/mamoru#287: a gasUsed of the whole gas given (Monad) measured nothing.
+    if (res?.every((x) => x.status === 'success' && x.gasUsed < SIM_CALL_GAS)) return { gas: res.reduce((n, x) => n + x.gasUsed, 0n) + overhead, simulated: true }
+    // otto/mamoru#286: a call that reverts here is never sent to the owner to sign. The per-call run is not the Safe's
+    // own execution, so the batch is run once in the Safe's context first: only a revert there refuses the prepare.
+    const bad = res?.findIndex((x) => x.status !== 'success') ?? -1
+    if (bad >= 0 && (await this.batchInSafe(live.safe, calls, block))?.success === false) {
+      logErr(`[owner] ${live.safe} gas simulation: call ${bad} to ${calls[bad]!.to} (${calls[bad]!.data.slice(0, 10)}) reverts:`, res![bad]!.error ?? res![bad]!.returnData)
+      throw new HttpError(409, 'SIMULATION_FAILED', `call ${bad + 1} of ${calls.length} (${calls[bad]!.data.slice(0, 10)} on ${calls[bad]!.to}) would revert`)
     }
     return { gas: (fallback ?? 400_000n + BigInt(sessions) * STATIC_GAS_PER_SESSION) + overhead, simulated: false }
   }
@@ -4068,7 +4089,7 @@ export class Operator {
     try {
       const batch = calls.map((c) => ({ from: safe, to: c.to, data: c.data }))
       const read = probe ? [{ from: safe, to: probe.to, data: probe.data }] : []
-      const all = await simulateCalls(this.client, [...read, ...batch, ...read], block)
+      const all = await this.simulateAsSafe(safe, [...read, ...batch, ...read], calls, block)
       if (probe) {
         const [before, after] = [all[0]!, all[all.length - 1]!]
         if (before.status !== 'success' || after.status !== 'success') throw new Error('recipient balance read failed')
@@ -4087,6 +4108,27 @@ export class Operator {
       // (redacted by logErr), never into the client-facing message.
       throw new HttpError(409, 'SIMULATION_FAILED', `call ${bad + 1} of ${calls.length} (${calls[bad]!.data.slice(0, 10)} on ${calls[bad]!.to}) would revert`)
     }
+    return res
+  }
+
+  /**
+   * otto/mamoru#287: `sims` (each sent from the Safe) in one eth_simulateV1 block. Monad refuses a sender with code
+   * ("sender not eoa"); only then they run again with the Safe given no code in the simulated block (its balances and
+   * storage stay), and only when no call is to the Safe itself, whose own code would have to run. That run is not the
+   * Safe's execution, so its verdict must match the owner batch run in the Safe's context (`batchInSafe`): when they
+   * disagree, or that run cannot be read, the simulation is unavailable, never a revert the owner is refused on.
+   */
+  private async simulateAsSafe(safe: Address, sims: SimCall[], calls: readonly { to: Address; data: Hex }[], block: bigint): Promise<SimCallResult[]> {
+    try {
+      return await simulateCalls(this.client, sims, block)
+    } catch (e) {
+      if (!senderNotEoa(e)) throw e
+    }
+    if (sims.some((c) => c.to.toLowerCase() === safe.toLowerCase())) throw new Error('sender not eoa, and a call is to the Safe itself')
+    const res = await simulateCalls(this.client, sims, block, { [safe]: { code: '0x' } })
+    const inSafe = await this.batchInSafe(safe, calls, block)
+    const ok = res.every((x) => x.status === 'success')
+    if (inSafe === null || inSafe.success !== ok) throw new Error(`sender not eoa: the Safe's own run ${inSafe === null ? 'is unreadable' : inSafe.success ? 'succeeds' : 'reverts'}, the run without its code ${ok ? 'succeeds' : 'reverts'}`)
     return res
   }
 

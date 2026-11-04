@@ -1,7 +1,7 @@
 // otto/mamoru#140 (part2 #3-#7): a small fake Base for the owner-flow hardening tests (owner-hardening.test.ts): one
 // counterfactual Safe, its USDC and ETH, position NFTs in the USDC/cbBTC 0.05% pool, the relayer, and optional
 // trusted providers. Kept apart from over-cap.test.ts's world so the two evolve without stepping on each other.
-import { decodeFunctionData, encodeFunctionResult, getAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { decodeFunctionData, encodeAbiParameters, encodeFunctionResult, getAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import type { AccountContext, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
 import { baseRegistry, address, entry, nonfungiblePositionManagerAbi, uniswapV3PoolAbi } from '@mamoru/registry'
 import { POLICIES } from '@mamoru/policy'
@@ -16,6 +16,7 @@ import type { AccountState, StateStore } from '../src/state.ts'
 import { answerAggregate3 } from './fake-multicall.ts'
 
 export const RELAYER = `0x${'7'.repeat(40)}` as const
+const SIMULATE_AND_REVERT = toFunctionSelector('simulateAndRevert(address,bytes)')
 export const TO = getAddress(`0x${'c'.repeat(40)}`)
 const EXECUTION_SUCCESS = keccak256(stringToHex('ExecutionSuccess(bytes32,uint256)'))
 const TRUE = `0x${'0'.repeat(63)}1` as const
@@ -104,6 +105,13 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     blockTime: 1_790_000_000n,
     relayerWei: 10n ** 18n,
     twapByPool: new Map<string, number | null>(),
+    /**
+     * otto/mamoru#287: a Monad provider. eth_simulateV1 refuses a sender with code ("sender not eoa") unless the block
+     * gives it none, and every call's gasUsed is the whole gas it was given; `sarOk` is the inner success
+     * Safe.simulateAndRevert answers from the relayer (null: an answer too short to read).
+     */
+    monad: false,
+    sarOk: true as boolean | null,
   }
   const npmCalls: string[] = []
   /** Canonical block hashes, and the height each one is at. */
@@ -181,20 +189,30 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
       }
       const calls = params[0].blockStateCalls[0].calls
       if (knobs.sim === 'down') throw new Error('the method eth_simulateV1 does not exist')
+      const gasUsed = knobs.monad ? '0x1c9c380' : '0x5208'
+      if (knobs.monad) {
+        const overrides = (params[0].blockStateCalls[0] as { stateOverrides?: Record<string, { code?: Hex }> }).stateOverrides ?? {}
+        const noCode = Object.entries(overrides).some(([a, o]) => a.toLowerCase() === SAFE.toLowerCase() && o.code === '0x')
+        if (!noCode && calls.some((c) => c.from?.toLowerCase() === SAFE.toLowerCase())) throw Object.assign(new Error('Missing or invalid parameters.'), { details: 'sender not eoa' })
+        if (calls.length === 1 && calls[0]!.from?.toLowerCase() === RELAYER.toLowerCase() && calls[0]!.data.startsWith(SIMULATE_AND_REVERT)) {
+          const returnData = knobs.sarOk === null ? '0x' : encodeAbiParameters([{ type: 'bool' }, { type: 'bytes' }], [knobs.sarOk, '0x'])
+          return [{ calls: [{ status: '0x0', returnData, gasUsed, logs: [] }] }]
+        }
+      }
       const last = calls.length - 1
       // A payout's recipient balance probe: read first and last from the Safe, around the batch.
       const probed = knobs.payoutGain !== null && last > 0 && calls[0]!.data.startsWith('0x70a08231') && calls[last]!.data === calls[0]!.data
       return [
         {
           calls: calls.map((c, i) => {
-            if (knobs.sim === 'revert' && i === last) return { status: '0x0', returnData: '0x', gasUsed: '0x5208', logs: [], error: { message: 'GS026' } }
-            if (probed && (i === 0 || i === last)) return { status: '0x1', returnData: toHex(i === 0 ? 0n : knobs.payoutGain!, { size: 32 }), gasUsed: '0x5208', logs: [] }
+            if (knobs.sim === 'revert' && i === last) return { status: '0x0', returnData: '0x', gasUsed, logs: [], error: { message: 'GS026' } }
+            if (probed && (i === 0 || i === last)) return { status: '0x1', returnData: toHex(i === 0 ? 0n : knobs.payoutGain!, { size: 32 }), gasUsed, logs: [] }
             // A collect of a position pays out USDC worth a fiftieth of its liquidity, whatever the decrease before it.
             const isCollect = c.data.startsWith(toFunctionSelector('collect((uint256,address,uint128,uint128))'))
             const tokenId = isCollect ? (decodeFunctionData({ abi: nonfungiblePositionManagerAbi, data: c.data }).args[0] as { tokenId: bigint }).tokenId : 0n
             const owed = (chain.positions.find((x) => x.tokenId === tokenId)?.liquidity ?? 0n) / 50n
             const data = isCollect ? encodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'collect', result: [owed, 0n] }) : TRUE
-            return { status: '0x1', returnData: data, gasUsed: '0x5208', logs: [] }
+            return { status: '0x1', returnData: data, gasUsed, logs: [] }
           }),
         },
       ]
