@@ -26,7 +26,9 @@ function withdrewLine(op: OpView, done: boolean): string {
   const verb = done ? 'Withdrew' : 'Withdrawing'
   if (!op.amountUsdc) return `${verb} USDC`
   const to = op.to ? ` to ${shortHex(op.to)}` : ''
-  return op.asset && op.asset !== 'USDC' ? `${verb} $${usd(op.amountUsdc)} as ${op.asset}${to}` : `${verb} ${usd(op.amountUsdc)} USDC${to}`
+  // otto/mamoru#371: Mamoru's yield fee paid in the same withdrawal, on top of what was sent.
+  const fee = op.feeUsdc && BigInt(op.feeUsdc) > 0n ? ` · Mamoru fee ${usd(op.feeUsdc)} USDC` : ''
+  return op.asset && op.asset !== 'USDC' ? `${verb} $${usd(op.amountUsdc)} as ${op.asset}${to}${fee}` : `${verb} ${usd(op.amountUsdc)} USDC${to}${fee}`
 }
 
 /** One plain line per operation: what happened to the money. */

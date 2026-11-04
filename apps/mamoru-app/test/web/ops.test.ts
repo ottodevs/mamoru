@@ -78,6 +78,8 @@ describe('opLine', () => {
     expect(opLine(base({ kind: 'activate', state: 'confirmed' }))).toBe('Mamoru started')
     expect(opLine(base({ kind: 'renew', state: 'confirmed' }))).toBe('Approval renewed')
     expect(opLine(base({ kind: 'transfer', state: 'confirmed', amountUsdc: '5000000' }))).toBe('Withdrew 5.00 USDC')
+    // otto/mamoru#371: the yield fee paid in the same withdrawal is on the line.
+    expect(opLine(base({ kind: 'transfer', state: 'confirmed', amountUsdc: '5000000', feeUsdc: '200000' }))).toBe('Withdrew 5.00 USDC · Mamoru fee 0.20 USDC')
   })
 })
 

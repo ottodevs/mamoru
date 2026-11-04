@@ -63,7 +63,7 @@ import { ONE_ACTION_GAS_UNITS, gasReserveAlertOverrideFromEnv, gasReserveAlertWe
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, GasReserveTracker, logErr, RELAYER_READ_MS, RelayerWatch, safeMetrics, SLOT_BUSY_ALERT_MS, type EngineHealthSnapshot, type GasReserveSnapshot, type RelayerBalance } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
-import { yieldFee, YIELD_FEE_BPS, YIELD_FEE_FROM } from './yield-fee.ts'
+import { feeFrom, yieldFee, YIELD_FEE_BPS, YIELD_FEE_FROM } from './yield-fee.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
 import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
@@ -1897,6 +1897,22 @@ export class Operator {
     const scope = this.cfg.opsScopedFlags?.()[flag]
     if (scope === null) return this.cfg.opsFlags?.()[flag] === true
     return Array.isArray(scope) && (scope.includes(acc.accountKey.toLowerCase()) || scope.includes(String(acc.ctx.address).toLowerCase()))
+  }
+
+  /**
+   * otto/mamoru#371: whether the yield fee applies to this account now, keeping since when (AccountState.yieldFeeFrom):
+   * set the first time it is seen in scope, cleared when seen out of it. Seen on every engine review and withdrawal.
+   */
+  private feeScope(acc: AccountState): boolean {
+    const on = this.inScope(acc, 'yield_fee')
+    if (on && !acc.yieldFeeFrom) {
+      acc.yieldFeeFrom = feeFrom(new Date().toISOString())
+      this.store.save()
+    } else if (!on && acc.yieldFeeFrom) {
+      acc.yieldFeeFrom = undefined
+      this.store.save()
+    }
+    return on
   }
 
   /**
@@ -3960,7 +3976,7 @@ export class Operator {
     // otto/mamoru#371: Mamoru's yield fee, for an account in the `yield_fee` scope: paid to the relayer in this same
     // batch, on top of the amount. When the Safe cannot free both, the fee comes out of the amount, and the owner is
     // told what they receive; a withdrawal no larger than the fee pays no fee (it is owed on the next one).
-    const owed = this.inScope(acc, 'yield_fee') ? yieldFee(acc.ops) : null
+    const owed = this.feeScope(acc) ? yieldFee(acc.ops, YIELD_FEE_BPS, feeFrom(acc.yieldFeeFrom)) : null
     let fee = owed?.owedUsdc ?? 0n
     let pay = amount
     const planFor = async (total: bigint) => {
@@ -3984,7 +4000,8 @@ export class Operator {
     try {
       planned = await planFor(amount + fee)
     } catch (e) {
-      if (fee === 0n || !(e instanceof HttpError) || e.code !== 'INSUFFICIENT_FUNDS') throw e
+      // Whatever refused amount + fee, the withdrawal plans exactly as it did without a fee; its refusal, if any, is the answer.
+      if (fee === 0n || !(e instanceof HttpError)) throw e
       planned = await planFor(amount)
       if (amount > fee) pay = amount - fee
       else fee = 0n
@@ -4030,6 +4047,7 @@ export class Operator {
     const ownerTx = await this.hold(acc, live, 'transfer', calls, summary, { meta: { amountUsdc: pay.toString(), ...(asset === 'USDC' ? {} : { asset }), to, ...(fee > 0n ? { feeUsdc: fee.toString() } : {}) }, ...(div ? { divergence: div.warning, accepted: div.accepted } : {}) })
     return {
       ...(div ? { divergence: div.warning } : {}),
+      ...(fee > 0n ? { fee: { feeUsdc: fee.toString(), requestedUsdc: amount.toString(), sentUsdc: pay.toString() } } : {}),
       reduce: reduce.map((x) => ({ tokenId: x.pos.tokenId.toString(), liquidityBps: x.bps })),
       ...(out
         ? { receive: { asset, quoted: out.quoted.toString(), minimum: out.receive.amountOutMinimum.toString(), decimals: out.decimals, route: out.route } }
@@ -7868,6 +7886,7 @@ export class Operator {
               return
             }
           }
+          this.feeScope(acc)
           const startedAt = Date.now()
           const r = await engine.review()
           this.revokeManage(engine)

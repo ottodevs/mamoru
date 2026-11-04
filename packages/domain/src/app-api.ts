@@ -353,6 +353,9 @@ export type TransferPlan = {
   // tolerance, and absent entirely from an operator built before this field existed — the app then behaves
   // exactly as it does today (otto/mamoru#155).
   divergence?: PriceDivergenceWarning
+  // otto/mamoru#371: Mamoru's yield fee this withdrawal pays to the relayer (USDC base units), the amount the owner asked
+  // for and the amount sent: equal, unless the Safe could not free both and the fee comes out of it. Absent: no fee.
+  fee?: { feeUsdc: string; requestedUsdc: string; sentUsdc: string }
 }
 // GET /api/accounts/:accountKey/withdraw-assets -> { assets: { asset: WithdrawAsset; available: boolean; reason?: string }[] }
 export type OwnerTxToSign = {
