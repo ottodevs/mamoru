@@ -17,8 +17,9 @@
 //   that day's collectedUsdc is left out rather than written short.
 
 import { isAddressEqual, parseAbi, parseEventLogs, type Address, type Hex, type Log } from 'viem'
-import { address, baseRegistry, entryPointV07Abi, nameOf } from '@mamoru/registry'
-import { inUsdc } from './chain.ts'
+import { isChainId, chainOf } from '@mamoru/domain'
+import { address, baseRegistry, entryPointV07Abi, nameOf, type Registry } from '@mamoru/registry'
+import { inUsdc, nativePricePool } from './chain.ts'
 import type { StoredOp } from './state.ts'
 import type { Snapshot } from './snapshot.ts'
 
@@ -56,9 +57,10 @@ export type OpFacts = {
  * userOp per handleOps (bundler.ts), so this matters only for a bundle someone else built. Without it (an owner
  * transaction, or an engine op stored before its hash was kept) the whole transaction counts.
  */
-export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, userOpHash?: Hex): OpFacts {
-  const entryPoint = address('EntryPointV07', baseRegistry)
-  const npm = address('NonfungiblePositionManager', baseRegistry)
+export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, userOpHash?: Hex, registry: Registry = baseRegistry): OpFacts {
+  // otto/mamoru#358: the chain's own contracts; Monad's position manager is another address than Base's.
+  const entryPoint = address('EntryPointV07', registry)
+  const npm = address('NonfungiblePositionManager', registry)
   const opEvents = parseEventLogs({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', logs: logs.filter((l) => isAddressEqual(l.address, entryPoint)) })
   let gas = 0n
   if (userOpHash) {
@@ -86,7 +88,7 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
     }
     if (!isAddressEqual(e.args.recipient, safe)) continue
     const poolAddr = poolCollects.filter((p) => p.logIndex < e.logIndex).at(-1)?.pool
-    const pool = poolAddr ? nameOf(poolAddr, baseRegistry) : undefined
+    const pool = poolAddr ? nameOf(poolAddr, registry) : undefined
     if (!pool) continue
     const cur = collected.get(e.args.tokenId)?.amounts ?? [0n, 0n]
     collected.set(e.args.tokenId, { pool, amounts: [cur[0] + e.args.amount0, cur[1] + e.args.amount1] })
@@ -114,24 +116,25 @@ export function needsFacts(op: StoredOp): boolean {
   return (op.opId.startsWith('eng-') || op.opId.startsWith('own-')) && !!op.txHash && op.facts?.txHash?.toLowerCase() !== op.txHash.toLowerCase()
 }
 
-/** The pool that prices Base gas (chain.ts NATIVE_PRICE_POOLS): ETH and WETH share 18 decimals. */
-const NATIVE_POOL = 'pool:WETH/USDC/3000'
-
-/** Sets `gasUsdc`, and `usdc` on every fee, when the snapshot can price them. Returns whether anything changed (the caller saves). */
-export function priceFees(facts: OpFacts, pools: Snapshot['pools']): boolean {
+/** Sets `gasUsdc`, and `usdc` on every fee, when the snapshot can price them. Returns whether anything changed (the caller saves).
+ * Gas is priced by the chain's native pool (chain.ts NATIVE_PRICE_POOLS: WETH/USDC on Base, WMON/USDC on Monad), the
+ * native asset and its wrapped token sharing 18 decimals. */
+export function priceFees(facts: OpFacts, pools: Snapshot['pools'], registry: Registry = baseRegistry): boolean {
   let changed = false
-  const native = pools[NATIVE_POOL]
+  const nativePool = nativePricePool(registry)
+  const native = pools[nativePool]
+  const wrapped = isChainId(registry.chainId) ? chainOf(registry.chainId).wrappedNative : 'WETH'
   if (facts.gasUsdc === undefined && native) {
-    facts.gasUsdc = inUsdc(NATIVE_POOL, 'WETH', BigInt(facts.gasWei), native.sqrtPriceX96, baseRegistry).toString()
+    facts.gasUsdc = inUsdc(nativePool, wrapped, BigInt(facts.gasWei), native.sqrtPriceX96, registry).toString()
     changed = true
   }
   for (const f of facts.fees) {
     if (f.usdc !== undefined) continue
     const state = pools[f.pool]
     if (!state) continue
-    const e = baseRegistry.entries.find((x) => x.name === f.pool)
+    const e = registry.entries.find((x) => x.name === f.pool)
     if (!e?.token0 || !e.token1) continue
-    f.usdc = (inUsdc(f.pool, e.token0, BigInt(f.fee0), state.sqrtPriceX96, baseRegistry) + inUsdc(f.pool, e.token1, BigInt(f.fee1), state.sqrtPriceX96, baseRegistry)).toString()
+    f.usdc = (inUsdc(f.pool, e.token0, BigInt(f.fee0), state.sqrtPriceX96, registry) + inUsdc(f.pool, e.token1, BigInt(f.fee1), state.sqrtPriceX96, registry)).toString()
     changed = true
   }
   return changed
@@ -208,7 +211,7 @@ export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[] }
  * least recently tried first (`tried`, kept by the caller across ticks), so receipts that keep failing go to the
  * back instead of using every tick. Nothing here throws into the snapshot loop.
  */
-export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, readReceipt: ReceiptReader, blockTime: BlockTimeReader, safeBlock: SafeBlockReader, tried: Map<string, number> = new Map()): Promise<Snapshot & { receipts: AccountReceiptsWire[] }> {
+export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, readReceipt: ReceiptReader, blockTime: BlockTimeReader, safeBlock: SafeBlockReader, tried: Map<string, number> = new Map(), registry: Registry = baseRegistry): Promise<Snapshot & { receipts: AccountReceiptsWire[] }> {
   const accounts = source.accounts()
   const due = accounts
     .flatMap((a) => a.ops.filter(needsFacts).map((op) => ({ a, op, key: `${a.accountKey}:${op.opId}` })))
@@ -232,14 +235,14 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
       if (!r || r.blockNumber > safe!) continue
       const t = times.get(r.blockNumber) ?? (await blockTime(r.blockNumber))
       times.set(r.blockNumber, t)
-      op.facts = { txHash, ...factsFromLogs(r.logs, a.safe, t, op.opId.startsWith('eng-') ? op.userOpHash : undefined) }
+      op.facts = { txHash, ...factsFromLogs(r.logs, a.safe, t, op.opId.startsWith('eng-') ? op.userOpHash : undefined, registry) }
       tried.delete(key)
       changed = true
     } catch (e) {
       console.error(`yield-receipts: ${a.accountKey.slice(0, 8)} ${op.opId} receipt not read`, e instanceof Error ? e.message : String(e))
     }
   }
-  for (const a of accounts) for (const op of a.ops) if (op.facts && priceFees(op.facts, snapshot.pools)) changed = true
+  for (const a of accounts) for (const op of a.ops) if (op.facts && priceFees(op.facts, snapshot.pools, registry)) changed = true
   if (changed) source.save()
   const receipts = accounts.map((a) => ({ safe: a.safe, days: dayReceipts(a.ops) })).filter((r) => r.days.length > 0)
   return { ...snapshot, receipts }

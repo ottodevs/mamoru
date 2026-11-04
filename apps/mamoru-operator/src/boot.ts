@@ -798,7 +798,27 @@ export async function bootOperator(o: BootOptions) {
   if (multicall3Monad && process.env.MAMORU_SNAPSHOT_MONAD === '1') {
     const snapshotClient = createPublicClient({ transport: http(via('snapshot'), { batch: true, timeout: 60_000 }) })
     const budget = rpcBudget(rpcMetrics)
-    monadSnapshot = new SnapshotLoop(() => readSnapshot(snapshotClient, multicall3Monad, chainId, registry, operator.snapshotTargets()), MONAD_SNAPSHOT_MS, () => budget.over())
+    // otto/mamoru#358: the Monad engine ops' gas and collected fees too (yield-receipts.ts over the Monad registry), so a
+    // Monad harvest counts in the yield ledger like a Base one. No hold-value baseline (Base-bound).
+    const tried = new Map<string, number>()
+    const receipts = {
+      source: { accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops })), save: () => store.save() },
+      readReceipt: async (hash: Hex) => {
+        const r = await snapshotClient.getTransactionReceipt({ hash }).catch((e: unknown) => {
+          if (e instanceof TransactionReceiptNotFoundError) return null
+          throw e
+        })
+        return r ? { logs: r.logs, blockNumber: r.blockNumber } : null
+      },
+      blockTime: async (blockNumber: bigint) => (await snapshotClient.getBlock({ blockNumber })).timestamp,
+      safeBlock: async () => (await snapshotClient.getBlock({ blockTag: 'safe' })).number,
+    }
+    const readMonad = () => readSnapshot(snapshotClient, multicall3Monad, chainId, registry, operator.snapshotTargets())
+    monadSnapshot = new SnapshotLoop(
+      async () => withReceipts(await readMonad(), receipts.source, receipts.readReceipt, receipts.blockTime, receipts.safeBlock, tried, registry),
+      MONAD_SNAPSHOT_MS,
+      () => budget.over(),
+    )
     monadSnapshot.start()
     console.log('[snapshot] Monad worked-capital loop on (MAMORU_SNAPSHOT_MONAD=1)')
   }

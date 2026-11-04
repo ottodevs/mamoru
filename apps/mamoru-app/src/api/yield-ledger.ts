@@ -402,12 +402,15 @@ export async function pullYieldLedger(db: Db, operatorUrl: string, operatorSecre
 
 /**
  * otto/mamoru#343 phase B: one cron tick for a chain whose operator measures capital only for the worked APY (Monad):
- * pulls its /snapshot and stores the worked samples under the sleeve's account_key, and nothing else. The yield
- * ledger, the account snapshot and the receipts are Base-bound and stay on `pullYieldLedger`. Null when the operator
- * answers nothing (loop off, 404, not reachable) or answers for another chain than `chainId`.
+ * pulls its /snapshot and stores the worked samples under the sleeve's account_key. otto/mamoru#358: and its receipts
+ * (gas paid, fees collected by the Monad engine ops), under chain_id `chainId`. The yield ledger and the account
+ * snapshot are Base-bound and stay on `pullYieldLedger`. Null when the operator answers nothing (loop off, 404, not
+ * reachable) or answers for another chain than `chainId`.
  */
 export async function pullWorkedSamples(db: Db, chainId: number, operatorUrl: string, operatorSecret: string, fetcher: OperatorFetch, now: Date): Promise<{ accounts: number; rows: number } | null> {
   const snapshot = await fetchSnapshot(operatorUrl, operatorSecret, fetcher)
   if (!snapshot || snapshot.chainId !== chainId) return null
-  return writeWorkedSamples(db, snapshot, now)
+  const samples = await writeWorkedSamples(db, snapshot, now)
+  await writeReceipts(db, snapshot, now)
+  return samples
 }

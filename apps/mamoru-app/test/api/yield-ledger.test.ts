@@ -7,6 +7,7 @@ import {
   dayOf,
   feeReadinessUsd,
   fetchSnapshot,
+  pullWorkedSamples,
   pullYieldLedger,
   writeAccountSnapshot,
   writeYieldLedger,
@@ -357,5 +358,24 @@ describe('pullYieldLedger: one cron tick end to end', () => {
     expect(await pullYieldLedger(db, 'http://op', 'secret', fetcher(404, {}), new Date())).toBeNull()
     const result = await pullYieldLedger(db, 'http://op', 'secret', fetcher(200, snapshot()), new Date())
     expect(result).toEqual({ accounts: 1, positions: 1 })
+  })
+})
+
+describe('pullWorkedSamples (otto/mamoru#358): the Monad tick stores the Monad receipts too', () => {
+  test("a Monad harvest's collected fees land under chain 143 for the account's Monad Safe; a snapshot of another chain writes nothing", async () => {
+    const db = memoryD1()
+    seedAccount(db)
+    db.raw.exec(
+      `INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at)
+       VALUES ('${ACCOUNT_KEY}-monad', 'u1', 143, '${SAFE.toLowerCase()}', '[]', 'cred', '0x1', '0x2', '1', 'v6', '2026-11-01T00:00:00.000Z')`,
+    )
+    const monad = snapshot({ chainId: 143, pools: {}, safes: [], receipts: [{ safe: SAFE, days: [{ day: '2026-11-04', gasWei: '7000', collectedUsdc: '11', positions: [{ tokenId: '49417', collected0: '5', collected1: '6', collectedUsdc: '11' }] }] }] })
+    expect(await pullWorkedSamples(db, 8453, 'http://op', 'secret', fetcher(200, monad), new Date())).toBeNull()
+    expect(db.raw.query('SELECT COUNT(*) AS n FROM yield_ledger_account_receipts').get()).toEqual({ n: 0 })
+    await pullWorkedSamples(db, 143, 'http://op', 'secret', fetcher(200, monad), new Date())
+    expect(db.raw.query('SELECT chain_id, account_key, collected_usdc, gas_paid_wei FROM yield_ledger_account_receipts').all()).toEqual([
+      { chain_id: 143, account_key: `${ACCOUNT_KEY}-monad`, collected_usdc: 11, gas_paid_wei: '7000' },
+    ])
+    expect(db.raw.query('SELECT chain_id, token_id, collected0, collected1 FROM yield_ledger_position_collected').all()).toEqual([{ chain_id: 143, token_id: 49417, collected0: '5', collected1: '6' }])
   })
 })

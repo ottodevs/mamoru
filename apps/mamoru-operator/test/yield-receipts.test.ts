@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters, encodeEventTopics, parseAbi, type Address, type Hex, type Log } from 'viem'
-import { address, baseRegistry, entryPointV07Abi } from '@mamoru/registry'
+import { address, baseRegistry, entryPointV07Abi, monadRegistry } from '@mamoru/registry'
 import { livePool } from '../src/chain.ts'
 import type { StoredOp } from '../src/state.ts'
 import type { Snapshot } from '../src/snapshot.ts'
@@ -184,5 +184,32 @@ describe('withReceipts', () => {
     expect(fresh.facts).toBeUndefined()
     await withReceipts(snapshot(), one(ops), counting, async () => T, SAFE_BLOCK, tried)
     expect(fresh.facts).toBeDefined()
+  })
+})
+
+describe('Monad (otto/mamoru#358): the chain registry decides the position manager, the pool name and the gas price', () => {
+  const MNPM = address('NonfungiblePositionManager', monadRegistry)
+  const MPOOL_NAME = 'pool:WMON/USDC/3000'
+  const MPOOL = address(MPOOL_NAME, monadRegistry)
+  const mPoolCollect = (a0: bigint, a1: bigint) =>
+    log(MPOOL, encodeEventTopics({ abi: poolAbi, eventName: 'Collect', args: { owner: MNPM, tickLower: -10, tickUpper: 10 } }) as Hex[], encodeAbiParameters([{ type: 'address' }, { type: 'uint128' }, { type: 'uint128' }], [MNPM, a0, a1]))
+  const mNpmCollect = (tokenId: bigint, a0: bigint, a1: bigint) =>
+    log(MNPM, encodeEventTopics({ abi: npmAbi, eventName: 'Collect', args: { tokenId } }) as Hex[], encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'uint256' }], [SAFE, a0, a1]))
+
+  test("a Monad harvest's Collect counts with the Monad registry, and is missed with Base's", () => {
+    const logs = [userOp(SAFE, 7_000n), mPoolCollect(5n, 6n), mNpmCollect(49417n, 5n, 6n)]
+    expect(factsFromLogs(logs, SAFE, T).fees).toEqual([])
+    expect(factsFromLogs(logs, SAFE, T, undefined, monadRegistry)).toMatchObject({ gasWei: '7000', fees: [{ tokenId: '49417', pool: MPOOL_NAME, fee0: '5', fee1: '6' }] })
+  })
+
+  test('gas in MON is priced by WMON/USDC, the fees by their own Monad pool', () => {
+    const pools = { [MPOOL_NAME]: { sqrtPriceX96: 2n ** 96n, tick: 0, feeGrowthGlobal0X128: 0n, feeGrowthGlobal1X128: 0n } } as unknown as Snapshot['pools']
+    const facts: OpFacts = { at: '2026-11-04T21:00:38.000Z', gasWei: '1000', fees: [{ tokenId: '49417', pool: MPOOL_NAME, fee0: '5', fee1: '6' }] }
+    expect(priceFees(facts, pools, monadRegistry)).toBe(true)
+    expect(facts.gasUsdc).toBeDefined()
+    expect(facts.fees[0]!.usdc).toBeDefined()
+    // With Base's registry nothing on Monad is priced (no WETH/USDC in the Monad snapshot, no such pool on Base).
+    const base: OpFacts = { at: '2026-11-04T21:00:38.000Z', gasWei: '1000', fees: [{ tokenId: '49417', pool: MPOOL_NAME, fee0: '5', fee1: '6' }] }
+    expect(priceFees(base, pools)).toBe(false)
   })
 })
