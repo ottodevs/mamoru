@@ -2,8 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import type { ApyView, FundingView } from '@mamoru/domain'
 import { fixtureFunding } from '../../src/web/fixtures/client.ts'
 import { split } from '../../src/web/lib/money.ts'
-import { bucketOf, currentRate, DAY_S, idleReason, monthlyRate, MONTH_S, positionRates, sourceName, valueOf, workedRate } from '../../src/web/lib/rates.ts'
+import { bucketOf, currentRate, DAY_S, idleReason, monthlyRate, MONTH_S, positionRates, sourceName, unratedLabels, valueOf, workedRate } from '../../src/web/lib/rates.ts'
 import { agoText, Balance, Idle, Indicators, Working } from '../../src/web/routes/home.tsx'
+import { registries } from '@mamoru/registry'
 import { render } from './render.ts'
 
 // otto/mamoru#193: the dashboard's rates and the idle/working split.
@@ -170,10 +171,26 @@ describe('rates over the working capital', () => {
       const none = { ...at12, byPool: [] }
       expect(workedRate(mixed, null, none, 'currentPct', DAY_S)).toMatchObject({ pct: null, gap: 'no-data', covered: 0, of: 3 })
     })
-    test('on Home: both figures show the rate and say what is excluded, not n/a', () => {
+    test('on Home: both figures show a rate, each with what is excluded and how much, not n/a', () => {
       const { html } = render(<Indicators f={mixed} apy={at12} price={null} />)
       expect(html).toMatch(/data-testid="rate-current"[^>]*>[^<]*(<[^>]+>)*5\.3%/)
-      expect(html).toContain('excludes WMON/USDC (no rate yet)')
+      expect(html).toMatch(/data-testid="rate-monthly"[^>]*>[^<]*(<[^>]+>)*16\.6%/)
+      expect(html.match(/excludes WMON\/USDC, 56% of capital \(no rate yet\)/g)?.length).toBe(2)
+    })
+    test('plan pools before anything is placed keep their own note and never claim an exclusion', () => {
+      const { html } = render(<Indicators f={{ ...brais, positions: [] }} apy={at12} price={null} />)
+      expect(html).toContain('plan pools, nothing placed yet')
+      expect(html).not.toContain('excludes')
+    })
+    test('labels: duplicates collapse, the fee tier appears only on a clash, the chain only when the pair exists on two chains', () => {
+      expect(unratedLabels(['pool:WMON/USDC/3000', 'pool:WMON/USDC/3000'])).toEqual(['WMON/USDC'])
+      expect(unratedLabels(['pool:WETH/USDC/500', 'pool:WETH/USDC/3000'])).toEqual(['WETH/USDC 0.05%', 'WETH/USDC 0.3%'])
+      expect(unratedLabels(['pool:WETH/USDC/500', 'pool:USDC/USDT/100'])).toEqual(['WETH/USDC', 'USDC/USDT'])
+      expect(unratedLabels(['vault:gtUSDCp'])).toEqual(['gtUSDCp'])
+    })
+    test('a pool key names one chain: no registry name repeats across chains, so byPool never rates one chain with another\'s pool', () => {
+      const names = registries.flatMap((r) => r.entries.map((e) => e.name).filter((n) => /^(pool|vault):/.test(n)))
+      expect(new Set(names).size).toBe(names.length)
     })
   })
   test('on Home: a ledger day more than 6 h old is not shown; the positions open now stand in', () => {

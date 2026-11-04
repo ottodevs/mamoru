@@ -18,7 +18,7 @@ import { detailHead, MoveDetail, OpDetail, Sheet } from '../components/activity-
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
 import { bridgeStuck, chainLabel, pairLabel, poolAddress, poolTokens, positionAmounts, progressLine, vaultAddress } from '../lib/positions.ts'
 import { activateLine, signatureCopy } from '../lib/signature.ts'
-import { DAY_S, idleReason, monthlyRate, MONTH_S, positionRates, sourceName, unratedLabel, workedRate, type AccountRate, type PositionRate } from '../lib/rates.ts'
+import { DAY_S, idleReason, monthlyRate, MONTH_S, positionRates, sourceName, unratedLabels, workedRate, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel, type Locale } from '../lib/price-divergence.ts'
 import { localTime } from '../lib/time.ts'
 import { BASE_SLEEVE, explorerAddress, explorerTx, knownChain, sleeveChain, useChain } from '../lib/chain.tsx'
@@ -65,7 +65,8 @@ export const homeCopy = {
   planPools: 'plan pools, nothing placed yet',
   na: 'n/a',
   // otto/mamoru#363: the figure covers the pools that have a rate; this names the ones left out.
-  excludes: (pools: string) => `excludes ${pools} (no rate yet)`,
+  excludes: (pools: string, pct?: number) => `excludes ${pools}${pct ? `, ${pct}% of capital` : ''} (no rate yet)`,
+  poolsWithRate: (covered: number, of: number) => `${covered} of ${of} pools with a rate`,
   gap: {
     loading: 'loading',
     'no-read': 'no live read',
@@ -300,7 +301,7 @@ export function Indicators({ f, apy, price, worked = null, otherChain = false, n
   const nothingWorked = !!f && f.positions.length === 0 && !fresh?.month.length
   const monthly = !f ? { pct: null, gap: waiting, covered: 0, of: 0, plan: false } : nothingWorked ? monthlyRate([], apy) : { ...workedRate(f, fresh?.month, apy, 'monthlyPct', MONTH_S, price, otherChain, !!fresh?.chains?.month.length), plan: false }
   const current = f ? workedRate(f, fresh?.day, apy, 'currentPct', DAY_S, price, otherChain, !!fresh?.chains?.day.length) : { pct: null, gap: waiting, covered: 0, of: 0 }
-  const partial = (r: AccountRate) => (r.pct !== null && r.unrated?.length ? homeCopy.excludes(r.unrated.map(unratedLabel).join(', ')) : null)
+  const partial = (r: AccountRate) => (r.pct === null ? null : r.unrated?.length ? homeCopy.excludes(unratedLabels(r.unrated).join(', '), r.unratedPct) : r.covered < r.of ? homeCopy.poolsWithRate(r.covered, r.of) : null)
   const monthlySrc = sourceName(apy?.monthlySource)
   const currentSrc = sourceName(apy?.currentSource)
   const monthlyTail = monthly.gap ? homeCopy.gap[monthly.gap] : [monthly.plan ? homeCopy.planPools : null, partial(monthly)].filter(Boolean).join(' · ') || null

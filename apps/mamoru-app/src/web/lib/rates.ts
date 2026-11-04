@@ -1,5 +1,6 @@
 import type { ApyView, FundingView, WorkedView } from '@mamoru/domain'
 import { POLICIES, type BucketId } from '@mamoru/policy'
+import { registries } from '@mamoru/registry'
 import { cbbtcToUsdc, DUST_USDC, MIN_ENTRY_USDC, type Split } from './money.ts'
 import { isMultichainTarget, poolTargets } from './policies.ts'
 import { poolName, poolTokens } from './positions.ts'
@@ -113,11 +114,36 @@ export function positionRates(f: FundingView, apy: ApyView | undefined, price: b
 export type RateGap = 'loading' | 'no-read' | 'no-positions' | 'no-data' | 'no-value'
 
 /** `baseOnly` (otto/mamoru#343): a worked-capital figure that leaves out money working on another chain, which has no samples yet. */
-export type AccountRate = { pct: number | null; gap: RateGap | null; covered: number; of: number; baseOnly?: boolean; /** otto/mamoru#363: pools that worked but have no rate, left out of `pct` (value-weighted over the rest); empty when every pool has one. */ unrated?: string[] }
+export type AccountRate = { pct: number | null; gap: RateGap | null; covered: number; of: number; baseOnly?: boolean; /** otto/mamoru#363: pools that worked but have no rate, left out of `pct` (value-weighted over the rest); empty when every pool has one. */ unrated?: string[]; /** Whole percent of the window's capital (by value x time) that `unrated` pools carried, 1..99. */ unratedPct?: number }
 
-/** "pool:WMON/USDC/3000" -> "WMON/USDC"; "vault:gtUSDCp" -> "gtUSDCp". */
-export function unratedLabel(pool: string): string {
-  return pool.replace(/^(pool|vault):/, '').replace(/\/\d+$/, '')
+/** Chain of a registry pool name ("pool:WMON/USDC/3000" -> "Monad"); null for a vault or an unknown name. */
+function chainOfPool(name: string): string | null {
+  return registries.find((r) => r.entries.some((e) => e.name === name))?.chain ?? null
+}
+const chainTitle = (c: string) => c.charAt(0).toUpperCase() + c.slice(1)
+
+/**
+ * otto/mamoru#363: short labels for the pools left out of a rate. "pool:WMON/USDC/3000" -> "WMON/USDC"; the fee tier
+ * is added only when two pools of the list share a pair ("WETH/USDC 0.05%" and "WETH/USDC 0.3%"), the chain only when
+ * the same pair is also a registry pool on another chain. Duplicates collapse.
+ */
+export function unratedLabels(pools: string[]): string[] {
+  const parts = [...new Set(pools)].map((name) => {
+    const m = /^pool:(.+)\/(\d+)$/.exec(name)
+    return { name, pair: m ? m[1]! : name.replace(/^vault:/, ''), fee: m ? Number(m[2]) : null }
+  })
+  const pairCount = new Map<string, number>()
+  for (const x of parts) pairCount.set(x.pair, (pairCount.get(x.pair) ?? 0) + 1)
+  const chains = (pair: string) => new Set(registries.flatMap((r) => (r.entries.some((e) => e.name.startsWith(`pool:${pair}/`)) ? [r.chain] : [])))
+  const labels = parts.map((x) => {
+    let l = x.pair
+    if (x.fee !== null && (pairCount.get(x.pair) ?? 0) > 1) l += ` ${x.fee / 10_000}%`
+    const cs = chains(x.pair)
+    const own = chainOfPool(x.name)
+    if (own && cs.size > 1) l += ` on ${chainTitle(own)}`
+    return l
+  })
+  return [...new Set(labels)]
 }
 
 function weighted(rows: PositionRate[], pick: (r: PositionRate) => number | null): { pct: number | null; covered: number } {
@@ -220,10 +246,12 @@ export function workedRate(f: FundingView, worked: WorkedView['day'] | null | un
   let w = 0
   let covered = 0
   const unrated: string[] = []
+  let wOut = 0
   for (const [pool, wi] of weights) {
     const rate = apy.byPool?.find((b) => b.pool === pool)?.[pick] ?? null
     if (rate === null) {
       unrated.push(pool)
+      wOut += wi
       continue
     }
     sum += rate * wi
@@ -232,7 +260,7 @@ export function workedRate(f: FundingView, worked: WorkedView['day'] | null | un
   }
   // otto/mamoru#363: n/a only when no pool that worked has a rate; otherwise the figure covers the rated ones and names the rest.
   if (covered === 0 || w <= 0) return { pct: null, gap: 'no-data', covered, of }
-  return { pct: Math.round((sum / w) * 100) / 100, gap: null, covered, of, ...(unrated.length ? { unrated } : {}), ...(baseOnly ? { baseOnly } : {}) }
+  return { pct: Math.round((sum / w) * 100) / 100, gap: null, covered, of, ...(unrated.length ? { unrated, unratedPct: Math.min(99, Math.max(1, Math.round((wOut / (w + wOut)) * 100))) } : {}), ...(baseOnly ? { baseOnly } : {}) }
 }
 
 /** The data source named in an ApyView source line ("Plan pools, 30-day mean · DefiLlama" -> "DefiLlama"). */
