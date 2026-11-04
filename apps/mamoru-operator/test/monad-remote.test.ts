@@ -29,12 +29,16 @@ function monadWorld(opts: { writes?: boolean } = {}) {
     notEnabled: new Set<string>(),
     eth: 0n,
     topUpReverts: false,
+    /** otto/mamoru#275: heads a lagging provider answers before 500 (one per getBlockNumber), and reads that throw. */
+    lag: [] as bigint[],
+    readsDown: false,
   }
   const sent: { to: string; data?: Hex; value?: bigint }[] = []
   const started: string[] = []
   let saves = 0
   let safe = '' as Address
   const read = (functionName: string, args: readonly unknown[] = []) => {
+    if (chain.readsDown && functionName === 'getOwners') throw new Error('The contract function "getOwners" returned no data ("0x").')
     if (functionName === 'getOwners') return chain.owners ?? ctx.owners
     if (functionName === 'getThreshold') return chain.threshold
     if (functionName === 'isModuleInstalled') return chain.smartSession
@@ -43,7 +47,7 @@ function monadWorld(opts: { writes?: boolean } = {}) {
     throw new Error(`unexpected read ${functionName}`)
   }
   const client = {
-    getBlockNumber: async () => 500n,
+    getBlockNumber: async () => chain.lag.shift() ?? 500n,
     getGasPrice: async () => 100_000_000_000n,
     getCode: async () => (chain.deployed ? '0x01' : undefined),
     getBalance: async () => chain.eth,
@@ -170,6 +174,37 @@ describe('provision (Monad side)', () => {
     const deploy = createProxyCall(m.r.setup, registry)
     expect(m.sent[0]).toMatchObject({ to: deploy.to, data: deploy.data })
     expect(m.chain.deployed).toBe(true)
+  })
+
+  test('otto/mamoru#275: a provider behind the deploy is waited for; the checks read at or after the receipt block', async () => {
+    const m = keyed()
+    m.chain.lag = [498n]
+    expect(await m.op.provision(m.rctx)).toEqual({ state: 'active', address: m.r.address })
+    expect(m.chain.lag).toEqual([])
+  })
+
+  test('otto/mamoru#275: a provider that never shows the deploy: 503 DEPLOY_PENDING_VISIBILITY, not active, retried', async () => {
+    const m = keyed()
+    m.chain.lag = Array.from({ length: 50 }, () => 400n)
+    expect(await code(m.op.provision(m.rctx))).toEqual({ status: 503, code: 'DEPLOY_PENDING_VISIBILITY' })
+    expect(m.started).toEqual([])
+    expect(m.state.accounts[m.rctx.accountKey]?.active).not.toBe(true)
+  })
+
+  test('otto/mamoru#275: checks that cannot be read are 503 REMOTE_CHECK_UNAVAILABLE (not OPERATOR_ERROR); nothing runs', async () => {
+    const m = keyed()
+    m.chain.deployed = true
+    m.chain.readsDown = true
+    expect(await code(m.op.provision(m.rctx))).toEqual({ status: 503, code: 'REMOTE_CHECK_UNAVAILABLE' })
+    expect(m.sent).toEqual([])
+    expect(m.started).toEqual([])
+  })
+
+  test('otto/mamoru#275: the gas top-up carries no fixed gas limit (the relayer sizes it)', async () => {
+    const m = keyed()
+    await m.op.provision(m.rctx)
+    const topUp = m.sent.find((t) => t.to === m.r.address) as { gas?: bigint }
+    expect(topUp.gas).toBeUndefined()
   })
 
   test('code already there: nothing is deployed', async () => {

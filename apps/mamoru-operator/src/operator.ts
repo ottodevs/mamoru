@@ -7353,13 +7353,24 @@ export class Operator {
     const r = v4 ? null : remoteSafe(remoteInput(ctx, spec, this.cfg.registry))
     const r4 = v4 ? v4RemoteFromSpec({ address: spec.home ?? '0x', owners: ctx.owners, passkey: ctx.passkey }, spec, this.cfg.registry) : null
     if ((r?.address ?? r4!.address).toLowerCase() !== live.safe.toLowerCase()) throw safeHttpError(400, 'ACCOUNT_MISMATCH')
+    let deployedAt: bigint | null = null
     if (!(await readSafeNonce(this.client, live.safe)).deployed) {
       const { hash, receipt } = await this.relayer.send(deployCall(live))
       console.log(`[remote] deploy ${live.safe} tx ${hash} ${receipt.status}`)
       if (receipt.status !== 'success') throw new HttpError(502, 'DEPLOY_FAILED', 'the Safe could not be created just now: it is retried')
+      deployedAt = receipt.blockNumber
     }
-    const block = await this.client.getBlockNumber()
-    const checked = await this.remoteChecks(live.safe, ctx.owners as Address[], r ? r.permissionIds : [r4!.permissionId], block)
+    // otto/mamoru#275: a load-balanced provider can answer from a node that has not seen the deploy yet (live 1 Nov:
+    // getOwners "returned no data"). The checks read at a block at or after the receipt's, once the provider has it.
+    const block = await this.headPast(deployedAt)
+    if (block === null) throw new HttpError(503, 'DEPLOY_PENDING_VISIBILITY', 'the Safe was created; the chain does not show it yet: it is retried')
+    let checked: string | null
+    try {
+      checked = await this.remoteChecks(live.safe, ctx.owners as Address[], r ? r.permissionIds : [r4!.permissionId], block)
+    } catch (e) {
+      logErr(`[remote] ${ctx.accountKey} ${live.safe} checks unreadable at ${block}:`, e)
+      throw new HttpError(503, 'REMOTE_CHECK_UNAVAILABLE', 'the Safe could not be read on chain just now: it is retried')
+    }
     if (checked) {
       logErr(`[remote] ${ctx.accountKey} ${live.safe} does not check out:`, checked)
       throw new HttpError(409, 'REMOTE_SAFE_UNVERIFIED', 'the Safe on chain is not the one the approval committed to: nothing runs on it')
@@ -7368,7 +7379,8 @@ export class Operator {
     const eth = await this.client.getBalance({ address: live.safe })
     const target = policy.gasReserveWei + (await this.topUpMarginWei())
     if (eth < target) {
-      const { hash, receipt } = await this.relayer.send({ to: live.safe, value: target - eth, gas: 50_000n })
+      // otto/mamoru#275: the relayer sizes the gas (estimate plus its chain's margin), no fixed limit.
+      const { hash, receipt } = await this.relayer.send({ to: live.safe, value: target - eth })
       console.log(`[remote] gas reserve ${live.safe} tx ${hash} ${receipt.status}`)
       // GPT-6 r2 P1 3: a Safe without its gas reserve cannot pay its userOps; it is not reported running (retried).
       if (receipt.status !== 'success') throw new HttpError(502, 'GAS_TOPUP_FAILED', 'the Safe could not be funded for gas just now: it is retried')
@@ -7396,6 +7408,16 @@ export class Operator {
     this.startLoop(acc)
     console.log(`[remote] ${ctx.accountKey} ${live.safe} provisioned and running (${stored.length} session${stored.length === 1 ? '' : 's'})`)
     return { state: 'active', address: live.safe }
+  }
+
+  /** otto/mamoru#275: the provider's head once it is at or past `atLeast` (none: the head now), waiting a few blocks; null when it never gets there. */
+  private async headPast(atLeast: bigint | null): Promise<bigint | null> {
+    for (let i = 0; ; i++) {
+      const head = await this.client.getBlockNumber({ cacheTime: 0 })
+      if (atLeast === null || head >= atLeast) return head
+      if (i >= this.cfg.maxWaitBlocks) return null
+      await Bun.sleep(this.cfg.waitBlockMs)
+    }
   }
 
   /** Why `safe` is not the committed Safe at `block`, or null: owners, threshold 1, SmartSession, every session enabled. */
