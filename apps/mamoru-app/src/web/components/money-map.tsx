@@ -244,8 +244,8 @@ export function StuckNote({ reason, from, to, burnTx }: { reason: string | undef
   const burn = burnTx ? txLink(from, burnTx) : null
   return (
     <>
-      <p className="mm-note" role="status" data-testid="stuck-note">
-        {stuckReasonText(reason)} {moneyCopy.stuckSafe}
+      <p className="mm-note mm-note-stuck" role="status" data-testid="stuck-note">
+        <span className="mm-note-reason">{stuckReasonText(reason)}</span> {moneyCopy.stuckSafe}
       </p>
       {burn && to === 143 && !NO_BURN.has(reason ?? '') ? (
         <details className="mm-diy" data-testid="stuck-diy">

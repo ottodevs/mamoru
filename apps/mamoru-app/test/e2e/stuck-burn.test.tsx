@@ -52,7 +52,7 @@ describe('the reason, by who the wait is on', () => {
     expect(moneyCopy.stuckSafe).toContain('already knows')
     for (const s of [...Object.values(moneyCopy.stuck), moneyCopy.stuckUnknown, moneyCopy.stuckSafe, moneyCopy.diyBody]) expect(s).not.toMatch(/\d/)
     const { html } = card(withStuckTransfer('gas_ceiling', NOW))
-    const note = /data-testid="stuck-note">([^<]*)</.exec(html)?.[1] ?? ''
+    const note = (/data-testid="stuck-note">([\s\S]*?)<\/p>/.exec(html)?.[1] ?? '').replace(/<[^>]+>/g, '')
     expect(note).toContain(moneyCopy.stuck.monad)
     expect(note).not.toMatch(/\d/)
   })
