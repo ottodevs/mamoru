@@ -27,9 +27,9 @@ import { DepositDetails, hasMoney } from './add-money.tsx'
 import { WrongNetwork } from '../components/other-chain-notice.tsx'
 import { OneApprovalStart } from '../components/one-approval.tsx'
 import { useOneApproval, type OneApproval } from '../lib/one-approval.ts'
-import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
+import { FeedbackDialog, feedbackCopy, type FeedbackStart } from '../components/feedback-dialog.tsx'
 import { HowItWorks, howCopy } from '../components/how-it-works.tsx'
-import { Chevron, Fold, LiveSync, PullToRefresh, Spark, TweenPct, TweenUsd } from '../components/motion.tsx'
+import { Fold, LiveSync, PullToRefresh, Spark, TweenPct, TweenUsd } from '../components/motion.tsx'
 import { useThrottledRefresh } from '../lib/refresh-throttle.ts'
 import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '../components/monad-consent.tsx'
 import { isVaultTarget } from '../lib/policies.ts'
@@ -153,6 +153,13 @@ export const homeCopy = {
   belowBody: (usdc: bigint, missing: bigint) => `This account holds ${usd(usdc)} USDC, so it has not started. Add at least ${usd(ceilCents(missing))} USDC more.`,
   overCapAct: (o: OverCap) => `Withdraw ${usd(ceilCents(BigInt(o.excessUsdc)))} USDC`,
 }
+
+/** otto/mamoru#290: under the seal, small, as on mamoru.lol; the pages live on the website. */
+const legalLinks = [
+  { label: 'Terms', href: 'https://mamoru.lol/terms' },
+  { label: 'Privacy', href: 'https://mamoru.lol/privacy' },
+  { label: 'Risks', href: 'https://mamoru.lol/risks' },
+]
 
 const KIND: Record<OpView['kind'], string> = { activate: 'Start', enter: 'Position', reduce: 'Position', transfer: 'Withdraw', exit: 'Stop', renew: 'Approval', 'migrate-v4': 'Approval', deposit: 'Deposit' }
 
@@ -1354,7 +1361,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // With the operator's money map Monad is read once, there; the sleeve's own read is for an operator without it.
   const monadFunding = useFunding(monadSleeve?.accountKey, !!monadSleeve && funding.data !== undefined && !funding.data.money, 60_000)
   const [dialog, setDialog] = useState<null | 'add' | 'withdraw' | 'stop' | 'start'>(null)
-  const [feedbackOpen, setFeedbackOpen] = useState(false)
+  const [feedback, setFeedback] = useState<FeedbackStart | null>(null)
+  const feedbackOpen = feedback !== null
   const [howOpen, setHowOpen] = useState(false)
   const [renewAsked, setRenewAsked] = useState(false)
   // Amount the withdraw form opens with; a new value remounts the dialog.
@@ -1581,18 +1589,20 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         </>
       )}
       <footer className="foot">
+        {/* otto/mamoru#290: plain links in a row, no chevrons; Help and Feedback open the form at their own path. The recovery
+            kit stays here until its top strip lands (#290 item 1). */}
         <nav className="foot-links" aria-label="Account and help">
-          <button type="button" className="foot-link" onClick={() => kit.mutate()} disabled={!cached || kit.isPending}>
-            {kit.isSuccess ? 'Recovery kit saved' : 'Save recovery kit'}
-            <Chevron dir="right" />
-          </button>
-          <button type="button" className="foot-link" onClick={() => setFeedbackOpen(true)}>
-            {feedbackCopy.trigger}
-            <Chevron dir="right" />
-          </button>
           <button type="button" className="foot-link" onClick={() => setHowOpen(true)}>
             {howCopy.trigger}
-            <Chevron dir="right" />
+          </button>
+          <button type="button" className="foot-link" onClick={() => setFeedback('help')}>
+            {feedbackCopy.help}
+          </button>
+          <button type="button" className="foot-link" onClick={() => setFeedback('feedback')}>
+            {feedbackCopy.feedback}
+          </button>
+          <button type="button" className="foot-link" onClick={() => kit.mutate()} disabled={!cached || kit.isPending}>
+            {kit.isSuccess ? 'Recovery kit saved' : 'Save recovery kit'}
           </button>
         </nav>
         {/* otto/mamoru#198: the seal signs the page, the only red besides Stop. #226: centred under the links, not squeezed beside them. */}
@@ -1602,9 +1612,16 @@ export function HomeView({ accountKey }: { accountKey: string }) {
             <span className="seal-word">MAMORU</span>
           </span>
         </div>
+        <nav className="foot-legal" aria-label="Legal">
+          {legalLinks.map((l) => (
+            <a key={l.href} href={l.href} target="_blank" rel="noreferrer">
+              {l.label}
+            </a>
+          ))}
+        </nav>
       </footer>
       <HowItWorks open={howOpen} onClose={() => setHowOpen(false)} />
-      <FeedbackDialog accountKey={accountKey} open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
+      <FeedbackDialog accountKey={accountKey} start={feedback ?? 'help'} open={feedbackOpen} onClose={() => setFeedback(null)} />
 
       {f && s ? (
         <>

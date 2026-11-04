@@ -8,12 +8,12 @@ import { Modal } from './ui.tsx'
 // thread per request. 'bug' and 'idea' are read weekly, in a batch. No third-party widget: the app sells privacy.
 
 type Path = FeedbackRequest['kind']
+/** otto/mamoru#290: the footer has two links. Help opens the support form; Feedback opens the choice of bug or idea. */
+export type FeedbackStart = 'help' | 'feedback'
 
 export const feedbackCopy = {
-  trigger: 'Help & feedback',
-  title: 'Help & feedback',
-  needHelp: 'I need help',
-  haveFeedbackLead: 'I have feedback',
+  help: 'Help',
+  feedback: 'Feedback',
   bug: "Something's not working",
   idea: 'I have an idea',
   back: 'Back',
@@ -104,20 +104,21 @@ export function FeedbackForm({
   )
 }
 
-export function FeedbackDialog({ accountKey, open, onClose }: { accountKey: string | undefined; open: boolean; onClose: () => void }) {
+export function FeedbackDialog({ accountKey, start, open, onClose }: { accountKey: string | undefined; start: FeedbackStart; open: boolean; onClose: () => void }) {
   const api = useApi()
-  const [path, setPath] = useState<Path | null>(null)
+  const [picked, setPicked] = useState<Path | null>(null)
+  const path: Path | null = start === 'help' ? 'support' : picked
   const send = useMutation({ mutationFn: (body: FeedbackRequest) => api.feedback(body) })
 
   const close = () => {
-    setPath(null)
+    setPicked(null)
     send.reset()
     onClose()
   }
   const error = send.error ? (send.error instanceof ApiRequestError && send.error.status === 429 ? feedbackCopy.rateLimited : feedbackCopy.genericError) : null
 
   return (
-    <Modal open={open} onClose={close} title={feedbackCopy.title}>
+    <Modal open={open} onClose={close} title={start === 'help' ? feedbackCopy.help : feedbackCopy.feedback}>
       {send.isSuccess && path ? (
         <div className="grid gap-4" data-testid="feedback-done">
           <p className="m-0 text-[1.05rem]">{feedbackCopy.doneBody(path)}</p>
@@ -128,19 +129,13 @@ export function FeedbackDialog({ accountKey, open, onClose }: { accountKey: stri
           </div>
         </div>
       ) : path === null ? (
-        <div className="grid gap-[0.6rem]" data-testid="feedback-pick">
-          <button type="button" className="act" onClick={() => setPath('support')}>
-            {feedbackCopy.needHelp}
+        <div className="flex flex-wrap gap-2" data-testid="feedback-pick">
+          <button type="button" className="act" onClick={() => setPicked('bug')}>
+            {feedbackCopy.bug}
           </button>
-          <p className="m-0 mt-2 text-[0.85rem] text-stone">{feedbackCopy.haveFeedbackLead}</p>
-          <div className="flex flex-wrap gap-2">
-            <button type="button" className="act" onClick={() => setPath('bug')}>
-              {feedbackCopy.bug}
-            </button>
-            <button type="button" className="act" onClick={() => setPath('idea')}>
-              {feedbackCopy.idea}
-            </button>
-          </div>
+          <button type="button" className="act" onClick={() => setPicked('idea')}>
+            {feedbackCopy.idea}
+          </button>
         </div>
       ) : (
         <FeedbackForm
@@ -148,10 +143,14 @@ export function FeedbackDialog({ accountKey, open, onClose }: { accountKey: stri
           accountKey={accountKey}
           busy={send.isPending}
           error={error}
-          onBack={() => {
-            send.reset()
-            setPath(null)
-          }}
+          onBack={
+            start === 'help'
+              ? close
+              : () => {
+                  send.reset()
+                  setPicked(null)
+                }
+          }
           onSend={(fields) =>
             send.mutate({
               kind: path,
