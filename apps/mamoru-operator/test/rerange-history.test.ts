@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { outOfRangeSeedOf, rerangeHistoryOf } from '../src/operator.ts'
+import { heldHistorySeedOf, outOfRangeSeedOf, rerangeHistoryOf } from '../src/operator.ts'
 import { outOfRangeFromSeed, OUT_OF_RANGE_SEED_GAP_S } from '@mamoru/scenarios/driver/engine.ts'
 import type { StoredOp } from '../src/state.ts'
 
@@ -45,5 +45,19 @@ describe('out-of-range clock across a restart', () => {
     expect(outOfRangeFromSeed(seed, 10_000n + OUT_OF_RANGE_SEED_GAP_S).get(7n)).toBe(1000n)
     expect(outOfRangeFromSeed(seed, 10_001n + OUT_OF_RANGE_SEED_GAP_S).size).toBe(0)
     expect(outOfRangeFromSeed(seed, 9_000n).size).toBe(0)
+  })
+})
+
+describe('otto/mamoru#358: the stored held-position histories as the engine seed', () => {
+  const H = `0x${'ab'.repeat(32)}`
+  const ev = { kind: 'collect', tokenId: '49417', amount0: '5', amount1: '7', logIndex: 3, blockNumber: '118500000', txHash: `0x${'cd'.repeat(32)}` }
+  test('parses what onHeldHistory stored; a malformed entry is left out, the rest kept', () => {
+    expect(heldHistorySeedOf({ '49417': { through: '118600000', hash: H, events: [ev] } })).toEqual(
+      new Map([['49417', { through: 118600000n, hash: H, events: [{ kind: 'collect', tokenId: 49417n, amount0: 5n, amount1: 7n, logIndex: 3, blockNumber: 118500000n, txHash: ev.txHash }] }]]),
+    )
+    const mixed = heldHistorySeedOf({ '1': { through: 'x', hash: H, events: [] }, '2': { through: '9', hash: '0x01', events: [] }, '3': { through: '9', hash: H, events: [{ ...ev, kind: 'mint' }] }, '4': { through: '9', hash: H, events: [] } })
+    expect([...(mixed ?? new Map()).keys()]).toEqual(['4'])
+    expect(heldHistorySeedOf(undefined)).toBeUndefined()
+    expect(heldHistorySeedOf({ '1': { through: 'x', hash: H, events: [] } })).toBeUndefined()
   })
 })

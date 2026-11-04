@@ -44,7 +44,7 @@ import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSess
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
-import { Engine, engineGas, isTransportError, thrownSummary, v4EngineGas, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
+import { Engine, engineGas, isTransportError, thrownSummary, v4EngineGas, type BridgeSigning, type EngineConfig, type EngineSession, type HeldHistory } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
 import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
 import { buildMoneyMap, chainLegOf, returnRows, unreadLeg, type ReturnLeg } from './money-map.ts'
@@ -352,6 +352,25 @@ const TERMINAL_STATES = new Set<OpView['state']>(['confirmed', 'failed'])
 export function priorIncludedOf(ops: readonly StoredOp[], sessions: readonly { permissionId: Hex }[]): { permissionId: Hex; calls: NonNullable<StoredOp['calls']> }[] {
   const active = new Set(sessions.map((s) => s.permissionId.toLowerCase()))
   return ops.filter((o) => o.opId.startsWith('eng-') && (o.state === 'confirmed' || o.lateIncluded) && o.permissionId && o.calls && active.has(o.permissionId.toLowerCase())).map((o) => ({ permissionId: o.permissionId!, calls: o.calls! }))
+}
+
+/** otto/mamoru#358: the stored held-position histories as the engine's seed; an entry that does not parse is left out. */
+export function heldHistorySeedOf(o: AccountState['heldHistory']): EngineConfig['heldHistorySeed'] {
+  if (!o || typeof o !== 'object') return undefined
+  const out = new Map<string, HeldHistory>()
+  for (const [id, h] of Object.entries(o)) {
+    try {
+      const events = h.events.map((e) => {
+        if (e.kind !== 'decrease' && e.kind !== 'collect') throw new Error(`kind ${e.kind}`)
+        return { kind: e.kind as 'decrease' | 'collect', tokenId: BigInt(e.tokenId), amount0: BigInt(e.amount0), amount1: BigInt(e.amount1), logIndex: Number(e.logIndex), blockNumber: BigInt(e.blockNumber), txHash: e.txHash as Hex }
+      })
+      if (!/^0x[0-9a-fA-F]{64}$/.test(h.hash)) throw new Error('hash')
+      out.set(id, { through: BigInt(h.through), hash: h.hash as Hex, events })
+    } catch {
+      // read again from activation
+    }
+  }
+  return out.size ? out : undefined
 }
 
 /** Live wait rule: the stored out-of-range clock as the engine's seed; undefined when there is none or it does not parse. */
@@ -7621,6 +7640,7 @@ export class Operator {
         ...this.remoteOf(acc),
         rerangeHistory: rerangeHistoryOf(acc.ops, Math.floor(Date.now() / 1000)),
         ...(outOfRangeSeedOf(acc.outOfRange) ? { outOfRangeSeed: outOfRangeSeedOf(acc.outOfRange)! } : {}),
+        ...(heldHistorySeedOf(acc.heldHistory) ? { heldHistorySeed: heldHistorySeedOf(acc.heldHistory)! } : {}),
       },
       {
         waitBlock: () => Bun.sleep(this.cfg.waitBlockMs),
@@ -7633,6 +7653,16 @@ export class Operator {
         // Live wait rule: the out-of-range clock survives a restart (the engine drops it after a long gap).
         onOutOfRange: (since, seenAt) => {
           acc.outOfRange = { since: Object.fromEntries([...since].map(([id, at]) => [id.toString(), at.toString()])), seenAt: seenAt.toString() }
+          this.store.save()
+        },
+        // otto/mamoru#358: a Monad position's history survives a restart (one slice per review is hours from activation).
+        onHeldHistory: (tokenId, h) => {
+          const all = { ...acc.heldHistory }
+          if (h && h.hash) {
+            const s = (e: (typeof h.events)[number]) => ({ kind: e.kind, tokenId: e.tokenId.toString(), amount0: e.amount0.toString(), amount1: e.amount1.toString(), logIndex: e.logIndex, blockNumber: e.blockNumber.toString(), txHash: e.txHash })
+            all[tokenId] = { through: h.through.toString(), hash: h.hash, events: h.events.map(s) }
+          } else delete all[tokenId]
+          acc.heldHistory = all
           this.store.save()
         },
         onReranged: (pool, at, block) => {

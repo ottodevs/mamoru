@@ -469,6 +469,11 @@ export type EngineConfig = {
    */
   outOfRangeSeed?: { since: ReadonlyMap<bigint, bigint>; seenAt: bigint }
   /**
+   * otto/mamoru#358: each held position's history as read before a restart (`onHeldHistory`), by tokenId. A harvest
+   * folds an entry only once a review found its last block still canonical; one that is not starts over. Absent: none.
+   */
+  heldHistorySeed?: ReadonlyMap<string, HeldHistory>
+  /**
    * otto/mamoru#101 phase 1b (shadow): the latest off-chain pool statistics, by pool name (`Observation.poolStats`). Used
    * only for a policy that lists `packaging:tvl`. Must not throw or wait: the operator answers from its cache.
    */
@@ -486,6 +491,9 @@ export const OUT_OF_RANGE_SEED_GAP_S = 5_400n
 export const OUT_OF_RANGE_SAVE_S = 1_800n
 
 /** Live wait rule: the clock a restarted engine starts from: the stored one when its review is recent enough, else empty. */
+/** otto/mamoru#358: a held position's history read so far: its events up to `through`, whose block hash was `hash`. */
+export type HeldHistory = { through: bigint; hash: Hex | null; events: ChainPositionEvent[] }
+
 export function outOfRangeFromSeed(seed: NonNullable<EngineConfig['outOfRangeSeed']>, now: bigint): Map<bigint, bigint> {
   const gap = now - seed.seenAt
   return gap >= 0n && gap <= OUT_OF_RANGE_SEED_GAP_S ? new Map(seed.since) : new Map()
@@ -533,6 +541,8 @@ export type EngineHooks = {
    * was last handed out; `seenAt` is the review's block time. The live operator stores it for `outOfRangeSeed`.
    */
   onOutOfRange?: (since: ReadonlyMap<bigint, bigint>, seenAt: bigint) => void
+  /** otto/mamoru#358: a held position's history read further (or dropped: null), for `heldHistorySeed` after a restart. */
+  onHeldHistory?: (tokenId: string, history: HeldHistory | null) => void
   /** otto/mamoru#101: the shadow risk entries changed (rule, pool), with their latest values; the operator logs it. Never acts. */
   onShadowRisk?: (risk: NonNullable<Decision['shadowRisk']>) => void
 }
@@ -667,7 +677,8 @@ export class Engine {
   private readonly historyCursor = historyCursor()
   /** otto/mamoru#358: history of held positions the observation's cursor does not follow, read up to `through` (a safe block). */
   private heldTurn = 0
-  private readonly heldHistory = new Map<string, { through: bigint; hash: Hex | null; events: ChainPositionEvent[] }>()
+  /** `checked`: its last block was found canonical by this process (a seed is not, until a review checks it). */
+  private readonly heldHistory = new Map<string, HeldHistory & { checked: boolean }>()
   depositsAfter: bigint
   lastObservation?: Observation
   /** Live: premises the bundler rejected as unincludable, held back until `until` (block timestamp, seconds). */
@@ -721,6 +732,7 @@ export class Engine {
     for (const op of cfg.carried ?? []) if (op.userOpHash && op.nonce !== undefined && op.prepareBlock !== undefined) this.released.push(op)
     for (const [name, series] of cfg.guardHistory?.series ?? []) this.guardSeries.set(name, series)
     this.outOfRangeSeed = cfg.outOfRangeSeed
+    for (const [id, h] of cfg.heldHistorySeed ?? []) if (h.through >= this.historyFromBlock) this.heldHistory.set(id, { ...h, checked: false })
     // #218: a restart keeps the cooldown and the weekly count.
     for (const r of cfg.rerangeHistory ?? []) {
       this.reranges.push({ pool: r.pool, at: r.at, ...(r.merge ? { merge: true as const } : {}) })
@@ -2101,26 +2113,32 @@ export class Engine {
     const start = ids.length ? this.heldTurn++ % ids.length : 0
     for (const tokenId of [...ids.slice(start), ...ids.slice(0, start)]) {
       if (c.fromBlock === this.historyFromBlock && c.ids.has(String(tokenId))) continue
-      let h = this.heldHistory.get(String(tokenId)) ?? { through: this.historyFromBlock - 1n, hash: null, events: [] }
+      const id = String(tokenId)
+      let h = this.heldHistory.get(id) ?? { through: this.historyFromBlock - 1n, hash: null, events: [], checked: true }
       try {
         // The last slice's end is still canonical, or what was read starts over and leaves the map at once, so a harvest
-        // never folds a forked read (gate of #358: no fork mix across slices).
-        if (h.hash && (await this.client.getBlock({ blockNumber: h.through })).hash !== h.hash) {
-          this.heldHistory.delete(String(tokenId))
-          h = { through: this.historyFromBlock - 1n, hash: null, events: [] }
+        // never folds a forked read (gate of #358: no fork mix across slices). A seed from before a restart counts from here.
+        if (h.hash) {
+          if ((await this.client.getBlock({ blockNumber: h.through })).hash !== h.hash) {
+            this.heldHistory.delete(id)
+            this.hooks.onHeldHistory?.(id, null)
+            h = { through: this.historyFromBlock - 1n, hash: null, events: [], checked: true }
+          } else if (!h.checked) {
+            h = { ...h, checked: true }
+            this.heldHistory.set(id, h)
+          }
         }
         // Caught up within a step: the tail read at harvest time covers the rest.
-        if (h.through >= this.historyFromBlock && safe - h.through <= step) {
-          this.heldHistory.set(String(tokenId), h)
-          continue
-        }
+        if (h.through >= this.historyFromBlock && safe - h.through <= step) continue
         if (read) return
         read = true
         const to = h.through + step < safe ? h.through + step : safe
         const before = (await this.client.getBlock({ blockNumber: to })).hash
         const events = await readPositionHistory(this.client, [tokenId], h.through + 1n, to, this.registry)
         if ((await this.client.getBlock({ blockNumber: to })).hash !== before) continue
-        this.heldHistory.set(String(tokenId), { through: to, hash: before, events: [...h.events, ...events] })
+        const next = { through: to, hash: before, events: [...h.events, ...events] }
+        this.heldHistory.set(id, { ...next, checked: true })
+        this.hooks.onHeldHistory?.(id, next)
       } catch {
         // read again on the next review
       }
@@ -2140,7 +2158,7 @@ export class Engine {
     const read =
       c.fromBlock === this.historyFromBlock && c.ids.has(String(tokenId)) && c.through >= this.historyFromBlock
         ? { through: c.through, events: c.events }
-        : held && held.through >= this.historyFromBlock
+        : held && held.checked && held.through >= this.historyFromBlock
           ? held
           : null
     // Nothing at or after (block, 0) is used: do not ask for a block that may not exist yet.

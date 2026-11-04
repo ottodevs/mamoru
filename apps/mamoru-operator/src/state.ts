@@ -183,6 +183,11 @@ export type AccountState = {
    * block time of the review that saw it (`seenAt`). Seeds the engine's clock after a restart (EngineConfig.outOfRangeSeed).
    */
   outOfRange?: { since: Record<string, string>; seenAt: string }
+  /**
+   * otto/mamoru#358: each held position's history as the engine read it (EngineConfig.heldHistorySeed), by tokenId, so a
+   * restart does not read a Monad position's history from activation again. Amounts and blocks as decimal strings.
+   */
+  heldHistory?: Record<string, { through: string; hash: string; events: { kind: string; tokenId: string; amount0: string; amount1: string; logIndex: number; blockNumber: string; txHash: string }[] }>
   /** otto/mamoru#140 (part2 #6): owner transactions of this account the relayer paid for, last 24 h (sponsorship limits). */
   sponsored?: SponsorEntry[]
   /**

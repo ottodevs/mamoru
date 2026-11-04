@@ -27,6 +27,8 @@ const decreaseLog = (blockNumber: bigint, logIndex: number, amount0: bigint) => 
 function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; events: ChainPositionEvent[] }, tailLogs: unknown[] = [], cfg: { historyStepBlocks?: bigint } = {}, hashOf: (n: bigint) => Hex = () => '0xaa') {
   const ranges: { from: bigint; to: bigint }[] = []
   const logs = { down: false }
+  const hooked: [string, bigint | null][] = []
+  const held = new Map()
   const client = {
     getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({ hash: hashOf(blockNumber) }),
     request: async ({ method, params }: { method: string; params: [{ fromBlock: Hex; toBlock: Hex }] }) => {
@@ -42,12 +44,13 @@ function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; eve
     historyFromBlock: 100n,
     cfg,
     heldTurn: 0,
-    heldHistory: new Map(),
+    heldHistory: held,
+    hooks: { onHeldHistory: (id: string, h: { through: bigint } | null) => hooked.push([id, h?.through ?? null]) },
     historyCursor: { fromBlock: cursor.fromBlock, through: cursor.through, hash: '0x01', ids: new Set(cursor.ids), events: cursor.events },
   })
   const owed = (tokenId: bigint, at: { block: bigint; logIndex: number }, full = false) => (e as unknown as { principalOwed: (t: bigint, a: typeof at, f: boolean) => Promise<Map<bigint, [bigint, bigint]>> }).principalOwed(tokenId, at, full)
   const advance = (safe: bigint, tokenIds: bigint[]) => (e as unknown as { advanceHeldHistory: (o: unknown) => Promise<void> }).advanceHeldHistory({ safeBlock: { number: safe, hash: '0xaa' }, positions: tokenIds.map((tokenId) => ({ tokenId })) })
-  return { owed, ranges, advance, logs }
+  return { owed, ranges, advance, logs, held, hooked }
 }
 
 describe('principal owed from the observation cursor (otto/mamoru#358)', () => {
@@ -158,6 +161,38 @@ describe('a held position the cursor does not follow, read one slice per review 
       { from: 100n, to: 400_099n },
       { from: 400_100n, to: 800_099n },
     ])
+  })
+
+  test('#358 persist: every slice read or dropped goes to onHeldHistory', async () => {
+    let fork = false
+    const { advance, hooked } = engine(none, [], { historyStepBlocks: 400_000n }, (n) => (fork && n === 400_099n ? '0xbb' : '0xaa'))
+    await advance(900_000n, [7n])
+    fork = true
+    await advance(900_000n, [7n])
+    expect(hooked).toEqual([
+      ['7', 400_099n],
+      ['7', null],
+      ['7', 400_099n],
+    ])
+  })
+
+  test('#358 persist: a seed from before a restart is folded only once a review found its last block canonical', async () => {
+    const { owed, ranges, advance, held } = engine(none, [], { historyStepBlocks: 400_000n })
+    held.set('7', { through: 800_099n, hash: '0xaa', events: [ev('decrease', 500n, 40n)], checked: false })
+    await expect(owed(7n, { block: 900_010n, logIndex: 0 })).rejects.toThrow('OBS_RPC_UNAVAILABLE')
+    expect(ranges).toEqual([])
+    await advance(900_000n, [7n])
+    expect(ranges).toEqual([])
+    expect(held.get('7').checked).toBe(true)
+    expect(await owed(7n, { block: 900_010n, logIndex: 0 })).toEqual(new Map([[7n, [40n, 0n]]]))
+    expect(ranges).toEqual([{ from: 800_100n, to: 900_009n }])
+  })
+
+  test('#358 persist: a seed whose last block is no longer canonical starts over', async () => {
+    const { advance, held, ranges } = engine(none, [], { historyStepBlocks: 400_000n }, (n) => (n === 800_099n ? '0xbb' : '0xaa'))
+    held.set('7', { through: 800_099n, hash: '0xaa', events: [], checked: false })
+    await advance(900_000n, [7n])
+    expect(ranges).toEqual([{ from: 100n, to: 400_099n }])
   })
 
   test('gate: a safe head below activation reads nothing and never moves the read back', async () => {
