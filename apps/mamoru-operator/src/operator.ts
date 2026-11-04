@@ -63,7 +63,7 @@ import { ONE_ACTION_GAS_UNITS, gasReserveAlertOverrideFromEnv, gasReserveAlertWe
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, GasReserveTracker, logErr, RELAYER_READ_MS, RelayerWatch, safeMetrics, SLOT_BUSY_ALERT_MS, type EngineHealthSnapshot, type GasReserveSnapshot, type RelayerBalance } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
-import { feeFrom, yieldFee, YIELD_FEE_BPS, YIELD_FEE_FROM } from './yield-fee.ts'
+import { yieldFee, YIELD_FEE_BPS, YIELD_FEE_FROM } from './yield-fee.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
 import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
@@ -1899,20 +1899,10 @@ export class Operator {
     return Array.isArray(scope) && (scope.includes(acc.accountKey.toLowerCase()) || scope.includes(String(acc.ctx.address).toLowerCase()))
   }
 
-  /**
-   * otto/mamoru#371: whether the yield fee applies to this account now, keeping since when (AccountState.yieldFeeFrom):
-   * set the first time it is seen in scope, cleared when seen out of it. Seen on every engine review and withdrawal.
-   */
-  private feeScope(acc: AccountState): boolean {
-    const on = this.inScope(acc, 'yield_fee')
-    if (on && !acc.yieldFeeFrom) {
-      acc.yieldFeeFrom = feeFrom(new Date().toISOString())
-      this.store.save()
-    } else if (!on && acc.yieldFeeFrom) {
-      acc.yieldFeeFrom = undefined
-      this.store.save()
-    }
-    return on
+  /** otto/mamoru#371: whether the yield fee applies to this account now (the scoped `yield_fee` flag); yield-receipts marks facts with it. */
+  yieldFeeScope(accountKey: string): boolean {
+    const acc = this.store.state.accounts[accountKey]
+    return !!acc && this.inScope(acc, 'yield_fee')
   }
 
   /**
@@ -3976,7 +3966,7 @@ export class Operator {
     // otto/mamoru#371: Mamoru's yield fee, for an account in the `yield_fee` scope: paid to the relayer in this same
     // batch, on top of the amount. When the Safe cannot free both, the fee comes out of the amount, and the owner is
     // told what they receive; a withdrawal no larger than the fee pays no fee (it is owed on the next one).
-    const owed = this.feeScope(acc) ? yieldFee(acc.ops, YIELD_FEE_BPS, feeFrom(acc.yieldFeeFrom)) : null
+    const owed = this.inScope(acc, 'yield_fee') ? yieldFee(acc.ops) : null
     let fee = owed?.owedUsdc ?? 0n
     let pay = amount
     const planFor = async (total: bigint) => {
@@ -7886,7 +7876,6 @@ export class Operator {
               return
             }
           }
-          this.feeScope(acc)
           const startedAt = Date.now()
           const r = await engine.review()
           this.revokeManage(engine)

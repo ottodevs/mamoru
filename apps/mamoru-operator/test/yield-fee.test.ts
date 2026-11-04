@@ -4,11 +4,16 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { StateStore } from '../src/state.ts'
-import { feeFrom, YIELD_FEE_BPS, YIELD_FEE_FROM, YIELD_FEE_MIN, yieldFee } from '../src/yield-fee.ts'
+import { YIELD_FEE_FROM, YIELD_FEE_MIN, yieldFee } from '../src/yield-fee.ts'
 
 const fee = (usdc?: string) => ({ tokenId: '1', pool: 'pool:WETH/USDC/3000', fee0: '1', fee1: '1', ...(usdc === undefined ? {} : { usdc }) })
 const harvest = (at: string, ...usdc: (string | undefined)[]): StoredOp =>
-  ({ opId: `eng-${at}`, kind: 'reduce', state: 'confirmed', updatedAt: at, txHash: '0xaa', facts: { at, gasWei: '1', fees: usdc.map(fee) } }) as StoredOp
+  ({ opId: `eng-${at}`, kind: 'reduce', state: 'confirmed', updatedAt: at, txHash: '0xaa', facts: { at, gasWei: '1', fees: usdc.map(fee), feeable: true } }) as StoredOp
+const outOfScope = (at: string, usdc: string): StoredOp => {
+  const op = harvest(at, usdc)
+  delete (op.facts as { feeable?: true }).feeable
+  return op
+}
 const withdrawal = (state: StoredOp['state'], feeUsdc?: string, txHash?: string): StoredOp =>
   ({ opId: `own-${state}-${feeUsdc}-${txHash}`, kind: 'transfer', state, updatedAt: '2026-11-06T00:00:00Z', amountUsdc: '1000000', ...(feeUsdc ? { feeUsdc } : {}), ...(txHash ? { txHash } : {}) }) as StoredOp
 
@@ -31,18 +36,22 @@ describe('yieldFee (otto/mamoru#371)', () => {
     expect(f.owedUsdc).toBe(150_000n)
   })
 
-  test('only a withdrawal confirmed or on its way has paid: proposed without a transaction has not', () => {
+  test('a signed withdrawal being sent (proposed, no transaction yet) has paid: a prepare meanwhile never prices it again', () => {
     const base = harvest('2026-11-05T10:00:00.000Z', '3000000')
-    expect(yieldFee([base, withdrawal('proposed', '100000')]).chargedUsdc).toBe(0n)
-    expect(yieldFee([base, withdrawal('proposed', '100000', '0xab')]).chargedUsdc).toBe(100_000n)
+    expect(yieldFee([base, withdrawal('proposed', '100000')]).chargedUsdc).toBe(100_000n)
+    expect(yieldFee([base, withdrawal('failed', '100000', '0xab')]).chargedUsdc).toBe(0n)
   })
 
-  test("the account's own start in scope: yield collected before it is never charged", () => {
-    const ops = [harvest('2026-11-06T10:00:00.000Z', '5000000'), harvest('2026-11-08T10:00:00.000Z', '1000000')]
-    expect(yieldFee(ops, YIELD_FEE_BPS, feeFrom('2026-11-07T00:00:00.000Z')).collectedUsdc).toBe(1_000_000n)
-    // Never before the fee itself started.
-    expect(feeFrom('2026-11-01T00:00:00.000Z')).toBe(YIELD_FEE_FROM)
-    expect(feeFrom(undefined)).toBe(YIELD_FEE_FROM)
+  test('only yield whose facts were taken while in scope is charged: out-of-scope yield never, whenever it was', () => {
+    const ops = [outOfScope('2026-11-06T10:00:00.000Z', '5000000'), harvest('2026-11-08T10:00:00.000Z', '1000000'), outOfScope('2026-11-09T10:00:00.000Z', '4000000')]
+    expect(yieldFee(ops).collectedUsdc).toBe(1_000_000n)
+    expect(yieldFee(ops).owedUsdc).toBe(100_000n)
+  })
+
+  test('leaving scope and coming back keeps the books right: paid fees and in-scope yield both accumulate', () => {
+    // In scope: 100 collected, 10 charged. Out: 50 collected (not feeable). Back in: 50 collected -> owed 5.
+    const ops = [harvest('2026-11-06T10:00:00.000Z', '100000000'), withdrawal('confirmed', '10000000'), outOfScope('2026-11-20T10:00:00.000Z', '50000000'), harvest('2027-01-02T10:00:00.000Z', '50000000')]
+    expect(yieldFee(ops).owedUsdc).toBe(5_000_000n)
   })
 
   test('the charged fee survives a restart: what the state file keeps is what is counted', () => {
@@ -79,14 +88,13 @@ function transfers(data: string): { to: string; amount: bigint }[] {
 
 describe('a withdrawal pays the yield fee (otto/mamoru#371)', () => {
   const owedOps = (acc: { ops: unknown[] }) =>
-    acc.ops.push({ opId: 'eng-h1', kind: 'reduce', state: 'confirmed', updatedAt: '2026-11-05T10:00:00Z', txHash: '0xaa', facts: { at: '2026-11-05T10:00:00.000Z', gasWei: '1', fees: [{ tokenId: '1', pool: 'pool:WETH/USDC/3000', fee0: '1', fee1: '1', usdc: '2000000' }] } })
+    acc.ops.push({ opId: 'eng-h1', kind: 'reduce', state: 'confirmed', updatedAt: '2026-11-05T10:00:00Z', txHash: '0xaa', facts: { at: '2026-11-05T10:00:00.000Z', gasWei: '1', fees: [{ tokenId: '1', pool: 'pool:WETH/USDC/3000', fee0: '1', fee1: '1', usdc: '2000000' }], feeable: true } })
 
   async function prepared(inScope: boolean, usdc: bigint, amount: string) {
     const w = world(usdc, { opsFlags: () => ({ yield_fee: inScope }), opsScopedFlags: () => (inScope ? { yield_fee: null } : {}) })
     w.chain.deployed = true
     // The account's state, with 2 USDC of yield collected since the fee started.
-    const { acc } = (w.op as unknown as { account: (c: typeof ctx) => { acc: { ops: unknown[]; yieldFeeFrom?: string } } }).account(ctx)
-    if (inScope) acc.yieldFeeFrom = YIELD_FEE_FROM
+    const { acc } = (w.op as unknown as { account: (c: typeof ctx) => { acc: { ops: unknown[] } } }).account(ctx)
     owedOps(acc)
     const plan = (await quiet(() => w.op.prepareTransfer(ctx, { to: TO, amountUsdc: amount }))).out
     await quiet(() => w.op.submit(ctx, 'transfer', sign(plan.ownerTx)))

@@ -104,11 +104,6 @@ export type ArmedActivation = {
 }
 
 export type AccountState = {
-  /**
-   * otto/mamoru#371: since when (ISO) this account is in the `yield_fee` scope, as this operator first saw it (never
-   * before YIELD_FEE_FROM). Cleared when it is seen out of scope, so time out of scope is never charged.
-   */
-  yieldFeeFrom?: string
   /** Spec 006: the cap (base units) the account's current grants were sized for, from its last confirmed activation or renewal. Absent: LIVE_CAP_USDC. */
   signedCapUsdc?: string
   accountKey: string

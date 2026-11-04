@@ -48,6 +48,11 @@ export type OpFacts = {
   /** otto/mamoru#219: gasWei in raw USDC, set once by the first snapshot that prices the native asset (WETH/USDC). */
   gasUsdc?: string
   fees: FeeFact[]
+  /**
+   * otto/mamoru#371: the account was in the yield fee's scope when these facts were taken (minutes after the op, or at
+   * its backfill). Only such facts are the fee's base: yield collected while out of scope is never charged.
+   */
+  feeable?: true
 }
 
 /**
@@ -191,6 +196,8 @@ export function dayReceipts(ops: readonly StoredOp[]): DayReceiptWire[] {
 export type ReceiptSource = {
   accounts(): { accountKey: string; safe: Address; ops: StoredOp[] }[]
   save(): void
+  /** otto/mamoru#371: whether the account is in the yield fee's scope now. Absent: never (no fee on this chain). */
+  feeScope?(accountKey: string): boolean
 }
 
 export type ReceiptReader = (txHash: Hex) => Promise<{ logs: Log[]; blockNumber: bigint } | null>
@@ -235,7 +242,7 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
       if (!r || r.blockNumber > safe!) continue
       const t = times.get(r.blockNumber) ?? (await blockTime(r.blockNumber))
       times.set(r.blockNumber, t)
-      op.facts = { txHash, ...factsFromLogs(r.logs, a.safe, t, op.opId.startsWith('eng-') ? op.userOpHash : undefined, registry) }
+      op.facts = { txHash, ...factsFromLogs(r.logs, a.safe, t, op.opId.startsWith('eng-') ? op.userOpHash : undefined, registry), ...(source.feeScope?.(a.accountKey) ? { feeable: true as const } : {}) }
       tried.delete(key)
       changed = true
     } catch (e) {

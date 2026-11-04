@@ -774,7 +774,12 @@ export async function bootOperator(o: BootOptions) {
     const budget = rpcBudget(rpcMetrics)
     const read = (): Promise<Snapshot> => readSnapshot(snapshotClient, multicall3, chainId, registry, operator.snapshotTargets())
     const receipts = {
-      source: { accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops })), save: () => store.save() },
+      source: {
+        accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops })),
+        save: () => store.save(),
+        // otto/mamoru#371: facts taken while the account is in the yield fee's scope are the fee's base.
+        feeScope: (accountKey: string) => operator.yieldFeeScope(accountKey),
+      },
       // Same transport as the read: these calls count against the snapshot's RPC budget, not the engines'.
       readReceipt: async (hash: Hex) => {
         const r = await snapshotClient.getTransactionReceipt({ hash }).catch((e: unknown) => {

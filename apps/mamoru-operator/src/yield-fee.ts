@@ -6,8 +6,8 @@
 // transfer in the batch the owner signs, named on its own line of the summary, like the Safe-paid network fee.
 //
 // What it is owed on: the fees the receipts say this account's ops collected (yield-receipts.ts facts, every op, engine
-// or owner), priced in USDC, since the account entered the fee's scope (never before YIELD_FEE_FROM): nothing
-// collected before the fee existed, or while the account was out of scope, is charged. Fees are what Collect paid above
+// or owner), priced in USDC, at or after YIELD_FEE_FROM, and only facts taken while the account was in the fee's scope
+// (`feeable`): nothing collected before the fee existed, or while the account was out of scope, is charged. Fees are what Collect paid above
 // the principal a DecreaseLiquidity of the same transaction freed (yield-receipts.ts). An
 // unpriced fee is not owed yet (it is once a snapshot prices it). What was already charged: the fee of every withdrawal
 // confirmed or on its way (one in flight counts, so two withdrawals never charge the same yield twice).
@@ -35,16 +35,12 @@ export type YieldFee = {
 }
 
 /**
- * A withdrawal whose fee counts as paid: confirmed, or on its way (submitted, or created with a transaction sent). A
- * withdrawal op exists only once the owner signed it (submit); one that failed, or never left, pays nothing.
+ * A withdrawal whose fee counts as paid: any not failed. A withdrawal op exists only once the owner signed it (submit,
+ * Operator.newOp), so a `proposed` one is being sent right now: counting it means a prepare in that window never
+ * prices the same fee twice (when in doubt, the owner is not charged).
  */
 function charged(op: StoredOp): boolean {
-  return op.state === 'confirmed' || op.state === 'submitted' || (op.state === 'proposed' && !!op.txHash)
-}
-
-/** The later of the fee's start and the account's own start in scope (AccountState.yieldFeeFrom). */
-export function feeFrom(accountFrom: string | undefined): string {
-  return accountFrom && Date.parse(accountFrom) > Date.parse(YIELD_FEE_FROM) ? accountFrom : YIELD_FEE_FROM
+  return op.state !== 'failed'
 }
 
 export function yieldFee(ops: readonly StoredOp[], bps: bigint = YIELD_FEE_BPS, from: string = YIELD_FEE_FROM): YieldFee {
@@ -53,7 +49,7 @@ export function yieldFee(ops: readonly StoredOp[], bps: bigint = YIELD_FEE_BPS, 
   let unpriced = 0
   let chargedUsdc = 0n
   for (const op of ops) {
-    if (op.facts && Date.parse(op.facts.at) >= since) {
+    if (op.facts?.feeable && Date.parse(op.facts.at) >= since) {
       for (const f of op.facts.fees) {
         if (f.usdc === undefined) unpriced++
         else collectedUsdc += BigInt(f.usdc)
