@@ -200,6 +200,27 @@ export function autoRollbackAllowed(baseline: { required: Set<string> | null }, 
   return baseline.required !== null && !rollback
 }
 
+/**
+ * The engines a watch without a baseline looks at: every account the new boot has published so far (a union over the
+ * polls, so an empty first answer right after the boot does not freeze an empty set). With a baseline, that set.
+ */
+export function watchedEngines(given: ReadonlySet<string> | null, seen: ReadonlySet<string> | null, engines: unknown): Set<string> | null {
+  if (given) return new Set(given)
+  const all = new Set([...(seen ?? []), ...engineAccounts(engines)])
+  return all.size ? all : null
+}
+
+/**
+ * otto/mamoru#369: of two /metrics answers before a redeploy, the one to take everything from (sha, live flag, active
+ * accounts and the engine baseline): one with the operator view beats one without, and with both, one with `engines`.
+ * Nothing is mixed from two answers.
+ */
+export function betterPayload<P extends { operator?: unknown; engines?: unknown }>(current: P | null, next: P | null): P | null {
+  if (!next?.operator) return current
+  if (!current?.operator) return next
+  return !Array.isArray(current.engines) && Array.isArray(next.engines) ? next : current
+}
+
 /** Every engine account a /metrics `engines` lists: what a report-only watch without a baseline looks at. */
 export function engineAccounts(engines: unknown): Set<string> {
   return new Set((engineList(engines) ?? []).map((e) => e.account))
@@ -262,7 +283,9 @@ export type ObserveVerdict =
  * - `doubt` at the deadline: engines reviewed but never decided, without the evidence above. Reported, never rolled back.
  * - `wait` otherwise.
  */
-export function observeVerdict(tracks: ReadonlyMap<string, EngineTrack>, required: ReadonlySet<string>, timedOut: boolean): ObserveVerdict {
+export function observeVerdict(tracks: ReadonlyMap<string, EngineTrack>, required: ReadonlySet<string> | null, timedOut: boolean, fatal: string | null = null): ObserveVerdict {
+  // Nothing to watch is never "the engines observe": wait for engines, and say so at the deadline.
+  if (!required || required.size === 0) return timedOut ? { state: 'doubt', why: `no engine to watch${required ? ' (none was clean before the redeploy)' : ' (/metrics published none since the restart)'}${fatal ? `; journal: ${fatal}` : ''}` } : { state: 'wait' }
   const req = [...required]
   const regressed = req.filter((a) => {
     const t = tracks.get(a)
@@ -272,6 +295,8 @@ export function observeVerdict(tracks: ReadonlyMap<string, EngineTrack>, require
     const codes = [...new Set(regressed.map((a) => tracks.get(a)!.code))].join(', ')
     return { state: 'regression', why: `${regressed.length} of ${req.length} engines clean before the redeploy have not observed since it (${codes}, ${REGRESSION_REVIEWS}+ in a row over ${REGRESSION_SPAN_MS / 1000}+ s): ${regressed.slice(0, 4).join(', ')}${regressed.length > 4 ? ', ...' : ''}` }
   }
+  // A fatal-looking journal line: no early ok; regression still wins (above), anything else at the deadline is a doubt.
+  if (fatal) return timedOut ? { state: 'doubt', why: `journal after the boot: ${fatal}` } : { state: 'wait' }
   const quiet = req.filter((a) => tracks.get(a)?.lastReviewAt == null)
   const stuck = req.filter((a) => {
     const t = tracks.get(a)

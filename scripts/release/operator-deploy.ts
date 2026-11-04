@@ -16,7 +16,7 @@ import { appendFileSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { metricsSignature } from '../../packages/operator-auth/src/index.ts'
 import { fetchRefs, isAncestor } from './lib/git.ts'
 import { OP_LOCK, refuseLeftoverWork, requireLease, sessionName, underFlock, WORK_LOCK } from './lib/lease.ts'
-import { autoRollbackAllowed, engineAccounts, engineBaseline, envReads, fatalLines, healthy, loopsStarted, newEnv, observeTimeout, observeVerdict, refuseDeploy, signedOk, trackEngines, unitTarget, type EngineTrack, type MetricsView, type ObserveVerdict } from './lib/operator.ts'
+import { autoRollbackAllowed, betterPayload, engineBaseline, envReads, fatalLines, healthy, loopsStarted, newEnv, observeTimeout, observeVerdict, refuseDeploy, signedOk, trackEngines, unitTarget, watchedEngines, type EngineTrack, type MetricsView, type ObserveVerdict } from './lib/operator.ts'
 
 const HOME = process.env.HOME!
 const root = new URL('../../', import.meta.url).pathname
@@ -156,7 +156,8 @@ async function bringUp(target: string, installDeps: boolean): Promise<{ ok: bool
  */
 async function watchEngines(target: string, invocation: string, since: number, given: ReadonlySet<string> | null): Promise<ObserveVerdict | { state: 'boot'; why: string }> {
   // No baseline (report only): the engines the new boot publishes are watched.
-  let required = given
+  let required: Set<string> | null = given ? new Set(given) : null
+  let fatalSeen: string | null = null
   console.log(`boot healthy on ${target.slice(0, 7)}; watching ${given ? given.size : 'every'} engine(s) for up to ${OBSERVE_MS / 1000} s (${watchMode})`)
   const deadline = Date.now() + OBSERVE_MS
   let tracks: Map<string, EngineTrack> = new Map()
@@ -165,21 +166,18 @@ async function watchEngines(target: string, invocation: string, since: number, g
     const timedOut = Date.now() >= deadline
     const journal = invocation ? await $`journalctl --user _SYSTEMD_INVOCATION_ID=${invocation} --no-pager -o cat`.quiet().nothrow().text() : ''
     const fatal = fatalLines(journal)
-    // A restart is a crash: the boot failed. A fatal-looking line in a process that keeps running is only reported.
+    // A restart is a crash: the boot failed. A fatal-looking line in a process that keeps running is kept: the watch
+    // goes on, a regression still rolls back, and otherwise it is a doubt at the deadline (observeVerdict).
     if ((await $`systemctl --user show -p InvocationID --value ${unit}`.quiet().nothrow().text()).trim() !== invocation) return { state: 'boot', why: 'the unit restarted on its own after the redeploy (crash loop?)' }
-    if (fatal.length) return { state: 'doubt', why: `journal after the boot: ${fatal[0]!.slice(0, 200)}` }
+    fatalSeen ??= fatal[0]?.slice(0, 200) ?? null
     const p = await payload()
     if (p && healthy(p.operator ?? null, target, wasLive)) {
-      required ??= engineAccounts(p.engines)
+      required = watchedEngines(given, required, p.engines)
       tracks = trackEngines(tracks, p.engines, since)
-    } else if (timedOut) return { state: 'doubt', why: `/metrics did not answer with ${target.slice(0, 7)} at the end of the watch` }
-    if (!required) {
-      await Bun.sleep(5_000)
-      continue
-    }
-    const v = observeVerdict(tracks, required, timedOut)
+    } else if (timedOut) return { state: 'doubt', why: `/metrics did not answer with ${target.slice(0, 7)} at the end of the watch${fatalSeen ? `; journal: ${fatalSeen}` : ''}` }
+    const v = observeVerdict(tracks, required, timedOut, fatalSeen)
     if (v.state !== 'wait') return v
-    const pending = [...required].filter((a) => !tracks.get(a)?.observed)
+    const pending = [...(required ?? [])].filter((a) => !tracks.get(a)?.observed)
     const now = `waiting on ${pending.length} engine(s): ${pending.slice(0, 6).map((a) => `${a}${tracks.get(a)?.code ? ` ${tracks.get(a)!.code}` : ''}`).join(', ')}${pending.length > 6 ? ', ...' : ''}`
     if (now !== last) console.log(now)
     last = now
@@ -197,22 +195,22 @@ async function note83(text: string): Promise<void> {
   await $`tk comment forgejo:otto/mamoru#83 ${`${at} UTC [operator:deploy] ${text}`}`.quiet().nothrow()
 }
 
-const beforePayload = await payload()
-const before = beforePayload?.operator ?? {}
-// otto/mamoru#369: the engines clean now are the ones the new boot is watched on. A baseline that cannot be read
-// (asked again a few times) never turns into "require every engine": the redeploy then only reports.
-let baselineEngines = beforePayload?.engines
-for (let i = 0; i < 3 && !Array.isArray(baselineEngines); i++) {
+// otto/mamoru#369: one /metrics answer gives the running sha, the live flag, the active accounts and the engine
+// baseline, asked again a few times while it lacks the operator view or `engines`. No operator view: nothing moves
+// (refused below). No `engines`: never "require every engine": the redeploy then only reports.
+let beforePayload = await payload()
+for (let i = 0; i < 3 && !(beforePayload?.operator && Array.isArray(beforePayload.engines)); i++) {
   await Bun.sleep(2_000)
-  baselineEngines = (await payload())?.engines
+  beforePayload = betterPayload(beforePayload, await payload())
 }
-const baseline = engineBaseline(baselineEngines)
+const before: MetricsView & { accounts?: { active?: number } } = beforePayload?.operator ?? {}
+const baseline = engineBaseline(beforePayload?.engines)
 // Rolls back by itself only with a baseline and never after an explicit --rollback (there is nothing better to go to).
 const autoRollback = autoRollbackAllowed(baseline, rollback)
 const watchMode = autoRollback ? 'roll back by itself on a regression' : `report only, no automatic rollback (${rollback ? 'this is a --rollback' : '/metrics gave no engines before the redeploy'})`
 const wasLive = before.live ?? true
 // Engine loops the new boot must start: one per account active now.
-const activeAccounts = (before as { accounts?: { active?: number } }).accounts?.active ?? 0
+const activeAccounts = before.accounts?.active ?? 0
 
 await fetchRefs(root, 'main')
 // What runs is what /metrics says, not what is checked out: a run that died after its checkout leaves the two apart.

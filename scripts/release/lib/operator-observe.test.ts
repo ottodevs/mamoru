@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { autoRollbackAllowed, engineAccounts, engineBaseline, hardFailure, OBSERVE_TIMEOUT_MS, observeTimeout, observeVerdict, REGRESSION_REVIEWS, REGRESSION_SPAN_MS, trackEngines, type EngineTrack, type EngineView } from './operator.ts'
+import { autoRollbackAllowed, betterPayload, engineAccounts, engineBaseline, hardFailure, OBSERVE_TIMEOUT_MS, observeTimeout, observeVerdict, REGRESSION_REVIEWS, REGRESSION_SPAN_MS, trackEngines, watchedEngines, type EngineTrack, type EngineView } from './operator.ts'
 
 // otto/mamoru#369: operator:deploy watches the engines after the restart and rolls back by itself only on positive
 // evidence of a regression.
@@ -88,8 +88,53 @@ describe('observeVerdict', () => {
     expect(observeVerdict(tracks, new Set(['a', 'b']), true)).toEqual({ state: 'ok', quiet: ['b'] })
   })
 
-  test('nothing to watch is ok', () => {
-    expect(observeVerdict(new Map(), new Set(), false)).toEqual({ state: 'ok', quiet: [] })
+  test('P1-1: nothing to watch is never ok: wait, then a doubt at the deadline', () => {
+    expect(observeVerdict(new Map(), new Set(), false)).toEqual({ state: 'wait' })
+    expect(observeVerdict(new Map(), null, false)).toEqual({ state: 'wait' })
+    expect(observeVerdict(new Map(), new Set(), true).state).toBe('doubt')
+    expect(observeVerdict(new Map(), null, true).state).toBe('doubt')
+  })
+
+  test('P1-1: without a baseline the watched set is the union of every poll; an empty first answer freezes nothing', () => {
+    let seen = watchedEngines(null, null, [])
+    expect(seen).toBeNull()
+    seen = watchedEngines(null, seen, 'not an array')
+    expect(seen).toBeNull()
+    seen = watchedEngines(null, seen, [failed(MONAD[0]!, 5, 1)])
+    seen = watchedEngines(null, seen, [failed(MONAD[1]!, 25, 1)])
+    expect([...seen!].sort()).toEqual([MONAD[0]!, MONAD[1]!].sort())
+    // The 4 Nov shape behind an empty first poll is still a regression, not "engines observe after 0 s".
+    const polls: EngineView[][] = [[], ...Array.from({ length: 8 }, (_, i) => MONAD.map((a) => failed(a, 1 + i * 20, i + 1)))]
+    let set: Set<string> | null = null
+    for (const p of polls) set = watchedEngines(null, set, p)
+    expect(observeVerdict(watch(polls), set, false).state).toBe('regression')
+    // With a baseline the set is the baseline's.
+    expect([...watchedEngines(new Set(['a']), null, [decided('b', 5)])!]).toEqual(['a'])
+  })
+
+  test('P1-2: a fatal-looking line does not hide a regression; without one it is a doubt at the deadline, never an early ok', () => {
+    const broken = Array.from({ length: 8 }, (_, i) => MONAD.map((a) => failed(a, 1 + i * 20, i + 1)))
+    expect(observeVerdict(watch(broken), new Set(MONAD), false, 'error: unhandled rejection').state).toBe('regression')
+    const fine = watch([MONAD.map((a) => decided(a, 5))])
+    expect(observeVerdict(fine, new Set(MONAD), false, 'error: unhandled rejection')).toEqual({ state: 'wait' })
+    const v = observeVerdict(fine, new Set(MONAD), true, 'error: unhandled rejection')
+    expect(v.state === 'doubt' && v.why).toContain('unhandled rejection')
+  })
+})
+
+describe('P1-3: the baseline payload', () => {
+  type P = { operator?: { gitSha: string; accounts?: { active: number } }; engines?: unknown }
+  const noOp: P = { engines: [] }
+  const noEngines: P = { operator: { gitSha: 'aaaaaaa', accounts: { active: 2 } } }
+  const full: P = { operator: { gitSha: 'aaaaaaa', accounts: { active: 3 } }, engines: [decided('a', -5)] }
+  test('everything comes from one answer: the one with the operator view, then the one with engines', () => {
+    expect(betterPayload<P>(null, noEngines)).toBe(noEngines)
+    expect(betterPayload<P>(noOp, noEngines)).toBe(noEngines)
+    expect(betterPayload<P>(noEngines, full)).toBe(full)
+    expect(betterPayload<P>(full, noEngines)).toBe(full)
+    expect(betterPayload<P>(noEngines, null)).toBe(noEngines)
+    // No operator view at all: nothing to take (operator-deploy.ts refuses to move).
+    expect(betterPayload<P>(null, noOp)).toBeNull()
   })
 })
 
