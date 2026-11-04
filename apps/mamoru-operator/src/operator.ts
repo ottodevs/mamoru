@@ -453,6 +453,9 @@ const SAFE_ERROR_MESSAGE = {
   OPERATOR_BUSY: 'the operator is busy, try again in a moment',
 } as const
 
+/** otto/mamoru#358: blocks of a held position's history one Monad review reads (200 log requests of 100 blocks). */
+const MONAD_HISTORY_STEP_BLOCKS = 20_000n
+
 export class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -7447,6 +7450,8 @@ export class Operator {
         nonceLane: 0,
         depositsAfter: BigInt(acc.depositsAfter),
         historyFromBlock: BigInt(acc.historyFromBlock),
+        // otto/mamoru#358: Monad's providers serve 100-block log ranges; one read of a position's whole history timed out.
+        ...(this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? { historyStepBlocks: MONAD_HISTORY_STEP_BLOCKS } : {}),
         sessions,
         priorIncluded,
         carried: acc.carried ?? [],

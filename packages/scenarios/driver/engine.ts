@@ -16,6 +16,7 @@ import {
   SharedGuardReads,
   principalOwedBefore,
   readPositionHistory,
+  type ChainPositionEvent,
   readUserOpEvent,
   rpcClient,
   simulateFromEntryPoint,
@@ -368,6 +369,13 @@ export type EngineConfig = {
   gasModel?: 'gas_used' | 'gas_limit'
   /** First block of the managed positions' history on a restarted engine. Default: depositsAfter. */
   historyFromBlock?: bigint
+  /**
+   * otto/mamoru#358: at most this many blocks of a held position's history are read per review, for a position the
+   * observation's cursor does not follow (one admitted before this run). Set where one read of the whole history times
+   * out (Monad: 100-block log ranges); a harvest then waits until it is read. Absent: the whole remaining range at once,
+   * and a harvest before that falls back to the full read, as before.
+   */
+  historyStepBlocks?: bigint
   /** Session uses already confirmed on chain before this engine started (restart): replayed into the ledger so caps and usage limits count them. */
   priorIncluded?: { permissionId: Hex; calls: Execution[] }[]
   /**
@@ -652,6 +660,8 @@ export class Engine {
   readonly historyFromBlock: bigint
   /** Position history read so far: each review scans only the blocks after it. */
   private readonly historyCursor = historyCursor()
+  /** otto/mamoru#358: history of held positions the observation's cursor does not follow, read up to `through` (a safe block). */
+  private readonly heldHistory = new Map<string, { through: bigint; events: ChainPositionEvent[] }>()
   depositsAfter: bigint
   lastObservation?: Observation
   /** Live: premises the bundler rejected as unincludable, held back until `until` (block timestamp, seconds). */
@@ -933,6 +943,7 @@ export class Engine {
     }
     if (this.cfg.policy.range.lazy) obs = withOutOfRangeSince(obs, this.outOfRange)
     this.lastObservation = obs
+    await this.advanceHeldHistory(obs)
     const decision = decide(obs, this.cfg.policy)
     // #101: report only when the set of rules that would fire changes, not on every review.
     const shadowSig = (decision.shadowRisk ?? []).map((r) => `${r.code}:${r.pool}:${r.window ?? ''}`).join(',')
@@ -1384,7 +1395,7 @@ export class Engine {
       const collect = positionEvents(logs, this.registry).find((e) => e.kind === 'collect' && e.tokenId === proposal.tokenId)
       if (!collect) throw new Error(`${op.opId}: confirmed harvest without a Collect of ${proposal.tokenId}`)
       // FR-PRJ-003: the principal owed right before this Collect, folded from the canonical history, owner actions included.
-      const owed = await this.principalOwed(proposal.tokenId, { block: inc.blockNumber, logIndex: collect.logIndex })
+      const owed = await this.principalOwed(proposal.tokenId, { block: inc.blockNumber, logIndex: collect.logIndex }, true)
       this.savingsLog.push(
         harvestRow({
           opId: op.opId,
@@ -2057,22 +2068,60 @@ export class Engine {
   }
 
   /**
-   * Principal owed per tokenId just before (block, logIndex), as `principalOwedBefore`. otto/mamoru#358: from the
-   * observation's history cursor (read from activation, kept only up to a safe block whose hash held) plus the few
-   * blocks after it, not from activation again: on Monad (100-block log ranges) that re-read was thousands of requests
-   * and every harvest timed out. A tokenId the cursor does not hold is read in full, as before.
+   * otto/mamoru#358: under `historyStepBlocks`, reads one more slice of the history of each held position
+   * the observation's cursor does not follow, up to the observation's safe block. A slice counts only if the block it
+   * ends at has the same hash after the read as before it. Best effort: a slice that fails is read again next review.
    */
-  private async principalOwed(tokenId: bigint, at: { block: bigint; logIndex: number }): Promise<Map<bigint, Pair>> {
+  private async advanceHeldHistory(obs: Observation): Promise<void> {
+    const step = this.cfg.historyStepBlocks
+    // Only where it is set: elsewhere (Base) nothing is read here, and a harvest reads as before.
+    if (step === undefined) return
     const c = this.historyCursor
-    if (c.fromBlock !== this.historyFromBlock || !c.ids.has(String(tokenId)) || c.through < this.historyFromBlock) {
-      return principalOwedBefore(this.client, [tokenId], this.historyFromBlock, at, this.registry)
+    const safe = obs.safeBlock.number
+    for (const { tokenId } of obs.positions) {
+      if (c.fromBlock === this.historyFromBlock && c.ids.has(String(tokenId))) continue
+      const h = this.heldHistory.get(String(tokenId)) ?? { through: this.historyFromBlock - 1n, events: [] }
+      // Caught up within a step: the tail read at harvest time covers the rest.
+      if (h.through >= this.historyFromBlock && safe - h.through <= step) continue
+      const to = h.through + step < safe ? h.through + step : safe
+      try {
+        const before = (await this.client.getBlock({ blockNumber: to })).hash
+        const events = await readPositionHistory(this.client, [tokenId], h.through + 1n, to, this.registry)
+        if ((await this.client.getBlock({ blockNumber: to })).hash !== before) continue
+        this.heldHistory.set(String(tokenId), { through: to, events: [...h.events, ...events] })
+      } catch {
+        // read again on the next review
+      }
     }
+  }
+
+  /**
+   * Principal owed per tokenId just before (block, logIndex), as `principalOwedBefore`. otto/mamoru#358: from a history
+   * already read (the observation's cursor, or `heldHistory`), both kept only up to a safe block whose hash held, plus
+   * the few blocks after it, never from activation again: on Monad (100-block log ranges) that re-read was thousands of
+   * requests and every harvest timed out. Without one, or one too far behind: under `historyStepBlocks` the prepare
+   * waits (OBS_RPC_UNAVAILABLE, the history is still being read); otherwise, and always for `full`, the full read.
+   */
+  private async principalOwed(tokenId: bigint, at: { block: bigint; logIndex: number }, full = false): Promise<Map<bigint, Pair>> {
+    const c = this.historyCursor
+    const held = this.heldHistory.get(String(tokenId))
+    const read =
+      c.fromBlock === this.historyFromBlock && c.ids.has(String(tokenId)) && c.through >= this.historyFromBlock
+        ? { through: c.through, events: c.events }
+        : held && held.through >= this.historyFromBlock
+          ? held
+          : null
     // Nothing at or after (block, 0) is used: do not ask for a block that may not exist yet.
     const end = at.logIndex === 0 ? at.block - 1n : at.block
-    // Only what the cursor answers for (up to `through`), then the tail after it: no event is counted twice. The fold
+    const step = this.cfg.historyStepBlocks
+    if (!read || (step !== undefined && end - read.through > step)) {
+      if (step === undefined || full) return principalOwedBefore(this.client, [tokenId], this.historyFromBlock, at, this.registry)
+      throw new ReasonError('OBS_RPC_UNAVAILABLE', `position ${tokenId}: its history is read to block ${read?.through ?? this.historyFromBlock - 1n} of ${end}, one slice per review`)
+    }
+    // Only what the read answers for (up to `through`), then the tail after it: no event is counted twice. The fold
     // clamps a collect against what is owed, so it runs in chain order, as `readPositionHistory` gives it.
-    const known = c.events.filter((e) => e.tokenId === tokenId && e.blockNumber <= (c.through < end ? c.through : end))
-    const tail = c.through < end ? await readPositionHistory(this.client, [tokenId], c.through + 1n, end, this.registry) : []
+    const known = read.events.filter((e) => e.tokenId === tokenId && e.blockNumber <= (read.through < end ? read.through : end))
+    const tail = read.through < end ? await readPositionHistory(this.client, [tokenId], read.through + 1n, end, this.registry) : []
     const history = [...known, ...tail].sort((a, b) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1))
     return applyPrincipal(new Map(), history.filter((e) => e.blockNumber < at.block || e.logIndex < at.logIndex))
   }

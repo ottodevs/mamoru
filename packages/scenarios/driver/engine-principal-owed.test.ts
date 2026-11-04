@@ -24,9 +24,10 @@ const decreaseLog = (blockNumber: bigint, logIndex: number, amount0: bigint) => 
   removed: false,
 })
 
-function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; events: ChainPositionEvent[] }, tailLogs: unknown[] = []) {
+function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; events: ChainPositionEvent[] }, tailLogs: unknown[] = [], cfg: { historyStepBlocks?: bigint } = {}, hashOf: (n: bigint) => Hex = () => '0xaa') {
   const ranges: { from: bigint; to: bigint }[] = []
   const client = {
+    getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({ hash: hashOf(blockNumber) }),
     request: async ({ method, params }: { method: string; params: [{ fromBlock: Hex; toBlock: Hex }] }) => {
       if (method !== 'eth_getLogs') throw new Error(`unexpected ${method}`)
       ranges.push({ from: BigInt(params[0].fromBlock), to: BigInt(params[0].toBlock) })
@@ -37,10 +38,13 @@ function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; eve
     client,
     registry: baseRegistry,
     historyFromBlock: 100n,
+    cfg,
+    heldHistory: new Map(),
     historyCursor: { fromBlock: cursor.fromBlock, through: cursor.through, hash: '0x01', ids: new Set(cursor.ids), events: cursor.events },
   })
-  const owed = (tokenId: bigint, at: { block: bigint; logIndex: number }) => (e as unknown as { principalOwed: (t: bigint, a: typeof at) => Promise<Map<bigint, [bigint, bigint]>> }).principalOwed(tokenId, at)
-  return { owed, ranges }
+  const owed = (tokenId: bigint, at: { block: bigint; logIndex: number }, full = false) => (e as unknown as { principalOwed: (t: bigint, a: typeof at, f: boolean) => Promise<Map<bigint, [bigint, bigint]>> }).principalOwed(tokenId, at, full)
+  const advance = (safe: bigint, tokenIds: bigint[]) => (e as unknown as { advanceHeldHistory: (o: unknown) => Promise<void> }).advanceHeldHistory({ safeBlock: { number: safe, hash: '0xaa' }, positions: tokenIds.map((tokenId) => ({ tokenId })) })
+  return { owed, ranges, advance }
 }
 
 describe('principal owed from the observation cursor (otto/mamoru#358)', () => {
@@ -77,5 +81,44 @@ describe('principal owed: the cursor and its tail together (review of #358)', ()
     const { owed, ranges } = engine({ fromBlock: 100n, through: 900_000n, ids: ['7'], events: [ev('collect', 300n, 20n), ev('decrease', 200n, 50n)] }, [decreaseLog(900_005n, 1, 4n), decreaseLog(900_005n, 4, 9n)])
     expect((await owed(7n, { block: 900_005n, logIndex: 3 })).get(7n)).toEqual([34n, 0n])
     expect(ranges).toEqual([{ from: 900_001n, to: 900_005n }])
+  })
+})
+
+describe('a held position the cursor does not follow, read one slice per review (otto/mamoru#358, Monad)', () => {
+  const none = { fromBlock: 100n, through: 900_000n, ids: [] as string[], events: [] as ChainPositionEvent[] }
+
+  test('under historyStepBlocks: slices of the step up to the safe block, then the harvest folds them plus the tail', async () => {
+    const { owed, ranges, advance } = engine(none, [], { historyStepBlocks: 400_000n })
+    await expect(owed(7n, { block: 900_010n, logIndex: 0 })).rejects.toMatchObject({ code: 'OBS_RPC_UNAVAILABLE' })
+    expect(ranges).toEqual([])
+    await advance(900_000n, [7n])
+    await advance(900_000n, [7n])
+    await advance(900_000n, [7n])
+    // Within a step of the safe block it stops: the tail at harvest time reads the rest (at most a step).
+    expect(ranges).toEqual([
+      { from: 100n, to: 400_099n },
+      { from: 400_100n, to: 800_099n },
+    ])
+    ranges.length = 0
+    await owed(7n, { block: 900_010n, logIndex: 0 })
+    expect(ranges).toEqual([{ from: 800_100n, to: 900_009n }])
+  })
+
+  test('a slice whose end block changed hash during the read does not count', async () => {
+    let n = 0
+    const { owed, advance } = engine(none, [], { historyStepBlocks: 2_000_000n }, () => (n++ === 0 ? '0xaa' : '0xbb'))
+    await advance(900_000n, [7n])
+    await expect(owed(7n, { block: 900_010n, logIndex: 0 })).rejects.toMatchObject({ code: 'OBS_RPC_UNAVAILABLE' })
+  })
+
+  test('the confirm path (`full`) and chains without a step read in full, as before; without a step nothing is read ahead', async () => {
+    const a = engine(none, [], { historyStepBlocks: 400_000n })
+    await a.owed(7n, { block: 900_010n, logIndex: 0 }, true)
+    expect(a.ranges).toEqual([{ from: 100n, to: 900_009n }])
+    const b = engine(none)
+    await b.advance(900_000n, [7n])
+    expect(b.ranges).toEqual([])
+    await b.owed(7n, { block: 900_010n, logIndex: 0 })
+    expect(b.ranges).toEqual([{ from: 100n, to: 900_009n }])
   })
 })
