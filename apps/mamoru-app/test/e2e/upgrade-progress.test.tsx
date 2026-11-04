@@ -51,6 +51,16 @@ describe('the steps at each moment of the move', () => {
   })
 })
 
+describe('times never say a later step finished first', () => {
+  test('Base kept placing after the burn: the rebalance time is before the send, the later work has its own time', () => {
+    const j = journey('done')
+    const at = (id: string) => Date.parse(j.steps.find((s) => s.id === id)!.at!)
+    expect(at('rebalance')).toBeLessThanOrEqual(at('bridge'))
+    expect(at('bridge')).toBeLessThanOrEqual(at('arrive'))
+    expect(j.steps.find((s) => s.id === 'rebalance')!.detail).toMatch(/^Base finished its part at .+, while the Monad share was on its way\.$/)
+  })
+})
+
 describe('the card', () => {
   test('step n of 6, a bar, and one row per step; no reason code anywhere', () => {
     const { html, text } = render(<UpgradeProgress upgrade={journey('bridging')} now={NOW} />)

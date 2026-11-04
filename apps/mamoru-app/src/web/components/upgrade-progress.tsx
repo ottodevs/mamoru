@@ -26,7 +26,7 @@ const SR: Record<StepState, string> = { done: 'Done: ', active: 'Now: ', waiting
 
 function Ext() {
   return (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+    <svg className="inline-block align-[-1px]" width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
       <path d="M9 2h5v5M14 2 7 9M12 10v4H2V4h4" />
     </svg>
   )

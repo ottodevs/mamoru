@@ -3,6 +3,7 @@ import { opLine } from './ops.ts'
 import { isMultichainTarget } from './policies.ts'
 import { chainLabel } from './positions.ts'
 import { usd, MIN_ENTRY_USDC } from './money.ts'
+import { clockOrDate } from './time.ts'
 import { transferNow, transferOfBridge, transferOfFlight, type Transfer } from './transfer.ts'
 
 // otto/mamoru#263: the move of a running account to the mix with Monad, as the steps it really takes (Brais's beta, 1 Nov:
@@ -43,6 +44,7 @@ export const upgradeCopy = {
   settingUp: 'Setting up your Safe on Monad',
   rebalancing: 'Mamoru is adjusting your Base positions',
   rebalanceNext: 'Starts once your approval is confirmed',
+  finishedAfter: (time: string) => `Base finished its part at ${time}, while the Monad share was on its way.`,
   waitingLp: (amount: string) => `${amount} USDC is in your Monad Safe, waiting to be invested.`,
   step: (n: number, of: number) => `Step ${n} of ${of}`,
   headline: {
@@ -115,11 +117,18 @@ export function upgradeJourney(f: FundingView | undefined, ops: OpView[], now: n
   }
   const moves = after.filter((o) => !o.bridge)
   const busy = moves.some((o) => o.state === 'submitted') || (!!f.progress && f.progress.step !== 'bridging')
+  // Base keeps placing its own share while the Monad share travels (Brais: the WETH swap and mint landed after the burn).
+  // The step's time is its last move before the burn, so no later step reads as finished first; what Base did after the
+  // burn is said with its own real time.
+  const confirmedMoves = moves.filter((o) => o.state === 'confirmed')
+  const burnAt = transfer?.burnedAt ? t(transfer.burnedAt) : null
+  const beforeBurn = burnAt === null ? confirmedMoves : confirmedMoves.filter((o) => t(o.updatedAt) <= burnAt)
+  const afterBurn = burnAt === null ? [] : confirmedMoves.filter((o) => t(o.updatedAt) > burnAt)
   const rebalance: UpgradeStep = {
     id: 'rebalance', label: upgradeCopy.labels.rebalance,
     state: !approved ? 'pending' : busy ? 'active' : moves.length || transfer ? 'done' : 'active',
-    at: moves.filter((o) => o.state === 'confirmed').at(-1)?.updatedAt,
-    ...(!approved ? {} : busy || (!moves.length && !transfer) ? { detail: upgradeCopy.rebalancing } : {}),
+    at: beforeBurn.at(-1)?.updatedAt,
+    ...(!approved ? {} : busy || (!moves.length && !transfer) ? { detail: upgradeCopy.rebalancing } : afterBurn.length ? { detail: upgradeCopy.finishedAfter(clockOrDate(afterBurn.at(-1)!.updatedAt)) } : {}),
     links: moves.flatMap((o) => (o.txHash ? [{ chainId: 8453, tx: o.txHash, text: opLine(o) }] : [])),
   }
   const sent = !!transfer && transfer.step >= 1
