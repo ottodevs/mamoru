@@ -750,6 +750,13 @@ export async function bootOperator(o: BootOptions) {
   if (Object.keys(remotePeers).length) setInterval(() => void operator.tickRemotes(), 60_000).unref?.()
   // otto/mamoru#277: each relayer's native balance is read on this minute tick, at most every 10 min (metrics.ts RELAYER_READ_MS).
   setInterval(() => void operator.tickRelayers(), 60_000).unref?.()
+  // otto/mamoru#367: held-position history read between reviews (only engines with a history step: Monad).
+  let heldTick = false
+  setInterval(() => {
+    if (heldTick) return
+    heldTick = true
+    void operator.tickHeldHistory().finally(() => (heldTick = false))
+  }, 60_000).unref?.()
   // otto/mamoru#293: V4 homes register, provision and follow the readiness of their remote every minute.
   if (oneAuth && chainId === BASE_CHAIN_ID) setInterval(() => void operator.tickOneAuth(), 60_000).unref?.()
   // otto/mamoru#278: a V4 remote Safe's burn home is settled against the chain every minute.

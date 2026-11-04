@@ -1158,6 +1158,14 @@ export class Operator {
    * 2 x (gasReserveWei + topUpMarginWei), what relayerCanActivate and the top-ups count for one Safe. A failed read keeps
    * the last value and never throws into the tick.
    */
+  /** otto/mamoru#367: each running engine reads its held positions' history between reviews (Monad only: a step is set). */
+  async tickHeldHistory(): Promise<void> {
+    for (const [key, runner] of this.runners) {
+      if (runner.stopped) continue
+      await runner.engine.readHeldHistory().catch((e: unknown) => logErr(`[engine ${key}] held history:`, e))
+    }
+  }
+
   async tickRelayers(): Promise<void> {
     const at = Date.now()
     if (at - this.relayerReadAt >= RELAYER_READ_MS) {

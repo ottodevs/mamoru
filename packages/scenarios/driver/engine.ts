@@ -688,6 +688,7 @@ export class Engine {
   private readonly historyCursor = historyCursor()
   /** otto/mamoru#358: history of held positions the observation's cursor does not follow, read up to `through` (a safe block). */
   private heldTurn = 0
+  private heldReading = false
   /** `checked`: its last block was found canonical by this process (a seed is not, until a review checks it). */
   private readonly heldHistory = new Map<string, HeldHistory & { checked: boolean }>()
   depositsAfter: bigint
@@ -2114,10 +2115,25 @@ export class Engine {
    * each one lands and `historyReadMs` lasts; without it, one slice per review.
    */
   private async catchUpHeldHistory(obs: Observation): Promise<void> {
-    const until = Date.now() + (this.cfg.historyReadMs ?? 0)
-    let more: boolean
-    do more = await this.advanceHeldHistory(obs)
-    while (more && Date.now() < until)
+    // One reader at a time: the review's and the operator's timer (`readHeldHistory`) never interleave on the map.
+    if (this.heldReading) return
+    this.heldReading = true
+    try {
+      const until = Date.now() + (this.cfg.historyReadMs ?? 0)
+      let more: boolean
+      do more = await this.advanceHeldHistory(obs)
+      while (more && Date.now() < until)
+    } finally {
+      this.heldReading = false
+    }
+  }
+
+  /**
+   * otto/mamoru#367: the held-history catch-up on the operator's own timer, between reviews (budget-limited to one per
+   * 15 min, they left a Monad position days behind), against the last review's observation. Nothing before a review.
+   */
+  async readHeldHistory(): Promise<void> {
+    if (this.lastObservation && this.cfg.historyStepBlocks !== undefined) await this.catchUpHeldHistory(this.lastObservation)
   }
 
   private async advanceHeldHistory(obs: Observation): Promise<boolean> {
