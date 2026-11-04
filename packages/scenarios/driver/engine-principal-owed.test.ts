@@ -132,6 +132,14 @@ describe('a held position the cursor does not follow, read one slice per review 
     ])
   })
 
+  test('gate: a safe head below activation reads nothing and never moves the read back', async () => {
+    const { ranges, advance } = engine(none, [], { historyStepBlocks: 400_000n })
+    await advance(50n, [7n])
+    expect(ranges).toEqual([])
+    await advance(900_000n, [7n])
+    expect(ranges).toEqual([{ from: 100n, to: 400_099n }])
+  })
+
   test('the confirm path (`full`) and chains without a step read in full, as before; without a step nothing is read ahead', async () => {
     const a = engine(none, [], { historyStepBlocks: 400_000n })
     await a.owed(7n, { block: 900_010n, logIndex: 0 }, true)

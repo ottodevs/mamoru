@@ -2078,6 +2078,8 @@ export class Engine {
     if (step === undefined) return
     const c = this.historyCursor
     const safe = obs.safeBlock.number
+    // A safe head not yet past activation has nothing to read (and must not move a slice back before it).
+    if (safe < this.historyFromBlock) return
     for (const { tokenId } of obs.positions) {
       if (c.fromBlock === this.historyFromBlock && c.ids.has(String(tokenId))) continue
       let h = this.heldHistory.get(String(tokenId)) ?? { through: this.historyFromBlock - 1n, hash: null, events: [] }
@@ -2126,7 +2128,7 @@ export class Engine {
     }
     // Only what the read answers for (up to `through`), then the tail after it: no event is counted twice. The fold
     // clamps a collect against what is owed, so it runs in chain order, as `readPositionHistory` gives it.
-    const known = read.events.filter((e) => e.tokenId === tokenId && e.blockNumber <= (read.through < end ? read.through : end))
+    const known = read.events.filter((e) => e.tokenId === tokenId && e.blockNumber >= this.historyFromBlock && e.blockNumber <= (read.through < end ? read.through : end))
     const tail = read.through < end ? await readPositionHistory(this.client, [tokenId], read.through + 1n, end, this.registry) : []
     const history = [...known, ...tail].sort((a, b) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1))
     return applyPrincipal(new Map(), history.filter((e) => e.blockNumber < at.block || e.logIndex < at.logIndex))
