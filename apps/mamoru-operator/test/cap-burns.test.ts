@@ -416,16 +416,23 @@ describe('otto/mamoru#332 review r2', () => {
     // Cover 100 asked first, cover 90 after it (the running read does not stand for 90): 90 completes first.
     const slow = r.read(SAFE, 30_000, cov(100n))
     const fast = r.read(SAFE, 30_000, cov(90n))
+    // Both reads sign their request asynchronously (HMAC), so the order the fetches arrive in is not the order the reads
+    // were asked in (otto/mamoru#362): the pending request is looked up by its path, never by its position.
     const sent = async (n: number) => {
-      for (let i = 0; i < 100 && pending.length < n; i++) await Bun.sleep(1)
+      for (let i = 0; i < 1_000 && pending.length < n; i++) await Bun.sleep(1)
+    }
+    const request = (path: string) => {
+      const p = pending.find((x) => x.path === path)
+      if (!p) throw new Error(`no request sent for ${path}`)
+      return p
     }
     await sent(2)
-    expect(pending.map((p) => p.path)).toEqual([exposurePath(SAFE, cov(100n)), exposurePath(SAFE, cov(90n))])
+    expect(pending.map((p) => p.path).sort()).toEqual([exposurePath(SAFE, cov(100n)), exposurePath(SAFE, cov(90n))].sort())
     clock.t += 10
-    pending[1]!.done('90')
+    request(exposurePath(SAFE, cov(90n))).done('90')
     await fast
     clock.t += 10
-    pending[0]!.done('100')
+    request(exposurePath(SAFE, cov(100n))).done('100')
     await slow
     // The later, narrower answer (cover 100) did not evict the broader one (cover 90): an ask at 95 still has an answer.
     expect(idle(r.cached(SAFE, 30_000, cov(95n)))).toBe(90n)
@@ -435,7 +442,7 @@ describe('otto/mamoru#332 review r2', () => {
     const all3 = r.read(SAFE, 30_000)
     await sent(3)
     clock.t += 10
-    pending[2]!.done('1')
+    request(exposurePath(SAFE)).done('1')
     await all3
     expect(idle(r.cached(SAFE, 30_000, cov(89n)))).toBe(1n)
     expect(idle(r.cached(SAFE, 30_000, cov(100n)))).toBe(1n)

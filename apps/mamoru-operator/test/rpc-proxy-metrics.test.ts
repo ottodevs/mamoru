@@ -567,11 +567,16 @@ describe('a refused transaction says why', () => {
 
   test('a log that throws costs no answer, alone or in a batch', async () => {
     const error = { code: -32000, message: 'nonce too low' }
-    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, error } }))
+    let asked = 0
+    const upstream = fakeUpstream((body) => ((asked += 1), { json: { jsonrpc: '2.0', id: body.id, error } }))
     const proxy = startRpcProxy(upstream.url, {})
     const log = console.log
+    // console.log is the whole process's: a line from anything else running in it (another file's leftover work) is not
+    // this proxy's. Count the proxy's own refusal lines, and compare them with the sends the upstream received
+    // (otto/mamoru#362: a bare counter of every call read 4 for 3 sends).
     let thrown = 0
-    console.log = () => {
+    console.log = (...a: unknown[]) => {
+      if (!String(a[0]).startsWith('[rpc] eth_sendRawTransaction refused')) return
       thrown++
       throw new Error('sink down')
     }
@@ -582,7 +587,8 @@ describe('a refused transaction says why', () => {
       expect(one.error).toEqual(error)
       expect(many.map((m) => m.id).sort()).toEqual([2, 3])
       for (const m of many) expect(m.error).toEqual(error)
-      expect(thrown).toBe(3)
+      expect(asked).toBe(3)
+      expect(thrown).toBe(asked)
     } finally {
       console.log = log
       proxy.stop()
