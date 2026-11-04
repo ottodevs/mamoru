@@ -44,7 +44,7 @@ import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSess
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
-import { Engine, engineGas, v4EngineGas, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
+import { Engine, engineGas, isTransportError, v4EngineGas, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
 import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
 import { buildMoneyMap, chainLegOf, returnRows, unreadLeg, type ReturnLeg } from './money-map.ts'
@@ -455,6 +455,13 @@ const SAFE_ERROR_MESSAGE = {
 
 /** otto/mamoru#358: blocks of a held position's history one Monad review reads (200 log requests of 100 blocks). */
 const MONAD_HISTORY_STEP_BLOCKS = 20_000n
+
+/** Names of an error and its `.cause` chain (bounded). */
+function causeNames(e: unknown): string[] {
+  const out: string[] = []
+  for (let x: unknown = e; x && out.length < 8; x = (x as { cause?: unknown }).cause) out.push(String((x as { name?: unknown }).name))
+  return out
+}
 
 export class HttpError extends Error {
   constructor(
@@ -7357,7 +7364,11 @@ export class Operator {
     if (!(await readSafeNonce(this.client, live.safe)).deployed) {
       const { hash, receipt } = await this.relayer.send(deployCall(live))
       console.log(`[remote] deploy ${live.safe} tx ${hash} ${receipt.status}`)
-      if (receipt.status !== 'success') throw new HttpError(502, 'DEPLOY_FAILED', 'the Safe could not be created just now: it is retried')
+      // otto/mamoru#275 (gate r1): a retry whose code read hit a node behind an earlier deploy sends it again, and the
+      // factory reverts on an address that has code. The Safe is there: the checks below decide, at that block.
+      if (receipt.status !== 'success' && !(await this.client.getCode({ address: live.safe, blockNumber: receipt.blockNumber }).catch(() => undefined))?.slice(2)) {
+        throw new HttpError(502, 'DEPLOY_FAILED', 'the Safe could not be created just now: it is retried')
+      }
       deployedAt = receipt.blockNumber
     }
     // otto/mamoru#275: a load-balanced provider can answer from a node that has not seen the deploy yet (live 1 Nov:
@@ -7368,6 +7379,9 @@ export class Operator {
     try {
       checked = await this.remoteChecks(live.safe, ctx.owners as Address[], r ? r.permissionIds : [r4!.permissionId], block)
     } catch (e) {
+      // Only a read the provider could not answer (no data yet, a timeout, a failed exchange) is retried; anything else
+      // (a revert, a decode error) fails as before.
+      if (!isTransportError(e) && !causeNames(e).includes('ContractFunctionZeroDataError')) throw e
       logErr(`[remote] ${ctx.accountKey} ${live.safe} checks unreadable at ${block}:`, e)
       throw new HttpError(503, 'REMOTE_CHECK_UNAVAILABLE', 'the Safe could not be read on chain just now: it is retried')
     }
@@ -7379,8 +7393,7 @@ export class Operator {
     const eth = await this.client.getBalance({ address: live.safe })
     const target = policy.gasReserveWei + (await this.topUpMarginWei())
     if (eth < target) {
-      // otto/mamoru#275: the relayer sizes the gas (estimate plus its chain's margin), no fixed limit.
-      const { hash, receipt } = await this.relayer.send({ to: live.safe, value: target - eth })
+      const { hash, receipt } = await this.relayer.send({ to: live.safe, value: target - eth, gas: 50_000n })
       console.log(`[remote] gas reserve ${live.safe} tx ${hash} ${receipt.status}`)
       // GPT-6 r2 P1 3: a Safe without its gas reserve cannot pay its userOps; it is not reported running (retried).
       if (receipt.status !== 'success') throw new HttpError(502, 'GAS_TOPUP_FAILED', 'the Safe could not be funded for gas just now: it is retried')

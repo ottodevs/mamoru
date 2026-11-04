@@ -32,13 +32,17 @@ function monadWorld(opts: { writes?: boolean } = {}) {
     /** otto/mamoru#275: heads a lagging provider answers before 500 (one per getBlockNumber), and reads that throw. */
     lag: [] as bigint[],
     readsDown: false,
+    readsRevert: false,
+    /** A deploy that reverts because an earlier one already put code there (a retry after a lagging read). */
+    deployRevertsWithCode: false,
   }
   const sent: { to: string; data?: Hex; value?: bigint }[] = []
   const started: string[] = []
   let saves = 0
   let safe = '' as Address
   const read = (functionName: string, args: readonly unknown[] = []) => {
-    if (chain.readsDown && functionName === 'getOwners') throw new Error('The contract function "getOwners" returned no data ("0x").')
+    if (chain.readsDown && functionName === 'getOwners') throw Object.assign(new Error('The contract function "getOwners" returned no data ("0x").'), { name: 'ContractFunctionZeroDataError' })
+    if (chain.readsRevert && functionName === 'getOwners') throw Object.assign(new Error('execution reverted'), { name: 'ContractFunctionExecutionError' })
     if (functionName === 'getOwners') return chain.owners ?? ctx.owners
     if (functionName === 'getThreshold') return chain.threshold
     if (functionName === 'isModuleInstalled') return chain.smartSession
@@ -62,7 +66,11 @@ function monadWorld(opts: { writes?: boolean } = {}) {
         return { hash, receipt: { transactionHash: hash, status: 'reverted', blockNumber: 499n, logs: [], gasUsed: 50_000n, effectiveGasPrice: 1n } as unknown as TransactionReceipt }
       }
       if (tx.to.toLowerCase() === safe.toLowerCase()) chain.eth += tx.value ?? 0n
-      else chain.deployed = true
+      else if (chain.deployRevertsWithCode) {
+        chain.deployed = true
+        const hash = toHex(sent.length, { size: 32 })
+        return { hash, receipt: { transactionHash: hash, status: 'reverted', blockNumber: 499n, logs: [], gasUsed: 200_000n, effectiveGasPrice: 1n } as unknown as TransactionReceipt }
+      } else chain.deployed = true
       const hash = toHex(sent.length, { size: 32 })
       return { hash, receipt: { transactionHash: hash, status: 'success', blockNumber: 499n, logs: [], gasUsed: 200_000n, effectiveGasPrice: 1n } as unknown as TransactionReceipt }
     },
@@ -200,11 +208,18 @@ describe('provision (Monad side)', () => {
     expect(m.started).toEqual([])
   })
 
-  test('otto/mamoru#275: the gas top-up carries no fixed gas limit (the relayer sizes it)', async () => {
+  test('otto/mamoru#275 (gate r1): a check that reverts is not retried as unavailable', async () => {
     const m = keyed()
-    await m.op.provision(m.rctx)
-    const topUp = m.sent.find((t) => t.to === m.r.address) as { gas?: bigint }
-    expect(topUp.gas).toBeUndefined()
+    m.chain.deployed = true
+    m.chain.readsRevert = true
+    expect(await code(m.op.provision(m.rctx))).toMatchObject({ message: 'execution reverted' })
+    expect(m.started).toEqual([])
+  })
+
+  test('otto/mamoru#275 (gate r1): a re-deploy that reverts on a Safe that has code goes on to the checks', async () => {
+    const m = keyed()
+    m.chain.deployRevertsWithCode = true
+    expect(await m.op.provision(m.rctx)).toEqual({ state: 'active', address: m.r.address })
   })
 
   test('code already there: nothing is deployed', async () => {
