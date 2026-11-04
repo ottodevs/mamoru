@@ -55,9 +55,10 @@ function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; eve
   const catchUp = (safe: bigint, tokenIds: bigint[]) => (e as unknown as { catchUpHeldHistory: (o: unknown) => Promise<void> }).catchUpHeldHistory({ safeBlock: { number: safe, hash: '0xaa' }, positions: tokenIds.map((tokenId) => ({ tokenId })) })
   const timer = (safe?: bigint, tokenIds: bigint[] = [7n]) => {
     if (safe !== undefined) (e as unknown as { lastObservation: unknown }).lastObservation = { safeBlock: { number: safe, hash: '0xaa' }, positions: tokenIds.map((tokenId) => ({ tokenId })) }
-    return e.readHeldHistory()
+    return (e as unknown as { readHeldHistory: (ms: number, live: () => boolean) => Promise<void> }).readHeldHistory(60_000, () => alive.on)
   }
-  return { owed, ranges, advance, catchUp, timer, logs, held, hooked, failed }
+  const alive = { on: true }
+  return { owed, ranges, advance, catchUp, timer, alive, logs, held, hooked, failed }
 }
 
 describe('principal owed from the observation cursor (otto/mamoru#358)', () => {
@@ -230,6 +231,21 @@ describe('a held position the cursor does not follow, read one slice per review 
     const b = engine(none)
     await b.timer(900_000n)
     expect(b.ranges).toEqual([])
+  })
+
+  test('#367 gate: a stopped runner reads nothing; after a failed read the timer waits, the review does not', async () => {
+    const a = engine(none, [], { historyStepBlocks: 200_000n, historyReadMs: 60_000 })
+    a.alive.on = false
+    await a.timer(900_000n)
+    expect(a.ranges).toEqual([])
+    a.alive.on = true
+    a.logs.down = true
+    await a.timer(900_000n)
+    a.logs.down = false
+    await a.timer(900_000n)
+    expect(a.ranges).toEqual([])
+    await a.catchUp(900_000n, [7n])
+    expect(a.ranges.length).toBeGreaterThan(0)
   })
 
   test('#358 persist (gate): a position no longer held loses its history, stored copy included', async () => {

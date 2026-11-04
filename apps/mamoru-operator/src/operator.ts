@@ -104,6 +104,8 @@ export type AuthorizationSnapshot = {
   deactivated: string | null
 }
 const RELAYER_BALANCE_CACHE_MS = 60_000
+/** otto/mamoru#367: how long the minute timer reads one engine's held history (the review's own read is longer). */
+const HELD_TIMER_READ_MS = 20_000
 /** otto/mamoru#277: a remote Safe still not provisioned this long after its first non-active answer pages ops once per code. */
 export const REMOTE_STUCK_ALERT_MS = 30 * 60_000
 /** otto/mamoru#277 (gate): pages per account for one stuck remote Safe, whatever codes its peer cycles through. */
@@ -1158,11 +1160,14 @@ export class Operator {
    * 2 x (gasReserveWei + topUpMarginWei), what relayerCanActivate and the top-ups count for one Safe. A failed read keeps
    * the last value and never throws into the tick.
    */
-  /** otto/mamoru#367: each running engine reads its held positions' history between reviews (Monad only: a step is set). */
+  /**
+   * otto/mamoru#367: each running engine reads its held positions' history between reviews (Monad only: a step is set),
+   * HELD_TIMER_READ_MS each, and stops at once when its runner is stopped or replaced.
+   */
   async tickHeldHistory(): Promise<void> {
-    for (const [key, runner] of this.runners) {
-      if (runner.stopped) continue
-      await runner.engine.readHeldHistory().catch((e: unknown) => logErr(`[engine ${key}] held history:`, e))
+    for (const [key, runner] of [...this.runners]) {
+      const live = () => !runner.stopped && this.runners.get(key) === runner
+      await runner.engine.readHeldHistory(HELD_TIMER_READ_MS, live).catch((e: unknown) => logErr(`[engine ${key}] held history:`, e))
     }
   }
 

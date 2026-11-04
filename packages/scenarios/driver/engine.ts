@@ -503,6 +503,9 @@ export function heldHistoryFromSeed(seed: ReadonlyMap<string, HeldHistory> | und
   return out
 }
 
+/** otto/mamoru#367: after a failed held-history read, the operator's timer leaves the provider alone this long (reviews still read). */
+export const HELD_TIMER_BACKOFF_MS = 3 * 60_000
+
 export function outOfRangeFromSeed(seed: NonNullable<EngineConfig['outOfRangeSeed']>, now: bigint): Map<bigint, bigint> {
   const gap = now - seed.seenAt
   return gap >= 0n && gap <= OUT_OF_RANGE_SEED_GAP_S ? new Map(seed.since) : new Map()
@@ -689,6 +692,7 @@ export class Engine {
   /** otto/mamoru#358: history of held positions the observation's cursor does not follow, read up to `through` (a safe block). */
   private heldTurn = 0
   private heldReading = false
+  private heldFailedAt = 0
   /** `checked`: its last block was found canonical by this process (a seed is not, until a review checks it). */
   private readonly heldHistory = new Map<string, HeldHistory & { checked: boolean }>()
   depositsAfter: bigint
@@ -2114,15 +2118,15 @@ export class Engine {
    * otto/mamoru#358: far behind (a new account on Monad, reviews budget-limited to one per 15 min), more slices while
    * each one lands and `historyReadMs` lasts; without it, one slice per review.
    */
-  private async catchUpHeldHistory(obs: Observation): Promise<void> {
+  private async catchUpHeldHistory(obs: Observation, readMs = this.cfg.historyReadMs ?? 0, live: () => boolean = () => true): Promise<void> {
     // One reader at a time: the review's and the operator's timer (`readHeldHistory`) never interleave on the map.
     if (this.heldReading) return
     this.heldReading = true
     try {
-      const until = Date.now() + (this.cfg.historyReadMs ?? 0)
+      const until = Date.now() + readMs
       let more: boolean
       do more = await this.advanceHeldHistory(obs)
-      while (more && Date.now() < until)
+      while (more && Date.now() < until && live())
     } finally {
       this.heldReading = false
     }
@@ -2132,8 +2136,11 @@ export class Engine {
    * otto/mamoru#367: the held-history catch-up on the operator's own timer, between reviews (budget-limited to one per
    * 15 min, they left a Monad position days behind), against the last review's observation. Nothing before a review.
    */
-  async readHeldHistory(): Promise<void> {
-    if (this.lastObservation && this.cfg.historyStepBlocks !== undefined) await this.catchUpHeldHistory(this.lastObservation)
+  async readHeldHistory(readMs: number, live: () => boolean): Promise<void> {
+    if (!this.lastObservation || this.cfg.historyStepBlocks === undefined || !live()) return
+    // A read that failed lately waits HELD_TIMER_BACKOFF_MS (gate of #367: no extra load on a provider refusing it).
+    if (Date.now() - this.heldFailedAt < HELD_TIMER_BACKOFF_MS) return
+    await this.catchUpHeldHistory(this.lastObservation, readMs, live)
   }
 
   private async advanceHeldHistory(obs: Observation): Promise<boolean> {
@@ -2188,6 +2195,7 @@ export class Engine {
         stored = true
       } catch (e) {
         // read again on the next review
+        this.heldFailedAt = Date.now()
         this.hooks.onHeldHistoryError?.(id, e)
       }
     }
