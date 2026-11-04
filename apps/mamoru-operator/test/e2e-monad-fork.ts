@@ -17,7 +17,7 @@ import { freshEmulation } from '../../../packages/scenarios/proxy/profile.ts'
 import { loadMonadManifest, startFromState, startMonadFork, upstreamHost } from '../../../packages/scenarios/monad/harness.ts'
 import { buildPosition, fmt } from '../../../packages/scenarios/monad/scenario.ts'
 import { bootOperator } from '../src/boot.ts'
-import { operatorSignature } from '../src/server.ts'
+import { signedCall } from './e2e-client.ts'
 
 const t0 = Date.now()
 const log = (m: string) => console.log(`[e2e-monad +${((Date.now() - t0) / 1000).toFixed(0)}s] ${m}`)
@@ -72,12 +72,7 @@ try {
   }
   const header = Buffer.from(JSON.stringify(ctx)).toString('base64url')
   async function call<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ status: number; json: T }> {
-    const raw = body === undefined ? '' : JSON.stringify(body)
-    // The signed-timestamp form (otto/mamoru#140): the legacy HMAC is refused since 23 Oct.
-    const ts = String(Math.floor(Date.now() / 1000))
-    const sig = operatorSignature(secret, method, path, header, raw, ts)
-    const res = await fetch(op.url + path, { method, headers: { 'x-mamoru-account': header, 'x-mamoru-sig': sig, 'x-mamoru-ts': ts, 'content-type': 'application/json' }, body: method === 'POST' ? raw : undefined })
-    return { status: res.status, json: (await res.json()) as T }
+    return signedCall<T>(op.url, secret, method, path, header, body)
   }
   const base = `/api/accounts/${ctx.accountKey}`
 

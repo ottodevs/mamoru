@@ -1,7 +1,7 @@
 // otto/mamoru#61: the operator WRITING to Monad, end to end, through its own HTTP prepare/submit path. An anvil fork of
 // Monad mainnet that keeps chain id 143 (so the operator runs the mainnet configuration: MAMORU_CHAIN_WRITES=143,
-// MAMORU_LIVE=1, policy live-wmon-usdc-monad-v1), with TimeFramePolicy and UsageLimitPolicy deployed on the fork the
-// way Base deployed them (#62; Monad mainnet does not have them yet). A passkey owner deposits USDC to its
+// MAMORU_LIVE=1, policy live-wmon-usdc-monad-v6); TimeFramePolicy and UsageLimitPolicy are the ones monad.json pins
+// (on chain since #251; the Base-address deploy of #62 is gone). A passkey owner deposits USDC to its
 // counterfactual Safe, prepares and signs the activation; the relayer deploys the Safe, tops up its MON gas reserve and
 // executes the activation; the engine enters the WMON/USDC pool (enter_swap, enter_mint) through the operator's
 // loopback bundler. Then the gas each transaction declared is set against what it used: Monad charges the limit.
@@ -21,9 +21,9 @@ import { assertNoKeyInArgv, sanitizedEnv } from '../../../packages/scenarios/for
 import { startEnginePort, startForkProxy } from '../../../packages/scenarios/proxy/index.ts'
 import { Lab, devAccount } from '../../../packages/scenarios/fixtures/lab.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
-import { buyUsdc, deployBasePolicies } from '../../../packages/scenarios/monad/harness.ts'
+import { buyUsdc } from '../../../packages/scenarios/monad/harness.ts'
 import { bootOperator } from '../src/boot.ts'
-import { operatorSignature } from '../src/server.ts'
+import { signedCall } from './e2e-client.ts'
 
 const DEPOSIT = 50_000_000n // 50 USDC, under the 100 USDC default cap
 const POOL = 'pool:WMON/USDC/3000'
@@ -64,10 +64,6 @@ let code = 1
 try {
   log(`fork of Monad at block ${await lab.client.getBlockNumber()}, chain ${await lab.client.getChainId()}, gas price ${await lab.client.getGasPrice()} wei`)
 
-  // --- #62 on the fork: the two session policies, as Base deployed them ---------------------------------------------
-  const policies = await deployBasePolicies(lab, devAccount(3))
-  check(policies.length === 2, `TimeFramePolicy and UsageLimitPolicy at their Base address with Base's code: ${policies.map((p) => p.address).join(', ')}`)
-
   // --- the account, as the Worker describes it, and the deposit to its counterfactual Safe --------------------------
   const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)
   const owners = [address('SafeWebAuthnSharedSigner', monadRegistry)]
@@ -91,20 +87,16 @@ try {
   process.env.MAMORU_HEAD_LAG = '0'
   delete process.env.MAMORU_SOURCE_CHAIN_ID
   const secret = randomBytes(32).toString('hex')
-  const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'live-wmon-usdc-monad-v1' })
+  const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'live-wmon-usdc-monad-v6' })
   stopOperator = op.stop
   check(op.operator.cfg.live && op.operator.cfg.chainId === 143 && op.operator.cfg.registry.chainId === 143, 'operator is live on chain 143 with MAMORU_CHAIN_WRITES=143')
   check(op.operator.cfg.bundlerUrl !== '', 'the loopback bundler runs')
-  check(op.operator.cfg.registry.entries.some((e) => e.name === 'TimeFramePolicy') && !monadRegistry.entries.some((e) => e.name === 'TimeFramePolicy'), 'the write registry carries the session policies verified on the chain; monad.json is untouched')
+  check(['TimeFramePolicy', 'UsageLimitPolicy'].every((n) => op.operator.cfg.registry.entries.some((e) => e.name === n && monadRegistry.entries.some((m) => m.name === n && m.address === e.address))), 'the write registry carries the session policies monad.json pins, code verified on the chain at boot')
   await lab.setBalance(op.operator.relayer.address, 100n * 10n ** 18n)
 
   const header = Buffer.from(JSON.stringify(ctx)).toString('base64url')
   async function call<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ status: number; json: T }> {
-    const raw = body === undefined ? '' : JSON.stringify(body)
-    const ts = Math.floor(Date.now() / 1000).toString()
-    const sig = operatorSignature(secret, method, path, header, raw, ts)
-    const res = await fetch(op.url + path, { method, headers: { 'x-mamoru-account': header, 'x-mamoru-ts': ts, 'x-mamoru-sig': sig, 'content-type': 'application/json' }, body: method === 'POST' ? raw : undefined })
-    return { status: res.status, json: (await res.json()) as T }
+    return signedCall<T>(op.url, secret, method, path, header, body)
   }
   const base = `/api/accounts/${ctx.accountKey}`
   const funding = async () => (await call<FundingView>('GET', `${base}/funding?fresh=1`)).json

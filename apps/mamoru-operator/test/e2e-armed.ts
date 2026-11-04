@@ -3,7 +3,7 @@
 // The upstream RPC comes from the environment only (RPC_URL or BASE_RPC_URL, or ~/.config/mamoru-operator/env)
 // and reaches anvil through a loopback proxy; the operator talks to anvil through the engine port, which
 // refuses anvil_* methods. Blocks advance by themselves (--block-time 1), so the operator runs unchanged.
-import { createHmac, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,6 +19,7 @@ import { Lab } from '../../../packages/scenarios/fixtures/lab.ts'
 import { WHALE } from '../../../packages/scenarios/fixtures/world.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { bootOperator } from '../src/boot.ts'
+import { signedCall } from './e2e-client.ts'
 
 const envFile = join(homedir(), '.config/mamoru-operator/env')
 if (!process.env.RPC_URL && existsSync(envFile)) {
@@ -96,10 +97,7 @@ try {
 
   const header = Buffer.from(JSON.stringify(ctx)).toString('base64url')
   async function call<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ status: number; json: T }> {
-    const raw = body === undefined ? '' : JSON.stringify(body)
-    const sig = createHmac('sha256', secret).update(`${method} ${path}\n${header}\n${raw}`).digest('hex')
-    const res = await fetch(op.url + path, { method, headers: { 'x-mamoru-account': header, 'x-mamoru-sig': sig, 'content-type': 'application/json' }, body: method === 'POST' ? raw : undefined })
-    return { status: res.status, json: (await res.json()) as T }
+    return signedCall<T>(op.url, secret, method, path, header, body)
   }
   const base = `/api/accounts/${ctx.accountKey}`
   const funding = async () => (await call<FundingView>('GET', `${base}/funding`)).json

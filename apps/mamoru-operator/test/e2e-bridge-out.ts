@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createPublicClient, encodeFunctionData, http, toHex, type Hex } from 'viem'
+import { createPublicClient, http, toHex, type Hex } from 'viem'
 import type { AccountContext, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
 import { address, baseRegistry, erc20Abi } from '@mamoru/registry'
 import { accountSetup, counterfactualAddress } from '@mamoru/account/recovery'
@@ -21,8 +21,8 @@ import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/we
 import { BridgeOut, L1_USDC, ACROSS_SPOKE_POOL, type Fetch } from '../src/bridge-out.ts'
 import { HttpError } from '../src/operator.ts'
 import { Relayer } from '../src/relayer.ts'
+import { fundUsdc } from './fork-funding.ts'
 
-const L1_USDC_HOLDER = '0x28C6c06298d514Db089934071355E5743bf21d60' as const
 /** anvil's first dev account, funded on every fork. */
 const DEV_KEY: Hex = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
 const AMOUNT = 150_000_000n
@@ -81,9 +81,7 @@ try {
   const safe = ctx.address
   const usdcAt = (a: `0x${string}`) => l1.readContract({ address: L1_USDC, abi: erc20Abi, functionName: 'balanceOf', args: [a] })
   const fundSafe = async (amount: bigint) => {
-    await lab.setBalance(L1_USDC_HOLDER, 10n ** 18n)
-    const r = await lab.sendAs(L1_USDC_HOLDER, L1_USDC, encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [safe, amount] }))
-    if (!r.ok) throw new Error('could not fund the account on the fork')
+    await fundUsdc(lab, L1_USDC, safe, amount)
   }
 
   let statusAnswer = { status: 'pending' } as { status: string; fillTx?: string }

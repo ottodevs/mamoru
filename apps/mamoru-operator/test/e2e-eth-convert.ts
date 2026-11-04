@@ -22,6 +22,7 @@ import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/we
 import { BridgeOut, L1_USDC, type Fetch } from '../src/bridge-out.ts'
 import { HttpError } from '../src/operator.ts'
 import { Relayer } from '../src/relayer.ts'
+import { advanceFinality } from './fork-funding.ts'
 
 /** anvil's first dev account, funded on every fork. */
 const DEV_KEY: Hex = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
@@ -153,6 +154,8 @@ try {
   const rs = await make().status(ctx)
   check(rs.convert?.state === 'done' && rs.convert.usdcOut === got.toString(), 'unconfirmed resolved from the receipt after a restart')
 
+  // The terminal answers below are read at Ethereum's finalized block (#285); anvil's moves only as blocks are mined.
+  await advanceFinality(lab)
   // No transaction hash, past the wait, nonce spent: the Safe's ExecutionSuccess for the signed safeTxHash proves it
   // ran, and the amount comes from that receipt, even with ETH sent to the account again since.
   const j2 = JSON.parse(readFileSync(file, 'utf8'))

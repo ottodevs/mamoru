@@ -48,7 +48,7 @@ import type { AccountRow } from '../../mamoru-app/src/api/accounts/store.ts'
 import { verifyRemote, type RemoteOffer } from '../../mamoru-app/src/api/remote.ts'
 import { bootOperator } from '../src/boot.ts'
 import { MESSAGE_TRANSMITTER_V2 } from '../src/cctp.ts'
-import { operatorSignature } from '../src/server.ts'
+import { signedCall } from './e2e-client.ts'
 import { DEFAULT_SPONSOR, SPONSOR_BOUNDS, type SponsorPolicy } from '../src/sponsorship.ts'
 
 const REPO = join(import.meta.dir, '../../..')
@@ -266,10 +266,7 @@ try {
   async function opCall<T>(url: string, c: AccountContext, method: 'GET' | 'POST', route: string, body?: unknown): Promise<{ status: number; json: T }> {
     const path = `/api/accounts/${encodeURIComponent(c.accountKey)}${route}`
     const header = Buffer.from(JSON.stringify(c)).toString('base64url')
-    const raw = body === undefined ? '' : JSON.stringify(body)
-    const ts = Math.floor(Date.now() / 1000).toString()
-    const res = await realFetch(url + path, { method, headers: { 'x-mamoru-account': header, 'x-mamoru-ts': ts, 'x-mamoru-sig': operatorSignature(secret, method, path, header, raw, ts), 'content-type': 'application/json' }, body: method === 'POST' ? raw : undefined })
-    return { status: res.status, json: (await res.json()) as T }
+    return signedCall<T>(url, secret, method, path, header, body, realFetch)
   }
   const funding = async () => (await opCall<FundingView>(baseOp.url, ctx, 'GET', '/funding')).json
   const baseOps = async () => (await opCall<{ ops: OpView[] }>(baseOp.url, ctx, 'GET', '/ops')).json.ops

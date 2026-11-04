@@ -1,11 +1,11 @@
 // Requests per review on real Base state: one observe() through Multicall3 and one with unbatched reads, at the
-// same block of an anvil fork, for an account that holds at least 3 Uniswap v3 positions. The two observations
+// same block of an anvil fork, for an account that holds at least 3 Uniswap v3 positions.  The account: MAMORU_E2E_ACCOUNT or a pinned one. The two observations
 // must be equal; the request counts are printed. Never touches the live operator.
 // Upstream: RPC_URL or BASE_RPC_URL from the environment only; a public Base RPC when neither is set.
 import { mkdtempSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createPublicClient, custom, http, parseAbiItem, zeroAddress, type PublicClient } from 'viem'
+import { createPublicClient, custom, type PublicClient } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { baseRegistry, address, nonfungiblePositionManagerAbi } from '@mamoru/registry'
 import { historyCursor, observe, type ObserveInput } from '@mamoru/rpc'
@@ -64,22 +64,24 @@ async function retry<T>(what: string, fn: () => Promise<T>, tries = 4): Promise<
   }
 }
 
-/** Owners with 3 to 40 positions: MAMORU_E2E_ACCOUNT, or the busiest minters of the last blocks. */
-async function findAccounts(client: PublicClient, head: bigint): Promise<Address[]> {
+/** Base owners with 3 to 40 Uniswap v3 positions on 4 Nov 2026, found once: a log scan hits the public RPC's getLogs limit. Several, since positions close. */
+const PINNED_ACCOUNTS: Address[] = [
+  '0x9C26862025740e1cf45157561134a7b9736d3a8E',
+  '0xb52EFB901ad963E477e7841931E682873c4930F6',
+  '0x0a32e66cFd9589EdD8B7A97a71C3CD35E90Ed8D3',
+  '0xB83cfE30C16d886940d4a66ccad76690e6BC2f00',
+]
+
+/** Owners with 3 to 40 positions: MAMORU_E2E_ACCOUNT, else the pinned ones that still qualify. No log scan. */
+async function findAccounts(client: PublicClient): Promise<Address[]> {
   if (process.env.MAMORU_E2E_ACCOUNT) return [process.env.MAMORU_E2E_ACCOUNT as Address]
   const npm = address('NonfungiblePositionManager', baseRegistry)
-  const transfer = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)')
-  const upstream = createPublicClient({ transport: http(proxy.url, { timeout: 30_000 }) })
-  const mints = await upstream.getLogs({ address: npm, event: transfer, args: { from: zeroAddress }, fromBlock: head - 1_999n, toBlock: head })
-  const perOwner = new Map<Address, number>()
-  for (const m of mints) perOwner.set(m.args.to!, (perOwner.get(m.args.to!) ?? 0) + 1)
   const found: Address[] = []
-  for (const [owner] of [...perOwner].sort((a, b) => b[1] - a[1])) {
+  for (const owner of PINNED_ACCOUNTS) {
     const n = await client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [owner] })
     if (n >= 3n && n <= 40n) found.push(owner)
-    if (found.length >= 6) break
   }
-  if (found.length === 0) throw new Error('no owner with 3 to 40 positions in the last 2000 blocks; set MAMORU_E2E_ACCOUNT')
+  if (found.length === 0) throw new Error('no pinned owner holds 3 to 40 positions any more; set MAMORU_E2E_ACCOUNT')
   return found
 }
 
@@ -96,7 +98,7 @@ try {
     }
   }
   const head = await setup.getBlockNumber()
-  const candidates = await retry('finding an account', () => findAccounts(setup, head))
+  const candidates = await retry('finding an account', () => findAccounts(setup))
   let account = candidates[0]!
   const input = (multicall3?: null): ObserveInput => ({
     chainId: 8453,

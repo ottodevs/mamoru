@@ -10,7 +10,7 @@
 //
 // RPC: BASE_FORK_RPC_URL (default https://mainnet.base.org, the public endpoint, never the operator's provider key),
 // through the loopback proxy. Run: PATH="$HOME/.foundry/bin:$PATH" bun apps/mamoru-operator/test/e2e-v5.ts
-import { createHmac, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -30,6 +30,7 @@ import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/we
 import { bootOperator } from '../src/boot.ts'
 import { readSafe } from '../src/chain.ts'
 import { DEFAULT_SPONSOR, SPONSOR_BOUNDS, type SponsorPolicy } from '../src/sponsorship.ts'
+import { signedCall } from './e2e-client.ts'
 
 process.env.RPC_URL = process.env.BASE_FORK_RPC_URL ?? 'https://mainnet.base.org'
 const DEPOSIT = 20_000_000n
@@ -134,10 +135,7 @@ try {
 
   const header = Buffer.from(JSON.stringify(ctx)).toString('base64url')
   async function call<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ status: number; json: T }> {
-    const raw = body === undefined ? '' : JSON.stringify(body)
-    const sig = createHmac('sha256', secret).update(`${method} ${path}\n${header}\n${raw}`).digest('hex')
-    const res = await fetch(op.url + path, { method, headers: { 'x-mamoru-account': header, 'x-mamoru-sig': sig, 'content-type': 'application/json' }, body: method === 'POST' ? raw : undefined })
-    return { status: res.status, json: (await res.json()) as T }
+    return signedCall<T>(op.url, secret, method, path, header, body)
   }
   const base = `/api/accounts/${ctx.accountKey}`
   const funding = async () => (await call<FundingView>('GET', `${base}/funding`)).json

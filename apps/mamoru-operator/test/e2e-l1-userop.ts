@@ -37,8 +37,8 @@ import { burnMatches, FINALITY_STANDARD, MESSAGE_TRANSMITTER_V2, messageTransmit
 import { Relayer } from '../src/relayer.ts'
 import { HttpError } from '../src/operator.ts'
 import { checkPimlicoErc20, L1Bundler, MAX_CONSTANT_FEE, PIMLICO_ERC20_PAYMASTER_V07, RpcRefused, type Erc20Paymaster, type GasPrice } from '../src/paymaster.ts'
+import { fundUsdc } from './fork-funding.ts'
 
-const L1_USDC_HOLDER = '0x28C6c06298d514Db089934071355E5743bf21d60' as const
 const CHAINLINK_ETH_USD = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419' as const
 const AMOUNT = 150_000_000n
 /** A dev key the fork paymaster signs with, written into the real paymaster's signers mapping. */
@@ -224,9 +224,7 @@ try {
   }
   const usdcAt = (a: Address) => l1.readContract({ address: L1_USDC, abi: erc20Abi, functionName: 'balanceOf', args: [a] })
   const fund = async (to: Address, amount: bigint) => {
-    await lab.setBalance(L1_USDC_HOLDER, 10n ** 18n)
-    const r = await lab.sendAs(L1_USDC_HOLDER, L1_USDC, encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to, amount] }))
-    if (!r.ok) throw new Error('could not fund the account on the fork')
+    await fundUsdc(lab, L1_USDC, to, amount)
   }
   function der(r: bigint, s: bigint): Uint8Array {
     const int = (v: bigint) => {
