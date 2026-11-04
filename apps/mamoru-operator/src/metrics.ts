@@ -546,6 +546,39 @@ export type EngineHealthSnapshot = {
 /** otto/mamoru#277: a slot held this long (an op neither sent nor settled) pages ops once; #357 held one 13 h unseen. */
 export const SLOT_BUSY_ALERT_MS = 30 * 60_000
 
+/** otto/mamoru#277: a relayer's native balance as /metrics shows it; `lowBelowWei` is two provisionings (operator) or two mints (bridge). */
+export type RelayerBalance = { role: 'operator' | 'bridge_monad'; chainId: number; address: string; wei: string; at: string; lowBelowWei: string; low: boolean }
+
+/** otto/mamoru#277: a relayer is read at most this often, whatever the tick that asks. */
+export const RELAYER_READ_MS = 10 * 60_000
+
+/** otto/mamoru#277: one relayer key's last balance read, and whether its low-balance page is out. */
+export class RelayerWatch {
+  private entry: RelayerBalance | null = null
+  private paged = false
+
+  /**
+   * Records a read. Pages ops once when the balance goes below `lowBelow` (`unit`: what the threshold counts), logs one
+   * plain line when it is back, and pages again only after that recovery.
+   */
+  observe(role: RelayerBalance['role'], chainId: number, address: string, wei: bigint, lowBelow: bigint, unit: 'provisionings' | 'mints', at: string): void {
+    const low = wei < lowBelow
+    this.entry = { role, chainId, address, wei: wei.toString(), at, lowBelowWei: lowBelow.toString(), low }
+    if (low && !this.paged) {
+      this.paged = true
+      // The address is public and is what ops funds: in the tag, which is not redacted.
+      logErr(`[alert] relayer ${role} ${address} on chain ${chainId} has ${wei} wei, below ${lowBelow} (two ${unit}): fund it`, undefined)
+    } else if (!low && this.paged) {
+      this.paged = false
+      logErr(`[relayer] ${role} ${address} on chain ${chainId} is back to ${wei} wei, above ${lowBelow}`, undefined)
+    }
+  }
+
+  last(): RelayerBalance | null {
+    return this.entry
+  }
+}
+
 type AccountHealth = { lastAt: number; lastCode: string | null; consecutiveErrors: number; lastErrorClass: EngineErrorClass | null; lastErrorAt: number | null; hourStart: number; reviews: number; errors: number }
 
 /** Per-account engine review stats, in-memory only (reset on operator restart; the journal in state.ts is the durable record). Keyed by a `Map` (see `Buckets` above for why, applies equally to an attacker- or bug-influenced accountKey). */

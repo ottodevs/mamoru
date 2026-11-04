@@ -55,7 +55,15 @@ account keys are shortened to 8 chars. Example (values illustrative):
     // burns, the oldest in-flight burn's age, reverts of in-flight mints, burns past their deadline (engine setting
     // bridge.stuckAfterMin, default sending 30 / burned 45 min) by reason code, and the relayer's MON on Monad as last
     // read before a mint (null until one).
-    "bridgeMonad": { "inFlightUsdc": "1500000000", "inFlightCount": 1, "oldestBurnAgeS": 2900, "mintReverts": 0, "stuckCount": 1, "stuckReasons": { "no_attestation": 1 }, "relayerMon": { "address": "0xRELAYER…", "wei": "980000000000000000", "at": "…" } }
+    "bridgeMonad": { "inFlightUsdc": "1500000000", "inFlightCount": 1, "oldestBurnAgeS": 2900, "mintReverts": 0, "stuckCount": 1, "stuckReasons": { "no_attestation": 1 }, "relayerMon": { "address": "0xRELAYER…", "wei": "980000000000000000", "at": "…" } },
+    // otto/mamoru#277: the native balance of each relayer key, read on a timer (at most every 10 min). operator: this
+    // chain's relayer, low under 2 x (policy gasReserveWei + top-up margin) = two provisionings; bridge_monad: the Base
+    // operator's Monad relayer, low under two mints (2 x 500000 gas x 2 x gas price). One [alert] page when it goes low,
+    // one plain line when it recovers. A failed read keeps the last value.
+    "relayers": [{ "role": "operator", "chainId": 8453, "address": "0xRELAYER…", "wei": "40000000000000000", "at": "…", "lowBelowWei": "10000000000000000", "low": false }],
+    // otto/mamoru#277: remote Safes of running accounts still not provisioned 30 min after the remote operator's first
+    // non-active answer (account: first 8 chars of its key; code: the last answer). One [alert] per (account, code).
+    "remote": { "stuck": [{ "account": "3f9a7c21", "chainId": 143, "safe": "0xSAFE…", "code": "REMOTE_SAFE_UNVERIFIED", "sinceS": 2400 }] }
   },
   "rpc": {
     // provider host (never the path or an API key; "#1"/"#2" when two providers share a host) -> method -> counters,

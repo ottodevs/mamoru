@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SLOT_BUSY_ALERT_MS, classifyEngineError, classifyRpcError, cuFor, CU_TABLE, DEFAULT_CU, EngineHealthTracker, GasReserveTracker, logErr, redactSecrets, RpcMetrics, safeMetrics, type EngineErrorClass } from '../src/metrics.ts'
+import { SLOT_BUSY_ALERT_MS, classifyEngineError, classifyRpcError, cuFor, CU_TABLE, DEFAULT_CU, EngineHealthTracker, GasReserveTracker, logErr, RelayerWatch, redactSecrets, RpcMetrics, safeMetrics, type EngineErrorClass } from '../src/metrics.ts'
 
 const dirs: string[] = []
 function tmpDir(): string {
@@ -703,5 +703,32 @@ describe('EngineHealthTracker.slot (otto/mamoru#277)', () => {
     t.slot('a', true, 0)
     expect(t.slot('b', true, SLOT_BUSY_ALERT_MS)).toBe(false)
     expect(t.slot('a', true, SLOT_BUSY_ALERT_MS)).toBe(true)
+  })
+})
+
+describe('RelayerWatch (otto/mamoru#277)', () => {
+  const ADDR = '0x1111111111111111111111111111111111111111'
+  test('pages once below the line, logs a plain line on recovery, pages again only after it; the address is kept', () => {
+    const lines: string[] = []
+    const was = console.error
+    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '))
+    try {
+      const w = new RelayerWatch()
+      expect(w.last()).toBeNull()
+      w.observe('operator', 8453, ADDR, 99n, 100n, 'provisionings', 't1')
+      w.observe('operator', 8453, ADDR, 50n, 100n, 'provisionings', 't2')
+      expect(w.last()).toEqual({ role: 'operator', chainId: 8453, address: ADDR, wei: '50', at: 't2', lowBelowWei: '100', low: true })
+      w.observe('operator', 8453, ADDR, 100n, 100n, 'provisionings', 't3')
+      expect(w.last()!.low).toBe(false)
+      w.observe('operator', 8453, ADDR, 100n, 100n, 'provisionings', 't4')
+      w.observe('operator', 8453, ADDR, 1n, 100n, 'provisionings', 't5')
+    } finally {
+      console.error = was
+    }
+    expect(lines.filter((l) => l.startsWith('[alert]'))).toEqual([
+      `[alert] relayer operator ${ADDR} on chain 8453 has 99 wei, below 100 (two provisionings): fund it`,
+      `[alert] relayer operator ${ADDR} on chain 8453 has 1 wei, below 100 (two provisionings): fund it`,
+    ])
+    expect(lines).toHaveLength(3)
   })
 })

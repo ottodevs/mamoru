@@ -47,6 +47,11 @@ function fakeOperator(): Operator {
       { accountKey: '9b0e41aa', kind: 'activate', state: 'failed', at: '2026-10-02T09:14:30.000Z', code: 'DEPOSIT_OVER_CAP' },
     ],
     gasReserveLowCount: () => 1,
+    relayersSnapshot: () => [
+      { role: 'operator', chainId: 8453, address: '0x1111111111111111111111111111111111111111', wei: '812345678901234567', at: '2026-10-02T09:00:00.000Z', lowBelowWei: '4400000000000000', low: false },
+      { role: 'bridge_monad', chainId: 143, address: '0x2222222222222222222222222222222222222222', wei: '1000', at: '2026-10-02T09:00:00.000Z', lowBelowWei: '200000000000000000', low: true },
+    ],
+    remoteStuck: () => [{ account: '3f9a7c21', chainId: 143, safe: '0x3333333333333333333333333333333333333333', code: 'REMOTE_SAFE_UNVERIFIED', sinceS: 2400 }],
     gasReserveSnapshot: () => [
       { account: '3f9a7c21', nativeWei: '250000000000000', thresholdWei: '500000000000000', low: true, lowSince: '2026-10-02T09:00:00.000Z' },
       { account: '9b0e41aa', nativeWei: '900000000000000', thresholdWei: '500000000000000', low: false, lowSince: null },
@@ -72,6 +77,10 @@ describe('GET /metrics auth', () => {
       expect(res.status).toBe(200)
       const body = (await res.json()) as MetricsPayload
       expect(body.operator.gitSha).toBe('5efba44')
+      const op = body.operator as unknown as { relayers: { role: string; chainId: number; wei: string; lowBelowWei: string; low: boolean }[]; remote: { stuck: { account: string; chainId: number; safe: string; code: string; sinceS: number }[] } }
+      expect(op.relayers.map((r) => [r.role, r.chainId, r.low])).toEqual([['operator', 8453, false], ['bridge_monad', 143, true]])
+      expect(Object.keys(op.relayers[0]!).sort()).toEqual(['address', 'at', 'chainId', 'low', 'lowBelowWei', 'role', 'wei'])
+      expect(op.remote.stuck).toEqual([{ account: '3f9a7c21', chainId: 143, safe: '0x3333333333333333333333333333333333333333', code: 'REMOTE_SAFE_UNVERIFIED', sinceS: 2400 }])
     } finally {
       server.stop(true)
     }
@@ -207,6 +216,8 @@ describe('GET /metrics never carries injected secret-shaped free text (finding #
       engineHealthSnapshot: () => nasty.map((_, i) => tracker.snapshot(`account-${i}`)),
       recentOps: () => [],
       gasReserveLowCount: () => 0,
+      relayersSnapshot: () => [],
+      remoteStuck: () => [],
       gasReserveSnapshot: () => [],
       authorizationsSnapshot: () => [],
     } as unknown as Operator

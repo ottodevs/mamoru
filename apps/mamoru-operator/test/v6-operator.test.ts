@@ -597,6 +597,61 @@ describe('after a confirmed v6 approval the account\'s own Safe on Monad is prov
     })
   })
 
+  test('otto/mamoru#277: pendingSince is set at the first non-active answer, kept while pending, cleared when active', async () => {
+    const { w, p, t } = await started({ provision: { state: 'pending', code: 'REMOTE_SAFE_UNVERIFIED' } })
+    await quiet(async () => {
+      await confirm(w, t)
+      const rs = w.state.accounts.k!.remote!
+      const first = rs.pendingSince
+      expect(Date.parse(first!)).toBeGreaterThan(0)
+      await new Promise((r) => setTimeout(r, 5))
+      await w.op.tickRemotes()
+      expect(rs.pendingSince).toBe(first)
+      p.answer.provision = { state: 'active', address: SESSION_KEY }
+      await w.op.tickRemotes()
+      expect(rs).toMatchObject({ ready: true, pendingSince: undefined })
+    })
+  })
+
+  test('otto/mamoru#277: remote.stuck lists a not-ready remote after 30 min, with the code; a state without pendingSince loads and is not listed', async () => {
+    const { w, t } = await started({ provision: { state: 'pending', code: 'REMOTE_SAFE_UNVERIFIED' } })
+    await quiet(async () => {
+      await confirm(w, t)
+      const acc = w.state.accounts.k!
+      const rs = acc.remote!
+      expect(w.op.remoteStuck()).toEqual([])
+      rs.pendingSince = new Date(Date.now() - 29 * 60_000).toISOString()
+      expect(w.op.remoteStuck()).toEqual([])
+      rs.pendingSince = new Date(Date.now() - 40 * 60_000).toISOString()
+      const [row] = w.op.remoteStuck()
+      expect(row).toMatchObject({ account: 'k', chainId: 143, safe: rs.address, code: 'REMOTE_SAFE_UNVERIFIED' })
+      expect(Math.abs(row!.sinceS - 2400)).toBeLessThan(5)
+      rs.pendingSince = undefined
+      expect(w.op.remoteStuck()).toEqual([])
+      rs.pendingSince = new Date(Date.now() - 40 * 60_000).toISOString()
+      acc.active = false
+      expect(w.op.remoteStuck()).toEqual([])
+    })
+  })
+
+  test('otto/mamoru#277: pages once per (account, code) past 30 min; a new code pages again', async () => {
+    const { w, p, t } = await started({ provision: { state: 'pending', code: 'REMOTE_SAFE_UNVERIFIED' } })
+    const pages = async () => (await quiet(() => w.op.tickRemotes())).logged.filter((l) => l.startsWith('[alert]'))
+    await quiet(() => confirm(w, t))
+    const rs = w.state.accounts.k!.remote!
+    expect(await pages()).toEqual([])
+    rs.pendingSince = new Date(Date.now() - 31 * 60_000).toISOString()
+    const first = await pages()
+    expect(first).toHaveLength(1)
+    expect(first[0]).toBe(`[alert] remote Safe ${rs.address} of account k on chain 143 not provisioned for over 31 min (REMOTE_SAFE_UNVERIFIED): it is retried; nothing runs on it`)
+    expect(await pages()).toEqual([])
+    p.answer.provision = { state: 'pending', code: 'REMOTE_DEPLOY_FAILED' }
+    const next = await pages()
+    expect(next).toHaveLength(1)
+    expect(next[0]).toContain('(REMOTE_DEPLOY_FAILED)')
+    expect(await pages()).toEqual([])
+  })
+
   test('a Monad operator that provisions another address than the committed one is never taken as ready', async () => {
     const { w, p, t } = await started({ provision: { state: 'pending', code: 'X' } })
     p.peer.provision = async (c) => {
@@ -616,5 +671,52 @@ describe('after a confirmed v6 approval the account\'s own Safe on Monad is prov
       const view = await w.op.funding(ctx)
       expect(view.remote).toEqual({ chainId: 143, address: t.remote!.address, spec: t.remote!.spec, ready: false })
     })
+  })
+})
+
+describe('the operator relayer balance on a timer (otto/mamoru#277)', () => {
+  /** 2 x (policy gasReserveWei + TOP_UP_MARGIN_WEI): two provisionings on Base. */
+  const lowBelow = (w: ReturnType<typeof world>) => 2n * (w.op.cfg.policy.gasReserveWei + 200_000_000_000_000n)
+  const tick = async (w: ReturnType<typeof world>) => {
+    // The 10 min gate and the 60 s balance cache are as if that long had passed.
+    ;(w.op as unknown as { relayerReadAt: number; relayerBalanceCache: null }).relayerReadAt = 0
+    ;(w.op as unknown as { relayerBalanceCache: null }).relayerBalanceCache = null
+    return (await quiet(() => w.op.tickRelayers())).logged
+  }
+
+  test('shape and threshold; one page when low, one plain line on recovery, a page again only after it', async () => {
+    const w = world(0n)
+    const low = lowBelow(w)
+    expect(low).toBe(2n * (w.op.cfg.policy.gasReserveWei + 200_000_000_000_000n))
+    w.knobs.relayerWei = low - 1n
+    const l1 = await tick(w)
+    expect(l1).toEqual([`[alert] relayer operator ${w.op.relayer.address} on chain 8453 has ${low - 1n} wei, below ${low} (two provisionings): fund it`])
+    expect(w.op.relayersSnapshot()).toEqual([{ role: 'operator', chainId: 8453, address: w.op.relayer.address, wei: (low - 1n).toString(), at: expect.any(String), lowBelowWei: low.toString(), low: true }])
+    expect(await tick(w)).toEqual([])
+    w.knobs.relayerWei = low
+    const l3 = await tick(w)
+    expect(l3).toHaveLength(1)
+    expect(l3[0]).toStartWith('[relayer] operator')
+    expect(w.op.relayersSnapshot()[0]).toMatchObject({ wei: low.toString(), low: false })
+    w.knobs.relayerWei = 1n
+    expect((await tick(w)).filter((l) => l.startsWith('[alert]'))).toHaveLength(1)
+  })
+
+  test('read at most every 10 min, and a failed read keeps the last value without throwing', async () => {
+    const w = world(0n)
+    w.knobs.relayerWei = 10n ** 18n
+    await tick(w)
+    w.knobs.relayerWei = 1n
+    // The gate: no read right after one.
+    ;(w.op as unknown as { relayerBalanceCache: null }).relayerBalanceCache = null
+    await quiet(() => w.op.tickRelayers())
+    expect(w.op.relayersSnapshot()[0]).toMatchObject({ wei: (10n ** 18n).toString(), low: false })
+    const client = (w.op as unknown as { client: { getBalance: () => Promise<bigint> } }).client
+    client.getBalance = async () => {
+      throw new Error('down')
+    }
+    const logged = await tick(w)
+    expect(logged.some((l) => l.startsWith('[alert]'))).toBe(false)
+    expect(w.op.relayersSnapshot()[0]).toMatchObject({ wei: (10n ** 18n).toString() })
   })
 })

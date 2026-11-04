@@ -203,7 +203,9 @@ export type AccountState = {
   lane1Open?: { nonce: string; expiresAt: string }
 }
 
-export type RemoteSafeRecord = { chainId: number; address: Hex; spec: RemoteSpec; permissionIds: Hex[]; ready?: boolean; lastCode?: string; checkedAt?: string }
+export type RemoteSafeRecord = { chainId: number; address: Hex; spec: RemoteSpec; permissionIds: Hex[]; ready?: boolean; lastCode?: string; checkedAt?: string
+  /** otto/mamoru#277: ISO time of the first non-active answer of the remote operator, kept while it is not ready (remote.stuck in /metrics). */
+  pendingSince?: string }
 
 export type OperatorState = {
   accounts: Record<string, AccountState>

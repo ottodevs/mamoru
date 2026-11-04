@@ -1190,3 +1190,78 @@ describe('stuck burns (otto/mamoru#245)', () => {
     expect(reads).toBe(1)
   })
 })
+
+describe('the relayer balance on a timer (otto/mamoru#277)', () => {
+  const MIN = 60_000
+  /** Two mints: 2 x (MONAD_MINT_GAS_CAP 500000 x gas price 1e11 x 2). */
+  const TWO_MINTS = 2n * (500_000n * 100_000_000_000n * 2n)
+  const watch = (now: () => number, balance: bigint) => {
+    const s = setup({ now })
+    s.st.balance = balance
+    const lines: string[] = []
+    const was = console.error
+    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '))
+    return { ...s, lines, restore: () => (console.error = was) }
+  }
+
+  test('read with no mint pending: shape, threshold of two mints, and one page when low', async () => {
+    let now = T0
+    const s = watch(() => now, 10n ** 16n)
+    await s.bridge.tickRelayer()
+    s.restore()
+    expect(TWO_MINTS).toBe(200_000_000_000_000_000n)
+    expect(s.bridge.relayers()).toEqual([{ role: 'bridge_monad', chainId: monadRegistry.chainId, address: s.relayer!.address, wei: (10n ** 16n).toString(), at: new Date(T0).toISOString(), lowBelowWei: TWO_MINTS.toString(), low: true }])
+    expect(s.bridge.metrics().relayerMon).toMatchObject({ wei: (10n ** 16n).toString() })
+    expect(s.lines).toEqual([`[alert] relayer bridge_monad ${s.relayer!.address} on chain ${monadRegistry.chainId} has ${10n ** 16n} wei, below ${TWO_MINTS} (two mints): fund it`])
+  })
+
+  test('read at most every 10 min; recovery logs one plain line; pages again only after it', async () => {
+    let now = T0
+    const s = watch(() => now, 10n ** 16n)
+    await s.bridge.tickRelayer()
+    s.st.balance = 10n ** 18n
+    now += 9 * MIN
+    await s.bridge.tickRelayer()
+    expect(s.bridge.relayers()[0]).toMatchObject({ wei: (10n ** 16n).toString(), low: true })
+    now += 2 * MIN
+    await s.bridge.tickRelayer()
+    expect(s.bridge.relayers()[0]).toMatchObject({ wei: (10n ** 18n).toString(), low: false })
+    expect(s.lines).toHaveLength(2)
+    expect(s.lines[1]).toStartWith('[relayer] bridge_monad')
+    expect(s.lines[1]).not.toContain('[alert]')
+    s.st.balance = 1n
+    now += 11 * MIN
+    await s.bridge.tickRelayer()
+    now += 11 * MIN
+    await s.bridge.tickRelayer()
+    s.restore()
+    expect(s.lines.filter((l) => l.startsWith('[alert]'))).toHaveLength(2)
+  })
+
+  test('a failed read keeps the last value and does not throw; a failed price falls back to the last one', async () => {
+    let now = T0
+    const s = watch(() => now, 10n ** 18n)
+    await s.bridge.tickRelayer()
+    const monad = (s.bridge as unknown as { monad: { getBalance: () => Promise<bigint>; getGasPrice: () => Promise<bigint> } }).monad
+    monad.getGasPrice = async () => {
+      throw new Error('down')
+    }
+    s.st.balance = 10n ** 15n
+    now += 11 * MIN
+    await s.bridge.tickRelayer()
+    expect(s.bridge.relayers()[0]).toMatchObject({ wei: (10n ** 15n).toString(), lowBelowWei: TWO_MINTS.toString(), low: true })
+    monad.getBalance = async () => {
+      throw new Error('down')
+    }
+    now += 11 * MIN
+    await s.bridge.tickRelayer()
+    s.restore()
+    expect(s.bridge.relayers()[0]).toMatchObject({ wei: (10n ** 15n).toString() })
+  })
+
+  test('no relayer key: nothing to read', async () => {
+    const s = setup({ relayer: false })
+    await s.bridge.tickRelayer()
+    expect(s.bridge.relayers()).toEqual([])
+  })
+})

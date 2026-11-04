@@ -12,7 +12,7 @@ import { amountsForLiquidity, inUsdc, readSafe, usdcPools, type SafeRead } from 
 import { chainLegOf, etaOf, heldAboveDust, unreadLeg } from './money-map.ts'
 import { attestationValid, CCTP_DOMAIN_BASE, CCTP_DOMAIN_MONAD, cctpAttestation, cctpMessageKey, decodeCctpMessage, MESSAGE_TRANSMITTER_V2, mintIsFor, receiveMessageData } from './cctp.ts'
 import { Lock } from './lock.ts'
-import { logErr, redactSecrets } from './metrics.ts'
+import { logErr, redactSecrets, RELAYER_READ_MS, RelayerWatch, type RelayerBalance } from './metrics.ts'
 
 // otto/mamoru#215: the bridge leg of a v6 account, Base to its own sleeve on Monad (same Safe address there).
 //
@@ -243,6 +243,40 @@ export class MonadBridge {
   private readonly blockers = new Map<string, BridgeStuckReason>()
   /** otto/mamoru#245: the relayer's MON on Monad from the last mint's balance check (for /metrics; no read of its own). */
   private relayerMon: { wei: bigint; at: string } | null = null
+  /** otto/mamoru#277: the relayer's balance on a timer (not only before a mint), its low-balance page, and the last Monad gas price read. */
+  private readonly relayerWatch = new RelayerWatch()
+  private relayerReadAt = 0
+  private lastGasPrice: bigint | null = null
+
+  /**
+   * otto/mamoru#277: reads the Monad relayer's MON at most every RELAYER_READ_MS, so the figure is fresh with no mint
+   * pending, and pages once when it is under two mints (MONAD_MINT_GAS_CAP gas at twice the gas price, the mint's own
+   * estimate shape, doubled). A failed read keeps the last value; nothing throws into the tick.
+   */
+  async tickRelayer(): Promise<void> {
+    const relayer = this.relayer
+    if (!relayer || this.now() - this.relayerReadAt < RELAYER_READ_MS) return
+    this.relayerReadAt = this.now()
+    try {
+      if (!(await this.monadVerified())) return
+      const wei = await this.monad.getBalance({ address: relayer.address })
+      const read = await this.monad.getGasPrice().catch(() => 0n)
+      if (read > 0n) this.lastGasPrice = read
+      const price = this.lastGasPrice
+      this.relayerMon = { wei, at: this.iso() }
+      // No price ever read: the balance is shown by relayerMon and nothing is judged on a guess.
+      if (price === null) return
+      this.relayerWatch.observe('bridge_monad', this.monadRegistryOf.chainId, relayer.address, wei, 2n * (MONAD_MINT_GAS_CAP * price * 2n), 'mints', this.iso())
+    } catch (e) {
+      logErr('[bridge-monad] relayer balance not read, last value kept:', e)
+    }
+  }
+
+  /** otto/mamoru#277: the Monad relayer's balance as last read, for /metrics `relayers`. */
+  relayers(): RelayerBalance[] {
+    const e = this.relayerWatch.last()
+    return e ? [e] : []
+  }
 
   /** Whether Monad is the checked chain; runs the boot check again while it is not. */
   private async monadVerified(): Promise<boolean> {

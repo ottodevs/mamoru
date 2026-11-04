@@ -99,6 +99,10 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       // otto/mamoru#245 (#277): the bridge leg to Monad from its journal (no RPC): USDC in flight, oldest burn age, mint
       // reverts, stuck burns by reason, the relayer's MON on Monad as last read before a mint. Null without the leg.
       bridgeMonad: op.cfg.bridgeMonad?.metrics() ?? null,
+      // otto/mamoru#277: the native balance of each relayer key (this chain's, the bridge's on Monad) as last read on a
+      // timer, with the line under which ops are paged; and the remote Safes not provisioned for over 30 min.
+      relayers: op.relayersSnapshot(),
+      remote: { stuck: op.remoteStuck() },
     },
     rpc: {
       cumulative: rpc.cumulative,

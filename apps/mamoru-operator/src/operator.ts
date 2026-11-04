@@ -61,7 +61,7 @@ import { closeCalls, planReduce, planVaultExit, routeOf, swapBackCalls, vaultExi
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
 import { ONE_ACTION_GAS_UNITS, gasReserveAlertOverrideFromEnv, gasReserveAlertWei, reserveRefillWei } from './gas-reserve.ts'
 import { Lock } from './lock.ts'
-import { classifyEngineError, EngineHealthTracker, GasReserveTracker, logErr, safeMetrics, SLOT_BUSY_ALERT_MS, type EngineHealthSnapshot, type GasReserveSnapshot } from './metrics.ts'
+import { classifyEngineError, EngineHealthTracker, GasReserveTracker, logErr, RELAYER_READ_MS, RelayerWatch, safeMetrics, SLOT_BUSY_ALERT_MS, type EngineHealthSnapshot, type GasReserveSnapshot, type RelayerBalance } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
@@ -104,6 +104,8 @@ export type AuthorizationSnapshot = {
   deactivated: string | null
 }
 const RELAYER_BALANCE_CACHE_MS = 60_000
+/** otto/mamoru#277: a remote Safe still not provisioned this long after its first non-active answer pages ops once per code. */
+export const REMOTE_STUCK_ALERT_MS = 30 * 60_000
 /**
  * otto/mamoru#135: how old the shared readSafe behind GET funding may be. 15 s for a poll, 60 s while the keyed
  * RPC provider is over its hourly budget, and 2 s for `fresh=1` (the add-money screen watching a deposit land, a
@@ -568,7 +570,7 @@ export type OperatorConfig = {
    * account's engine reads its remote value from it and records every bridge-out in it before signing. Absent: no
    * account has a remote value, and no bridge-out is ever signed.
    */
-  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs' | 'capUsdc' | 'metrics'>
+  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs' | 'capUsdc' | 'metrics' | 'tickRelayer' | 'relayers'>
   /** otto/mamoru#278 (Base): a V4 home's returns from its remote Safe, followed to the mint here. Absent: none asked. */
   returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'floor' | 'open' | 'request' | 'lastClosedAt' | 'capUsdc' | 'returns' | 'holds' | 'noteReported'>
   /**
@@ -962,6 +964,11 @@ export class Operator {
   private readonly armHold = new Map<string, number>()
   /** Last time each account's activation was logged as waiting for relayer ETH. */
   private readonly relayerLowLogged = new Map<string, number>()
+  /** otto/mamoru#277: this chain's relayer balance on a timer and its low-balance page; when it was last read. */
+  private readonly relayerWatch = new RelayerWatch()
+  private relayerReadAt = 0
+  /** otto/mamoru#277: the (account, code) pairs of not-provisioned remote Safes already paged (memory only). */
+  private readonly remoteStuckPaged = new Set<string>()
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
   private readonly poolCache = poolStateCache()
   /** otto/mamoru#101 (shadow): hourly off-chain pool stats (TVL change, volume); only read for a policy that lists packaging:tvl. */
@@ -1100,6 +1107,33 @@ export class Operator {
       this.relayerBalanceCache = { at: now, value }
     }
     return { wei: this.relayerBalanceCache.value.toString(), cachedAgeMs: now - this.relayerBalanceCache.at }
+  }
+
+  /**
+   * otto/mamoru#277: on a timer, at most every RELAYER_READ_MS, reads this chain's relayer (and the bridge's on Monad) so
+   * /metrics `relayers` is fresh with no provisioning or mint going on, and pages once under two provisionings:
+   * 2 x (gasReserveWei + topUpMarginWei), what relayerCanActivate and the top-ups count for one Safe. A failed read keeps
+   * the last value and never throws into the tick.
+   */
+  async tickRelayers(): Promise<void> {
+    const at = Date.now()
+    if (at - this.relayerReadAt >= RELAYER_READ_MS) {
+      this.relayerReadAt = at
+      try {
+        const b = await this.relayerBalance()
+        const lowBelow = 2n * (this.cfg.policy.gasReserveWei + (await this.topUpMarginWei()))
+        this.relayerWatch.observe('operator', this.cfg.chainId, this.relayer.address, BigInt(b.wei), lowBelow, 'provisionings', new Date(at - b.cachedAgeMs).toISOString())
+      } catch (e) {
+        logErr('[relayer] operator balance not read, last value kept:', e)
+      }
+    }
+    await this.cfg.bridgeMonad?.tickRelayer().catch((e: unknown) => logErr('[relayer] bridge balance:', e))
+  }
+
+  /** otto/mamoru#277: every relayer key's balance as last read (operator's, then the bridge's), for /metrics. */
+  relayersSnapshot(): RelayerBalance[] {
+    const own = this.relayerWatch.last()
+    return [...(own ? [own] : []), ...(this.cfg.bridgeMonad?.relayers() ?? [])]
   }
 
   /** Whether a transaction of the relayer is in a node's pool and not yet mined. */
@@ -7180,12 +7214,40 @@ export class Operator {
       if (res.address.toLowerCase() !== rs.address.toLowerCase()) throw new Error(`remote operator provisioned ${res.address}, not ${rs.address}`)
       rs.ready = true
       rs.lastCode = undefined
+      rs.pendingSince = undefined
       console.log(`[remote] ${acc.accountKey} Safe ${rs.address} on chain ${rs.chainId} runs`)
     } else {
       rs.lastCode = res.code
+      rs.pendingSince ??= now()
       logErr(`[remote] ${acc.accountKey} Safe ${rs.address} on chain ${rs.chainId} not provisioned yet:`, res.code)
     }
     this.store.save()
+    this.pageRemoteStuck(acc)
+  }
+
+  /** otto/mamoru#277: the remote Safes of running accounts not provisioned for REMOTE_STUCK_ALERT_MS, for /metrics `remote.stuck`. */
+  remoteStuck(): { account: string; chainId: number; safe: string; code: string; sinceS: number }[] {
+    const out: { account: string; chainId: number; safe: string; code: string; sinceS: number }[] = []
+    for (const acc of Object.values(this.store.state.accounts)) {
+      const rs = acc.remote
+      if (!rs || rs.ready || !acc.active || !rs.pendingSince) continue
+      const since = Date.parse(rs.pendingSince)
+      if (!Number.isFinite(since) || Date.now() - since < REMOTE_STUCK_ALERT_MS) continue
+      out.push({ account: acc.accountKey.slice(0, 8), chainId: rs.chainId, safe: rs.address, code: rs.lastCode ?? 'UNKNOWN', sinceS: Math.round((Date.now() - since) / 1000) })
+    }
+    return out
+  }
+
+  /** otto/mamoru#277: pages once per (account, code) when a remote Safe crosses REMOTE_STUCK_ALERT_MS; a new code pages again. */
+  private pageRemoteStuck(acc: AccountState): void {
+    const rs = acc.remote
+    if (!rs || rs.ready || !rs.pendingSince || !rs.lastCode) return
+    const since = Date.parse(rs.pendingSince)
+    if (!Number.isFinite(since) || Date.now() - since < REMOTE_STUCK_ALERT_MS) return
+    const key = `${acc.accountKey}|${rs.lastCode}`
+    if (this.remoteStuckPaged.has(key)) return
+    this.remoteStuckPaged.add(key)
+    logErr(`[alert] remote Safe ${rs.address} of account ${acc.accountKey.slice(0, 8)} on chain ${rs.chainId} not provisioned for over ${Math.round((Date.now() - since) / 60_000)} min (${rs.lastCode}): it is retried; nothing runs on it`, undefined)
   }
 
   /** Base side, on a timer: every running account whose remote Safe is not running yet is provisioned again. */
