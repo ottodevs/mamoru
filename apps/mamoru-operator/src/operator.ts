@@ -497,8 +497,12 @@ const SAFE_ERROR_MESSAGE = {
  * only if no read lands for that long.
  */
 const MONAD_HISTORY_STEP_BLOCKS = 1_000n
-/** otto/mamoru#367: a Monad harvest reads up to this many blocks of history itself (200 requests), as before the small slices. */
-const MONAD_HISTORY_LAG_BLOCKS = 20_000n
+/**
+ * otto/mamoru#367: a Monad harvest reads up to this many blocks of history itself: 100 requests of the public RPCs,
+ * within the proxy's second tier, so never the 10-block keyed one. About 70 min of blocks, past what a review 15 min
+ * apart and a slice short of safe leave.
+ */
+const MONAD_HISTORY_LAG_BLOCKS = 10_000n
 /** otto/mamoru#358: an unchanged held-history read error is logged again after this long. */
 const HELD_HISTORY_ERROR_LOG_MS = 15 * 60_000
 /** otto/mamoru#358: how long a Monad review keeps reading those slices after its decision, while far behind. */

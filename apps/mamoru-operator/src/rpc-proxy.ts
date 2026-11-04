@@ -120,11 +120,11 @@ const WITNESS_TTL_MS = 15_000
 /** A trusted provider serves a log range ahead of every public one when it takes it in at most this many requests. */
 const TRUSTED_LOG_MAX_REQUESTS = 4n
 /**
- * otto/mamoru#367: a provider that would need more requests than this for one range is not asked for it while another
- * can serve it: on Monad a 5000-block history slice fell through to Alchemy free (10 blocks: 500 requests), timed out
- * and spent the hour's keyed budget.
+ * otto/mamoru#367: the providers asked for one range, by the requests each needs for it: those within the first tier
+ * when any is; else those within the second; else every one, as before. On Monad a 5000-block history slice fell
+ * through to Alchemy free (10 blocks: 500 requests), timed out and spent the hour's keyed budget.
  */
-const LOG_MAX_REQUESTS = 100n
+const LOG_REQUEST_TIERS = [50n, 200n] as const
 
 /** Calls whose answer decides nothing: a signed transaction is the same bytes whoever relays it. Any provider may take them. */
 const ANY_PROVIDER = new Set(['eth_sendRawTransaction'])
@@ -538,9 +538,9 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const allowed = logProviders
       .filter((p) => !opts.trustedLogsOnly || trusted.includes(p.url))
       .map((p, i) => { const n = requests(p); return { p, i, n, t: tier(p, n) } })
-    // A provider over LOG_MAX_REQUESTS for this range only when none can do it in fewer (#367).
-    const within = allowed.filter((x) => x.n <= LOG_MAX_REQUESTS)
-    const order = (within.length ? within : allowed).sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
+    // A provider that needs many requests for this range only when none can do it in fewer (#367).
+    const tierOf = LOG_REQUEST_TIERS.map((max) => allowed.filter((x) => x.n <= max)).find((t) => t.length) ?? allowed
+    const order = tierOf.sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
     let last: any = null
     // What the caller is told when nothing is accepted: a range that was read but not witnessed says more than a provider being down.
     let unwitnessed: any = null
