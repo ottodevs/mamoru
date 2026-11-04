@@ -146,6 +146,18 @@ export class MemoryJournal {
     return op
   }
 
+  /**
+   * otto/mamoru#357: an op that something threw out of before it was signed (an RPC timeout in prepare or the
+   * simulation) is discarded, so the slot is free for the next review. Nothing of it reached the chain. A signed op is
+   * left where it is: reconciliation settles it. True when it discarded the op.
+   */
+  discardUnsigned(opId: string, code: ReasonCode, detail?: string): boolean {
+    const op = this.op(opId)
+    if (op.state !== 'proposed' && op.state !== 'prepared' && op.state !== 'simulated') return false
+    this.move(opId, 'discarded', code, {}, detail)
+    return true
+  }
+
   pathOf(opId: string): OpState[] {
     return this.transitions.filter((t) => t.opId === opId).map((t) => t.to)
   }

@@ -26,7 +26,7 @@ describe('checkTransition', () => {
   })
 
   test('simulated discards only with the sign blockers and a stale decision; signed ops cannot be discarded', () => {
-    for (const code of ['DRY_RUN_STOP', 'OP_DECISION_STALE', 'OP_NONCE_MOVED', 'EHG_OBSERVATION_STALE', 'EHG_OBSERVATION_REORGED', 'SIGN_CHAIN_NOT_ALLOWED'] as const) {
+    for (const code of ['DRY_RUN_STOP', 'OP_DECISION_STALE', 'OP_NONCE_MOVED', 'EHG_OBSERVATION_STALE', 'EHG_OBSERVATION_REORGED', 'SIGN_CHAIN_NOT_ALLOWED', 'OBS_RPC_UNAVAILABLE'] as const) {
       expect(checkTransition('simulated', 'discarded', code).ok).toBe(true)
     }
     expect(checkTransition('simulated', 'discarded', 'POLICY_BUDGET').ok).toBe(false)

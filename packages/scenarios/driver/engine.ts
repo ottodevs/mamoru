@@ -903,11 +903,25 @@ export class Engine {
     if (p.kind === 'enter_mint' || p.kind === 'increase_liquidity' || p.kind === 'rerange') this.cfg.onEntering?.(p.pool)
     // An op settled RECON_UNINCLUDABLE is backed off where it is settled (`settlePending`).
     try {
-      await this.run(op, obs, decision)
+      await this.runOp(op, obs, decision)
     } finally {
       this.reportBridgeFailures()
     }
     return { kind: 'decided', observation: obs, record, op }
+  }
+
+  /**
+   * otto/mamoru#357: a throw that is not a refusal (a Monad RPC timeout in prepare or the simulation) left the unsigned
+   * op live, and every review after it held DECIDE_SLOT_BUSY until a restart. It is discarded; the error still reaches
+   * the caller, which logs the review error.
+   */
+  private async runOp(op: OpRecord, obs: Observation, decision: Decision): Promise<void> {
+    try {
+      await this.run(op, obs, decision)
+    } catch (e) {
+      this.journal.discardUnsigned(op.opId, 'OBS_RPC_UNAVAILABLE', `thrown before signing: ${(e as Error)?.message?.split('\n')[0] ?? String(e)}`)
+      throw e
+    }
   }
 
   /**

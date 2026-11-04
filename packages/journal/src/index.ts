@@ -35,12 +35,12 @@ const EDGES: Record<string, readonly CodeRule[]> = {
   // SIGN_STATE_INVALID out of the move and left the op live: DECIDE_SLOT_BUSY on every review until a restart
   // (POLICY_PRICE_BAND, INVENTORY_FULL, GAS_PRICE_OVER_CAP and precheck POLICY_BUDGET / POLICY_NOT_ADMITTED did). Nothing is
   // signed in these states, so they take any code. simulated keeps its list: its discards are the fixed signBlocker codes
-  // and OP_DECISION_STALE, and it is the last state before a userOp exists. Signed ops have no discard edge at all.
+  // and OP_DECISION_STALE, plus OBS_RPC_UNAVAILABLE for a throw before signing (#357), and it is the last state before a userOp exists. Signed ops have no discard edge at all.
   'proposed>discarded': [ANY_CODE],
   'proposed>prepared': ['EHG_OK'],
   'prepared>discarded': [ANY_CODE],
   'prepared>simulated': ['EHG_OK', 'EHG_NO_GO_OVERRIDDEN_BY_EXIT'],
-  'simulated>discarded': ['DRY_RUN_STOP', 'OP_DECISION_STALE', 'OP_NONCE_MOVED', 'EHG_OBSERVATION_STALE', 'EHG_OBSERVATION_REORGED', 'OP_PREEMPTED_BY_EXIT', 'SIGN_CHAIN_NOT_ALLOWED'],
+  'simulated>discarded': ['DRY_RUN_STOP', 'OP_DECISION_STALE', 'OP_NONCE_MOVED', 'EHG_OBSERVATION_STALE', 'EHG_OBSERVATION_REORGED', 'OP_PREEMPTED_BY_EXIT', 'SIGN_CHAIN_NOT_ALLOWED', 'OBS_RPC_UNAVAILABLE'],
   'simulated>signed': ['OP_SIGNED'],
   'signed>submitted': ['BUNDLER_ACCEPTED'],
   'signed>pending_reconciliation': ['RECON_SEND_UNKNOWN', 'BUNDLER_REJECTED', 'BUNDLER_UNAVAILABLE'],
