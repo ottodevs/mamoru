@@ -183,14 +183,17 @@ export const MONTH_S = 30 * DAY_S
  * another chain has no samples: the figure then covers Base and says so (`baseOnly`), it never invents capital.
  * With nothing measured for the window, the positions open now stand in, every chain. If a pool that worked has no
  * rate, the figure is n/a.
+ * The fallback for an empty measured window is deliberate (otto/mamoru#343, review r3): a new position is sampled
+ * within one cron tick, and n/a in that gap is what product asked to avoid.
  */
-export function workedRate(f: FundingView, worked: WorkedView['day'] | null | undefined, apy: ApyView | undefined, pick: 'currentPct' | 'monthlyPct', windowS: number, price: bigint | null = null): AccountRate {
+export function workedRate(f: FundingView, worked: WorkedView['day'] | null | undefined, apy: ApyView | undefined, pick: 'currentPct' | 'monthlyPct', windowS: number, price: bigint | null = null, otherChain = false): AccountRate {
   if (!apy) return { pct: null, gap: 'loading', covered: 0, of: 0 }
   const weights = new Map<string, number>()
   const add = (pool: string, w: number) => weights.set(pool, (weights.get(pool) ?? 0) + w)
   const fromLedger = !!worked?.length
   for (const w of worked ?? []) add(w.pool, w.usdSeconds)
-  let baseOnly = false
+  // `otherChain`: the owner has a sleeve off Base, so money that worked there earlier in the window and closed is absent from the samples too.
+  let baseOnly = fromLedger && otherChain
   for (const p of f.positions) {
     if (fromLedger) {
       const chainId = (p as { chainId?: number }).chainId

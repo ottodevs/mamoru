@@ -290,15 +290,15 @@ function RateSub({ name, what, tail, info = null }: { name: string; what: string
  */
 const LEDGER_DAY_MAX_AGE_MS = 6 * 60 * 60_000
 
-export function Indicators({ f, apy, price, worked = null, noRead = false }: { f: FundingView | undefined; apy: ApyView | undefined; price: bigint | null; worked?: WorkedView | null; noRead?: boolean }) {
+export function Indicators({ f, apy, price, worked = null, otherChain = false, noRead = false }: { f: FundingView | undefined; apy: ApyView | undefined; price: bigint | null; worked?: WorkedView | null; otherChain?: boolean; noRead?: boolean }) {
   const waiting = noRead ? ('no-read' as const) : ('loading' as const)
   // Brais, 2 Nov: both figures count only the capital that worked in the window, never idle money. Before anything
   // has worked, the 30-day figure is the plan pools' mean (`monthlyRate` with no positions).
-  const nothingWorked = !!f && f.positions.length === 0 && !worked?.month.length
-  const monthly = !f ? { pct: null, gap: waiting, covered: 0, of: 0, plan: false } : nothingWorked ? monthlyRate([], apy) : { ...workedRate(f, worked?.month, apy, 'monthlyPct', MONTH_S, price), plan: false }
-  // A ledger more than 6 h behind (its cron stalled) would show an old day: the positions open now stand in instead.
-  const day = worked && Date.now() - Date.parse(worked.asOf) < LEDGER_DAY_MAX_AGE_MS ? worked.day : null
-  const current = f ? workedRate(f, day, apy, 'currentPct', DAY_S, price) : { pct: null, gap: waiting, covered: 0, of: 0 }
+  // A ledger more than 6 h behind (its cron stalled) would show an old window, for both figures: the positions open now stand in instead.
+  const fresh = worked && Date.now() - Date.parse(worked.asOf) < LEDGER_DAY_MAX_AGE_MS ? worked : null
+  const nothingWorked = !!f && f.positions.length === 0 && !fresh?.month.length
+  const monthly = !f ? { pct: null, gap: waiting, covered: 0, of: 0, plan: false } : nothingWorked ? monthlyRate([], apy) : { ...workedRate(f, fresh?.month, apy, 'monthlyPct', MONTH_S, price, otherChain), plan: false }
+  const current = f ? workedRate(f, fresh?.day, apy, 'currentPct', DAY_S, price, otherChain) : { pct: null, gap: waiting, covered: 0, of: 0 }
   const partial = (r: AccountRate) => (r.pct !== null && r.covered < r.of ? `${r.covered} of ${r.of} pools with a rate` : null)
   const monthlySrc = sourceName(apy?.monthlySource)
   const currentSrc = sourceName(apy?.currentSource)
@@ -1521,7 +1521,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         total={total}
         scopeNote={past && !cached ? moneyCopy.pastScope : totalScopeNote(f, !!monadSleeve)}
       />
-      <Indicators f={noPositions ? undefined : whole?.f} apy={apy.data} price={price} worked={yieldLedger.data?.worked} noRead={(!f && liveDown) || noPositions} />
+      <Indicators f={noPositions ? undefined : whole?.f} apy={apy.data} price={price} worked={yieldLedger.data?.worked} otherChain={!!monadSleeve} noRead={(!f && liveDown) || noPositions} />
       <WrongNetwork accountKey={accountKey} startPending={canStart || oneOpen} />
       {past ? (
         <section className="card" data-testid="past-notice" role="status">

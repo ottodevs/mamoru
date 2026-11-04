@@ -97,12 +97,22 @@ describe('rates over the working capital', () => {
     expect(html).toContain('rate-base-only')
     expect(html).toContain('Both figures cover')
   })
-  test('each figure has its own scope: a stale 24h falls back to every open position, the 30-day one is Base-measured', () => {
+  test('a Monad sleeve alone (its position closed) still marks the figure Base only', () => {
+    const day = [{ pool: 'pool:WETH/USDC/3000', usdSeconds: 1 }]
+    expect(workedRate(brais, day, at12, 'currentPct', DAY_S, null, true)).toMatchObject({ pct: 12, baseOnly: true })
+    expect(workedRate(brais, null, at12, 'currentPct', DAY_S, null, true).baseOnly).toBeUndefined()
+  })
+  test('a ledger more than 6 h old is not shown as the 30-day figure either', () => {
+    const old = { asOf: new Date(Date.now() - 7 * 3_600_000).toISOString(), day: [{ pool: 'pool:USDC/USDT/100', usdSeconds: 1 }], month: [{ pool: 'pool:USDC/USDT/100', usdSeconds: 1 }] }
+    const { html } = render(<Indicators f={brais} apy={at12} price={null} worked={old} />)
+    expect(html).toMatch(/data-testid="rate-monthly"[^>]*>[^<]*(<[^>]+>)*53/)
+  })
+  test('each figure has its own scope: a 24h with nothing measured falls back to every open position, the 30-day one is Base-measured', () => {
     const monad = { ...pos('9', 'pool:WMON/USDC/3000', '50000000'), chainId: 143 } as FundingView['positions'][number]
     const both = { ...brais, positions: [...brais.positions, monad] }
     const month = [{ pool: 'pool:WETH/USDC/3000', usdSeconds: 1 }]
     const rates = { ...at12, byPool: [...at12.byPool, { pool: 'pool:WMON/USDC/3000', weight: 0, currentPct: 9, monthlyPct: 9 }] }
-    const { html } = render(<Indicators f={both} apy={rates} price={null} worked={{ asOf: new Date(Date.now() - 7 * 3_600_000).toISOString(), day: month, month }} />)
+    const { html } = render(<Indicators f={both} apy={rates} price={null} worked={{ asOf: new Date().toISOString(), day: [], month }} />)
     expect(html).toContain('The 30-day figure covers')
     expect(html).not.toContain('Both figures')
   })
