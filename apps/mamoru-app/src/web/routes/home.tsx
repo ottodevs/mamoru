@@ -35,6 +35,9 @@ import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '..
 import { isVaultTarget } from '../lib/policies.ts'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 import { moneyCopy, StuckNote, totalScopeNote, unreadChains } from '../components/money-map.tsx'
+import { ChainBadge, SafeRef } from '../components/safe-ref.tsx'
+import { idleWhyLine } from '../lib/idle-why.ts'
+import { mixVsTarget, type MixRow } from '../lib/mix.ts'
 
 export const homeCopy = {
   total: 'Total balance',
@@ -90,6 +93,11 @@ export const homeCopy = {
   colAmount: 'Amount',
   colShare: 'Share',
   target: (pct: number) => (pct === 0 ? 'target 0%, closing' : `target ${pct}%`),
+  // otto/mamoru#265: the account's mix now against its policy's, per bucket, under the positions.
+  mix: 'Your mix',
+  mixTarget: (pct: string) => `target ${pct}%`,
+  chainSum: (amount: string) => `${amount} USDC`,
+  leftOver: 'Left over, under the 0.10 USDC minimum.',
   // otto/mamoru#210: a row of USDC supplied to a lending vault.
   lending: 'USDC lending',
   // otto/mamoru#297: next to the range gauge; the dust, cost and cooldown holds below keep their own, truer lines.
@@ -476,6 +484,45 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
  * range, value in USDC with each token, share of working capital and the pool's current and monthly rates. A
  * paused (out-of-range) position earns 0% today and says Mamoru puts it back to work.
  */
+type ChainGroup = { chainId: number; safe: string; value: bigint | null; rows: number[] }
+
+/**
+ * otto/mamoru#265: with the money map of an account on more than one chain, the positions by the Safe that holds them,
+ * the group with the most money first and, inside it, the largest position first (#350). `f.positions` is the map's
+ * chains' positions in order (wholeMoney), so each chain owns the next run of rows. Null for an account on one chain.
+ */
+export function chainGroups(f: FundingView, rows: PositionRate[]): ChainGroup[] | null {
+  const m = f.money
+  if (!m || new Set(m.chains.map((c) => c.chainId)).size < 2 || m.chains.reduce((n, c) => n + c.positions.length, 0) !== f.positions.length) return null
+  const sorted = bySize(rows)
+  let at = 0
+  const groups: ChainGroup[] = []
+  for (const c of m.chains) {
+    const own = new Set(c.positions.map((_, i) => at + i))
+    at += c.positions.length
+    if (!own.size) continue
+    const mine = sorted.filter((k) => own.has(k))
+    const values = mine.map((k) => rows[k]!.valueUsdc)
+    groups.push({ chainId: c.chainId, safe: c.safe, value: values.some((v) => v === null) ? null : values.reduce<bigint>((a, v) => a + v!, 0n), rows: mine })
+  }
+  return groups.sort((a, b) => (a.value === b.value ? 0 : a.value === null ? 1 : b.value === null ? -1 : b.value > a.value ? 1 : -1))
+}
+
+/** "YOUR MIX  Stable 50.3% target 50% · Balanced 34.6% target 35% · Growth 15.1% target 15%". */
+function MixLine({ rows }: { rows: MixRow[] }) {
+  const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1))
+  return (
+    <p className="m-0 mt-3 flex flex-col gap-x-5 gap-y-1 border-t border-wash pt-3 font-mono text-[0.75rem] tracking-[0.04em] sm:flex-row sm:flex-wrap sm:items-baseline" data-testid="mix">
+      <span className="uppercase tracking-[0.14em] text-stone">{homeCopy.mix}</span>
+      {rows.map((r) => (
+        <span key={r.bucket} data-testid="mix-row">
+          {r.bucket} <span className="text-ink">{r.nowPct.toFixed(1)}%</span> <span className="text-stone">{homeCopy.mixTarget(fmt(r.targetPct))}</span>
+        </span>
+      ))}
+    </p>
+  )
+}
+
 /** Range holds name a token id only, and ids repeat across chains: they belong to the account's own chain's positions. */
 function holdsApply(p: { chainId?: number }, homeChain: number): boolean {
   return p.chainId === undefined || p.chainId === homeChain
@@ -494,6 +541,10 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
   const line = progressLine(f.progress) ?? engineLine(f)
   const bridge = f.progress?.bridge
   const noRate = apy !== undefined && rows.some((r) => r.monthlyPct === null || (r.inRange && r.currentPct === null))
+  // otto/mamoru#265: an account on more than one chain lists its positions by chain, each under its Safe.
+  const groups = chainGroups(f, rows)
+  const order = groups ? groups.flatMap((g) => g.rows) : bySize(rows)
+  const mix = mixVsTarget(f, price)
   return (
     <Fold
       defaultOpen
@@ -538,12 +589,26 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
             <span className="wc-rate">{homeCopy.monthly}</span>
           </div>
           <ul className="m-0 list-none p-0">
-            {bySize(rows).map((k, i) => {
-              const p = f.positions[k]! as FundingView['positions'][number] & { chainId?: number }
-              return <PositionRow key={`${p.chainId ?? ''}:${p.tokenId}`} p={p} r={rows[k]!} i={i} readFromChain={f.source === 'chain'} hold={holdsApply(p, homeChain) ? f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code : undefined} />
-            })}
+            {(groups ?? [{ chainId: 0, safe: '', value: null, rows: bySize(rows) }]).map((g, gi) => (
+              <Fragment key={`${g.chainId}:${g.safe}`}>
+                {groups ? (
+                  <li className={`flex flex-wrap items-center gap-x-3 gap-y-[0.35rem] pt-5 pb-2${gi ? ' mt-2 border-t border-wash' : ''}`} data-testid="chain-group">
+                    <ChainBadge chainId={g.chainId} />
+                    <span className="order-3 basis-full sm:order-2 sm:basis-auto">
+                      <SafeRef chainId={g.chainId} safe={g.safe} />
+                    </span>
+                    {g.value !== null ? <span className="order-2 ml-auto font-mono text-[0.78rem] tracking-[0.04em] text-stone sm:order-3">{homeCopy.chainSum(usd(g.value))}</span> : null}
+                  </li>
+                ) : null}
+                {g.rows.map((k) => {
+                  const p = f.positions[k]! as FundingView['positions'][number] & { chainId?: number }
+                  return <PositionRow key={`${p.chainId ?? ''}:${p.tokenId}`} p={p} r={rows[k]!} i={order.indexOf(k)} readFromChain={f.source === 'chain'} hold={holdsApply(p, homeChain) ? f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code : undefined} />
+                })}
+              </Fragment>
+            ))}
           </ul>
           {noRate ? <p className="m-0 pt-2 font-mono text-[0.72rem] text-stone">{homeCopy.noRate}</p> : null}
+          {mix ? <MixLine rows={mix} /> : null}
         </>
       )}
       {onStop || onStart ? (
@@ -607,7 +672,36 @@ function idleByChain(f: FundingView): string | null {
   return parts.length > 1 ? parts.map((x) => `${chainLabel(x.c.chainId)} ${usd(x.v)}`).join(' · ') : null
 }
 
+type IdleChain = { chainId: number; safe: string; value: bigint; tokens: { token: string; amount: string; decimals: number }[]; line: string }
+
+/**
+ * otto/mamoru#265: each Safe holding idle money, when the money map spans more than one chain; null otherwise. The line
+ * says why it waits: the engine's reason for that chain in words, else, on the account's own chain, what Idle said before,
+ * else that it waits (or is a remainder under the smallest entry). Dust under a cent is left out.
+ */
+export function idleChains(f: FundingView, home: Split, homeChain: number): IdleChain[] | null {
+  const m = f.money
+  if (!m || new Set(m.chains.map((c) => c.chainId)).size < 2) return null
+  const out: IdleChain[] = []
+  for (const c of m.chains) {
+    const value = c.idle.reduce((a, t) => a + BigInt(t.valueUsdc), 0n)
+    if (value < DUST_USDC) continue
+    const why = c.idle.find((t) => t.why)?.why
+    const own = idleReason(f, home)
+    const line = why
+      ? idleWhyLine(why, c.chainId)
+      : c.chainId === homeChain
+        ? `${own.charAt(0).toUpperCase()}${own.slice(1)}.`
+        : value < MIN_ENTRY_USDC
+          ? homeCopy.leftOver
+          : idleWhyLine(undefined, c.chainId)
+    out.push({ chainId: c.chainId, safe: c.safe, value, tokens: c.idle.filter((t) => t.amount !== '0'), line })
+  }
+  return out.length ? out.sort((a, b) => (b.value > a.value ? 1 : b.value < a.value ? -1 : 0)) : null
+}
+
 export function Idle({ f, s, home = s }: { f: FundingView; s: Split; /** The account's own (Base) balance: why money is idle is said of it, never of money on another chain. */ home?: Split }) {
+  const homeChain = useChain().chainId
   const reason = f.money && home.idle < DUST_USDC && s.idle >= DUST_USDC ? null : idleReason(f, home)
   // One idle token that is not USDC (cbBTC left over, say) is named on the line itself, since nothing opens.
   const only = s.idleTokens.length === 1 && s.idleTokens[0]!.token !== 'USDC' ? s.idleTokens[0]! : null
@@ -634,6 +728,38 @@ export function Idle({ f, s, home = s }: { f: FundingView; s: Split; /** The acc
       </span>
     </>
   )
+  // otto/mamoru#265: on more than one chain, the idle money of each Safe and why it waits. Open when money waits on a
+  // chain other than the account's own (the Monad share after a move), so the Safe and the reason are in view.
+  const chains = idleChains(f, home, homeChain)
+  if (chains) {
+    return (
+      <Fold testId="idle" head={head} labelledBy="idle-title" defaultOpen={chains.some((c) => c.chainId !== homeChain && c.value >= MIN_ENTRY_USDC)}>
+        <ul className="m-0 list-none p-0 pt-1" data-testid="idle-chains">
+          {chains.map((c, i) => (
+            <li key={`${c.chainId}:${c.safe}`} className={`grid gap-2 py-3${i ? ' border-t border-wash' : ''}`} data-testid="idle-chain">
+              <span className="flex flex-wrap items-center gap-x-3 gap-y-[0.35rem]">
+                <ChainBadge chainId={c.chainId} />
+                <span className="order-3 basis-full sm:order-2 sm:basis-auto">
+                  <SafeRef chainId={c.chainId} safe={c.safe} />
+                </span>
+                <span className="order-2 ml-auto text-[1.05rem] tabular-nums sm:order-3">
+                  {usd(c.value)} <span className="wc-unit">USDC</span>
+                </span>
+              </span>
+              {c.tokens.length > 1 || (c.tokens[0] && c.tokens[0].token !== 'USDC') ? (
+                <span className="font-mono text-[0.75rem] tracking-[0.04em] text-stone">
+                  {c.tokens.map((t) => `${tokenAmount(t.amount, t.token, t.decimals)} ${t.token}`).join(' · ')}
+                </span>
+              ) : null}
+              <span className="max-w-[44rem] text-[0.95rem] leading-[1.45]" data-testid="idle-why">
+                {c.line}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </Fold>
+    )
+  }
   // #226: the same head as every panel; it opens only when there is more than one token to list.
   if (s.idleTokens.length <= 1) {
     return (
