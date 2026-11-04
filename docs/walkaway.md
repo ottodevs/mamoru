@@ -60,7 +60,7 @@ Developers can build this batch with `walkawayCalls` in [`packages/account/owner
 
 Mamoru moves the Growth share from Base to your Safe on Monad over Circle CCTP V2: it burns the USDC on Base, Circle signs a message (the attestation), and a relayer calls Monad to mint it. If the app says a transfer to Monad is stuck, the USDC is not lost and Mamoru keeps retrying. You do not have to wait for us: the burn names no caller on Monad, so any wallet can finish it, and the USDC can only go to your Monad Safe.
 
-You need the burn's Base transaction hash (the app links it under "Finish it yourself", or find it in your account's history on Basescan) and a wallet on Monad (chain id 143) with a little MON for gas.
+You need the burn's Base transaction hash (find it in your account's history on Basescan) and a wallet on Monad (chain id 143) with a little MON for gas.
 
 1. **Get the message and the attestation from Circle.** Base is CCTP domain 6:
 
