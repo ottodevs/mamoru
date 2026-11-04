@@ -24,7 +24,7 @@ const decreaseLog = (blockNumber: bigint, logIndex: number, amount0: bigint) => 
   removed: false,
 })
 
-function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; events: ChainPositionEvent[] }, tailLogs: unknown[] = [], cfg: { historyStepBlocks?: bigint; historyReadMs?: number } = {}, hashOf: (n: bigint) => Hex = () => '0xaa') {
+function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; events: ChainPositionEvent[] }, tailLogs: unknown[] = [], cfg: { historyStepBlocks?: bigint; historyLagBlocks?: bigint; historyReadMs?: number } = {}, hashOf: (n: bigint) => Hex = () => '0xaa') {
   const ranges: { from: bigint; to: bigint }[] = []
   const logs = { down: false }
   const hooked: [string, bigint | null][] = []
@@ -214,6 +214,15 @@ describe('a held position the cursor does not follow, read one slice per review 
     await c.catchUp(900_000n, [7n])
     expect(c.held.size).toBe(0)
     expect(c.failed).toEqual([['7', 'timeout']])
+  })
+
+  test('#367: a harvest waits only past historyLagBlocks, not past one small slice', async () => {
+    const { owed, held, ranges } = engine(none, [], { historyStepBlocks: 1_000n, historyLagBlocks: 20_000n })
+    held.set('7', { from: 100n, through: 890_000n, hash: '0xaa', events: [], checked: true })
+    await owed(7n, { block: 900_010n, logIndex: 0 })
+    expect(ranges).toEqual([{ from: 890_001n, to: 900_009n }])
+    held.set('7', { from: 100n, through: 870_000n, hash: '0xaa', events: [], checked: true })
+    await expect(owed(7n, { block: 900_010n, logIndex: 0 })).rejects.toThrow('OBS_RPC_UNAVAILABLE')
   })
 
   test('#367: the timer reads between reviews from the last observation; nothing before a review; one reader at a time', async () => {

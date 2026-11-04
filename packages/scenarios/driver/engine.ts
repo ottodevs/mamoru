@@ -381,6 +381,12 @@ export type EngineConfig = {
    * and a harvest before that falls back to the full read, as before.
    */
   historyStepBlocks?: bigint
+  /**
+   * otto/mamoru#367: how far a held position's history may trail the harvest block before the prepare waits; the
+   * harvest reads the rest itself. Absent: one `historyStepBlocks`. Apart from the slice so small slices (a 429 costs
+   * little) do not make a harvest wait on reviews 15 min apart.
+   */
+  historyLagBlocks?: bigint
   /** otto/mamoru#358: how long a review may keep reading held-history slices after its decision. Absent: one slice. */
   historyReadMs?: number
   /** Session uses already confirmed on chain before this engine started (restart): replayed into the ledger so caps and usage limits count them. */
@@ -2222,7 +2228,9 @@ export class Engine {
     const end = at.logIndex === 0 ? at.block - 1n : at.block
     const step = this.cfg.historyStepBlocks
     // `full` (an included harvest's row): whatever was read plus all the rest, never the whole history again (gate of #358).
-    if (!read || (step !== undefined && !full && end - read.through > step)) {
+    // How far behind a harvest still reads the rest itself (#367: apart from the slice size; default a step).
+    const lag = this.cfg.historyLagBlocks ?? step
+    if (!read || (step !== undefined && !full && end - read.through > lag!)) {
       if (step === undefined || full) return principalOwedBefore(this.client, [tokenId], this.historyFromBlock, at, this.registry)
       throw new ReasonError('OBS_RPC_UNAVAILABLE', `position ${tokenId}: its history is read to block ${read?.through ?? this.historyFromBlock - 1n} of ${end}, one slice per review`)
     }

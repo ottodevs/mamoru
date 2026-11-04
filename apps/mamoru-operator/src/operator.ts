@@ -492,10 +492,13 @@ const SAFE_ERROR_MESSAGE = {
 } as const
 
 /**
- * otto/mamoru#358: blocks of a held position's history one slice reads on Monad (50 log requests of 100 blocks): small
- * enough that one 429 loses little, read in a row while `MONAD_HISTORY_READ_MS` lasts. 5000 blocks are about 33 min.
+ * otto/mamoru#358, #367: blocks of a held position's history one slice reads on Monad (10 log requests of 100 blocks):
+ * a 429 loses little, and the minute timer reads slices in a row. 1000 blocks are about 7 min, past a harvest's reach
+ * only if no read lands for that long.
  */
-const MONAD_HISTORY_STEP_BLOCKS = 5_000n
+const MONAD_HISTORY_STEP_BLOCKS = 1_000n
+/** otto/mamoru#367: a Monad harvest reads up to this many blocks of history itself (200 requests), as before the small slices. */
+const MONAD_HISTORY_LAG_BLOCKS = 20_000n
 /** otto/mamoru#358: an unchanged held-history read error is logged again after this long. */
 const HELD_HISTORY_ERROR_LOG_MS = 15 * 60_000
 /** otto/mamoru#358: how long a Monad review keeps reading those slices after its decision, while far behind. */
@@ -7658,7 +7661,7 @@ export class Operator {
         depositsAfter: BigInt(acc.depositsAfter),
         historyFromBlock: BigInt(acc.historyFromBlock),
         // otto/mamoru#358: Monad's providers serve 100-block log ranges; one read of a position's whole history timed out.
-        ...(this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? { historyStepBlocks: MONAD_HISTORY_STEP_BLOCKS, historyReadMs: MONAD_HISTORY_READ_MS } : {}),
+        ...(this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? { historyStepBlocks: MONAD_HISTORY_STEP_BLOCKS, historyLagBlocks: MONAD_HISTORY_LAG_BLOCKS, historyReadMs: MONAD_HISTORY_READ_MS } : {}),
         sessions,
         priorIncluded,
         carried: acc.carried ?? [],

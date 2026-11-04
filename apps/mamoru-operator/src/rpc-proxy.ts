@@ -125,8 +125,6 @@ const TRUSTED_LOG_MAX_REQUESTS = 4n
  * and spent the hour's keyed budget.
  */
 const LOG_MAX_REQUESTS = 100n
-/** otto/mamoru#367: a log chunk refused for rate is asked again after these pauses, before the provider is given up. */
-const LOG_CHUNK_RETRY_MS = [300, 1200] as const
 
 /** Calls whose answer decides nothing: a signed transaction is the same bytes whoever relays it. Any provider may take them. */
 const ANY_PROVIDER = new Set(['eth_sendRawTransaction'])
@@ -459,31 +457,12 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   }
   type Rejection = Exclude<LogRangeOutcome, 'accepted'>
   const fail = (message: string, reason: Rejection = 'provider_error') => Object.assign(new Error(message), { rpc: { code: -32603, message }, reason })
-  /**
-   * One chunk. A refusal for rate (429, -32005, "limit") from a provider that already served a chunk of this range (it
-   * works, it is only throttled) is asked again after LOG_CHUNK_RETRY_MS; any other error, or a provider that served
-   * nothing, gives the provider up at once.
-   */
-  async function askChunk(url: string, filter: any, a: bigint, b: bigint, isChunk: boolean, served: { n: number }): Promise<any> {
-    for (let k = 0; ; k++) {
-      try {
-        const r = await ask(url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], isChunk)
-        served.n++
-        return r
-      } catch (e) {
-        const pause = LOG_CHUNK_RETRY_MS[k]
-        if (pause === undefined || served.n === 0 || classifyRpcError(undefined, (e as any).rpc) !== 'rateCapacity') throw e
-        await Bun.sleep(pause)
-      }
-    }
-  }
   /** The whole range from one provider, in chunks it accepts. Any failed chunk fails the provider: providers are never mixed inside one range. */
   async function logsFrom(p: LogProvider, filter: any, from: bigint, to: bigint): Promise<unknown[]> {
     const chunks = ranges(from, to, p.logRange)
     const out: unknown[] = []
-    const served = { n: 0 }
     for (let i = 0; i < chunks.length; i += 4) {
-      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => askChunk(p.url, filter, a, b, chunks.length > 1, served)))
+      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => ask(p.url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], chunks.length > 1)))
       for (const logs of part) {
         if (!Array.isArray(logs)) throw fail('eth_getLogs answered no list')
         out.push(...logs)
