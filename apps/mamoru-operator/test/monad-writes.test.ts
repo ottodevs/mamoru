@@ -21,6 +21,7 @@ import { nativePricePool, writeRefusal } from '../src/chain.ts'
 import { relayerGasProfile } from '../src/relayer.ts'
 import { MONAD_SPONSOR, monadSponsor, type SponsorPolicy } from '../src/sponsorship.ts'
 import { operatorSignature } from '../src/server.ts'
+import { Operator } from '../src/operator.ts'
 import { ctx } from './owner-world.ts'
 
 function code(fn: () => unknown): string | undefined {
@@ -288,5 +289,20 @@ describe('boot on chain 143', () => {
       process.env = saved
     }
     expect(methods).not.toContain('eth_sendRawTransaction')
+  })
+})
+
+describe('otto/mamoru#370: the approval summary names the chain native asset', () => {
+  const feeLine = (registry: typeof monadRegistry, policy: Parameters<Operator['v4Lines']>[1]) =>
+    (Operator.prototype as unknown as { v4Lines: Operator['v4Lines'] }).v4Lines
+      .call(Object.assign(Object.create(Operator.prototype), { cfg: { registry } }), [], policy, 1_000_000n)
+      .find((l: string) => l.includes('network fee'))!
+
+  test('on Monad the network fee is in MON, from the Safe MON; Base keeps ETH', () => {
+    const monad = feeLine(monadRegistry, monadV6Deployed(withPinnedV3()))
+    expect(monad).toContain(' MON of network fee')
+    expect(monad).toContain("from your Safe's MON;")
+    expect(monad).not.toMatch(/\bETH\b/)
+    expect(feeLine(baseRegistry, POLICIES['conservador-live-v2']!) ?? '').not.toContain('MON')
   })
 })

@@ -3272,7 +3272,7 @@ export class Operator {
     if (caps) {
       const per = maxGasCostPerOp(caps)
       const ops = stored.reduce((n, g) => n + BigInt(g.grant.userOp.usageLimit), 0n)
-      lines.push(`Each engine transaction pays at most ${fmtUnits(per, 18)} ETH of network fee (at most ${fmtUnits(caps.maxFeePerGas, 9)} gwei per gas), from your Safe's ETH; these grants allow ${ops.toLocaleString('en-US')} transactions in all`)
+      lines.push(`Each engine transaction pays at most ${fmtUnits(per, 18)} ${this.nativeSymbol()} of network fee (at most ${fmtUnits(caps.maxFeePerGas, 9)} gwei per gas), from your Safe's ${this.nativeSymbol()}; these grants allow ${ops.toLocaleString('en-US')} transactions in all`)
     }
     return lines
   }
