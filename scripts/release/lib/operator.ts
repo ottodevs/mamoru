@@ -283,7 +283,11 @@ export type ObserveVerdict =
  * - `doubt` at the deadline: engines reviewed but never decided, without the evidence above. Reported, never rolled back.
  * - `wait` otherwise.
  */
-export function observeVerdict(tracks: ReadonlyMap<string, EngineTrack>, required: ReadonlySet<string> | null, timedOut: boolean, fatal: string | null = null): ObserveVerdict {
+/**
+ * `minWatched`: without a baseline, the engines expected (the operator's active accounts). /metrics may publish them a
+ * few at a time after the boot, so a set smaller than that is never `ok`: it waits, and is a doubt at the deadline.
+ */
+export function observeVerdict(tracks: ReadonlyMap<string, EngineTrack>, required: ReadonlySet<string> | null, timedOut: boolean, fatal: string | null = null, minWatched = 0): ObserveVerdict {
   // Nothing to watch is never "the engines observe": wait for engines, and say so at the deadline.
   if (!required || required.size === 0) return timedOut ? { state: 'doubt', why: `no engine to watch${required ? ' (none was clean before the redeploy)' : ' (/metrics published none since the restart)'}${fatal ? `; journal: ${fatal}` : ''}` } : { state: 'wait' }
   const req = [...required]
@@ -302,6 +306,7 @@ export function observeVerdict(tracks: ReadonlyMap<string, EngineTrack>, require
     const t = tracks.get(a)
     return !!t && t.lastReviewAt !== null && !t.observed
   })
+  if (req.length < minWatched) return timedOut ? { state: 'doubt', why: `only ${req.length} of ${minWatched} engines published since the restart` } : { state: 'wait' }
   if (!stuck.length && (timedOut || !quiet.length)) return { state: 'ok', quiet }
   if (!timedOut) return { state: 'wait' }
   return { state: 'doubt', why: `${stuck.length} of ${req.length} engines reviewed but never decided since the restart: ${stuck.slice(0, 4).map((a) => `${a} ${tracks.get(a)!.errors}x ${tracks.get(a)!.code ?? '?'}`).join(', ')}${quiet.length ? `; no review at all: ${quiet.join(', ')}` : ''}` }

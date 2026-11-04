@@ -175,7 +175,7 @@ async function watchEngines(target: string, invocation: string, since: number, g
       required = watchedEngines(given, required, p.engines)
       tracks = trackEngines(tracks, p.engines, since)
     } else if (timedOut) return { state: 'doubt', why: `/metrics did not answer with ${target.slice(0, 7)} at the end of the watch${fatalSeen ? `; journal: ${fatalSeen}` : ''}` }
-    const v = observeVerdict(tracks, required, timedOut, fatalSeen)
+    const v = observeVerdict(tracks, required, timedOut, fatalSeen, given ? 0 : activeAccounts)
     if (v.state !== 'wait') return v
     const pending = [...(required ?? [])].filter((a) => !tracks.get(a)?.observed)
     const now = `waiting on ${pending.length} engine(s): ${pending.slice(0, 6).map((a) => `${a}${tracks.get(a)?.code ? ` ${tracks.get(a)!.code}` : ''}`).join(', ')}${pending.length > 6 ? ', ...' : ''}`

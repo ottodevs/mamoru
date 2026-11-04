@@ -40,6 +40,14 @@ describe('baseline', () => {
 })
 
 describe('observeVerdict', () => {
+  test('no baseline, a partial first answer: one engine published and observed is not ok while 3 are expected', () => {
+    const tracks = watch([[decided('a', 10, 'DECIDE_IN_RANGE')]])
+    expect(observeVerdict(tracks, new Set(['a']), false, null, 3)).toEqual({ state: 'wait' })
+    expect(observeVerdict(tracks, new Set(['a']), true, null, 3).state).toBe('doubt')
+    const all = watch([['a', 'b', 'c'].map((x) => decided(x, 10, 'DECIDE_IN_RANGE'))])
+    expect(observeVerdict(all, new Set(['a', 'b', 'c']), false, null, 3)).toEqual({ state: 'ok', quiet: [] })
+  })
+
   test('22:19 (fdf04d4, healthy): 11 EHG_OBSERVATION_STALE in ~60 s, then DECIDE_IN_RANGE -> no rollback, ok', () => {
     const polls = Array.from({ length: 11 }, (_, i) => [failed('8b0b4d7f', 5 + i * 5, i + 1, 'EHG_OBSERVATION_STALE')])
     const during = watch(polls)
