@@ -5,7 +5,7 @@
 //   bun apps/mamoru-operator/test/e2e-monad-fork.ts [prestate.json.gz]
 // With a prestate it runs offline on a plain anvil (bun run scenarios:monad replay's state); without, it forks Monad
 // at the block pinned in scenarios/monad/manifest.json through the public RPC (MONAD_RPC_URL overrides it).
-import { createHmac, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,9 +13,11 @@ import { toHex } from 'viem'
 import type { AccountContext, FundingView } from '@mamoru/domain'
 import { monadRegistry } from '@mamoru/registry'
 import { startEnginePort } from '../../../packages/scenarios/proxy/index.ts'
+import { freshEmulation } from '../../../packages/scenarios/proxy/profile.ts'
 import { loadMonadManifest, startFromState, startMonadFork, upstreamHost } from '../../../packages/scenarios/monad/harness.ts'
 import { buildPosition, fmt } from '../../../packages/scenarios/monad/scenario.ts'
 import { bootOperator } from '../src/boot.ts'
+import { operatorSignature } from '../src/server.ts'
 
 const t0 = Date.now()
 const log = (m: string) => console.log(`[e2e-monad +${((Date.now() - t0) / 1000).toFixed(0)}s] ${m}`)
@@ -31,7 +33,10 @@ const dir = mkdtempSync(join(tmpdir(), 'mamoru-operator-e2e-monad-'))
 const statePath = process.argv[2]
 const fork = statePath ? await startFromState(m, statePath, join(dir, 'anvil.log')) : await startMonadFork(m, join(dir, 'anvil.log'))
 log(statePath ? `plain anvil from ${statePath}, chain ${m.fork.chainId}` : `fork of Monad (${upstreamHost()}) at block ${m.fork.block}, lab chain id ${m.fork.chainId}`)
-const enginePort = startEnginePort(fork.anvil.url)
+// otto/mamoru#273: in front of anvil, what rpc.monad.xyz really serves (refused params, gasUsed = gas given, 100-block
+// logs, unknown-block reads), from a profile at most 7 days old; MAMORU_E2E_CHAOS=1 adds 429s and a node behind writes.
+const chaos = process.env.MAMORU_E2E_CHAOS === '1' ? { rate429: 0.05, lag: { blocks: 3, requests: 4 } } : {}
+const enginePort = startEnginePort(fork.anvil.url, undefined, [], freshEmulation('monad', 'rpc.monad.xyz', chaos))
 let stopOperator = () => {}
 let code = 1
 try {
@@ -68,8 +73,10 @@ try {
   const header = Buffer.from(JSON.stringify(ctx)).toString('base64url')
   async function call<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<{ status: number; json: T }> {
     const raw = body === undefined ? '' : JSON.stringify(body)
-    const sig = createHmac('sha256', secret).update(`${method} ${path}\n${header}\n${raw}`).digest('hex')
-    const res = await fetch(op.url + path, { method, headers: { 'x-mamoru-account': header, 'x-mamoru-sig': sig, 'content-type': 'application/json' }, body: method === 'POST' ? raw : undefined })
+    // The signed-timestamp form (otto/mamoru#140): the legacy HMAC is refused since 23 Oct.
+    const ts = String(Math.floor(Date.now() / 1000))
+    const sig = operatorSignature(secret, method, path, header, raw, ts)
+    const res = await fetch(op.url + path, { method, headers: { 'x-mamoru-account': header, 'x-mamoru-sig': sig, 'x-mamoru-ts': ts, 'content-type': 'application/json' }, body: method === 'POST' ? raw : undefined })
     return { status: res.status, json: (await res.json()) as T }
   }
   const base = `/api/accounts/${ctx.accountKey}`

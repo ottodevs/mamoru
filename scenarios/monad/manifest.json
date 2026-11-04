@@ -10,11 +10,11 @@
     "chainId": 143
   },
   "fork": {
-    "block": 115696274,
-    "blockHash": "0x1ba03045c419aa8f93c94d708ea53c93b4033d1211bdd74845893f6c5d2defab",
-    "timestamp": 1792697697,
+    "block": 119355280,
+    "blockHash": "0x35c6e416e12cd56ad5e60ae1dfae5bf2be52ae102661f0494f6eeffa2607dc18",
+    "timestamp": 1793803980,
     "chainId": 314143,
-    "pinnedAt": "2026-10-22"
+    "pinnedAt": "2026-11-04"
   },
   "pinNote": "The public Monad RPC keeps about 21 hours of state (about 250,000 blocks): a fork at this block works for about a day after pinnedAt. Re-pin with `bun run scenarios:monad pin` (latest finalized block), or replay offline from the state dumped by a forked run (`bun run scenarios:monad replay <state>`).",
   "pool": "pool:WMON/USDC/3000",
