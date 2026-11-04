@@ -51,12 +51,12 @@ describe('Brais after the move', () => {
     expect(stable! + balanced! + growth!).toBeLessThanOrEqual(100)
   })
 
-  test('Working: the Base positions under the Base Safe, with copy and Basescan, and the mix line', () => {
+  test('Working: the Base positions under a Base header, no Safe address (Brais, 3 Nov), and the mix line', () => {
     const { working } = views(braisAfterMove(NOW))
     expect(count(working.html, 'data-testid="chain-group"')).toBe(1)
-    expect(working.text).toContain('Safe 0x99aC')
-    expect(working.html).toContain(`https://basescan.org/address/${BRAIS_BASE_SAFE}`)
-    expect(working.html).toContain('aria-label="Copy your Base Safe address"')
+    expect(working.html).not.toContain('data-testid="safe-ref"')
+    expect(working.html).not.toContain(BRAIS_BASE_SAFE)
+    expect(working.text).toContain('11.70 USDC')
     expect(working.text).toContain('Your mix')
     expect(working.text).toContain('Growth 15.1%')
     expect(working.text).toContain('target 15%')
@@ -87,13 +87,14 @@ describe('Brais after the move', () => {
 })
 
 describe('other moments', () => {
-  test('positions on Base and Monad: two groups, the larger first, each with its own explorer', () => {
+  test('positions on Base and Monad: two groups, the larger first, each named by its chain', () => {
     const { f: w, s } = wholeMoney(braisToday(NOW))
     const { html } = render(<Working f={w} s={s} onStop={null} />)
     const groups = html.split('data-testid="chain-group"').slice(1)
     expect(groups.length).toBe(2)
-    expect(groups[0]).toContain('basescan.org/address/')
-    expect(groups[1]).toContain('monadscan.com/address/')
+    expect(groups[0]).toContain('Base')
+    expect(groups[1]).toContain('Monad')
+    expect(html).not.toContain('data-testid="safe-ref"')
     // The rows of each group follow its head, largest first (#350).
     expect(groups[0]!.indexOf('Gauntlet USDC Prime')).toBeLessThan(groups[0]!.indexOf('WETH/USDC'))
     expect(groups[1]).toContain('WMON/USDC')

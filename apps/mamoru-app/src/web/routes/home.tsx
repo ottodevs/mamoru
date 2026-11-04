@@ -593,11 +593,9 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
               <Fragment key={`${g.chainId}:${g.safe}`}>
                 {groups ? (
                   <li className={`flex flex-wrap items-center gap-x-3 gap-y-[0.35rem] pt-5 pb-2${gi ? ' mt-2 border-t border-wash' : ''}`} data-testid="chain-group">
+                    {/* Brais, 3 Nov (#350): no Safe address in Working capital; the Safe shows in Idle capital, where money waits. */}
                     <ChainBadge chainId={g.chainId} />
-                    <span className="order-3 basis-full sm:order-2 sm:basis-auto">
-                      <SafeRef chainId={g.chainId} safe={g.safe} />
-                    </span>
-                    {g.value !== null ? <span className="order-2 ml-auto font-mono text-[0.78rem] tracking-[0.04em] text-stone sm:order-3">{homeCopy.chainSum(usd(g.value))}</span> : null}
+                    {g.value !== null ? <span className="ml-auto font-mono text-[0.78rem] tracking-[0.04em] text-stone">{homeCopy.chainSum(usd(g.value))}</span> : null}
                   </li>
                 ) : null}
                 {g.rows.map((k) => {
