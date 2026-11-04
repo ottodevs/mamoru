@@ -2050,9 +2050,12 @@ export class Engine {
     }
     // Nothing at or after (block, 0) is used: do not ask for a block that may not exist yet.
     const end = at.logIndex === 0 ? at.block - 1n : at.block
-    const known = c.events.filter((e) => e.tokenId === tokenId && e.blockNumber <= end)
+    // Only what the cursor answers for (up to `through`), then the tail after it: no event is counted twice. The fold
+    // clamps a collect against what is owed, so it runs in chain order, as `readPositionHistory` gives it.
+    const known = c.events.filter((e) => e.tokenId === tokenId && e.blockNumber <= (c.through < end ? c.through : end))
     const tail = c.through < end ? await readPositionHistory(this.client, [tokenId], c.through + 1n, end, this.registry) : []
-    return applyPrincipal(new Map(), [...known, ...tail].filter((e) => e.blockNumber < at.block || e.logIndex < at.logIndex))
+    const history = [...known, ...tail].sort((a, b) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1))
+    return applyPrincipal(new Map(), history.filter((e) => e.blockNumber < at.block || e.logIndex < at.logIndex))
   }
 
   /** The harvest's simulated Collect pays more than the principal owed on at least one side. */
