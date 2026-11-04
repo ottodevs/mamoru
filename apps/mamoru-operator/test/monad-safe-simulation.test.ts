@@ -76,6 +76,14 @@ describe('owner gas on Monad (otto/mamoru#287) and a measured revert (otto/mamor
     expect(await priv(w.op).activationGasOf({ safe: SAFE }, CALLS, 1, 100n)).toMatchObject({ simulated: false })
   })
 
+  test('Monad (per-call run refused): a batch that reverts in the Safe context is 409; one that succeeds keeps the static estimate (gate r1, Argon P1)', async () => {
+    const w = monad()
+    w.knobs.sarOk = false
+    expect(await priv(w.op).activationGasOf({ safe: SAFE }, CALLS, 1, 100n).catch((e: unknown) => e)).toMatchObject({ status: 409, code: 'SIMULATION_FAILED' })
+    w.knobs.sarOk = null
+    expect(await priv(w.op).activationGasOf({ safe: SAFE }, CALLS, 1, 100n)).toMatchObject({ simulated: false })
+  })
+
   test('Base: a real gasUsed is still a measurement', async () => {
     const w = world(5_000_000n)
     w.chain.deployed = true

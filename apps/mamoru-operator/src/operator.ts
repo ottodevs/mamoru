@@ -2690,10 +2690,11 @@ export class Operator {
     if (res?.every((x) => x.status === 'success' && x.gasUsed < SIM_CALL_GAS)) return { gas: res.reduce((n, x) => n + x.gasUsed, 0n) + overhead, simulated: true }
     // otto/mamoru#286: a call that reverts here is never sent to the owner to sign. The per-call run is not the Safe's
     // own execution, so the batch is run once in the Safe's context first: only a revert there refuses the prepare.
+    // On Monad the per-call run is refused ("sender not eoa", res null) and only the Safe-context run can say it.
     const bad = res?.findIndex((x) => x.status !== 'success') ?? -1
-    if (bad >= 0 && (await this.batchInSafe(live.safe, calls, block))?.success === false) {
-      logErr(`[owner] ${live.safe} gas simulation: call ${bad} to ${calls[bad]!.to} (${calls[bad]!.data.slice(0, 10)}) reverts:`, res![bad]!.error ?? res![bad]!.returnData)
-      throw new HttpError(409, 'SIMULATION_FAILED', `call ${bad + 1} of ${calls.length} (${calls[bad]!.data.slice(0, 10)} on ${calls[bad]!.to}) would revert`)
+    if ((bad >= 0 || res === null) && (await this.batchInSafe(live.safe, calls, block))?.success === false) {
+      if (bad >= 0) logErr(`[owner] ${live.safe} gas simulation: call ${bad} to ${calls[bad]!.to} (${calls[bad]!.data.slice(0, 10)}) reverts:`, res![bad]!.error ?? res![bad]!.returnData)
+      throw new HttpError(409, 'SIMULATION_FAILED', bad >= 0 ? `call ${bad + 1} of ${calls.length} (${calls[bad]!.data.slice(0, 10)} on ${calls[bad]!.to}) would revert` : `the batch of ${calls.length} call(s) would revert`)
     }
     return { gas: (fallback ?? 400_000n + BigInt(sessions) * STATIC_GAS_PER_SESSION) + overhead, simulated: false }
   }
