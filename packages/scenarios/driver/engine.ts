@@ -15,6 +15,7 @@ import {
   observeGuardHistory,
   SharedGuardReads,
   principalOwedBefore,
+  readPositionHistory,
   readUserOpEvent,
   rpcClient,
   simulateFromEntryPoint,
@@ -31,7 +32,7 @@ import { policyIncrease, uniswapV3, type UniswapV3, type V3Call } from '@mamoru/
 import { minOut, quoteMint } from '@mamoru/uniswap-v3/quote'
 import { diverges, swapMinimum, twapFloor as deviationFloor, twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { DEFAULT_BAND_FACTOR_BPS, decreaseMinsInRange, exitRange as v4ExitRange, oracleFromObserve, priceRange, swapBoundsInRange, type OracleRead, type PriceAnchor, type PriceRange } from '@mamoru/uniswap-v3/policy-bounds'
-import { harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
+import { applyPrincipal, harvestRow, ledgerTotal, positionEvents, type Pair, type SavingsLogRow } from '@mamoru/projector'
 import { MemoryJournal, type DecisionRecord, type OpRecord } from './journal.ts'
 
 /** Spec 007 (#151) T4: the two MamoruActionPolicy views precheck's mirror needs that are not already read for T3's
@@ -1364,7 +1365,7 @@ export class Engine {
       const collect = positionEvents(logs, this.registry).find((e) => e.kind === 'collect' && e.tokenId === proposal.tokenId)
       if (!collect) throw new Error(`${op.opId}: confirmed harvest without a Collect of ${proposal.tokenId}`)
       // FR-PRJ-003: the principal owed right before this Collect, folded from the canonical history, owner actions included.
-      const owed = await principalOwedBefore(this.client, [proposal.tokenId], this.historyFromBlock, { block: inc.blockNumber, logIndex: collect.logIndex }, this.registry)
+      const owed = await this.principalOwed(proposal.tokenId, { block: inc.blockNumber, logIndex: collect.logIndex })
       this.savingsLog.push(
         harvestRow({
           opId: op.opId,
@@ -2031,10 +2032,27 @@ export class Engine {
     // idle principal instead. The volatile fees stay in the account, where a later idle sell-back (priced at the
     // TWAP, on the balance the chain shows then) or an entry uses them.
     if (p.convert) throw new ReasonError('EHG_SIM_DELTA_MISMATCH', `harvest of ${p.tokenId} asks to convert ${p.convert.amount} ${p.convert.token}: harvests only collect`)
-    const owedAt = await principalOwedBefore(this.client, [p.tokenId], this.historyFromBlock, { block: blockNumber + 1n, logIndex: 0 }, this.registry)
-    const owed = owedAt.get(p.tokenId) ?? [0n, 0n]
+    const owed = (await this.principalOwed(p.tokenId, { block: blockNumber + 1n, logIndex: 0 })).get(p.tokenId) ?? [0n, 0n]
     if (isV4Policy(this.cfg.policy.actionPolicy)) return { calls: this.a1([{ kind: 'collect', tokenId: p.tokenId }], timestamp), owed, expiresAt: null }
     return { calls: [this.v3.collect({ account: acct, tokenId: p.tokenId })].map(exec), owed, expiresAt: null }
+  }
+
+  /**
+   * Principal owed per tokenId just before (block, logIndex), as `principalOwedBefore`. otto/mamoru#358: from the
+   * observation's history cursor (read from activation, kept only up to a safe block whose hash held) plus the few
+   * blocks after it, not from activation again: on Monad (100-block log ranges) that re-read was thousands of requests
+   * and every harvest timed out. A tokenId the cursor does not hold is read in full, as before.
+   */
+  private async principalOwed(tokenId: bigint, at: { block: bigint; logIndex: number }): Promise<Map<bigint, Pair>> {
+    const c = this.historyCursor
+    if (c.fromBlock !== this.historyFromBlock || !c.ids.has(String(tokenId)) || c.through < this.historyFromBlock) {
+      return principalOwedBefore(this.client, [tokenId], this.historyFromBlock, at, this.registry)
+    }
+    // Nothing at or after (block, 0) is used: do not ask for a block that may not exist yet.
+    const end = at.logIndex === 0 ? at.block - 1n : at.block
+    const known = c.events.filter((e) => e.tokenId === tokenId && e.blockNumber <= end)
+    const tail = c.through < end ? await readPositionHistory(this.client, [tokenId], c.through + 1n, end, this.registry) : []
+    return applyPrincipal(new Map(), [...known, ...tail].filter((e) => e.blockNumber < at.block || e.logIndex < at.logIndex))
   }
 
   /** The harvest's simulated Collect pays more than the principal owed on at least one side. */
