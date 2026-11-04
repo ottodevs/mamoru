@@ -5557,6 +5557,8 @@ export class Operator {
 
   private newOp(acc: AccountState, kind: OpView['kind']): OpView {
     const op: OpView = { opId: `own-${++acc.seq}-${kind}`, kind, state: 'proposed', updatedAt: now() }
+    // otto/mamoru#371: in the yield fee's scope as the op is recorded (see StoredOp.feeScoped).
+    if (this.inScope(acc, 'yield_fee')) (op as StoredOp).feeScoped = true
     // When it was created, before anything is sent: the earliest its transaction can be on chain (findOwnerTx).
     ;(op as StoredOp).sentAt = Date.now()
     acc.ops.push(op)
@@ -8122,7 +8124,7 @@ export class Operator {
         if (view.state === 'failed' && last && last.opId.startsWith('eng-') && last.state === 'failed' && last.kind === view.kind && last.code === view.code) {
           runner.alias.set(own, last.opId)
           Object.assign(last, { updatedAt: view.updatedAt, count: (last.count ?? 1) + 1 })
-        } else acc.ops.push(view)
+        } else acc.ops.push(this.inScope(acc, 'yield_fee') ? { ...view, feeScoped: true } : view)
       }
       changed = true
     }

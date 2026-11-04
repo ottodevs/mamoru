@@ -133,3 +133,17 @@ describe('a withdrawal pays the yield fee (otto/mamoru#371)', () => {
     expect(plan.ownerTx.summary.some((l: string) => l.includes('The fee comes out of this withdrawal'))).toBe(true)
   })
 })
+
+describe('the real wiring (otto/mamoru#371): Operator.yieldFeeScope and op stamping', () => {
+  test('an owner op recorded in scope is stamped; yieldFeeScope answers by the state key; out of scope neither', async () => {
+    for (const inScope of [true, false]) {
+      const w = world(5_000_000n, { opsFlags: () => ({ yield_fee: inScope }), opsScopedFlags: () => (inScope ? { yield_fee: null } : {}) })
+      w.chain.deployed = true
+      const plan = (await quiet(() => w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1000000' }))).out
+      await quiet(() => w.op.submit(ctx, 'transfer', sign(plan.ownerTx)))
+      const [key, acc] = Object.entries(w.state.accounts)[0]!
+      expect(w.op.yieldFeeScope(key)).toBe(inScope)
+      expect((acc.ops.find((o) => o.kind === 'transfer') as { feeScoped?: true }).feeScoped).toBe(inScope ? true : undefined)
+    }
+  })
+})

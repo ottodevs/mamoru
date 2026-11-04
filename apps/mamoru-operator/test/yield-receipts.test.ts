@@ -216,9 +216,9 @@ describe('Monad (otto/mamoru#358): the chain registry decides the position manag
 
 describe('feeable (otto/mamoru#371): facts taken while the account is in the yield fee scope', () => {
   test('marked only when the source says the account is in scope at the time of the read', async () => {
-    const mk = () => ({ opId: 'eng-1', kind: 'reduce', state: 'confirmed', updatedAt: '2026-11-05T10:00:00Z', txHash: '0xaa' }) as unknown as StoredOp
-    const run = async (inScope: boolean | undefined) => {
-      const o = mk()
+    const mk = (scoped: boolean) => ({ opId: 'eng-1', kind: 'reduce', state: 'confirmed', updatedAt: '2026-11-05T10:00:00Z', txHash: '0xaa', ...(scoped ? { feeScoped: true } : {}) }) as unknown as StoredOp
+    const run = async (inScope: boolean | undefined, scoped = true) => {
+      const o = mk(scoped)
       const source = { accounts: () => [{ accountKey: 'k', safe: SAFE, ops: [o] }], save: () => {}, ...(inScope === undefined ? {} : { feeScope: () => inScope }) }
       await withReceipts({ pools: {} } as unknown as Snapshot, source, async () => ({ logs: [userOp(SAFE, 1n)], blockNumber: 1n }), async () => T, async () => 10n)
       return o.facts
@@ -226,5 +226,7 @@ describe('feeable (otto/mamoru#371): facts taken while the account is in the yie
     expect((await run(true))?.feeable).toBe(true)
     expect((await run(false))?.feeable).toBeUndefined()
     expect((await run(undefined))?.feeable).toBeUndefined()
+    // Out of scope when the op was recorded, in scope by the time its facts are read: never charged.
+    expect((await run(true, false))?.feeable).toBeUndefined()
   })
 })

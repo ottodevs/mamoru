@@ -49,8 +49,8 @@ export type OpFacts = {
   gasUsdc?: string
   fees: FeeFact[]
   /**
-   * otto/mamoru#371: the account was in the yield fee's scope when these facts were taken (minutes after the op, or at
-   * its backfill). Only such facts are the fee's base: yield collected while out of scope is never charged.
+   * otto/mamoru#371: the account was in the yield fee's scope both when the op was recorded (StoredOp.feeScoped) and when
+   * these facts were taken. Only such facts are the fee's base: yield collected while out of scope is never charged.
    */
   feeable?: true
 }
@@ -242,7 +242,7 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
       if (!r || r.blockNumber > safe!) continue
       const t = times.get(r.blockNumber) ?? (await blockTime(r.blockNumber))
       times.set(r.blockNumber, t)
-      op.facts = { txHash, ...factsFromLogs(r.logs, a.safe, t, op.opId.startsWith('eng-') ? op.userOpHash : undefined, registry), ...(source.feeScope?.(a.accountKey) ? { feeable: true as const } : {}) }
+      op.facts = { txHash, ...factsFromLogs(r.logs, a.safe, t, op.opId.startsWith('eng-') ? op.userOpHash : undefined, registry), ...(op.feeScoped && source.feeScope?.(a.accountKey) ? { feeable: true as const } : {}) }
       tried.delete(key)
       changed = true
     } catch (e) {

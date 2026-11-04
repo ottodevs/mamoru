@@ -14,6 +14,12 @@ import type { AnnounceRecord } from './readiness.ts'
 
 /** An op as GET /ops serves it, plus what the operator keeps: repeat count of an identical failure, and for a confirmed engine op the session and calls it used (ledger replay on restart). */
 export type StoredOp = OpView & {
+  /**
+   * otto/mamoru#371: the account was in the yield fee's scope when this op was recorded (before its transaction). Its
+   * facts are the fee's base only if it is also in scope when they are read (yield-receipts `feeable`): any disagreement
+   * undercharges, never overcharges.
+   */
+  feeScoped?: true
   count?: number
   /** An engine op settled failed whose signed bytes were included later: its session uses replay like a confirmed one. */
   lateIncluded?: boolean
