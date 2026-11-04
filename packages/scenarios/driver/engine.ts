@@ -96,9 +96,24 @@ function causeChain(e: unknown): unknown[] {
   return out
 }
 
-/** otto/mamoru#357: a throw that is the provider not answering (anywhere in its cause chain), not a bug or a refusal. */
+/** viem's errors for a call that reverted: a revert is deterministic, never a provider failure. */
+const REVERT_ERRORS = new Set(['ExecutionRevertedError', 'ContractFunctionRevertedError'])
+
+/** A revert anywhere in the chain: by error class, by revert data, or by the node's words (some report one as -32603). */
+function revertIn(chain: unknown[]): boolean {
+  return chain.some((x) => {
+    const { name, data, details, message } = (x ?? {}) as { name?: unknown; data?: unknown; details?: unknown; message?: unknown }
+    if (REVERT_ERRORS.has(name as string)) return true
+    if (typeof data === 'string' && /^0x[0-9a-fA-F]+$/.test(data) && data.length > 2) return true
+    if (typeof data === 'object' && data !== null && typeof (data as { data?: unknown }).data === 'string' && ((data as { data: string }).data.length > 2)) return true
+    return /revert/i.test(String(details ?? '')) || /revert/i.test(String(message ?? ''))
+  })
+}
+
+/** otto/mamoru#357: a throw that is the provider not answering (anywhere in its cause chain), not a bug, a refusal or a revert. */
 export function isTransportError(e: unknown): boolean {
-  return causeChain(e).some((x) => TRANSPORT_ERRORS.has((x as { name?: unknown })?.name as string))
+  const chain = causeChain(e)
+  return !revertIn(chain) && chain.some((x) => TRANSPORT_ERRORS.has((x as { name?: unknown })?.name as string))
 }
 
 /**

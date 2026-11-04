@@ -3,7 +3,7 @@
 // cast, like engine-vault.test.ts.
 import { describe, expect, test } from 'bun:test'
 import type { Decision } from '@mamoru/decide'
-import { BaseError, InternalRpcError, ResourceUnavailableRpcError, RpcRequestError, TimeoutError } from 'viem'
+import { BaseError, ExecutionRevertedError, InternalRpcError, ResourceUnavailableRpcError, RpcRequestError, TimeoutError } from 'viem'
 import { Engine, isTransportError, thrownSummary } from './engine.ts'
 import { MemoryJournal, type OpRecord } from './journal.ts'
 
@@ -91,6 +91,10 @@ describe('only a provider that did not answer frees the slot (review of #357)', 
     expect(isTransportError(new ResourceUnavailableRpcError(answered(-32002, 'unavailable')))).toBe(true)
     expect(isTransportError(answered(-32602, 'invalid params'))).toBe(false)
     expect(isTransportError(new BaseError('execution reverted'))).toBe(false)
+    // Gate (Opus): a node that reports a revert as -32603. viem keeps the InternalRpcError as the cause.
+    expect(isTransportError(new ExecutionRevertedError({ cause: new InternalRpcError(answered(-32603, 'execution reverted')) }))).toBe(false)
+    const withData = new RpcRequestError({ body: { method: 'eth_call' }, error: { code: -32603, message: 'internal', data: '0x08c379a0' + '00'.repeat(4) }, url: 'https://rpc.monad.example' })
+    expect(isTransportError(new InternalRpcError(withData))).toBe(false)
     const { journal, runOp } = setup(async () => {
       throw new InternalRpcError(answered(-32603, 'internal error'))
     })
