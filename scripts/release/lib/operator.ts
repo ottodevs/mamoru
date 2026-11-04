@@ -120,84 +120,164 @@ export function unitTarget(
 /**
  * otto/mamoru#369: one engine as GET /metrics shows it (`engines[]`, apps/mamoru-operator/src/metrics.ts
  * EngineHealthSnapshot). The tracker lives in memory and starts empty at boot, so after a restart every field speaks of
- * the new process only. A failed review sets `lastDecisionCode` to its reason (OBS_RPC_UNAVAILABLE, REVIEW_ERROR...).
+ * the new process only. Every review that does not reach a decision adds one to `consecutiveErrors` (an observation
+ * failure of any code, EHG_OBSERVATION_STALE included, GRANT_CHECK_UNAVAILABLE, REVIEW_ERROR) and sets
+ * `lastDecisionCode` to its code; one that decides sets it back to 0. Fields are read defensively: an older operator
+ * may lack one.
  */
 export interface EngineView {
-  account: string
-  lastReviewAt: string | null
-  lastDecisionCode: string | null
-  consecutiveErrors: number
-  lastErrorClass: string | null
+  account?: unknown
+  lastReviewAt?: unknown
+  lastDecisionCode?: unknown
+  consecutiveErrors?: unknown
 }
 
-/** Failed reviews in a row after which an engine counts as not observing. Reviews run every 20 s: about a minute. */
-export const OBSERVE_FAIL_AFTER = 3
-/** How long a redeploy waits, after the boot is healthy, for every engine to observe. MAMORU_DEPLOY_OBSERVE_MS overrides it. */
+/**
+ * The rule: roll back by itself only on positive evidence of a regression, never on silence or a blip. A regression is
+ * an engine that was clean before the redeploy, has not decided once since the restart, and has failed with a hard
+ * code at least REGRESSION_REVIEWS times in a row over at least REGRESSION_SPAN_MS, and that for most of the engines
+ * that were clean. 4 Nov 2026 (ottodevs/mamoru#281): every Monad review failed OBS_RPC_UNAVAILABLE for 10 minutes.
+ */
+export const REGRESSION_REVIEWS = 5
+export const REGRESSION_SPAN_MS = 120_000
+/** How long a redeploy watches the engines once the boot is healthy. MAMORU_DEPLOY_OBSERVE_MS overrides it. */
 export const OBSERVE_TIMEOUT_MS = 240_000
+
+/**
+ * A failure that says the new code cannot observe: an OBS_* reason (OBS_RPC_UNAVAILABLE, OBS_BLOCK_INCONSISTENT...) or
+ * a thrown review. Not hard: waits and holds such as EHG_OBSERVATION_STALE (the post-restart observation floor of an
+ * unsettled op: 22:19 on 4 Nov, 11 in a row on a healthy deploy), EHG_OBSERVATION_REORGED, GRANT_CHECK_UNAVAILABLE.
+ */
+export function hardFailure(code: string | null): boolean {
+  return code !== null && (code.startsWith('OBS_') || code === 'REVIEW_ERROR')
+}
 
 /** The observation wait from MAMORU_DEPLOY_OBSERVE_MS (unset: the default), or why the value is refused. */
 export function observeTimeout(raw: string | undefined): number | string {
   if (raw === undefined || raw === '') return OBSERVE_TIMEOUT_MS
   if (!/^\d+$/.test(raw)) return `MAMORU_DEPLOY_OBSERVE_MS=${raw} is not a number of milliseconds`
   const ms = Number(raw)
-  if (ms < 60_000 || ms > 900_000) return `MAMORU_DEPLOY_OBSERVE_MS=${raw} is outside 60000..900000 (1 to 15 minutes)`
+  if (ms < REGRESSION_SPAN_MS + 60_000 || ms > 900_000) return `MAMORU_DEPLOY_OBSERVE_MS=${raw} is outside ${REGRESSION_SPAN_MS + 60_000}..900000`
   return ms
 }
 
-/** The engine's last review reached a decision (it observed the chain) and, when `since` is given, did so after it. */
-function observing(e: EngineView, since?: number): boolean {
-  if (e.lastReviewAt === null || e.consecutiveErrors !== 0) return false
-  return since === undefined || Date.parse(e.lastReviewAt) >= since
+type Parsed = { account: string; lastReviewAt: number | null; code: string | null; errors: number | null }
+function parse(e: EngineView): Parsed | null {
+  if (!e || typeof e !== 'object' || typeof e.account !== 'string' || !e.account) return null
+  const at = typeof e.lastReviewAt === 'string' ? Date.parse(e.lastReviewAt) : NaN
+  return {
+    account: e.account,
+    lastReviewAt: Number.isFinite(at) ? at : null,
+    code: typeof e.lastDecisionCode === 'string' ? e.lastDecisionCode : null,
+    errors: typeof e.consecutiveErrors === 'number' && Number.isInteger(e.consecutiveErrors) && e.consecutiveErrors >= 0 ? e.consecutiveErrors : null,
+  }
+}
+function engineList(engines: unknown): Parsed[] | null {
+  if (!Array.isArray(engines)) return null
+  return engines.map((e) => parse(e as EngineView)).filter((e): e is Parsed => e !== null)
 }
 
-/** A last review older than this before the redeploy (a review held for an owner tx, a keyed RPC over its budget) does
- * not say the engine observes now: it is named, not required. */
-export const BASELINE_FRESH_MS = 10 * 60_000
-
 /**
- * Engines a redeploy must see observing again: those that were observing before it (a review in the last
- * BASELINE_FRESH_MS, and fewer than OBSERVE_FAIL_AFTER failures in a row). An engine already failing before is not the new code's doing and
- * would only make a redeploy (or the rollback that fixes it) go back to the broken sha; it is named, not required.
- * No `engines` before (the running code does not publish them): every engine is required.
+ * Engines a redeploy watches: the ones clean before it (a last review that decided: `consecutiveErrors` 0). One already
+ * failing (an RPC outage before and after is not a regression) or with fields missing is named, not watched.
+ * `required` null: there is no baseline (/metrics did not answer with `engines`), so nothing is evidence of a
+ * regression and the redeploy only reports.
  */
-export function engineBaseline(before: EngineView[] | undefined, now: number): { required: Set<string> | null; failing: string[] } {
-  if (!before) return { required: null, failing: [] }
+export function engineBaseline(engines: unknown): { required: Set<string> | null; notRequired: string[] } {
+  const list = engineList(engines)
+  if (!list) return { required: null, notRequired: [] }
   const required = new Set<string>()
-  const failing: string[] = []
-  for (const e of before) {
-    const fresh = e.lastReviewAt !== null && now - Date.parse(e.lastReviewAt) <= BASELINE_FRESH_MS
-    if (fresh && e.consecutiveErrors < OBSERVE_FAIL_AFTER) required.add(e.account)
-    else failing.push(e.account)
+  const notRequired: string[] = []
+  for (const e of list) {
+    if (e.lastReviewAt !== null && e.errors === 0) required.add(e.account)
+    else notRequired.push(e.account)
   }
-  return { required, failing }
+  return { required, notRequired }
 }
 
-export type ObserveVerdict = { state: 'ok' } | { state: 'wait'; pending: string[] } | { state: 'fail'; why: string }
-
-function engineLine(e: EngineView): string {
-  return `${e.account} ${e.consecutiveErrors}x ${e.lastDecisionCode ?? 'no code'}${e.lastErrorClass ? ` (${e.lastErrorClass})` : ''}`
+/** A redeploy may roll back by itself only with a baseline, and never when it is itself an explicit --rollback. */
+export function autoRollbackAllowed(baseline: { required: Set<string> | null }, rollback: boolean): boolean {
+  return baseline.required !== null && !rollback
 }
+
+/** Every engine account a /metrics `engines` lists: what a report-only watch without a baseline looks at. */
+export function engineAccounts(engines: unknown): Set<string> {
+  return new Set((engineList(engines) ?? []).map((e) => e.account))
+}
+
+/** What the watch has seen of one engine since the restart. `observed` is sticky: a later blip does not undo it. */
+export type EngineTrack = { observed: boolean; lastReviewAt: number | null; errors: number; code: string | null; hardCount: number; hardSince: number | null; hardLast: number | null }
 
 /**
- * otto/mamoru#369: whether the new boot's engines observe. `ok` once every required engine (all of them when
- * `required` is null) has a review after `since` that reached a decision, and there are at least `expected` engines;
- * `fail` as soon as a required engine has failed OBSERVE_FAIL_AFTER reviews in a row, or when `timedOut` comes with
- * engines still not observing; otherwise `wait`. 4 Nov 2026 (ottodevs/mamoru#281): every Monad review failed
- * OBS_RPC_UNAVAILABLE for 10 minutes while the loops had started, and the redeploy called it healthy.
+ * Folds one /metrics snapshot into the tracks (a new map; `prev` is not changed). Reviews before `since` (the restart)
+ * are ignored. Between two polls an engine may review more than once: a `consecutiveErrors` that went down without
+ * reaching 0 means a review decided in between; a streak of the same hard code grows by the increase of the counter.
  */
-export function observeVerdict(engines: EngineView[] | undefined, expected: number, required: Set<string> | null, since: number, timedOut: boolean): ObserveVerdict {
-  const list = engines ?? []
-  const need = required === null ? list : list.filter((e) => required.has(e.account))
-  const failing = need.filter((e) => e.consecutiveErrors >= OBSERVE_FAIL_AFTER)
-  if (failing.length) return { state: 'fail', why: `${failing.length} of ${need.length} engines fail to observe: ${failing.slice(0, 4).map(engineLine).join(', ')}${failing.length > 4 ? ', ...' : ''}` }
-  const seen = new Set(list.map((e) => e.account))
-  const missing = required === null ? [] : [...required].filter((a) => !seen.has(a))
-  const pending = [...need.filter((e) => !observing(e, since)).map((e) => e.account), ...missing.map((a) => `${a} (no engine)`)]
-  if (list.length < expected) pending.push(`${expected - list.length} engine(s) not published yet`)
-  if (!pending.length) return { state: 'ok' }
-  if (timedOut) {
-    const detail = need.filter((e) => !observing(e, since)).map((e) => (e.lastReviewAt === null ? `${e.account} no review` : engineLine(e)))
-    return { state: 'fail', why: `no successful observation in time from ${pending.length} engine(s): ${[...detail, ...missing.map((a) => `${a} no engine`)].concat(list.length < expected ? [`${list.length} of ${expected} engines published`] : []).slice(0, 5).join(', ')}` }
+export function trackEngines(prev: ReadonlyMap<string, EngineTrack>, engines: unknown, since: number): Map<string, EngineTrack> {
+  const next = new Map(prev)
+  for (const e of engineList(engines) ?? []) {
+    const t: EngineTrack = { ...(prev.get(e.account) ?? { observed: false, lastReviewAt: null, errors: 0, code: null, hardCount: 0, hardSince: null, hardLast: null }) }
+    if (e.lastReviewAt === null || e.lastReviewAt < since || e.lastReviewAt === t.lastReviewAt) continue
+    const at = e.lastReviewAt
+    if (e.errors === 0) {
+      t.observed = true
+      t.hardCount = 0
+      t.hardSince = t.hardLast = null
+    } else if (e.errors === null || !hardFailure(e.code)) {
+      // Unknown, or a wait/hold: no evidence either way, and it ends any hard streak.
+      t.hardCount = 0
+      t.hardSince = t.hardLast = null
+    } else {
+      if (t.lastReviewAt !== null && e.errors <= t.errors) {
+        // The counter went down: a review in between decided.
+        t.observed = true
+        t.hardCount = 0
+        t.hardSince = null
+      }
+      const grew = t.hardCount > 0 && t.code === e.code ? Math.max(1, e.errors - t.errors) : 1
+      t.hardCount += grew
+      t.hardSince ??= at
+      t.hardLast = at
+    }
+    t.errors = e.errors ?? 0
+    t.code = e.code
+    t.lastReviewAt = at
+    next.set(e.account, t)
   }
-  return { state: 'wait', pending }
+  return next
+}
+
+export type ObserveVerdict =
+  | { state: 'wait' }
+  | { state: 'ok'; quiet: string[] }
+  | { state: 'regression'; why: string }
+  | { state: 'doubt'; why: string }
+
+/**
+ * otto/mamoru#369, the decision over the tracks of the required engines:
+ * - `regression` (the only one that may roll back by itself): most required engines have not decided once since the
+ *   restart and each failed a hard code REGRESSION_REVIEWS times in a row over REGRESSION_SPAN_MS.
+ * - `ok`: every required engine decided once (sticky); at the deadline, engines with no review at all since the restart
+ *   are `quiet` (a warning: silence is not a regression).
+ * - `doubt` at the deadline: engines reviewed but never decided, without the evidence above. Reported, never rolled back.
+ * - `wait` otherwise.
+ */
+export function observeVerdict(tracks: ReadonlyMap<string, EngineTrack>, required: ReadonlySet<string>, timedOut: boolean): ObserveVerdict {
+  const req = [...required]
+  const regressed = req.filter((a) => {
+    const t = tracks.get(a)
+    return !!t && !t.observed && t.hardCount >= REGRESSION_REVIEWS && t.hardSince !== null && t.hardLast !== null && t.hardLast - t.hardSince >= REGRESSION_SPAN_MS
+  })
+  if (regressed.length > 0 && regressed.length * 2 > req.length) {
+    const codes = [...new Set(regressed.map((a) => tracks.get(a)!.code))].join(', ')
+    return { state: 'regression', why: `${regressed.length} of ${req.length} engines clean before the redeploy have not observed since it (${codes}, ${REGRESSION_REVIEWS}+ in a row over ${REGRESSION_SPAN_MS / 1000}+ s): ${regressed.slice(0, 4).join(', ')}${regressed.length > 4 ? ', ...' : ''}` }
+  }
+  const quiet = req.filter((a) => tracks.get(a)?.lastReviewAt == null)
+  const stuck = req.filter((a) => {
+    const t = tracks.get(a)
+    return !!t && t.lastReviewAt !== null && !t.observed
+  })
+  if (!stuck.length && (timedOut || !quiet.length)) return { state: 'ok', quiet }
+  if (!timedOut) return { state: 'wait' }
+  return { state: 'doubt', why: `${stuck.length} of ${req.length} engines reviewed but never decided since the restart: ${stuck.slice(0, 4).map((a) => `${a} ${tracks.get(a)!.errors}x ${tracks.get(a)!.code ?? '?'}`).join(', ')}${quiet.length ? `; no review at all: ${quiet.join(', ')}` : ''}` }
 }
