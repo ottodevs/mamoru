@@ -103,6 +103,8 @@ export type HarvestProjection = {
   savingsIsToken0: boolean
   /** Whether the harvest converted the volatile fees. */
   converted: boolean
+  /** The chain's registry: its position manager emits the Collect. Default Base (otto/mamoru#358: Monad's is another address). */
+  registry?: Registry
 }
 
 /**
@@ -111,7 +113,7 @@ export type HarvestProjection = {
  * from the Swap event, and only fees in the savings asset are credited.
  */
 export function harvestRow(h: HarvestProjection): SavingsLogRow {
-  const collects = positionEvents(h.logs).filter((e) => e.kind === 'collect' && e.tokenId === h.tokenId)
+  const collects = positionEvents(h.logs, h.registry).filter((e) => e.kind === 'collect' && e.tokenId === h.tokenId)
   if (collects.length !== 1) throw new Error(`${collects.length} Collect events for tokenId ${h.tokenId} in ${h.opId}`)
   const collect = collects[0]!
   const split = splitCollect(h.pendingBefore, [collect.amount0, collect.amount1])

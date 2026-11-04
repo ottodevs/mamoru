@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters, encodeEventTopics, toHex, type Log } from 'viem'
-import { baseRegistry, address } from '@mamoru/registry'
+import { baseRegistry, monadRegistry, address } from '@mamoru/registry'
 import { applyPrincipal, harvestRow, ledgerTotal, poolSwapAbi, positionEventsAbi, savingsRowView, splitCollect } from './index.ts'
 
 const POOL = address('pool:USDC/cbBTC/500', baseRegistry)
@@ -99,5 +99,16 @@ describe('harvestRow', () => {
     expect(v.provenance.source).toBe('journal')
     expect(v.amount.provenance.source).toBe('fork_rpc')
     expect(toHex(v.block)).toBe('0xa')
+  })
+})
+
+describe('harvestRow on another chain (otto/mamoru#358)', () => {
+  test("Monad's Collect comes from Monad's position manager: read with its registry, missed with Base's", () => {
+    const monadNpm = address('NonfungiblePositionManager', monadRegistry)
+    expect(monadNpm.toLowerCase()).not.toBe(NPM.toLowerCase())
+    const collect = log(monadNpm, encodeEventTopics({ abi: positionEventsAbi, eventName: 'Collect', args: { tokenId: 49417n } }) as `0x${string}`[], encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'uint256' }], [ACCOUNT, 12n, 34n]), 1)
+    const h = { opId: 'op-2', tokenId: 49417n, chainId: 143, block: 10n, blockHash: `0x${'aa'.repeat(32)}` as const, txHash: `0x${'bb'.repeat(32)}` as const, at: '2026-11-04T21:00:38.000Z', account: ACCOUNT, pool: address('pool:WMON/USDC/3000', monadRegistry), savingsIsToken0: false, logs: [collect], pendingBefore: [0n, 0n] as const, converted: false }
+    expect(() => harvestRow(h)).toThrow('0 Collect events for tokenId 49417 in op-2')
+    expect(harvestRow({ ...h, registry: monadRegistry }).fees).toEqual([12n, 34n])
   })
 })

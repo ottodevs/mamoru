@@ -1460,6 +1460,7 @@ export class Engine {
           savingsIsToken0: pool.token0 === this.cfg.policy.savingsAsset,
           // otto/mamoru#140: a harvest only collects; the volatile fees stay in the account.
           converted: false,
+          registry: this.registry,
         }),
       )
     }
