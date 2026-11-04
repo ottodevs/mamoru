@@ -138,10 +138,43 @@ describe('rates over the working capital', () => {
     const mixed = { ...brais, positions: [pos('1', 'pool:WETH/USDC/3000', '4790000', false), pos('2', 'pool:USDC/USDT/100', '1000000')] }
     expect(workedRate(mixed, null, at12, 'currentPct', DAY_S).pct).toBe(3)
   })
-  test('a pool that worked with no rate: n/a, never dropped', () => {
+  test('a pool that worked with no rate and no other pool rated: n/a', () => {
     const r = workedRate(brais, [{ pool: 'pool:USDC/cbBTC/500', usdSeconds: 1 }], at12, 'currentPct', DAY_S)
     expect(r.pct).toBeNull()
     expect(r.gap).toBe('no-data')
+  })
+  // otto/mamoru#363: one pool without a rate no longer blanks the account; it is left out of the weights and named.
+  describe('partial rates (#363)', () => {
+    const monadPos = { ...pos('9', 'pool:WMON/USDC/3000', '50000000'), chainId: 143 } as FundingView['positions'][number]
+    const base = { ...brais, positions: [pos('1', 'pool:WETH/USDC/3000', '10000000'), pos('2', 'pool:USDC/USDT/100', '30000000')] }
+    const mixed = { ...base, positions: [...base.positions, monadPos] }
+    test('Base only: every pool rated, value-weighted, nothing left out', () => {
+      const r = workedRate(base, null, at12, 'currentPct', DAY_S)
+      expect(r.pct).toBe(5.25) // (12 * 10 + 3 * 30) / 40
+      expect(r.unrated).toBeUndefined()
+    })
+    test('Base + Monad with no Monad rate: the Base figure, Monad named as left out', () => {
+      const r = workedRate(mixed, null, at12, 'currentPct', DAY_S)
+      expect(r).toMatchObject({ pct: 5.25, gap: null, covered: 2, of: 3, unrated: ['pool:WMON/USDC/3000'] })
+      const m = workedRate(mixed, null, at12, 'monthlyPct', MONTH_S)
+      expect(m.pct).toBeCloseTo(16.65, 1) // (53.1 * 10 + 4.5 * 30) / 40
+      expect(m.unrated).toEqual(['pool:WMON/USDC/3000'])
+    })
+    test('Base + Monad once Monad is rated: all three, nothing left out', () => {
+      const rated = { ...at12, byPool: [...at12.byPool, { pool: 'pool:WMON/USDC/3000', weight: 0, currentPct: 10, monthlyPct: 20 }] }
+      const r = workedRate(mixed, null, rated, 'currentPct', DAY_S)
+      expect(r.pct).toBe(7.89) // (12 * 10 + 3 * 30 + 10 * 50) / 90
+      expect(r.unrated).toBeUndefined()
+    })
+    test('no position has a rate: n/a', () => {
+      const none = { ...at12, byPool: [] }
+      expect(workedRate(mixed, null, none, 'currentPct', DAY_S)).toMatchObject({ pct: null, gap: 'no-data', covered: 0, of: 3 })
+    })
+    test('on Home: both figures show the rate and say what is excluded, not n/a', () => {
+      const { html } = render(<Indicators f={mixed} apy={at12} price={null} />)
+      expect(html).toMatch(/data-testid="rate-current"[^>]*>[^<]*(<[^>]+>)*5\.3%/)
+      expect(html).toContain('excludes WMON/USDC (no rate yet)')
+    })
   })
   test('on Home: a ledger day more than 6 h old is not shown; the positions open now stand in', () => {
     const old = { asOf: new Date(Date.now() - 7 * 60 * 60_000).toISOString(), day: [{ pool: 'pool:USDC/USDT/100', usdSeconds: 1 }], month: [] }

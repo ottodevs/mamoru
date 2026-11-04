@@ -113,7 +113,12 @@ export function positionRates(f: FundingView, apy: ApyView | undefined, price: b
 export type RateGap = 'loading' | 'no-read' | 'no-positions' | 'no-data' | 'no-value'
 
 /** `baseOnly` (otto/mamoru#343): a worked-capital figure that leaves out money working on another chain, which has no samples yet. */
-export type AccountRate = { pct: number | null; gap: RateGap | null; covered: number; of: number; baseOnly?: boolean }
+export type AccountRate = { pct: number | null; gap: RateGap | null; covered: number; of: number; baseOnly?: boolean; /** otto/mamoru#363: pools that worked but have no rate, left out of `pct` (value-weighted over the rest); empty when every pool has one. */ unrated?: string[] }
+
+/** "pool:WMON/USDC/3000" -> "WMON/USDC"; "vault:gtUSDCp" -> "gtUSDCp". */
+export function unratedLabel(pool: string): string {
+  return pool.replace(/^(pool|vault):/, '').replace(/\/\d+$/, '')
+}
 
 function weighted(rows: PositionRate[], pick: (r: PositionRate) => number | null): { pct: number | null; covered: number } {
   let sum = 0
@@ -183,7 +188,7 @@ export const MONTH_S = 30 * DAY_S
  * chain's operator runs the snapshot loop (`otherMeasured`, the window has samples of the owner's Monad sleeve, phase B):
  * without them the figure covers Base and says so (`baseOnly`), it never invents capital.
  * With nothing measured for the window, the positions open now stand in, every chain. If a pool that worked has no
- * rate, the figure is n/a.
+ * rate, the figure leaves it out and names it (`unrated`, otto/mamoru#363): n/a only when none of them has a rate.
  * The fallback for an empty measured window is deliberate (otto/mamoru#343, review r3): a new position is sampled
  * within one cron tick, and n/a in that gap is what product asked to avoid.
  */
@@ -214,15 +219,20 @@ export function workedRate(f: FundingView, worked: WorkedView['day'] | null | un
   let sum = 0
   let w = 0
   let covered = 0
+  const unrated: string[] = []
   for (const [pool, wi] of weights) {
     const rate = apy.byPool?.find((b) => b.pool === pool)?.[pick] ?? null
-    if (rate === null) continue
+    if (rate === null) {
+      unrated.push(pool)
+      continue
+    }
     sum += rate * wi
     w += wi
     covered++
   }
-  if (covered < of || w <= 0) return { pct: null, gap: 'no-data', covered, of }
-  return { pct: Math.round((sum / w) * 100) / 100, gap: null, covered, of, ...(baseOnly ? { baseOnly } : {}) }
+  // otto/mamoru#363: n/a only when no pool that worked has a rate; otherwise the figure covers the rated ones and names the rest.
+  if (covered === 0 || w <= 0) return { pct: null, gap: 'no-data', covered, of }
+  return { pct: Math.round((sum / w) * 100) / 100, gap: null, covered, of, ...(unrated.length ? { unrated } : {}), ...(baseOnly ? { baseOnly } : {}) }
 }
 
 /** The data source named in an ApyView source line ("Plan pools, 30-day mean · DefiLlama" -> "DefiLlama"). */
