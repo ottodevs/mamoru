@@ -1,6 +1,7 @@
 // Runs every e2e-*.ts one after the other, each under a timeout, and prints a PASS/FAIL table. Exit 1 when any fails.
 // Needs foundry on PATH and RPC_URL, BASE_RPC_URL, BASE_FORK_RPC_URL, L1_RPC_URL (public ones work). E2E_TIMEOUT_S: per script (default 900).
 // Usage: bun run e2e:all [name ...]   (names without the e2e- prefix, e.g. fork v4)
+import { spawn } from 'node:child_process'
 import { closeSync, mkdirSync, openSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -20,13 +21,14 @@ const rows: { name: string; result: 'PASS' | 'FAIL' | 'TIMEOUT'; secs: number; l
 for (const f of scripts) {
   const log = join(logDir, `${f.slice(0, -3)}.log`)
   const t0 = Date.now()
-  // One descriptor for both streams; each script leads its own process group (setsid), so a timeout stops its anvil and
-  // proxies too, not only the bun process (they would hold ports into the next script).
-  const fd = openSync(log, 'a')
-  const proc = Bun.spawn(['setsid', 'bun', join('apps/mamoru-operator/test', f)], { cwd: root, stdout: fd, stderr: fd, env: process.env })
+  // One descriptor for both streams, new each run; each script leads its own process group (`detached`: setsid on Linux
+  // and macOS, no external binary), so a timeout stops its anvil and proxies too, not only the bun process.
+  const fd = openSync(log, 'w')
+  const proc = spawn('bun', [join('apps/mamoru-operator/test', f)], { cwd: root, stdio: ['ignore', fd, fd], env: process.env, detached: true })
+  const exited = new Promise<number | null>((resolve) => proc.on('exit', (c) => resolve(c)))
   const group = (sig: NodeJS.Signals) => {
     try {
-      process.kill(-proc.pid, sig)
+      if (proc.pid) process.kill(-proc.pid, sig)
     } catch {
       // already gone
     }
@@ -37,7 +39,7 @@ for (const f of scripts) {
     group('SIGTERM')
     setTimeout(() => group('SIGKILL'), 10_000).unref?.()
   }, timeoutS * 1000)
-  const code = await proc.exited
+  const code = await exited
   clearTimeout(timer)
   // Whatever the script left behind (an anvil it did not stop) goes with it.
   group('SIGKILL')
