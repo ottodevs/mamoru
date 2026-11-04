@@ -35,13 +35,22 @@ function monadWorld(opts: { writes?: boolean } = {}) {
     readsRevert: false,
     /** A deploy that reverts because an earlier one already put code there (a retry after a lagging read). */
     deployRevertsWithCode: false,
+    /** A node behind the block asked for (gate r2): Monad's -32602 for reads, and for the code read at a receipt block. */
+    readsBehind: false,
+    codeBehind: false,
   }
+  const behind = () =>
+    Object.assign(new Error('Invalid parameters were provided to the RPC method.'), {
+      name: 'ContractFunctionExecutionError',
+      cause: Object.assign(new Error('Block requested not found.'), { name: 'InvalidParamsRpcError', code: -32602, details: 'Block requested not found. Request might be querying historical state that is not available.' }),
+    })
   const sent: { to: string; data?: Hex; value?: bigint }[] = []
   const started: string[] = []
   let saves = 0
   let safe = '' as Address
   const read = (functionName: string, args: readonly unknown[] = []) => {
     if (chain.readsDown && functionName === 'getOwners') throw Object.assign(new Error('The contract function "getOwners" returned no data ("0x").'), { name: 'ContractFunctionZeroDataError' })
+    if (chain.readsBehind && functionName === 'getOwners') throw behind()
     if (chain.readsRevert && functionName === 'getOwners') throw Object.assign(new Error('execution reverted'), { name: 'ContractFunctionExecutionError' })
     if (functionName === 'getOwners') return chain.owners ?? ctx.owners
     if (functionName === 'getThreshold') return chain.threshold
@@ -53,7 +62,10 @@ function monadWorld(opts: { writes?: boolean } = {}) {
   const client = {
     getBlockNumber: async () => chain.lag.shift() ?? 500n,
     getGasPrice: async () => 100_000_000_000n,
-    getCode: async () => (chain.deployed ? '0x01' : undefined),
+    getCode: async ({ blockNumber }: { blockNumber?: bigint }) => {
+      if (chain.codeBehind && blockNumber !== undefined) throw behind()
+      return chain.deployed ? '0x01' : undefined
+    },
     getBalance: async () => chain.eth,
     readContract: async ({ functionName, args }: { functionName: string; args?: readonly unknown[] }) => read(functionName, args),
   } as unknown as PublicClient
@@ -220,6 +232,28 @@ describe('provision (Monad side)', () => {
     const m = keyed()
     m.chain.deployRevertsWithCode = true
     expect(await m.op.provision(m.rctx)).toEqual({ state: 'active', address: m.r.address })
+  })
+
+  test('otto/mamoru#275 (gate r2): a node behind the block of the checks is 503 REMOTE_CHECK_UNAVAILABLE; nothing runs', async () => {
+    const m = keyed()
+    m.chain.deployed = true
+    m.chain.readsBehind = true
+    expect(await code(m.op.provision(m.rctx))).toEqual({ status: 503, code: 'REMOTE_CHECK_UNAVAILABLE' })
+    expect(m.started).toEqual([])
+  })
+
+  test('otto/mamoru#275 (gate r2): a reverted re-deploy reads the code once the provider has its block; behind it, 503, never 502', async () => {
+    const m = keyed()
+    m.chain.deployRevertsWithCode = true
+    m.chain.lag = [498n]
+    m.chain.codeBehind = true
+    expect(await code(m.op.provision(m.rctx))).toEqual({ status: 503, code: 'REMOTE_CHECK_UNAVAILABLE' })
+    expect(m.chain.lag).toEqual([])
+    const n = keyed()
+    n.chain.deployRevertsWithCode = true
+    n.chain.lag = Array.from({ length: 50 }, () => 400n)
+    expect(await code(n.op.provision(n.rctx))).toEqual({ status: 503, code: 'DEPLOY_PENDING_VISIBILITY' })
+    expect(n.started).toEqual([])
   })
 
   test('code already there: nothing is deployed', async () => {

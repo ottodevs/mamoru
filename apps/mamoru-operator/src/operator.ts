@@ -456,11 +456,22 @@ const SAFE_ERROR_MESSAGE = {
 /** otto/mamoru#358: blocks of a held position's history one Monad review reads (200 log requests of 100 blocks). */
 const MONAD_HISTORY_STEP_BLOCKS = 20_000n
 
-/** Names of an error and its `.cause` chain (bounded). */
-function causeNames(e: unknown): string[] {
-  const out: string[] = []
-  for (let x: unknown = e; x && out.length < 8; x = (x as { cause?: unknown }).cause) out.push(String((x as { name?: unknown }).name))
+/** An error and its `.cause` chain (bounded). */
+function causeChainOf(e: unknown): { name?: unknown; message?: unknown; details?: unknown }[] {
+  const out: { name?: unknown; message?: unknown; details?: unknown }[] = []
+  for (let x: unknown = e; x && out.length < 8; x = (x as { cause?: unknown }).cause) out.push(x as never)
   return out
+}
+
+/**
+ * otto/mamoru#275 (gate r2): a read the provider could not answer yet: a transport failure, no data at the address, or
+ * a node behind the block asked for (Monad answers -32602 "Block requested not found", geth "header not found").
+ */
+function notYetReadable(e: unknown): boolean {
+  if (isTransportError(e)) return true
+  return causeChainOf(e).some(
+    (x) => x.name === 'ContractFunctionZeroDataError' || x.name === 'BlockNotFoundError' || /block requested not found|header not found|unknown block/i.test(`${String(x.details ?? '')} ${String(x.message ?? '')}`),
+  )
 }
 
 export class HttpError extends Error {
@@ -7365,9 +7376,19 @@ export class Operator {
       const { hash, receipt } = await this.relayer.send(deployCall(live))
       console.log(`[remote] deploy ${live.safe} tx ${hash} ${receipt.status}`)
       // otto/mamoru#275 (gate r1): a retry whose code read hit a node behind an earlier deploy sends it again, and the
-      // factory reverts on an address that has code. The Safe is there: the checks below decide, at that block.
-      if (receipt.status !== 'success' && !(await this.client.getCode({ address: live.safe, blockNumber: receipt.blockNumber }).catch(() => undefined))?.slice(2)) {
-        throw new HttpError(502, 'DEPLOY_FAILED', 'the Safe could not be created just now: it is retried')
+      // factory reverts on an address that has code. The Safe is there: the checks below decide, at that block. The code
+      // is read once the provider has that block (gate r2), and a node that cannot answer yet is retried, not a failure.
+      if (receipt.status !== 'success') {
+        const at = await this.headPast(receipt.blockNumber)
+        if (at === null) throw new HttpError(503, 'DEPLOY_PENDING_VISIBILITY', 'the Safe creation is not visible on chain yet: it is retried')
+        let code: Hex | undefined
+        try {
+          code = await this.client.getCode({ address: live.safe, blockNumber: receipt.blockNumber })
+        } catch (e) {
+          if (!notYetReadable(e)) throw e
+          throw new HttpError(503, 'REMOTE_CHECK_UNAVAILABLE', 'the Safe could not be read on chain just now: it is retried')
+        }
+        if (!code?.slice(2)) throw new HttpError(502, 'DEPLOY_FAILED', 'the Safe could not be created just now: it is retried')
       }
       deployedAt = receipt.blockNumber
     }
@@ -7379,9 +7400,9 @@ export class Operator {
     try {
       checked = await this.remoteChecks(live.safe, ctx.owners as Address[], r ? r.permissionIds : [r4!.permissionId], block)
     } catch (e) {
-      // Only a read the provider could not answer (no data yet, a timeout, a failed exchange) is retried; anything else
-      // (a revert, a decode error) fails as before.
-      if (!isTransportError(e) && !causeNames(e).includes('ContractFunctionZeroDataError')) throw e
+      // Only a read the provider could not answer (no data yet, a node behind the block, a timeout, a failed exchange) is
+      // retried; anything else (a revert, a decode error) fails as before.
+      if (!notYetReadable(e)) throw e
       logErr(`[remote] ${ctx.accountKey} ${live.safe} checks unreadable at ${block}:`, e)
       throw new HttpError(503, 'REMOTE_CHECK_UNAVAILABLE', 'the Safe could not be read on chain just now: it is retried')
     }
