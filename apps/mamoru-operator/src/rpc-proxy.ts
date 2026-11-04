@@ -119,6 +119,14 @@ const WITNESS_TTL_MS = 15_000
 
 /** A trusted provider serves a log range ahead of every public one when it takes it in at most this many requests. */
 const TRUSTED_LOG_MAX_REQUESTS = 4n
+/**
+ * otto/mamoru#367: a provider that would need more requests than this for one range is not asked for it while another
+ * can serve it: on Monad a 5000-block history slice fell through to Alchemy free (10 blocks: 500 requests), timed out
+ * and spent the hour's keyed budget.
+ */
+const LOG_MAX_REQUESTS = 100n
+/** otto/mamoru#367: a log chunk refused for rate is asked again after these pauses, before the provider is given up. */
+const LOG_CHUNK_RETRY_MS = [300, 1200] as const
 
 /** Calls whose answer decides nothing: a signed transaction is the same bytes whoever relays it. Any provider may take them. */
 const ANY_PROVIDER = new Set(['eth_sendRawTransaction'])
@@ -451,12 +459,31 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   }
   type Rejection = Exclude<LogRangeOutcome, 'accepted'>
   const fail = (message: string, reason: Rejection = 'provider_error') => Object.assign(new Error(message), { rpc: { code: -32603, message }, reason })
+  /**
+   * One chunk. A refusal for rate (429, -32005, "limit") from a provider that already served a chunk of this range (it
+   * works, it is only throttled) is asked again after LOG_CHUNK_RETRY_MS; any other error, or a provider that served
+   * nothing, gives the provider up at once.
+   */
+  async function askChunk(url: string, filter: any, a: bigint, b: bigint, isChunk: boolean, served: { n: number }): Promise<any> {
+    for (let k = 0; ; k++) {
+      try {
+        const r = await ask(url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], isChunk)
+        served.n++
+        return r
+      } catch (e) {
+        const pause = LOG_CHUNK_RETRY_MS[k]
+        if (pause === undefined || served.n === 0 || classifyRpcError(undefined, (e as any).rpc) !== 'rateCapacity') throw e
+        await Bun.sleep(pause)
+      }
+    }
+  }
   /** The whole range from one provider, in chunks it accepts. Any failed chunk fails the provider: providers are never mixed inside one range. */
   async function logsFrom(p: LogProvider, filter: any, from: bigint, to: bigint): Promise<unknown[]> {
     const chunks = ranges(from, to, p.logRange)
     const out: unknown[] = []
+    const served = { n: 0 }
     for (let i = 0; i < chunks.length; i += 4) {
-      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => ask(p.url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], chunks.length > 1)))
+      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => askChunk(p.url, filter, a, b, chunks.length > 1, served)))
       for (const logs of part) {
         if (!Array.isArray(logs)) throw fail('eth_getLogs answered no list')
         out.push(...logs)
@@ -529,10 +556,12 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const span = to - from + 1n
     const requests = (p: LogProvider) => (Number.isFinite(p.logRange) ? (span + BigInt(p.logRange) - 1n) / BigInt(p.logRange) : 1n)
     const tier = (p: LogProvider, n: bigint) => (trusted.includes(p.url) && n <= TRUSTED_LOG_MAX_REQUESTS ? 0 : 1)
-    const order = logProviders
+    const allowed = logProviders
       .filter((p) => !opts.trustedLogsOnly || trusted.includes(p.url))
       .map((p, i) => { const n = requests(p); return { p, i, n, t: tier(p, n) } })
-      .sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
+    // A provider over LOG_MAX_REQUESTS for this range only when none can do it in fewer (#367).
+    const within = allowed.filter((x) => x.n <= LOG_MAX_REQUESTS)
+    const order = (within.length ? within : allowed).sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
     let last: any = null
     // What the caller is told when nothing is accepted: a range that was read but not witnessed says more than a provider being down.
     let unwitnessed: any = null
