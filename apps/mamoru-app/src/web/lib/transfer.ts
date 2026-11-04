@@ -19,14 +19,17 @@ export type Transfer = {
   mintedAt?: string
   eta?: { from: string; to: string; late: boolean }
   stuck: boolean
+  /** The 13-19 min window is Base's Standard finality; any other route gets no window of ours (review r1 of #264). */
+  standardFromBase: boolean
 }
 
 /** Standard finality from Base (CCTP V2): the window after the burn in which the mint is possible. */
+const BASE = 8453
 const ETA_FROM_MS = 13 * 60_000
 const ETA_TO_MS = 19 * 60_000
 
-function etaOf(burnedAt: string | undefined, now: number): Transfer['eta'] {
-  const t = burnedAt ? Date.parse(burnedAt) : NaN
+function etaOf(burnedAt: string | undefined, now: number, standardFromBase: boolean): Transfer['eta'] {
+  const t = burnedAt && standardFromBase ? Date.parse(burnedAt) : NaN
   if (!Number.isFinite(t)) return undefined
   return { from: new Date(t + ETA_FROM_MS).toISOString(), to: new Date(t + ETA_TO_MS).toISOString(), late: now > t + ETA_TO_MS }
 }
@@ -34,25 +37,30 @@ function etaOf(burnedAt: string | undefined, now: number): Transfer['eta'] {
 /** The money map's row: its stage says how far it got ('attested' and 'minting' are both "arriving"). */
 export function transferOfFlight(t: MoneyInFlight, now: number = Date.now()): Transfer {
   const step = t.stage === 'failed' ? -1 : t.stage === 'sending' ? 0 : t.stage === 'burned' ? (t.attestedAt ? 2 : 1) : t.stage === 'minted' ? 3 : 2
+  const standardFromBase = t.from === BASE && t.finality === 'standard'
   return {
     from: t.from, to: t.to, amountUsdc: t.amountUsdc, recipient: t.recipient, step,
     ...(t.burnTx ? { burnTx: t.burnTx } : {}), ...(t.burnedAt ? { burnedAt: t.burnedAt } : {}), ...(t.attestedAt ? { attestedAt: t.attestedAt } : {}),
     ...(t.mintTx ? { mintTx: t.mintTx } : {}), ...(t.mintedAt ? { mintedAt: t.mintedAt } : {}),
-    ...(step === 1 || step === 2 ? { eta: t.eta ?? etaOf(t.burnedAt, now) } : {}),
+    ...(step === 1 || step === 2 ? { eta: t.eta ?? etaOf(t.burnedAt, now, standardFromBase) } : {}),
     stuck: !!t.stuckAt && step >= 0 && step < 3,
+    standardFromBase,
   }
 }
 
 /** A bridge op's progress (its source is the account's own chain): 'burned' with an attestation seen is "arriving". */
 export function transferOfBridge(b: BridgeProgress, from: number, now: number = Date.now()): Transfer {
   const step = b.state === 'failed' ? -1 : b.state === 'sending' ? 0 : b.state === 'minted' ? 3 : b.attestedAt ? 2 : 1
+  // A bridge op is a burn the engine sends at Standard finality (#215).
+  const standardFromBase = from === BASE
   return {
     from, to: b.chainId, amountUsdc: b.amountUsdc, step,
     ...(b.recipient ? { recipient: b.recipient } : {}),
     ...(b.burnTx ? { burnTx: b.burnTx } : {}), ...(b.burnedAt ? { burnedAt: b.burnedAt } : {}), ...(b.attestedAt ? { attestedAt: b.attestedAt } : {}),
     ...(b.mintTx ? { mintTx: b.mintTx } : {}), ...(b.mintedAt ? { mintedAt: b.mintedAt } : {}),
-    ...(step === 1 || step === 2 ? { eta: b.eta ?? etaOf(b.burnedAt, now) } : {}),
+    ...(step === 1 || step === 2 ? { eta: b.eta ?? etaOf(b.burnedAt, now, standardFromBase) } : {}),
     stuck: !!b.stuckAt && step >= 0 && step < 3,
+    standardFromBase,
   }
 }
 

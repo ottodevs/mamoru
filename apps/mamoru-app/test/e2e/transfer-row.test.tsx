@@ -87,3 +87,30 @@ describe('under the balance', () => {
     expect(totalScopeNote(f, true, false)).toBeNull()
   })
 })
+
+describe('review r1', () => {
+  test('stuck while still leaving Base: the open row says it is taking longer, not only the closed line', () => {
+    const f = braisFlight('sending', NOW).money!.inFlight[0]!
+    const { text } = render(<TransferRow flight={{ ...f, stuckAt: new Date(NOW - 60_000).toISOString(), stuckReason: 'not_sent' }} now={NOW} />)
+    expect(text).toContain('leaving Base · taking longer than usual')
+    expect(text).toContain('Taking longer than usual. Your money is safe and counted in your total.')
+  })
+
+  test('the window turns late by the clock: the same row 30 min later promises no time', () => {
+    const f = braisFlight('burned', NOW).money!.inFlight[0]!
+    const late = render(<TransferRow flight={{ ...f, eta: { ...f.eta!, late: false } }} now={NOW + 30 * 60_000} />).text
+    expect(late).toContain('taking longer than usual')
+    expect(late).not.toMatch(/arrives .+ to /)
+  })
+
+  test('no 13-19 min window of ours for fast finality or a transfer that leaves Monad', () => {
+    const f = braisFlight('burned', NOW).money!.inFlight[0]!
+    for (const row of [{ ...f, finality: 'fast' as const, eta: undefined }, { ...f, from: 143, to: 8453, eta: undefined }]) {
+      const t = transferOfFlight(row, NOW)
+      expect(t.eta).toBeUndefined()
+      const { text } = render(<TransferRow flight={row} now={NOW} />)
+      expect(text).not.toContain('13 to 19')
+      expect(text).not.toMatch(/arrives .+ to /)
+    }
+  })
+})

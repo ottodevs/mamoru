@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import type { MoneyInFlight } from '@mamoru/domain'
 import { knownChain, sleeveChain, txLink } from '../lib/chain.tsx'
 import { shortHex } from '../lib/format.ts'
@@ -18,6 +19,16 @@ function Ext() {
       <path d="M9 2h5v5M14 2 7 9M12 10v4H2V4h4" />
     </svg>
   )
+}
+
+/** The time now, again every `ms` while mounted. */
+export function useNow(ms: number): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), ms)
+    return () => clearInterval(id)
+  }, [ms])
+  return now
 }
 
 /** "waiting for Circle to confirm · arrives 10:36 to 10:42", or that it is late; nothing more once arrived. */
@@ -67,10 +78,11 @@ export function TransferSteps({ t, now = Date.now() }: { t: Transfer; now?: numb
   const burn = t.burnTx ? txLink(t.from, t.burnTx) : null
   const mint = t.mintTx ? txLink(t.to, t.mintTx) : null
   const late = transferLate(t, now)
-  const waitDetail = late ? transferCopy.late : t.eta ? `${transferCopy.usually} ${transferCopy.etaLong(clockOrDate(t.eta.from), clockOrDate(t.eta.to))}` : transferCopy.usually
+  const usually = t.standardFromBase ? transferCopy.usually : null
+  const waitDetail = late ? transferCopy.late : [usually, t.eta ? transferCopy.etaLong(clockOrDate(t.eta.from), clockOrDate(t.eta.to)) : null].filter(Boolean).join(' ') || null
   return (
     <ol className="m-0 grid list-none gap-[0.55rem] p-0 font-mono text-[0.75rem] leading-[1.45] tracking-[0.03em]" data-testid="transfer-steps">
-      <Step label={leave!} state={state(0)} at={t.burnedAt} link={burn && knownChain(t.from) ? { href: burn, text: `${transferCopy.sent(sleeveChain(t.from).explorer.name)} ${shortHex(t.burnTx!)}` } : null} />
+      <Step label={leave!} state={state(0)} at={t.burnedAt} detail={t.step === 0 && late ? transferCopy.late : null} link={burn && knownChain(t.from) ? { href: burn, text: `${transferCopy.sent(sleeveChain(t.from).explorer.name)} ${shortHex(t.burnTx!)}` } : null} />
       <Step label={confirm!} state={state(1)} at={t.attestedAt} detail={t.step === 1 ? waitDetail : null} />
       <Step label={arrive!} state={state(2)} at={t.mintedAt} detail={t.step === 2 ? (late ? transferCopy.late : t.eta ? transferCopy.etaLong(clockOrDate(t.eta.from), clockOrDate(t.eta.to)) : null) : null} link={mint && knownChain(t.to) ? { href: mint, text: `${transferCopy.arrived(sleeveChain(t.to).explorer.name)} ${shortHex(t.mintTx!)}` } : null} />
     </ol>
@@ -78,7 +90,10 @@ export function TransferSteps({ t, now = Date.now() }: { t: Transfer; now?: numb
 }
 
 /** One transfer the total counts: the closed line under the balance, and its detail when opened. */
-export function TransferRow({ flight, now = Date.now() }: { flight: MoneyInFlight; now?: number }) {
+export function TransferRow({ flight, now: fixedNow }: { flight: MoneyInFlight; now?: number }) {
+  // Review r1 of #264: the row turns late by the clock even when no new reading re-renders Home.
+  const ticking = useNow(60_000)
+  const now = fixedNow ?? ticking
   const t = transferOfFlight(flight, now)
   if (t.step < 0) return null
   const line = (t.step === 3 ? transferCopy.arrivedLine : moneyCopy.moving)(usd(t.amountUsdc), chainLabel(t.from), chainLabel(t.to))

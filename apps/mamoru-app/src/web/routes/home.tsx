@@ -253,7 +253,7 @@ export function Balance({
             {homeCopy.pastReading(agoText(shownPast.readAt))}
           </p>
         ) : null}
-        {transfers.length && !shownPast ? (
+        {transfers.length ? (
           <div className="mm-transfers" role="status" aria-live="polite">
             {transfers.map((t) => (
               <TransferRow key={t.id} flight={t} />
