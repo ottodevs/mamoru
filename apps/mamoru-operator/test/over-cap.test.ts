@@ -3734,6 +3734,45 @@ test('spec 006: an armed activation that runs later records the cap its signatur
   expect(acc.signedCapUsdc).toBe('500000000')
 })
 
+describe('otto/mamoru#360: an armed approval over its signed cap', () => {
+  const settings = (capUsdc: number) => ({ forAccount: () => ({ settings: { depth: { impactBps: 30, shareBps: 500 }, capUsdc, guard: { enabled: false, btc: { fallBps: 700, volBps: 8000 }, eth: { fallBps: 900, volBps: 10000 } } }, versionId: 1, source: 'd1', override: [] }), status: () => ({}) })
+  const armOld = (w: ReturnType<typeof world>, extra: Partial<ArmedActivation> = {}) => {
+    const { acc } = w.op.account(ctx)
+    acc.ops.push({ opId: 'own-1-activate', kind: 'activate', state: 'proposed', code: 'ARMED', updatedAt: '2026-09-28T10:29:01.557Z' })
+    // Armed before spec 006: no cap in its summary, so LIVE_CAP_USDC is its ceiling.
+    acc.armed = { opId: 'own-1-activate', tx: { nonce: 0n } as ArmedActivation['tx'], safeTxHash: '0x', signature: '0x', grants: [], armedAt: '2026-09-28T10:29:01.557Z', ...extra }
+    return acc
+  }
+  const fire = (w: ReturnType<typeof world>, acc: AccountState, usdc: bigint) => (w.op as unknown as { fireArmed(a: AccountState, usdc: bigint): Promise<void> }).fireArmed(acc, usdc)
+
+  test('within the current cap: dropped, the op failed with APPROVAL_CAP_LOW and the amounts, nothing sent', async () => {
+    const w = world(OVER)
+    ;(w.op.cfg as { settings?: unknown }).settings = settings(1000)
+    const acc = armOld(w)
+    await fire(w, acc, OVER)
+    expect(acc.armed).toBeUndefined()
+    expect(acc.active).toBe(false)
+    expect(w.sent).toHaveLength(0)
+    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ opId: 'own-1-activate', state: 'failed', code: 'APPROVAL_CAP_LOW', amountUsdc: '101920000', capUsdc: '100000000' })
+  })
+
+  test('over the current cap too: kept, waiting, as before', async () => {
+    const w = world(OVER)
+    const acc = armOld(w)
+    await fire(w, acc, OVER)
+    expect(acc.armed?.opId).toBe('own-1-activate')
+    expect(w.op.ops(ctx, null).ops[0]).toMatchObject({ state: 'proposed', code: 'ARMED' })
+  })
+
+  test('an approval already sent once is never dropped here', async () => {
+    const w = world(OVER)
+    ;(w.op.cfg as { settings?: unknown }).settings = settings(1000)
+    const acc = armOld(w, { execSent: true })
+    await fire(w, acc, OVER)
+    expect(acc.armed?.opId).toBe('own-1-activate')
+  })
+})
+
 describe('prices the owner signs are read at the TWAP, not at slot0 (otto/mamoru#140)', () => {
   /** The cap of every rule of the grants a prepared activation would enable, by grant and field. */
   const capsOf = (w: ReturnType<typeof world>, prepareId: string) => {

@@ -911,6 +911,8 @@ const STATIC_GAS_PER_SESSION = 2_100_000n
 const STATIC_GAS_RESERVE_SWAP = 300_000n
 /** otto/mamoru#15: an activation whose gas reserve swap reached its deadline: it never ran and never can, the owner approves again. */
 const RESERVE_SWAP_EXPIRED = 'RESERVE_SWAP_EXPIRED'
+/** otto/mamoru#360: an armed activation over the cap it signed but within the current one: the owner approves again. */
+const APPROVAL_CAP_LOW = 'APPROVAL_CAP_LOW'
 
 /** The engine's and left-behind grants of `acc` that a stop revoking `revokes` leaves enabled: remembered for the next stop. */
 function unrevoked(acc: AccountState, revokes: Hex[]): Hex[] {
@@ -5406,6 +5408,14 @@ export class Operator {
     }
     const total = local.total + elsewhere
     if (total > cap) {
+      // otto/mamoru#360: over the cap its signature named, but within the account's current cap. The app measures the
+      // current cap, so it offers no withdrawal and, with an approval armed, no Start: the money would sit with nothing
+      // to press. This approval can never run as signed and a new one would: dropped, the owner approves again under the
+      // current cap. An approval already sent once is left to reconciliation.
+      if (!tried && total <= this.capFor(acc)) {
+        console.log(`[armed] ${acc.accountKey} ${a.opId} over its signed cap ${fmtUsdc(cap)} (${fmtUsdc(total)}) but within the current ${fmtUsdc(this.capFor(acc))}: dropped, the owner approves again (APPROVAL_CAP_LOW)`)
+        return this.disarm(acc, APPROVAL_CAP_LOW, { amountUsdc: total.toString(), capUsdc: cap.toString() })
+      }
       const shown = acc.ops.find((o) => o.opId === a.opId)
       if (shown?.amountUsdc !== total.toString() || shown.capUsdc !== cap.toString()) this.patchOp(acc, a.opId, { amountUsdc: total.toString(), capUsdc: cap.toString() })
       return this.park(acc, ARM_CAP_HOLD_MS)
