@@ -10,7 +10,7 @@ Ticket: <!-- https://git.ot2.me/otto/mamoru/issues/NNN -->
 
 ## Tested
 
-<!-- What you ran and what it showed. `bun run release:check` at least. -->
+<!-- What you ran and what it showed. `bun run release:check` at least. Operator auth, policy ids, finality or a public route: paste the `bun run e2e:all` table down to "N/M passed" (merge-pr.sh refuses without it). -->
 
 ## Not tested
 

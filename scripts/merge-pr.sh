@@ -79,7 +79,7 @@ if [ "$base" != "$(git -C "$root" rev-parse origin/main)" ]; then
   fi
 fi
 tmp="$(mktemp -d)"
-cleanup() { git -C "$root" worktree remove --force "$tmp" >/dev/null 2>&1 || true; }
+cleanup() { git -C "$root" worktree remove --force "$tmp" >/dev/null 2>&1 || true; rm -f "$tmp.diff"; }
 trap cleanup EXIT
 git -C "$root" worktree add -q --detach "$tmp" "origin/$head"
 
@@ -94,6 +94,11 @@ new_head="$(git -C "$tmp" rev-parse HEAD)"
 bad="$(git -C "$tmp" log --format='%h %G?' origin/main..HEAD | awk '$2 != "G"')"
 [ -z "$bad" ] || { echo "unsigned or badly signed commits:"; echo "$bad"; exit 1; } >&2
 [ -n "$(git -C "$tmp" log --format=%h origin/main..HEAD)" ] || { echo "PR #$pr has nothing to merge" >&2; exit 1; }
+
+# A change to operator auth, policy ids, finality or a public route carries the e2e:all table (#366): three reviewed
+# changes broke e2e nobody ran (docs/process/releasing.md).
+git -C "$tmp" diff origin/main HEAD >"$tmp.diff"
+bun "$root/scripts/release/e2e-rule.ts" "$pr" "$tmp.diff" || exit 1
 
 if [ "$new_head" != "$old_head" ]; then
   echo "rebased $head: $old_head -> $new_head; pushing and waiting for CI"

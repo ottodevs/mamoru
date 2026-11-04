@@ -140,10 +140,28 @@ branch that skips `main` and no deploy from a working tree.
 and `beta`: typecheck, the tests under `packages`, `apps` and `scripts/release` that need nothing but the
 checkout, and the production build of the app.
 
-It does not run what needs a chain or a browser: the fork scenarios (`bun run scenarios`), the operator
-end-to-end scripts, Playwright, and the suites that skip themselves without `RPC_URL` and Anvil (the live
-owner path in `packages/account/live`). A pull request that touches the operator, the account packages or
-the policy says in its body which of those were run by hand.
+CI also runs `e2e-monad-fork` offline on anvil from the committed Monad prestate, and a unit test checks that
+prestate has code for every registry contract it needs. It does not run what needs a live chain or a browser:
+the fork scenarios (`bun run scenarios`), the other operator end-to-end scripts, Playwright, and the suites
+that skip themselves without `RPC_URL` and Anvil (the live owner path in `packages/account/live`). A pull
+request that touches the operator, the account packages or the policy says in its body which of those were
+run by hand.
+
+### The operator e2e (since 4 Nov 2026)
+
+On 4 Nov, 13 of the 15 `apps/mamoru-operator/test/e2e-*.ts` were found broken on main, some for 12 days:
+the auth cutoff (#140), the v1 policy removal (#251) and the convert finality (#285/#309) were each reviewed
+and each broke e2e nobody ran. Two things keep that from happening again:
+
+- **Nightly.** `mamoru-e2e-nightly.timer` on lady (repo `mamoru-ops-report`, `src/e2e-nightly.ts`) runs
+  `bun run e2e:all` on origin/main at 03:30 with the operator's keyed RPCs. It posts to #mamoru-ops when the
+  set of failing scripts changes and when main is green again; `mamoru-e2e-stale.timer` posts once a day
+  while no green run exists for 48 h. Runs are in `~/.local/state/mamoru-ops-report/e2e-nightly.jsonl`.
+- **Merge rule.** A pull request that changes operator auth, policy ids, finality or a public route runs
+  `cd apps/mamoru-operator && bun run e2e:all` on its branch and pastes the table, down to the
+  `N/M passed` line, in its body. `scripts/merge-pr.sh` refuses it otherwise (`scripts/release/lib/e2e-rule.ts`
+  says which files and lines count). `MAMORU_E2E_WAIVED="<why>"` merges without it and posts the reason on
+  the pull request; a script that already fails on main is a reason, a slow run is not.
 
 ## Repository settings
 
