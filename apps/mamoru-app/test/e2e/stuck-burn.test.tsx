@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import type { BridgeStuckReason, FundingView } from '@mamoru/domain'
-import { DIY_MINT_URL, isLate, isStuck, MoneyMapCard, moneyCopy, stuckReasonText } from '../../src/web/components/money-map.tsx'
+import type { BridgeStuckReason, FundingView, MoneyInFlight } from '@mamoru/domain'
+import { DIY_MINT_URL, isStuck, moneyCopy, StuckNote, stuckReasonText } from '../../src/web/components/money-map.tsx'
 import { braisFunding, withStuckTransfer } from '../../src/web/fixtures/money.ts'
 import { split } from '../../src/web/lib/money.ts'
 import { bridgeLine } from '../../src/web/lib/positions.ts'
@@ -11,8 +11,11 @@ import { render } from './render.ts'
 // retrying; the app says why in plain words, that the money is safe, and how to finish it without Mamoru.
 
 const NOW = Date.parse('2026-11-01T10:30:00.000Z')
-const card = (f: FundingView) => render(<MoneyMapCard money={f.money!} now={NOW} />)
 const working = (f: FundingView) => render(<Working f={f} s={split(f, null)} onStop={null} />)
+// otto/mamoru#350: the money map card is gone; the stuck note lives under Working capital. A transfer row renders it as
+// the card did, for the cases the fixture's progress does not carry.
+const note = (t: MoneyInFlight) => render(<StuckNote reason={t.stuckReason} from={t.from} to={t.to} burnTx={t.burnTx} landed={t.stage !== 'sending'} />)
+const card = working
 
 const GROUPS: [string, BridgeStuckReason[]][] = [
   [moneyCopy.stuck.circle, ['no_attestation', 'burn_unmatched']],
@@ -64,21 +67,9 @@ describe('stuck wins over late', () => {
     const t = f.money!.inFlight[0]!
     expect(t.eta!.late).toBe(true)
     expect(isStuck(t)).toBe(true)
-    expect(isLate(t, NOW)).toBe(false)
     const { text, html } = card(f)
-    expect(text).not.toContain('Taking longer than expected')
-    expect(text).not.toContain('Expected between')
-    expect(html).toContain('data-stuck="true"')
-  })
-
-  test('the same row without the flag is late, as before', () => {
-    const f = withStuckTransfer('no_attestation', NOW)
-    const t = { ...f.money!.inFlight[0]!, stuckAt: undefined, stuckReason: undefined }
-    expect(isLate(t, NOW)).toBe(true)
-    const { text, html } = render(<MoneyMapCard money={{ ...f.money!, inFlight: [t] }} now={NOW} />)
-    expect(text).toContain('Taking longer than expected')
-    expect(html).not.toContain('stuck-note')
-    expect(html).not.toContain('stuck-diy')
+    expect(text).not.toContain('arrives in about')
+    expect(html).toContain('stuck-note')
   })
 
   test('a minted or failed row is never stuck, even with a stale flag', () => {
@@ -86,15 +77,12 @@ describe('stuck wins over late', () => {
     const t = f.money!.inFlight[0]!
     for (const stage of ['minted', 'failed'] as const) {
       expect(isStuck({ ...t, stage })).toBe(false)
-      const { html } = render(<MoneyMapCard money={{ ...f.money!, inFlight: [{ ...t, stage }] }} now={NOW} />)
-      expect(html).not.toContain('stuck-note')
     }
   })
 
   test('the in-flight row that is not stuck is unchanged', () => {
-    const { html, text } = card(braisFunding('flight', NOW))
+    const { html } = card(braisFunding('flight', NOW))
     expect(html).not.toContain('stuck-')
-    expect(text).toContain('Expected between')
   })
 })
 
@@ -112,8 +100,7 @@ describe('finish it yourself', () => {
 
   test('no disclosure without a burn to finish: no hash, or a burn that never landed', () => {
     const f = withStuckTransfer('mint_budget', NOW)
-    const noHash = { ...f.money!, inFlight: [{ ...f.money!.inFlight[0]!, burnTx: undefined }] }
-    expect(render(<MoneyMapCard money={noHash} now={NOW} />).html).not.toContain('stuck-diy')
+    expect(note({ ...f.money!.inFlight[0]!, burnTx: undefined }).html).not.toContain('stuck-diy')
     for (const code of ['not_sent', 'burn_unmatched']) {
       const { html } = card(withStuckTransfer(code, NOW))
       expect(html).toContain('stuck-note')
@@ -122,12 +109,12 @@ describe('finish it yourself', () => {
     for (const code of ['burn_reverted', '']) {
       const f2 = withStuckTransfer(code, NOW)
       const row = { ...f2.money!.inFlight[0]!, stuckReason: (code || undefined) as never }
-      expect(render(<MoneyMapCard money={{ ...f2.money!, inFlight: [row] }} now={NOW} />).html).not.toContain('stuck-diy')
+      expect(note(row).html).not.toContain('stuck-diy')
     }
     // A burn not confirmed on Base yet (sending) has nothing to finish.
     const sending = withStuckTransfer('mint_budget', NOW)
     const row = { ...sending.money!.inFlight[0]!, stage: 'sending' as const }
-    expect(render(<MoneyMapCard money={{ ...sending.money!, inFlight: [row] }} now={NOW} />).html).not.toContain('stuck-diy')
+    expect(note(row).html).not.toContain('stuck-diy')
     const w = working({ ...sending, progress: { ...sending.progress!, bridge: { ...sending.progress!.bridge!, state: 'sending' } } })
     expect(w.text).toContain(moneyCopy.stuck.ours)
     expect(w.html).not.toContain('stuck-diy')
