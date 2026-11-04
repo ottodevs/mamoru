@@ -358,14 +358,25 @@ export function priorIncludedOf(ops: readonly StoredOp[], sessions: readonly { p
 export function heldHistorySeedOf(o: AccountState['heldHistory']): EngineConfig['heldHistorySeed'] {
   if (!o || typeof o !== 'object') return undefined
   const out = new Map<string, HeldHistory>()
+  // Strict: a decimal string, never '' or a sign (BigInt('') is 0n), so a damaged entry is read again, never folded.
+  const dec = (x: unknown): bigint => {
+    if (typeof x !== 'string' || !/^\d{1,78}$/.test(x)) throw new Error('not a decimal')
+    return BigInt(x)
+  }
+  const hash32 = /^0x[0-9a-fA-F]{64}$/
   for (const [id, h] of Object.entries(o)) {
     try {
+      const from = dec(h.from)
+      const through = dec(h.through)
+      if (!/^\d+$/.test(id) || through < from || !hash32.test(h.hash) || !Array.isArray(h.events)) throw new Error('entry')
       const events = h.events.map((e) => {
-        if (e.kind !== 'decrease' && e.kind !== 'collect') throw new Error(`kind ${e.kind}`)
-        return { kind: e.kind as 'decrease' | 'collect', tokenId: BigInt(e.tokenId), amount0: BigInt(e.amount0), amount1: BigInt(e.amount1), logIndex: Number(e.logIndex), blockNumber: BigInt(e.blockNumber), txHash: e.txHash as Hex }
+        if (e.kind !== 'decrease' && e.kind !== 'collect') throw new Error('kind')
+        if (!Number.isSafeInteger(e.logIndex) || e.logIndex < 0 || !hash32.test(e.txHash) || e.tokenId !== id) throw new Error('event')
+        const blockNumber = dec(e.blockNumber)
+        if (blockNumber < from || blockNumber > through) throw new Error('event block')
+        return { kind: e.kind as 'decrease' | 'collect', tokenId: dec(e.tokenId), amount0: dec(e.amount0), amount1: dec(e.amount1), logIndex: e.logIndex, blockNumber, txHash: e.txHash as Hex }
       })
-      if (!/^0x[0-9a-fA-F]{64}$/.test(h.hash)) throw new Error('hash')
-      out.set(id, { through: BigInt(h.through), hash: h.hash as Hex, events })
+      out.set(id, { from, through, hash: h.hash as Hex, events })
     } catch {
       // read again from activation
     }
@@ -7660,7 +7671,7 @@ export class Operator {
           const all = { ...acc.heldHistory }
           if (h && h.hash) {
             const s = (e: (typeof h.events)[number]) => ({ kind: e.kind, tokenId: e.tokenId.toString(), amount0: e.amount0.toString(), amount1: e.amount1.toString(), logIndex: e.logIndex, blockNumber: e.blockNumber.toString(), txHash: e.txHash })
-            all[tokenId] = { through: h.through.toString(), hash: h.hash, events: h.events.map(s) }
+            all[tokenId] = { from: h.from.toString(), through: h.through.toString(), hash: h.hash, events: h.events.map(s) }
           } else delete all[tokenId]
           acc.heldHistory = all
           this.store.save()

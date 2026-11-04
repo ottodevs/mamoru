@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { heldHistorySeedOf, outOfRangeSeedOf, rerangeHistoryOf } from '../src/operator.ts'
-import { outOfRangeFromSeed, OUT_OF_RANGE_SEED_GAP_S } from '@mamoru/scenarios/driver/engine.ts'
+import { heldHistoryFromSeed, outOfRangeFromSeed, OUT_OF_RANGE_SEED_GAP_S } from '@mamoru/scenarios/driver/engine.ts'
+import type { Hex } from 'viem'
 import type { StoredOp } from '../src/state.ts'
 
 // otto/mamoru#218: a restarted engine is seeded from the confirmed re-ranges the account's stored ops record.
@@ -49,15 +50,37 @@ describe('out-of-range clock across a restart', () => {
 })
 
 describe('otto/mamoru#358: the stored held-position histories as the engine seed', () => {
-  const H = `0x${'ab'.repeat(32)}`
-  const ev = { kind: 'collect', tokenId: '49417', amount0: '5', amount1: '7', logIndex: 3, blockNumber: '118500000', txHash: `0x${'cd'.repeat(32)}` }
-  test('parses what onHeldHistory stored; a malformed entry is left out, the rest kept', () => {
-    expect(heldHistorySeedOf({ '49417': { through: '118600000', hash: H, events: [ev] } })).toEqual(
-      new Map([['49417', { through: 118600000n, hash: H, events: [{ kind: 'collect', tokenId: 49417n, amount0: 5n, amount1: 7n, logIndex: 3, blockNumber: 118500000n, txHash: ev.txHash }] }]]),
+  const H = `0x${'ab'.repeat(32)}` as Hex
+  const T = `0x${'cd'.repeat(32)}` as Hex
+  const ev = { kind: 'collect', tokenId: '49417', amount0: '5', amount1: '7', logIndex: 3, blockNumber: '118500000', txHash: T }
+  const ok = { from: '118444934', through: '118600000', hash: H, events: [ev] }
+  test('parses what onHeldHistory stored', () => {
+    expect(heldHistorySeedOf({ '49417': ok })).toEqual(
+      new Map([['49417', { from: 118444934n, through: 118600000n, hash: H, events: [{ kind: 'collect', tokenId: 49417n, amount0: 5n, amount1: 7n, logIndex: 3, blockNumber: 118500000n, txHash: T }] }]]),
     )
-    const mixed = heldHistorySeedOf({ '1': { through: 'x', hash: H, events: [] }, '2': { through: '9', hash: '0x01', events: [] }, '3': { through: '9', hash: H, events: [{ ...ev, kind: 'mint' }] }, '4': { through: '9', hash: H, events: [] } })
-    expect([...(mixed ?? new Map()).keys()]).toEqual(['4'])
     expect(heldHistorySeedOf(undefined)).toBeUndefined()
-    expect(heldHistorySeedOf({ '1': { through: 'x', hash: H, events: [] } })).toBeUndefined()
+  })
+  test('gate: a damaged entry is left out (read again), the rest kept', () => {
+    const bad = [
+      { ...ok, through: '' },
+      { ...ok, from: '-1' },
+      { ...ok, hash: '0x01' },
+      { ...ok, through: '1', from: '2' },
+      { ...ok, events: [{ ...ev, kind: 'mint' }] },
+      { ...ok, events: [{ ...ev, logIndex: 'x' }] },
+      { ...ok, events: [{ ...ev, amount0: '' }] },
+      { ...ok, events: [{ ...ev, txHash: '0x' }] },
+      { ...ok, events: [{ ...ev, tokenId: '1' }] },
+      { ...ok, events: [{ ...ev, blockNumber: '1' }] },
+    ]
+    for (const b of bad) expect(heldHistorySeedOf({ '49417': b } as never)).toBeUndefined()
+    expect([...heldHistorySeedOf({ '49417': ok, x: ok } as never)!.keys()]).toEqual(['49417'])
+  })
+  test('gate: the engine takes only a seed of the same activation with a kept hash, unchecked', () => {
+    const seed = heldHistorySeedOf({ '49417': ok })!
+    expect(heldHistoryFromSeed(seed, 118444934n).get('49417')).toMatchObject({ through: 118600000n, checked: false })
+    expect(heldHistoryFromSeed(seed, 118444935n).size).toBe(0)
+    expect(heldHistoryFromSeed(new Map([['1', { from: 5n, through: 9n, hash: null, events: [] }]]), 5n).size).toBe(0)
+    expect(heldHistoryFromSeed(undefined, 5n).size).toBe(0)
   })
 })

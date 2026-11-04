@@ -188,6 +188,14 @@ describe('a held position the cursor does not follow, read one slice per review 
     expect(ranges).toEqual([{ from: 800_100n, to: 900_009n }])
   })
 
+  test('#358 persist (gate): a position no longer held loses its history, stored copy included', async () => {
+    const { advance, held, hooked } = engine(none, [], { historyStepBlocks: 400_000n })
+    await advance(900_000n, [7n])
+    await advance(900_000n, [8n])
+    expect(held.has('7')).toBe(false)
+    expect(hooked).toContainEqual(['7', null])
+  })
+
   test('#358 persist: a seed whose last block is no longer canonical starts over', async () => {
     const { advance, held, ranges } = engine(none, [], { historyStepBlocks: 400_000n }, (n) => (n === 800_099n ? '0xbb' : '0xaa'))
     held.set('7', { through: 800_099n, hash: '0xaa', events: [], checked: false })
