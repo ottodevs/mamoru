@@ -21,7 +21,7 @@ const CODES: BridgeStuckReason[] = ['no_attestation', 'burn_unmatched', 'mint_pe
 
 describe('one sentence, whatever the reason (Brais, 4 Nov)', () => {
   test('the copy is Brais\'s sentence, with no amount', () => {
-    expect(moneyCopy.stuck).toBe('Taking longer than usual, Mamoru is trying. Your money is safe.')
+    expect(moneyCopy.stuck).toBe('Taking longer than usual. Mamoru keeps trying. Your money is safe.')
     expect(moneyCopy.stuck).not.toMatch(/\d/)
   })
 

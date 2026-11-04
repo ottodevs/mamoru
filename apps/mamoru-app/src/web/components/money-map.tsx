@@ -22,7 +22,7 @@ export const moneyCopy = {
   partial: (chains: string) => `Some positions on ${chains} could not be listed, so the total may be short.`,
   pastScope: 'May not include other chains.',
   // otto/mamoru#245: a burn past its deadline. Brais, 4 Nov (literal): one sentence, no reason code, no amount.
-  stuck: 'Taking longer than usual, Mamoru is trying. Your money is safe.',
+  stuck: 'Taking longer than usual. Mamoru keeps trying. Your money is safe.',
   diy: 'Finish it yourself',
   diyBody: 'Circle signs every transfer. With that signature, any wallet with a little MON can complete it on Monad, without Mamoru.',
   diyBurn: (explorer: string) => `The transfer on ${explorer}`,
