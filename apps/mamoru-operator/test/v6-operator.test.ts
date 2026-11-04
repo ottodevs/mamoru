@@ -652,6 +652,39 @@ describe('after a confirmed v6 approval the account\'s own Safe on Monad is prov
     expect(await pages()).toEqual([])
   })
 
+  test('otto/mamoru#277 (gate): a peer that stops answering, or provisions another address, is listed and paged too', async () => {
+    const { w, p, t } = await started({ provision: { state: 'pending', code: 'REMOTE_SAFE_UNVERIFIED' } })
+    const pages = async () => (await quiet(() => w.op.tickRemotes())).logged.filter((l) => l.startsWith('[alert]'))
+    await quiet(() => confirm(w, t))
+    const rs = w.state.accounts.k!.remote!
+    p.peer.provision = async () => {
+      throw new Error('fetch failed')
+    }
+    rs.pendingSince = new Date(Date.now() - 31 * 60_000).toISOString()
+    const down = await pages()
+    expect(down).toHaveLength(1)
+    expect(down[0]).toContain('(REMOTE_UNREACHABLE)')
+    expect(w.op.remoteStuck()[0]).toMatchObject({ code: 'REMOTE_UNREACHABLE' })
+    p.peer.provision = async () => ({ state: 'active', address: `0x${'ab'.repeat(20)}` as Address })
+    const wrong = await pages()
+    expect(wrong).toHaveLength(1)
+    expect(wrong[0]).toContain('(REMOTE_ADDRESS_MISMATCH)')
+    expect(rs.ready).not.toBe(true)
+  })
+
+  test('otto/mamoru#277 (gate): a peer code that is not a code shape never reaches a page or /metrics', async () => {
+    const { w, t } = await started({ provision: { state: 'pending', code: 'https://rpc.example/v2/sk_live_secret\n[alert] fake' } })
+    await quiet(() => confirm(w, t))
+    const rs = w.state.accounts.k!.remote!
+    rs.pendingSince = new Date(Date.now() - 31 * 60_000).toISOString()
+    const { logged } = await quiet(() => w.op.tickRemotes())
+    const page = logged.filter((l) => l.startsWith('[alert]'))
+    expect(page).toHaveLength(1)
+    expect(page[0]).toContain('(UNRECOGNIZED_CODE)')
+    expect(page[0]).not.toContain('secret')
+    expect(w.op.remoteStuck()[0]).toMatchObject({ code: 'UNRECOGNIZED_CODE' })
+  })
+
   test('a Monad operator that provisions another address than the committed one is never taken as ready', async () => {
     const { w, p, t } = await started({ provision: { state: 'pending', code: 'X' } })
     p.peer.provision = async (c) => {

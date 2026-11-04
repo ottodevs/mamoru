@@ -106,6 +106,8 @@ export type AuthorizationSnapshot = {
 const RELAYER_BALANCE_CACHE_MS = 60_000
 /** otto/mamoru#277: a remote Safe still not provisioned this long after its first non-active answer pages ops once per code. */
 export const REMOTE_STUCK_ALERT_MS = 30 * 60_000
+/** otto/mamoru#277 (gate): a remote's code as it may reach a page or /metrics: a code shape, never free text from the peer. */
+const remoteCodeOf = (c: string | undefined): string => (c && /^[A-Z][A-Z0-9_]{0,63}$/.test(c) ? c : 'UNRECOGNIZED_CODE')
 /**
  * otto/mamoru#135: how old the shared readSafe behind GET funding may be. 15 s for a poll, 60 s while the keyed
  * RPC provider is over its hourly budget, and 2 s for `fresh=1` (the add-money screen watching a deposit land, a
@@ -7211,7 +7213,13 @@ export class Operator {
     const res = await peer.provision(this.remoteContext(acc, rs))
     rs.checkedAt = now()
     if (res.state === 'active') {
-      if (res.address.toLowerCase() !== rs.address.toLowerCase()) throw new Error(`remote operator provisioned ${res.address}, not ${rs.address}`)
+      if (res.address.toLowerCase() !== rs.address.toLowerCase()) {
+        // otto/mamoru#277 (gate): stuck like any other answer, so it is listed and paged.
+        rs.lastCode = 'REMOTE_ADDRESS_MISMATCH'
+        rs.pendingSince ??= now()
+        this.store.save()
+        throw new Error(`remote operator provisioned ${res.address}, not ${rs.address}`)
+      }
       rs.ready = true
       rs.lastCode = undefined
       rs.pendingSince = undefined
@@ -7222,7 +7230,6 @@ export class Operator {
       logErr(`[remote] ${acc.accountKey} Safe ${rs.address} on chain ${rs.chainId} not provisioned yet:`, res.code)
     }
     this.store.save()
-    this.pageRemoteStuck(acc)
   }
 
   /** otto/mamoru#277: the remote Safes of running accounts not provisioned for REMOTE_STUCK_ALERT_MS, for /metrics `remote.stuck`. */
@@ -7233,7 +7240,7 @@ export class Operator {
       if (!rs || rs.ready || !acc.active || !rs.pendingSince) continue
       const since = Date.parse(rs.pendingSince)
       if (!Number.isFinite(since) || Date.now() - since < REMOTE_STUCK_ALERT_MS) continue
-      out.push({ account: acc.accountKey.slice(0, 8), chainId: rs.chainId, safe: rs.address, code: rs.lastCode ?? 'UNKNOWN', sinceS: Math.round((Date.now() - since) / 1000) })
+      out.push({ account: acc.accountKey.slice(0, 8), chainId: rs.chainId, safe: rs.address, code: remoteCodeOf(rs.lastCode), sinceS: Math.round((Date.now() - since) / 1000) })
     }
     return out
   }
@@ -7241,13 +7248,14 @@ export class Operator {
   /** otto/mamoru#277: pages once per (account, code) when a remote Safe crosses REMOTE_STUCK_ALERT_MS; a new code pages again. */
   private pageRemoteStuck(acc: AccountState): void {
     const rs = acc.remote
-    if (!rs || rs.ready || !rs.pendingSince || !rs.lastCode) return
+    if (!rs || rs.ready || !rs.pendingSince) return
     const since = Date.parse(rs.pendingSince)
     if (!Number.isFinite(since) || Date.now() - since < REMOTE_STUCK_ALERT_MS) return
-    const key = `${acc.accountKey}|${rs.lastCode}`
+    const code = remoteCodeOf(rs.lastCode)
+    const key = `${acc.accountKey}|${code}`
     if (this.remoteStuckPaged.has(key)) return
     this.remoteStuckPaged.add(key)
-    logErr(`[alert] remote Safe ${rs.address} of account ${acc.accountKey.slice(0, 8)} on chain ${rs.chainId} not provisioned for over ${Math.round((Date.now() - since) / 60_000)} min (${rs.lastCode}): it is retried; nothing runs on it`, undefined)
+    logErr(`[alert] remote Safe ${rs.address} of account ${acc.accountKey.slice(0, 8)} on chain ${rs.chainId} not provisioned for over ${Math.round((Date.now() - since) / 60_000)} min (${code}): it is retried; nothing runs on it`, undefined)
   }
 
   /** Base side, on a timer: every running account whose remote Safe is not running yet is provisioned again. */
@@ -7256,7 +7264,18 @@ export class Operator {
       if (!acc.remote || acc.remote.ready || !acc.active) continue
       await this.lock(acc.accountKey)
         .run(() => this.provisionRemote(acc))
-        .catch((e) => logErr(`[remote] ${acc.accountKey} provision:`, e))
+        .catch((e) => {
+          logErr(`[remote] ${acc.accountKey} provision:`, e)
+          // otto/mamoru#277 (gate): a peer that does not answer is stuck too: listed and paged like an answer.
+          const rs = acc.remote
+          if (rs && !rs.ready && !String((e as Error)?.message).startsWith('remote operator provisioned')) {
+            rs.lastCode = 'REMOTE_UNREACHABLE'
+            rs.pendingSince ??= now()
+            this.store.save()
+          }
+        })
+      // Whether the call answered or not (gate of #277).
+      this.pageRemoteStuck(acc)
     }
   }
 
