@@ -106,6 +106,8 @@ export type AuthorizationSnapshot = {
 const RELAYER_BALANCE_CACHE_MS = 60_000
 /** otto/mamoru#277: a remote Safe still not provisioned this long after its first non-active answer pages ops once per code. */
 export const REMOTE_STUCK_ALERT_MS = 30 * 60_000
+/** otto/mamoru#277 (gate): pages per account for one stuck remote Safe, whatever codes its peer cycles through. */
+const REMOTE_STUCK_PAGES = 4
 /** otto/mamoru#277 (gate): a remote's code as it may reach a page or /metrics: a code shape, never free text from the peer. */
 const remoteCodeOf = (c: string | undefined): string => (c && /^[A-Z][A-Z0-9_]{0,63}$/.test(c) ? c : 'UNRECOGNIZED_CODE')
 /**
@@ -969,8 +971,8 @@ export class Operator {
   /** otto/mamoru#277: this chain's relayer balance on a timer and its low-balance page; when it was last read. */
   private readonly relayerWatch = new RelayerWatch()
   private relayerReadAt = 0
-  /** otto/mamoru#277: the (account, code) pairs of not-provisioned remote Safes already paged (memory only). */
-  private readonly remoteStuckPaged = new Set<string>()
+  /** otto/mamoru#277: the codes of each account's not-provisioned remote Safe already paged (memory only, at most REMOTE_STUCK_PAGES each). */
+  private readonly remoteStuckPaged = new Map<string, Set<string>>()
   /** Pool state of the last few blocks: accounts reviewed at the same block read it once. */
   private readonly poolCache = poolStateCache()
   /** otto/mamoru#101 (shadow): hourly off-chain pool stats (TVL change, volume); only read for a policy that lists packaging:tvl. */
@@ -7227,7 +7229,7 @@ export class Operator {
     } else {
       rs.lastCode = res.code
       rs.pendingSince ??= now()
-      logErr(`[remote] ${acc.accountKey} Safe ${rs.address} on chain ${rs.chainId} not provisioned yet:`, res.code)
+      logErr(`[remote] ${acc.accountKey} Safe ${rs.address} on chain ${rs.chainId} not provisioned yet:`, remoteCodeOf(res.code))
     }
     this.store.save()
   }
@@ -7252,9 +7254,11 @@ export class Operator {
     const since = Date.parse(rs.pendingSince)
     if (!Number.isFinite(since) || Date.now() - since < REMOTE_STUCK_ALERT_MS) return
     const code = remoteCodeOf(rs.lastCode)
-    const key = `${acc.accountKey}|${code}`
-    if (this.remoteStuckPaged.has(key)) return
-    this.remoteStuckPaged.add(key)
+    const paged = this.remoteStuckPaged.get(acc.accountKey) ?? new Set<string>()
+    // A peer cycling codes pages a few times per account, never a storm (gate of #277).
+    if (paged.has(code) || paged.size >= REMOTE_STUCK_PAGES) return
+    paged.add(code)
+    this.remoteStuckPaged.set(acc.accountKey, paged)
     logErr(`[alert] remote Safe ${rs.address} of account ${acc.accountKey.slice(0, 8)} on chain ${rs.chainId} not provisioned for over ${Math.round((Date.now() - since) / 60_000)} min (${code}): it is retried; nothing runs on it`, undefined)
   }
 

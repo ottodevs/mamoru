@@ -672,6 +672,18 @@ describe('after a confirmed v6 approval the account\'s own Safe on Monad is prov
     expect(rs.ready).not.toBe(true)
   })
 
+  test('otto/mamoru#277 (gate): a peer cycling codes pages at most 4 times for the account', async () => {
+    const { w, p, t } = await started({ provision: { state: 'pending', code: 'E0' } })
+    await quiet(() => confirm(w, t))
+    w.state.accounts.k!.remote!.pendingSince = new Date(Date.now() - 31 * 60_000).toISOString()
+    let n = 0
+    for (let i = 1; i <= 10; i++) {
+      p.answer.provision = { state: 'pending', code: `E${i}` }
+      n += (await quiet(() => w.op.tickRemotes())).logged.filter((l) => l.startsWith('[alert]')).length
+    }
+    expect(n).toBe(4)
+  })
+
   test('otto/mamoru#277 (gate): a peer code that is not a code shape never reaches a page or /metrics', async () => {
     const { w, t } = await started({ provision: { state: 'pending', code: 'https://rpc.example/v2/sk_live_secret\n[alert] fake' } })
     await quiet(() => confirm(w, t))
@@ -682,6 +694,7 @@ describe('after a confirmed v6 approval the account\'s own Safe on Monad is prov
     expect(page).toHaveLength(1)
     expect(page[0]).toContain('(UNRECOGNIZED_CODE)')
     expect(page[0]).not.toContain('secret')
+    for (const l of logged) expect(l).not.toMatch(/secret|\[alert\] fake/)
     expect(w.op.remoteStuck()[0]).toMatchObject({ code: 'UNRECOGNIZED_CODE' })
   })
 
