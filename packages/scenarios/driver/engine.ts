@@ -661,7 +661,7 @@ export class Engine {
   /** Position history read so far: each review scans only the blocks after it. */
   private readonly historyCursor = historyCursor()
   /** otto/mamoru#358: history of held positions the observation's cursor does not follow, read up to `through` (a safe block). */
-  private readonly heldHistory = new Map<string, { through: bigint; events: ChainPositionEvent[] }>()
+  private readonly heldHistory = new Map<string, { through: bigint; hash: Hex | null; events: ChainPositionEvent[] }>()
   depositsAfter: bigint
   lastObservation?: Observation
   /** Live: premises the bundler rejected as unincludable, held back until `until` (block timestamp, seconds). */
@@ -2080,15 +2080,20 @@ export class Engine {
     const safe = obs.safeBlock.number
     for (const { tokenId } of obs.positions) {
       if (c.fromBlock === this.historyFromBlock && c.ids.has(String(tokenId))) continue
-      const h = this.heldHistory.get(String(tokenId)) ?? { through: this.historyFromBlock - 1n, events: [] }
-      // Caught up within a step: the tail read at harvest time covers the rest.
-      if (h.through >= this.historyFromBlock && safe - h.through <= step) continue
-      const to = h.through + step < safe ? h.through + step : safe
+      let h = this.heldHistory.get(String(tokenId)) ?? { through: this.historyFromBlock - 1n, hash: null, events: [] }
       try {
+        // The last slice's end is still canonical, or what was read starts over (gate of #358: no fork mix across slices).
+        if (h.hash && (await this.client.getBlock({ blockNumber: h.through })).hash !== h.hash) h = { through: this.historyFromBlock - 1n, hash: null, events: [] }
+        // Caught up within a step: the tail read at harvest time covers the rest.
+        if (h.through >= this.historyFromBlock && safe - h.through <= step) {
+          this.heldHistory.set(String(tokenId), h)
+          continue
+        }
+        const to = h.through + step < safe ? h.through + step : safe
         const before = (await this.client.getBlock({ blockNumber: to })).hash
         const events = await readPositionHistory(this.client, [tokenId], h.through + 1n, to, this.registry)
         if ((await this.client.getBlock({ blockNumber: to })).hash !== before) continue
-        this.heldHistory.set(String(tokenId), { through: to, events: [...h.events, ...events] })
+        this.heldHistory.set(String(tokenId), { through: to, hash: before, events: [...h.events, ...events] })
       } catch {
         // read again on the next review
       }
@@ -2114,7 +2119,8 @@ export class Engine {
     // Nothing at or after (block, 0) is used: do not ask for a block that may not exist yet.
     const end = at.logIndex === 0 ? at.block - 1n : at.block
     const step = this.cfg.historyStepBlocks
-    if (!read || (step !== undefined && end - read.through > step)) {
+    // `full` (an included harvest's row): whatever was read plus all the rest, never the whole history again (gate of #358).
+    if (!read || (step !== undefined && !full && end - read.through > step)) {
       if (step === undefined || full) return principalOwedBefore(this.client, [tokenId], this.historyFromBlock, at, this.registry)
       throw new ReasonError('OBS_RPC_UNAVAILABLE', `position ${tokenId}: its history is read to block ${read?.through ?? this.historyFromBlock - 1n} of ${end}, one slice per review`)
     }

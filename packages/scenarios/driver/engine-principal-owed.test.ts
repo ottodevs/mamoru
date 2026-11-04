@@ -111,6 +111,27 @@ describe('a held position the cursor does not follow, read one slice per review 
     await expect(owed(7n, { block: 900_010n, logIndex: 0 })).rejects.toMatchObject({ code: 'OBS_RPC_UNAVAILABLE' })
   })
 
+  test('gate: the confirm path folds what was read plus the whole rest, even past a step; never the whole history again', async () => {
+    const { owed, ranges, advance } = engine(none, [], { historyStepBlocks: 400_000n })
+    await advance(900_000n, [7n])
+    await advance(900_000n, [7n])
+    ranges.length = 0
+    await owed(7n, { block: 1_300_000n, logIndex: 2 }, true)
+    expect(ranges).toEqual([{ from: 800_100n, to: 1_300_000n }])
+  })
+
+  test('gate: a previous slice end that is no longer canonical starts the read over', async () => {
+    let fork = false
+    const { ranges, advance } = engine(none, [], { historyStepBlocks: 400_000n }, (n) => (fork && n === 400_099n ? '0xbb' : '0xaa'))
+    await advance(900_000n, [7n])
+    fork = true
+    await advance(900_000n, [7n])
+    expect(ranges).toEqual([
+      { from: 100n, to: 400_099n },
+      { from: 100n, to: 400_099n },
+    ])
+  })
+
   test('the confirm path (`full`) and chains without a step read in full, as before; without a step nothing is read ahead', async () => {
     const a = engine(none, [], { historyStepBlocks: 400_000n })
     await a.owed(7n, { block: 900_010n, logIndex: 0 }, true)
