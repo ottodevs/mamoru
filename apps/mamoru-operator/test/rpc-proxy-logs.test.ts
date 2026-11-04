@@ -75,8 +75,8 @@ afterEach(() => {
 
 type Answer = { result?: Log[]; error?: { code: number; message: string } }
 
-async function getLogs(w: ReturnType<typeof world>, from: number, to: number, metrics?: RpcMetrics): Promise<Answer> {
-  const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: FALLBACKS, logRanges: {}, metrics })
+async function getLogs(w: ReturnType<typeof world>, from: number, to: number, metrics?: RpcMetrics, extra: { logRequestFactor?: bigint } = {}): Promise<Answer> {
+  const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: FALLBACKS, logRanges: {}, metrics, ...extra })
   try {
     const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ address: '0x01', fromBlock: hex(from), toBlock: hex(to) }] }) })
     return (await res.json()) as Answer
@@ -114,23 +114,20 @@ describe('eth_getLogs routing by provider range', () => {
     expect(w.logsCalls(PUBLICNODE).length).toBe(0)
   })
 
-  test('otto/mamoru#367: a provider that needs over 50 requests for the range is not asked while another can do it in fewer', async () => {
+  test('otto/mamoru#367: with logRequestFactor, a provider needing 10x the requests of the best is never asked; similar ones stay failover', async () => {
     const w = world(LOGS)
     for (const u of [PUBLICNODE, DRPC, BASE_ORG]) w.providers[u]!.failAt = () => true
     // 1000 blocks: one request to each public provider, 100 to the 10-block upstream (the Monad slice case).
-    const r = await getLogs(w, 1000, 1999)
+    const r = await getLogs(w, 1000, 1999, undefined, { logRequestFactor: 10n })
     expect(r.error).toBeDefined()
     expect(w.logsCalls(ALCHEMY)).toEqual([])
-  })
-
-  test('otto/mamoru#367: with none within 50, those within 200; the 10-block upstream still never asked for a wide range', async () => {
-    const w = world(LOGS)
-    for (const u of [PUBLICNODE, DRPC, BASE_ORG]) w.providers[u]!.failAt = () => true
-    // 600k blocks: publicnode and base.org 300 requests each, drpc 60, the upstream 60k: drpc alone is in the second tier.
-    const r = await getLogs(w, 1000, 600_999)
-    expect(r.error).toBeDefined()
-    expect(w.logsCalls(DRPC).length).toBeGreaterThan(0)
-    expect(w.logsCalls(PUBLICNODE).length + w.logsCalls(BASE_ORG).length + w.logsCalls(ALCHEMY).length).toBe(0)
+    const v = world(LOGS)
+    v.providers[DRPC]!.failAt = () => true
+    // 6000 blocks: drpc 1, publicnode and base.org 3 (under 10x), the upstream 600 (out).
+    const ok = await getLogs(v, 1000, 6999, undefined, { logRequestFactor: 10n })
+    expect(ok.result).toEqual(inOrder(1000, 6999))
+    expect(v.logsCalls(PUBLICNODE).length).toBeGreaterThan(0)
+    expect(v.logsCalls(ALCHEMY)).toEqual([])
   })
 
   test('a provider error falls through to the next provider, and the answer is the same', async () => {

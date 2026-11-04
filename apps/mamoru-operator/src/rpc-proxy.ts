@@ -119,12 +119,7 @@ const WITNESS_TTL_MS = 15_000
 
 /** A trusted provider serves a log range ahead of every public one when it takes it in at most this many requests. */
 const TRUSTED_LOG_MAX_REQUESTS = 4n
-/**
- * otto/mamoru#367: the providers asked for one range, by the requests each needs for it: those within the first tier
- * when any is; else those within the second; else every one, as before. On Monad a 5000-block history slice fell
- * through to Alchemy free (10 blocks: 500 requests), timed out and spent the hour's keyed budget.
- */
-const LOG_REQUEST_TIERS = [50n, 200n] as const
+
 
 /** Calls whose answer decides nothing: a signed transaction is the same bytes whoever relays it. Any provider may take them. */
 const ANY_PROVIDER = new Set(['eth_sendRawTransaction'])
@@ -249,6 +244,14 @@ export type RpcProxyOptions = {
    * ExecutionSuccess would mark a conversion that ran as failed.
    */
   trustedLogsOnly?: boolean
+  /**
+   * otto/mamoru#367: a provider is asked for a range only if it needs fewer than this many times the requests of the one
+   * that needs the fewest; providers of a similar range stay each other's failover. Absent: every provider (Base: the
+   * 10-block keyed upstream serves the archive ranges the public ones refuse). Monad's public RPCs serve the archive, and
+   * there a 5000-block history slice fell through to Alchemy free (500 requests against 50), timed out and spent the
+   * hour's keyed budget.
+   */
+  logRequestFactor?: bigint
   /**
    * Blocks behind the tip that `latest` is served at; default MAMORU_HEAD_LAG or 3. 0 for Ethereum and Monad
    * (otto/mamoru#285): a move's send block (`fromBlock`) is read at the tip, so its log scans start where the send is.
@@ -538,9 +541,10 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const allowed = logProviders
       .filter((p) => !opts.trustedLogsOnly || trusted.includes(p.url))
       .map((p, i) => { const n = requests(p); return { p, i, n, t: tier(p, n) } })
-    // A provider that needs many requests for this range only when none can do it in fewer (#367).
-    const tierOf = LOG_REQUEST_TIERS.map((max) => allowed.filter((x) => x.n <= max)).find((t) => t.length) ?? allowed
-    const order = tierOf.sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
+    // Where set, never a provider that needs far more requests for this range than the best one (#367).
+    const fewest = allowed.reduce((m, x) => (x.n < m ? x.n : m), allowed[0]?.n ?? 1n)
+    const factor = opts.logRequestFactor
+    const order = (factor === undefined ? allowed : allowed.filter((x) => x.n < factor * fewest)).sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
     let last: any = null
     // What the caller is told when nothing is accepted: a range that was read but not witnessed says more than a provider being down.
     let unwitnessed: any = null
