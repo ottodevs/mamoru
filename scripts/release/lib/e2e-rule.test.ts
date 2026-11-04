@@ -30,6 +30,11 @@ describe('e2eReasons', () => {
     expect(e2eReasons(diff('apps/mamoru-operator/src/rpc-proxy.test.ts', "+'finalized'"))).toEqual([])
     expect(e2eReasons(diff('packages/policy/src/policies-monad.test.ts', '+x'))).toEqual([])
     expect(e2eReasons(diff('docs/process/releasing.md', '+finalized'))).toEqual([])
+    // The SPA's labels (4 Nov: #291 mix.ts reads a policyId, #293 transfer.ts names a finality stage) are not the operator's.
+    expect(e2eReasons(diff('apps/mamoru-app/src/web/lib/mix.ts', '+  const id = acc.policyId'))).toEqual([])
+    expect(e2eReasons(diff('apps/mamoru-app/src/web/lib/transfer.ts', "+  finality: 'standard'"))).toEqual([])
+    // The app's signed operator client is still covered.
+    expect(e2eReasons(diff('apps/mamoru-app/src/api/accounts/operator.ts', '+x'))).toHaveLength(1)
     expect(e2eReasons(diff('packages/scenarios/driver/engine.ts', '+policyId a', '+policyId b'))).toHaveLength(1)
   })
   it('reads several files from one diff', () => {

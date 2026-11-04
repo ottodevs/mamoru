@@ -12,7 +12,9 @@ const FILES: RegExp[] = [
 /** Changed lines anywhere else in shipped code that touch the same things. */
 const LINES = /finali[sz]ed|finality|confirmations|blockTag|operatorSignature|x-mamoru-|policy_?id/i
 const isTest = (path: string) => /(^|\/)test\/|\.test\.ts$/.test(path)
-const shipped = (path: string) => /^(apps|packages)\//.test(path) && !isTest(path)
+/** The SPA (apps/mamoru-app/src/web) is not what the operator e2e exercise: its words about finality or a policy id are labels. */
+const isSpa = (path: string) => path.startsWith('apps/mamoru-app/src/web/')
+const shipped = (path: string) => /^(apps|packages)\//.test(path) && !isTest(path) && !isSpa(path)
 
 /** Why a unified diff (`git diff --src-prefix=a/ --dst-prefix=b/`) needs the e2e table: one reason per file, empty
  * when it does not. Throws on a non-empty diff it cannot read, so an unexpected format refuses instead of passing. */
