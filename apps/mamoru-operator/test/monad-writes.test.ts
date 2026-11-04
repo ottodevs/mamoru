@@ -303,6 +303,9 @@ describe('otto/mamoru#370: the approval summary names the chain native asset', (
     expect(monad).toContain(' MON of network fee')
     expect(monad).toContain("from your Safe's MON;")
     expect(monad).not.toMatch(/\bETH\b/)
-    expect(feeLine(baseRegistry, POLICIES['conservador-live-v2']!) ?? '').not.toContain('MON')
+    // Same policy, Base registry: only the chain decides the symbol.
+    const base = feeLine(baseRegistry, monadV6Deployed(withPinnedV3()))
+    expect(base).toContain(' ETH of network fee')
+    expect(base).toContain("from your Safe's ETH;")
   })
 })
