@@ -162,12 +162,21 @@ export function logRangeOf(url: string, overrides: Record<string, number> = {}):
   return LOG_RANGE_BY_HOST.find(([re]) => re.test(host))?.[1] ?? Number.POSITIVE_INFINITY
 }
 
-/** Rate or capacity refusals that are worth a retry or another provider, not a real answer. */
+/**
+ * A provider that does not serve the method at all (JSON-RPC -32601, or a plan that leaves it out). otto/mamoru#358: on
+ * Monad only the keyed Alchemy serves eth_simulateV1; the public upstream's "Method not found" was returned as the answer,
+ * so every Monad harvest and entry was discarded EHG_SIM_UNAVAILABLE without the trusted provider ever being asked.
+ */
+function methodUnserved(e: any): boolean {
+  return e.code === -32601 || /method .*(not found|does not exist|not available|not supported|is not whitelisted)|not available on (your|free) plan/i.test(String(e.message))
+}
+
+/** Refusals that are worth a retry or another provider, not a real answer: rate or capacity, or a method this provider does not serve. */
 function retriable(status: number, body: any): boolean {
   if (status === 429 || status >= 500) return true
   const e = body?.error
   if (!e) return false
-  return e.code === 429 || e.code === -32005 || /rate|capacity|limit exceeded|compute units|too many|throughput|timeout|temporar/i.test(String(e.message))
+  return e.code === 429 || e.code === -32005 || /rate|capacity|limit exceeded|compute units|too many|throughput|timeout|temporar/i.test(String(e.message)) || methodUnserved(e)
 }
 
 function wellFormed(body: any): boolean {
