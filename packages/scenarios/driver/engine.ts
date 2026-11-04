@@ -122,13 +122,18 @@ export function isTransportError(e: unknown): boolean {
  * methods of its request body (a batch carries several), so the journal says which read timed out. Never the URL.
  */
 export function thrownSummary(e: unknown): string {
-  const first = (e as Error)?.message?.split('\n')[0] ?? String(e)
-  const bodies = causeChain(e).flatMap((x) => {
-    const meta = (x as { metaMessages?: unknown })?.metaMessages
-    return Array.isArray(meta) ? meta.filter((m): m is string => typeof m === 'string' && m.startsWith('Request body:')) : []
-  })
-  const methods = [...new Set(bodies.flatMap((b) => [...b.matchAll(/"method":"([A-Za-z0-9_]+)"/g)].map((m) => m[1])))]
-  return methods.length ? `${first} (${methods.join(', ')})` : first
+  // Total: it runs inside a catch, where an odd thrown value (a throwing getter, a revoked Proxy) must not throw again.
+  try {
+    const first = (e as Error)?.message?.split('\n')[0] ?? String(e)
+    const bodies = causeChain(e).flatMap((x) => {
+      const meta = (x as { metaMessages?: unknown })?.metaMessages
+      return Array.isArray(meta) ? meta.filter((m): m is string => typeof m === 'string' && m.startsWith('Request body:')) : []
+    })
+    const methods = [...new Set(bodies.flatMap((b) => [...b.matchAll(/"method":"([A-Za-z0-9_]+)"/g)].map((m) => m[1])))]
+    return methods.length ? `${first} (${methods.join(', ')})` : first
+  } catch {
+    return 'an unreadable thrown value'
+  }
 }
 
 /** What a V4 op's gas limits are sized by (decide's proposal kinds, exits together). */

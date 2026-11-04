@@ -123,4 +123,10 @@ describe('thrownSummary (otto/mamoru#357)', () => {
     expect(thrownSummary(new Error('boom\nmore'))).toBe('boom')
     expect(thrownSummary('plain')).toBe('plain')
   })
+
+  test('never throws itself (PR #268 gate): a throwing getter, a revoked Proxy, a value without toString', () => {
+    const r = Proxy.revocable({}, {})
+    r.revoke()
+    for (const odd of [{ get message() { throw new Error('getter') } }, r.proxy, Object.create(null)]) expect(thrownSummary(odd)).toBe('an unreadable thrown value')
+  })
 })
