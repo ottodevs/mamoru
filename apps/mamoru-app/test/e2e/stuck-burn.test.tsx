@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { BridgeStuckReason, FundingView, MoneyInFlight } from '@mamoru/domain'
-import { DIY_MINT_URL, isStuck, moneyCopy, StuckNote, stuckReasonText } from '../../src/web/components/money-map.tsx'
+import { DIY_MINT_URL, isStuck, moneyCopy, StuckNote } from '../../src/web/components/money-map.tsx'
 import { braisFunding, withStuckTransfer } from '../../src/web/fixtures/money.ts'
 import { split } from '../../src/web/lib/money.ts'
 import { bridgeLine } from '../../src/web/lib/positions.ts'
@@ -17,48 +17,23 @@ const working = (f: FundingView) => render(<Working f={f} s={split(f, null)} onS
 const note = (t: MoneyInFlight) => render(<StuckNote reason={t.stuckReason} from={t.from} to={t.to} burnTx={t.burnTx} landed={t.stage !== 'sending'} />)
 const card = working
 
-const GROUPS: [string, BridgeStuckReason[]][] = [
-  [moneyCopy.stuck.circle, ['no_attestation', 'burn_unmatched']],
-  [moneyCopy.stuck.monad, ['mint_pending', 'mint_reverted', 'gas_ceiling', 'monad_unreachable']],
-  [moneyCopy.stuck.ours, ['mint_budget', 'relayer_unfunded', 'mint_off', 'not_sent']],
-]
+const CODES: BridgeStuckReason[] = ['no_attestation', 'burn_unmatched', 'mint_pending', 'mint_reverted', 'gas_ceiling', 'monad_unreachable', 'mint_budget', 'relayer_unfunded', 'mint_off', 'not_sent']
 
-describe('the reason, by who the wait is on', () => {
-  for (const [sentence, codes] of GROUPS) {
-    for (const code of codes) {
-      test(`${code}: ${sentence}`, () => {
-        expect(stuckReasonText(code)).toBe(sentence)
-        const { text } = card(withStuckTransfer(code, NOW))
-        expect(text).toContain(`${sentence} ${moneyCopy.stuckSafe}`)
-      })
-    }
+describe('one sentence, whatever the reason (Brais, 4 Nov)', () => {
+  test('the copy is Brais\'s sentence, with no amount', () => {
+    expect(moneyCopy.stuck).toBe('Taking longer than usual, Mamoru is trying. Your money is safe.')
+    expect(moneyCopy.stuck).not.toMatch(/\d/)
+  })
+
+  for (const code of [...CODES, 'relay_on_vacation']) {
+    test(`${code}: the same sentence, no reason code shown`, () => {
+      const { text, html } = card(withStuckTransfer(code, NOW))
+      expect(text).toContain(moneyCopy.stuck)
+      expect(text).not.toContain(code)
+      const note = (/data-testid="stuck-note">([\s\S]*?)<\/p>/.exec(html)?.[1] ?? '').replace(/<[^>]+>/g, '').trim()
+      expect(note).toBe(moneyCopy.stuck)
+    })
   }
-
-  test('every code of the domain type is in a group', () => {
-    const all = GROUPS.flatMap(([, c]) => c)
-    expect(new Set(all).size).toBe(10)
-    for (const code of all) expect(stuckReasonText(code)).not.toBe(moneyCopy.stuckUnknown)
-  })
-
-  test('an unknown code, or none, gets generic words and never throws', () => {
-    expect(stuckReasonText('relay_on_vacation')).toBe(moneyCopy.stuckUnknown)
-    expect(stuckReasonText(undefined)).toBe(moneyCopy.stuckUnknown)
-    expect(stuckReasonText('toString')).toBe(moneyCopy.stuckUnknown)
-    const { text } = card(withStuckTransfer('relay_on_vacation', NOW))
-    expect(text).toContain(`${moneyCopy.stuckUnknown} ${moneyCopy.stuckSafe}`)
-    expect(text).not.toContain('relay_on_vacation')
-  })
-
-  test('the stuck copy says the money is safe, retried and known, and carries no amount', () => {
-    expect(moneyCopy.stuckSafe).toContain('safe')
-    expect(moneyCopy.stuckSafe).toContain('retrying')
-    expect(moneyCopy.stuckSafe).toContain('already knows')
-    for (const s of [...Object.values(moneyCopy.stuck), moneyCopy.stuckUnknown, moneyCopy.stuckSafe, moneyCopy.diyBody]) expect(s).not.toMatch(/\d/)
-    const { html } = card(withStuckTransfer('gas_ceiling', NOW))
-    const note = (/data-testid="stuck-note">([\s\S]*?)<\/p>/.exec(html)?.[1] ?? '').replace(/<[^>]+>/g, '')
-    expect(note).toContain(moneyCopy.stuck.monad)
-    expect(note).not.toMatch(/\d/)
-  })
 })
 
 describe('stuck wins over late', () => {
@@ -116,7 +91,7 @@ describe('finish it yourself', () => {
     const row = { ...sending.money!.inFlight[0]!, stage: 'sending' as const }
     expect(note(row).html).not.toContain('stuck-diy')
     const w = working({ ...sending, progress: { ...sending.progress!, bridge: { ...sending.progress!.bridge!, state: 'sending' } } })
-    expect(w.text).toContain(moneyCopy.stuck.ours)
+    expect(w.text).toContain(moneyCopy.stuck)
     expect(w.html).not.toContain('stuck-diy')
   })
 })
@@ -127,7 +102,7 @@ describe('the progress line under Working', () => {
     const { text, html } = working(f)
     expect(text).toContain('Moving 2.07 USDC to Monad')
     expect(text).not.toContain('arrives in about 20 minutes')
-    expect(text).toContain(`${moneyCopy.stuck.ours} ${moneyCopy.stuckSafe}`)
+    expect(text).toContain(moneyCopy.stuck)
     expect(html).toContain('stuck-diy')
     expect(bridgeLine(f.progress!.bridge!)).toBe('Moving 2.07 USDC to Monad')
   })

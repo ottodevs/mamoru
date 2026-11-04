@@ -2391,12 +2391,9 @@
 .mm-diy-body > p {
   margin: 0;
 }
-/* otto/mamoru#245: only the reason is marked; that the money is safe reads in plain ink, not as an alarm. */
+/* otto/mamoru#245: the stuck note reads in plain ink, not as an alarm. */
 .mm-note-stuck {
   color: var(--color-stone);
-}
-.mm-note-stuck > .mm-note-reason {
-  color: var(--color-alert-ink);
 }
 .progress-stuck {
   display: grid;

@@ -1,4 +1,4 @@
-import type { BridgeStuckReason, FundingView, MoneyChain, MoneyInFlight, MoneyMap } from '@mamoru/domain'
+import type { FundingView, MoneyChain, MoneyInFlight, MoneyMap } from '@mamoru/domain'
 import { WALKAWAY_URL } from '../lib/signin.ts'
 import { sleeveChain, txLink } from '../lib/chain.tsx'
 import { shortHex } from '../lib/format.ts'
@@ -21,15 +21,8 @@ export const moneyCopy = {
   staleNoTime: (chain: string) => `${chain} could not be read just now. Showing its last value.`,
   partial: (chains: string) => `Some positions on ${chains} could not be listed, so the total may be short.`,
   pastScope: 'May not include other chains.',
-  // otto/mamoru#245: a burn past its deadline. One sentence per group of reason codes, never an amount; the second
-  // sentence says the money is safe, still retried, and that we know. An unknown code gets generic words.
-  stuck: {
-    circle: 'Waiting on Circle to confirm this transfer.',
-    monad: 'Delayed on the Monad side.',
-    ours: 'Paused on our side for now.',
-  },
-  stuckUnknown: 'Taking longer than it should.',
-  stuckSafe: 'Your money is safe and counted in your total. Mamoru keeps retrying, and our team already knows.',
+  // otto/mamoru#245: a burn past its deadline. Brais, 4 Nov (literal): one sentence, no reason code, no amount.
+  stuck: 'Taking longer than usual, Mamoru is trying. Your money is safe.',
   diy: 'Finish it yourself',
   diyBody: 'Circle signs every transfer. With that signature, any wallet with a little MON can complete it on Monad, without Mamoru.',
   diyBurn: (explorer: string) => `The transfer on ${explorer}`,
@@ -76,20 +69,6 @@ export function totalScopeNote(f: FundingView | undefined, otherChain: boolean):
   return notes.length ? notes.join(' ') : null
 }
 
-/** otto/mamoru#245: the reason codes by who the wait is on. A code not listed here (a newer operator) is generic. */
-const STUCK_GROUP: Record<BridgeStuckReason, keyof typeof moneyCopy.stuck> = {
-  no_attestation: 'circle',
-  burn_unmatched: 'circle',
-  mint_pending: 'monad',
-  mint_reverted: 'monad',
-  gas_ceiling: 'monad',
-  monad_unreachable: 'monad',
-  mint_budget: 'ours',
-  relayer_unfunded: 'ours',
-  mint_off: 'ours',
-  not_sent: 'ours',
-}
-
 /**
  * The burn landed on Base for these, so Circle has a message to finish by hand. An allowlist: a code this app does not
  * know, or none, never offers it (not_sent and burn_unmatched mean no burn landed).
@@ -98,12 +77,6 @@ const BURN_LANDED = new Set<string>(['no_attestation', 'mint_pending', 'mint_rev
 
 /** The walkaway section that finishes a Base to Monad transfer by hand. */
 export const DIY_MINT_URL = `${WALKAWAY_URL}#a-transfer-to-monad-that-never-arrives`
-
-/** The owner's sentence for a stuck reason; generic words for a code this app does not know (or none). */
-export function stuckReasonText(reason: string | undefined): string {
-  const group = reason && Object.hasOwn(STUCK_GROUP, reason) ? STUCK_GROUP[reason as BridgeStuckReason] : null
-  return group ? moneyCopy.stuck[group] : moneyCopy.stuckUnknown
-}
 
 /** Flagged stuck by the operator while still on its way; once minted or failed the flag no longer applies. */
 export function isStuck(t: Pick<MoneyInFlight, 'stuckAt' | 'stage'>): boolean {
@@ -116,7 +89,7 @@ export function travelling(t: Pick<MoneyInFlight, 'stage'>): boolean {
 }
 
 /**
- * otto/mamoru#245: why a transfer is stuck and that the money is safe; for a burn on its way to Monad, a closed
+ * otto/mamoru#245: a transfer past its deadline says so and that the money is safe; for a burn on its way to Monad, a closed
  * disclosure with the burn and the guide to mint it by hand (CCTP V2 lets anyone call receiveMessage there).
  */
 export function StuckNote({ reason, from, to, burnTx, landed }: { reason: string | undefined; from: number; to: number; burnTx: string | undefined; landed: boolean }) {
@@ -124,7 +97,7 @@ export function StuckNote({ reason, from, to, burnTx, landed }: { reason: string
   return (
     <>
       <p className="mm-note mm-note-stuck" role="status" data-testid="stuck-note">
-        <span className="mm-note-reason">{stuckReasonText(reason)}</span> {moneyCopy.stuckSafe}
+        {moneyCopy.stuck}
       </p>
       {burn && landed && to === 143 && BURN_LANDED.has(reason ?? '') ? (
         <details className="mm-diy" data-testid="stuck-diy">
