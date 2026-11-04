@@ -26,3 +26,11 @@ jobs:
       - run: bun install --frozen-lockfile
       # typecheck, the tests that need only the checkout, and the production build: the gate the deploy scripts run.
       - run: bun run release:check
+      # otto/mamoru#365: the e2e that runs offline (anvil on the committed MONAD-01 prestate, ~15 s). Unrun for 12 days,
+      # it rotted; here it breaks the PR that breaks it. anvil at the lab's pin (scenarios/manifest.json).
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
+        with:
+          version: v1.7.1
+      - run: bun apps/mamoru-operator/test/e2e-monad-fork.ts scenarios/monad/MONAD-01.prestate.json.gz
+        env:
+          MAMORU_PROFILE_AGE: warn

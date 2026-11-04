@@ -189,3 +189,17 @@ describe('#273 recorded profile', () => {
     expect(() => freshEmulation('monad', 'nope', {}, recorded)).toThrow(/no endpoint/)
   })
 })
+
+describe('profile age on every PR (otto/mamoru#365)', () => {
+  test('MAMORU_PROFILE_AGE=warn goes on past 7 days; unset, it refuses', async () => {
+    const { freshEmulation } = await import('./profile.ts')
+    const late = new Date(Date.now() + 365 * 86_400_000)
+    expect(() => freshEmulation('monad', 'rpc.monad.xyz', {}, late)).toThrow(/PROFILE_STALE/)
+    process.env.MAMORU_PROFILE_AGE = 'warn'
+    try {
+      expect(freshEmulation('monad', 'rpc.monad.xyz', {}, late).endpoint).toBeDefined()
+    } finally {
+      delete process.env.MAMORU_PROFILE_AGE
+    }
+  })
+})
