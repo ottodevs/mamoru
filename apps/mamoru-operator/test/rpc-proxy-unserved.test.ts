@@ -19,7 +19,8 @@ function monad(serves: Record<string, boolean>) {
     if (body.method !== 'eth_simulateV1') return reply({ result: '0x1' })
     if (serves[url]) return reply({ result: [{ calls: [{ status: '0x1', gasUsed: '0x5208', returnData: '0x' }] }] })
     if (url === MONAD_DRPC) return reply({ error: { code: 35, message: 'method is not available on free plan, please upgrade to paid plan' } })
-    return reply({ error: { code: -32601, message: 'Method not found' } })
+    // geth adds the method as `data`; still unserved.
+    return reply({ error: { code: -32601, message: 'Method not found', data: 'eth_simulateV1' } } as Reply)
   }
   return { fetch, calls }
 }

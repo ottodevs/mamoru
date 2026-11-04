@@ -168,9 +168,10 @@ export function logRangeOf(url: string, overrides: Record<string, number> = {}):
  * so every Monad harvest and entry was discarded EHG_SIM_UNAVAILABLE without the trusted provider ever being asked.
  */
 function methodUnserved(e: any): boolean {
-  // A revert (code 3, or any error carrying `data`) is the method's real answer, whatever its reason says.
-  if (e.code === 3 || e.data !== undefined) return false
+  // -32601 first: a revert never carries it, and a provider may add `data` (even null) to it.
   if (e.code === -32601) return true
+  // A revert (code 3, or any other error carrying `data`) is the method's real answer, whatever its reason says.
+  if (e.code === 3 || e.data != null) return false
   // drpc's free plan: code 35, "method is not available on free plan"; geth's wording without the standard code.
   return /^(the )?method \S+ (does not exist|is not available)|^method is not available on (your|free|the free) plan/i.test(String(e.message))
 }
