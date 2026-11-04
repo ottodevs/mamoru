@@ -17,16 +17,19 @@ export async function signedCall<T>(
   const raw = body === undefined ? '' : JSON.stringify(body)
   const header = { 'x-mamoru-account': accountHeader, 'content-type': 'application/json' }
   // A prepare on a cold fork over a public RPC can outlast the operator's 120 s idle timeout; the client then re-sends the
-  // request with its old `x-mamoru-ts`, which is stale by then (401). Sign again and ask again: anvil has the state cached by now.
+  // request with its old `x-mamoru-ts`, which is stale by then (401: refused, nothing done). Sign again and ask again. A
+  // request that failed in transit is asked again only for a GET: a POST the operator may have handled is never replayed.
   for (let attempt = 1; ; attempt++) {
     const ts = String(Math.floor(Date.now() / 1000))
     const sig = operatorSignature(secret, method, path, accountHeader, raw, ts)
+    let res: Response
     try {
-      const res = await fetchFn(baseUrl + path, { method, headers: { ...header, 'x-mamoru-ts': ts, 'x-mamoru-sig': sig }, body: method === 'POST' ? raw : undefined })
-      if (res.status === 401 && attempt < RETRIES) continue
-      return { status: res.status, json: (await res.json()) as T }
+      res = await fetchFn(baseUrl + path, { method, headers: { ...header, 'x-mamoru-ts': ts, 'x-mamoru-sig': sig }, body: method === 'POST' ? raw : undefined })
     } catch (e) {
-      if (attempt >= RETRIES) throw e
+      if (method === 'POST' || attempt >= RETRIES) throw e
+      continue
     }
+    if (res.status === 401 && attempt < RETRIES) continue
+    return { status: res.status, json: (await res.json()) as T }
   }
 }

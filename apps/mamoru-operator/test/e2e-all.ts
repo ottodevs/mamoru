@@ -1,7 +1,7 @@
 // Runs every e2e-*.ts one after the other, each under a timeout, and prints a PASS/FAIL table. Exit 1 when any fails.
 // Needs foundry on PATH and RPC_URL, BASE_RPC_URL, BASE_FORK_RPC_URL, L1_RPC_URL (public ones work). E2E_TIMEOUT_S: per script (default 900).
 // Usage: bun run e2e:all [name ...]   (names without the e2e- prefix, e.g. fork v4)
-import { mkdirSync, readdirSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 const root = join(import.meta.dir, '../../..')
@@ -20,14 +20,28 @@ const rows: { name: string; result: 'PASS' | 'FAIL' | 'TIMEOUT'; secs: number; l
 for (const f of scripts) {
   const log = join(logDir, `${f.slice(0, -3)}.log`)
   const t0 = Date.now()
-  const proc = Bun.spawn(['bun', join('apps/mamoru-operator/test', f)], { cwd: root, stdout: Bun.file(log), stderr: Bun.file(log), env: process.env })
+  // One descriptor for both streams; each script leads its own process group (setsid), so a timeout stops its anvil and
+  // proxies too, not only the bun process (they would hold ports into the next script).
+  const fd = openSync(log, 'a')
+  const proc = Bun.spawn(['setsid', 'bun', join('apps/mamoru-operator/test', f)], { cwd: root, stdout: fd, stderr: fd, env: process.env })
+  const group = (sig: NodeJS.Signals) => {
+    try {
+      process.kill(-proc.pid, sig)
+    } catch {
+      // already gone
+    }
+  }
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
-    proc.kill()
+    group('SIGTERM')
+    setTimeout(() => group('SIGKILL'), 10_000).unref?.()
   }, timeoutS * 1000)
   const code = await proc.exited
   clearTimeout(timer)
+  // Whatever the script left behind (an anvil it did not stop) goes with it.
+  group('SIGKILL')
+  closeSync(fd)
   const secs = Math.round((Date.now() - t0) / 1000)
   rows.push({ name: f.slice(4, -3), result: timedOut ? 'TIMEOUT' : code === 0 ? 'PASS' : 'FAIL', secs, log })
   console.log(`${rows.at(-1)!.result.padEnd(7)} ${f} (${secs}s)`)
