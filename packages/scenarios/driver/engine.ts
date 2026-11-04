@@ -81,6 +81,18 @@ export function engineGas(baseFee: bigint, caps?: GasCaps): GasSettings | null {
   return { ...gas, maxFeePerGas: caps.maxFeePerGas }
 }
 /** What a V4 op's gas limits are sized by (decide's proposal kinds, exits together). */
+/**
+ * otto/mamoru#357: the first line of a throw, and for a viem request error the JSON-RPC methods of its request body (a
+ * batch carries several), so the journal says which read timed out. Never the URL: it may carry a provider key.
+ */
+export function thrownSummary(e: unknown): string {
+  const first = (e as Error)?.message?.split('\n')[0] ?? String(e)
+  const meta = (e as { metaMessages?: unknown })?.metaMessages
+  const body = Array.isArray(meta) ? meta.find((m): m is string => typeof m === 'string' && m.startsWith('Request body:')) : undefined
+  const methods = body ? [...new Set([...body.matchAll(/"method":"([A-Za-z0-9_]+)"/g)].map((m) => m[1]))] : []
+  return methods.length ? `${first} (${methods.join(', ')})` : first
+}
+
 export type V4OpKind = 'swap' | 'mint' | 'increase' | 'exit' | 'harvest' | 'bridge' | 'vault' | 'registerRemote' | 'announceReady' | 'relayMessage'
 export type GasLimits = { verificationGasLimit: bigint; callGasLimit: bigint; preVerificationGas: bigint }
 
@@ -919,7 +931,7 @@ export class Engine {
     try {
       await this.run(op, obs, decision)
     } catch (e) {
-      this.journal.discardUnsigned(op.opId, 'OBS_RPC_UNAVAILABLE', `thrown before signing: ${(e as Error)?.message?.split('\n')[0] ?? String(e)}`)
+      this.journal.discardUnsigned(op.opId, 'OBS_RPC_UNAVAILABLE', `thrown before signing: ${thrownSummary(e)}`)
       throw e
     }
   }

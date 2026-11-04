@@ -3,7 +3,8 @@
 // cast, like engine-vault.test.ts.
 import { describe, expect, test } from 'bun:test'
 import type { Decision } from '@mamoru/decide'
-import { Engine } from './engine.ts'
+import { TimeoutError } from 'viem'
+import { Engine, thrownSummary } from './engine.ts'
 import { MemoryJournal, type OpRecord } from './journal.ts'
 
 const harvest = {
@@ -58,5 +59,17 @@ describe('a throw before signing frees the slot (otto/mamoru#357)', () => {
     await expect(runOp()).rejects.toThrow('timeout')
     expect(journal.op(op.opId).state).toBe('signed')
     expect(journal.live?.opId).toBe(op.opId)
+  })
+})
+
+describe('thrownSummary (otto/mamoru#357)', () => {
+  test('a viem timeout names the methods of its batch, never the URL', () => {
+    const e = new TimeoutError({ body: [{ method: 'eth_call', params: [] }, { method: 'eth_simulateV1', params: [] }, { method: 'eth_call', params: [] }], url: 'https://monad-mainnet.g.alchemy.com/v2/secret' })
+    expect(thrownSummary(e)).toBe('The request took too long to respond. (eth_call, eth_simulateV1)')
+  })
+
+  test('any other throw: its first line', () => {
+    expect(thrownSummary(new Error('boom\nmore'))).toBe('boom')
+    expect(thrownSummary('plain')).toBe('plain')
   })
 })
