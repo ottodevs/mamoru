@@ -1,6 +1,4 @@
 import type { FundingView, MoneyChain, MoneyInFlight, MoneyMap } from '@mamoru/domain'
-import { WALKAWAY_URL } from '../lib/signin.ts'
-import { sleeveChain, txLink } from '../lib/chain.tsx'
 import { shortHex } from '../lib/format.ts'
 import { usd } from '../lib/money.ts'
 import { chainLabel } from '../lib/positions.ts'
@@ -23,10 +21,6 @@ export const moneyCopy = {
   pastScope: 'May not include other chains.',
   // otto/mamoru#245: a burn past its deadline. Brais, 4 Nov (literal): one sentence, no reason code, no amount.
   stuck: 'Taking longer than usual. Mamoru keeps trying. Your money is safe.',
-  diy: 'Finish it yourself',
-  diyBody: 'Circle signs every transfer. With that signature, any wallet with a little MON can complete it on Monad, without Mamoru.',
-  diyBurn: (explorer: string) => `The transfer on ${explorer}`,
-  diyGuide: 'Step by step guide',
 }
 
 /** Chains whose money is not in the total at all: never read. */
@@ -69,15 +63,6 @@ export function totalScopeNote(f: FundingView | undefined, otherChain: boolean):
   return notes.length ? notes.join(' ') : null
 }
 
-/**
- * The burn landed on Base for these, so Circle has a message to finish by hand. An allowlist: a code this app does not
- * know, or none, never offers it (not_sent and burn_unmatched mean no burn landed).
- */
-const BURN_LANDED = new Set<string>(['no_attestation', 'mint_pending', 'mint_reverted', 'gas_ceiling', 'mint_budget', 'relayer_unfunded', 'mint_off', 'monad_unreachable'])
-
-/** The walkaway section that finishes a Base to Monad transfer by hand. */
-export const DIY_MINT_URL = `${WALKAWAY_URL}#a-transfer-to-monad-that-never-arrives`
-
 /** Flagged stuck by the operator while still on its way; once minted or failed the flag no longer applies. */
 export function isStuck(t: Pick<MoneyInFlight, 'stuckAt' | 'stage'>): boolean {
   return !!t.stuckAt && travelling(t)
@@ -88,43 +73,11 @@ export function travelling(t: Pick<MoneyInFlight, 'stage'>): boolean {
   return t.stage !== 'minted' && t.stage !== 'failed'
 }
 
-/**
- * otto/mamoru#245: a transfer past its deadline says so and that the money is safe; for a burn on its way to Monad, a closed
- * disclosure with the burn and the guide to mint it by hand (CCTP V2 lets anyone call receiveMessage there).
- */
-export function StuckNote({ reason, from, to, burnTx, landed }: { reason: string | undefined; from: number; to: number; burnTx: string | undefined; landed: boolean }) {
-  const burn = burnTx ? txLink(from, burnTx) : null
+/** otto/mamoru#245: a transfer past its deadline says so and that the money is safe. Brais, 4 Nov: one sentence, no way-out disclosure. */
+export function StuckNote() {
   return (
-    <>
-      <p className="mm-note mm-note-stuck" role="status" data-testid="stuck-note">
-        {moneyCopy.stuck}
-      </p>
-      {burn && landed && to === 143 && BURN_LANDED.has(reason ?? '') ? (
-        <details className="mm-diy" data-testid="stuck-diy">
-          <summary>{moneyCopy.diy}</summary>
-          <div className="mm-diy-body">
-            <p className="panel-meta">{moneyCopy.diyBody}</p>
-            <p className="mm-links">
-              <a className="mm-link" href={burn} target="_blank" rel="noreferrer">
-                {moneyCopy.diyBurn(sleeveChain(from).explorer.name)} {shortHex(burnTx!)}
-                <ExternalMark />
-              </a>
-              <a className="mm-link" href={DIY_MINT_URL} target="_blank" rel="noreferrer">
-                {moneyCopy.diyGuide}
-                <ExternalMark />
-              </a>
-            </p>
-          </div>
-        </details>
-      ) : null}
-    </>
-  )
-}
-
-function ExternalMark() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-      <path d="M9 2h5v5M14 2 7 9M12 10v4H2V4h4" />
-    </svg>
+    <p className="mm-note mm-note-stuck" role="status" data-testid="stuck-note">
+      {moneyCopy.stuck}
+    </p>
   )
 }
