@@ -46,8 +46,34 @@ describe('a method the provider does not serve', () => {
     const w = monad({})
     const r = await simulate(MONAD_PUBLIC, [MONAD_ALCHEMY], w)
     expect(r.error?.code).toBe(-32601)
-    // A simulation is a decision read: drpc (a plain fallback) is never asked.
-    expect(w.calls.some((c) => c.startsWith('monad-mainnet.drpc.org'))).toBe(false)
+    // Two passes over the trusted list, in order, once each per pass; a simulation is a decision read: drpc (a plain
+    // fallback) is never asked.
+    expect(w.calls.filter((c) => c.endsWith('eth_simulateV1'))).toEqual([
+      'rpc.monad.xyz eth_simulateV1',
+      'monad-mainnet.g.alchemy.com eth_simulateV1',
+      'rpc.monad.xyz eth_simulateV1',
+      'monad-mainnet.g.alchemy.com eth_simulateV1',
+    ])
+  })
+  test('drpc free plan (code 35) is unserved too; a revert whose reason names a method is the answer', async () => {
+    const answers: Record<string, { code: number; message: string; data?: string }> = {
+      [MONAD_PUBLIC]: { code: 35, message: 'method is not available on free plan, please upgrade to paid plan' },
+      [MONAD_ALCHEMY]: { code: 3, message: 'execution reverted: Method not supported', data: '0x08c379a0' },
+    }
+    const calls: string[] = []
+    const fetch = async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { id: number; method: string }
+      calls.push(new URL(url).hostname)
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, error: answers[url] }), { status: 200 })
+    }
+    const proxy = startRpcProxy(MONAD_PUBLIC, { fetch, trusted: [MONAD_ALCHEMY], fallbacks: [], logRanges: {} })
+    try {
+      const res = await (await globalThis.fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [] }) })).json()
+      expect((res as Reply).error?.message).toBe('execution reverted: Method not supported')
+      expect(calls).toEqual(['rpc.monad.xyz', 'monad-mainnet.g.alchemy.com'])
+    } finally {
+      proxy.stop()
+    }
   })
   test('a real error of a served method is still the answer, not retried', async () => {
     const calls: string[] = []
