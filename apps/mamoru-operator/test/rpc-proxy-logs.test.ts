@@ -75,8 +75,8 @@ afterEach(() => {
 
 type Answer = { result?: Log[]; error?: { code: number; message: string } }
 
-async function getLogs(w: ReturnType<typeof world>, from: number, to: number, metrics?: RpcMetrics, extra: { logRequestFactor?: bigint } = {}): Promise<Answer> {
-  const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: FALLBACKS, logRanges: {}, metrics, ...extra })
+async function getLogs(w: ReturnType<typeof world>, from: number, to: number, metrics?: RpcMetrics): Promise<Answer> {
+  const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: FALLBACKS, logRanges: {}, metrics })
   try {
     const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ address: '0x01', fromBlock: hex(from), toBlock: hex(to) }] }) })
     return (await res.json()) as Answer
@@ -112,22 +112,6 @@ describe('eth_getLogs routing by provider range', () => {
     expect(r.result).toEqual(inOrder(1000, 5999))
     expect(w.logsCalls(DRPC)).toEqual([{ method: 'eth_getLogs', from: 1000, to: 5999 }])
     expect(w.logsCalls(PUBLICNODE).length).toBe(0)
-  })
-
-  test('otto/mamoru#367: with logRequestFactor, a provider needing 10x the requests of the best is never asked; similar ones stay failover', async () => {
-    const w = world(LOGS)
-    for (const u of [PUBLICNODE, DRPC, BASE_ORG]) w.providers[u]!.failAt = () => true
-    // 1000 blocks: one request to each public provider, 100 to the 10-block upstream (the Monad slice case).
-    const r = await getLogs(w, 1000, 1999, undefined, { logRequestFactor: 10n })
-    expect(r.error).toBeDefined()
-    expect(w.logsCalls(ALCHEMY)).toEqual([])
-    const v = world(LOGS)
-    v.providers[DRPC]!.failAt = () => true
-    // 6000 blocks: drpc 1, publicnode and base.org 3 (under 10x), the upstream 600 (out).
-    const ok = await getLogs(v, 1000, 6999, undefined, { logRequestFactor: 10n })
-    expect(ok.result).toEqual(inOrder(1000, 6999))
-    expect(v.logsCalls(PUBLICNODE).length).toBeGreaterThan(0)
-    expect(v.logsCalls(ALCHEMY)).toEqual([])
   })
 
   test('a provider error falls through to the next provider, and the answer is the same', async () => {
@@ -523,5 +507,62 @@ describe('recent trusted block hashes as witnesses', () => {
     }
     expect(r.result).toEqual(inOrder(1000, 1149))
     expect(w.blockCalls(ALCHEMY)).toEqual([1149])
+  })
+})
+
+// otto/mamoru#367: the Monad operator's providers. drpc's table range (10000) is not its free plan's (100), and sentio
+// has no known range: a ranking of every provider by requests left only those two and failed every observation (live,
+// 4 Nov 18:50). Only the keyed fallback is capped.
+describe('Monad log providers with keyedLogMaxRequests (otto/mamoru#367)', () => {
+  const UP = 'https://rpc.monad.xyz'
+  const KEYED = 'https://monad-mainnet.g.alchemy.com/v2/test-key'
+  const RPC3 = 'https://rpc3.monad.xyz'
+  const DRPC_M = 'https://monad-mainnet.drpc.org'
+  const SENTIO = 'https://monad-mainnet.rpc.sentio.xyz'
+  const limits: Record<string, number> = { [UP]: 100, [KEYED]: 10, [RPC3]: 100, [DRPC_M]: 100, [SENTIO]: 100 }
+  function monad(down: string[] = []) {
+    const calls: Record<string, number> = {}
+    const fetch = async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body))
+      const answer = (result: unknown) => Response.json({ jsonrpc: '2.0', id: body.id, result })
+      if (body.method === 'eth_chainId') return answer('0x8f')
+      if (body.method === 'eth_blockNumber') return answer(hex(1_000_000))
+      if (body.method === 'eth_getBlockByNumber') return answer({ number: body.params[0], hash: hashOf(Number(body.params[0])) })
+      calls[url] = (calls[url] ?? 0) + 1
+      const [from, to] = [Number(body.params[0].fromBlock), Number(body.params[0].toBlock)]
+      if (down.includes(url)) return Response.json({ jsonrpc: '2.0', id: body.id, error: { code: 429, message: 'request limit reached' } }, { status: 429 })
+      if (to - from + 1 > limits[url]!) return Response.json({ jsonrpc: '2.0', id: body.id, error: { code: 35, message: 'ranges over 10000 blocks are not supported on free plan' } })
+      return answer([])
+    }
+    return { fetch, calls }
+  }
+  async function read(m: ReturnType<typeof monad>, from: number, to: number): Promise<Answer> {
+    const proxy = startRpcProxy(UP, { fetch: m.fetch, trusted: [KEYED], fallbacks: [RPC3, DRPC_M, SENTIO], logRanges: {}, keyedLogMaxRequests: 4n })
+    try {
+      const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ address: '0x01', fromBlock: hex(from), toBlock: hex(to) }] }) })
+      return (await res.json()) as Answer
+    } finally {
+      proxy.stop()
+    }
+  }
+
+  test('an observation range is served by the 100-block providers even though drpc and sentio claim more', async () => {
+    const m = monad()
+    const r = await read(m, 900_000, 902_999)
+    expect(r.result).toEqual([])
+    expect(m.calls[KEYED] ?? 0).toBe(0)
+  })
+
+  test('a 1000-block slice never reaches the keyed fallback, even with every public one refusing', async () => {
+    const m = monad([UP, RPC3, DRPC_M, SENTIO])
+    const r = await read(m, 900_000, 900_999)
+    expect(r.error).toBeDefined()
+    expect(m.calls[KEYED] ?? 0).toBe(0)
+  })
+
+  test('a 40-block range may still use the keyed fallback', async () => {
+    const m = monad([UP, RPC3, DRPC_M, SENTIO])
+    await read(m, 900_000, 900_039)
+    expect(m.calls[KEYED] ?? 0).toBeGreaterThan(0)
   })
 })

@@ -245,13 +245,13 @@ export type RpcProxyOptions = {
    */
   trustedLogsOnly?: boolean
   /**
-   * otto/mamoru#367: a provider is asked for a range only if it needs fewer than this many times the requests of the one
-   * that needs the fewest; providers of a similar range stay each other's failover. Absent: every provider (Base: the
-   * 10-block keyed upstream serves the archive ranges the public ones refuse). Monad's public RPCs serve the archive, and
-   * there a 5000-block history slice fell through to Alchemy free (500 requests against 50), timed out and spent the
-   * hour's keyed budget.
+   * otto/mamoru#367: a keyed fallback (MAMORU_RPC_TRUSTED, not the upstream) is never asked for a range it needs more
+   * requests than this for. Absent: no limit (Base: the keyed provider serves the archive ranges public ones refuse).
+   * On Monad the public RPCs serve the archive, and there a 5000-block history slice fell through to Alchemy free
+   * (10 blocks: 500 requests), timed out and spent the hour's keyed budget. Only the keyed one is left out: a ranking
+   * of every provider by requests broke all Monad observations (a provider's table range, drpc 10000, is not its plan's).
    */
-  logRequestFactor?: bigint
+  keyedLogMaxRequests?: bigint
   /**
    * Blocks behind the tip that `latest` is served at; default MAMORU_HEAD_LAG or 3. 0 for Ethereum and Monad
    * (otto/mamoru#285): a move's send block (`fromBlock`) is read at the tip, so its log scans start where the send is.
@@ -541,10 +541,9 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const allowed = logProviders
       .filter((p) => !opts.trustedLogsOnly || trusted.includes(p.url))
       .map((p, i) => { const n = requests(p); return { p, i, n, t: tier(p, n) } })
-    // Where set, never a provider that needs far more requests for this range than the best one (#367).
-    const fewest = allowed.reduce((m, x) => (x.n < m ? x.n : m), allowed[0]?.n ?? 1n)
-    const factor = opts.logRequestFactor
-    const order = (factor === undefined ? allowed : allowed.filter((x) => x.n < factor * fewest)).sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
+    // Where set, never the keyed fallback for a range that takes it many requests (#367).
+    const cap = opts.keyedLogMaxRequests
+    const order = (cap === undefined ? allowed : allowed.filter((x) => !trustedFallbacks.includes(x.p.url) || x.n <= cap)).sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
     let last: any = null
     // What the caller is told when nothing is accepted: a range that was read but not witnessed says more than a provider being down.
     let unwitnessed: any = null

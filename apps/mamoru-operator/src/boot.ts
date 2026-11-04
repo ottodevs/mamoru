@@ -566,8 +566,8 @@ export async function bootOperator(o: BootOptions) {
   // those that answered here are proven already.
   const chain = await proveChain([o.rpcUrl, ...trustedFromEnv()])
   if (!chain) throw new Error('neither BASE_RPC_URL (RPC_URL) nor MAMORU_RPC_TRUSTED answered eth_chainId')
-  // otto/mamoru#367: on Monad no log range goes to a provider needing 10x the requests of the best (the 10-block keyed one).
-  const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics, chainId: chain.chainId, proven: chain.proven, ...(chain.chainId === BRIDGE_MONAD_CHAIN_ID ? { logRequestFactor: 10n } : {}) })
+  // otto/mamoru#367: on Monad the 10-block keyed fallback serves no log range that takes it more than 4 requests.
+  const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics, chainId: chain.chainId, proven: chain.proven, ...(chain.chainId === BRIDGE_MONAD_CHAIN_ID ? { keyedLogMaxRequests: 4n } : {}) })
   // One path per component, for the counters only: the proxy serves them all the same way.
   const via = (component: string) => `${proxy.url}c/${component}`
   o = { ...o, rpcUrl: via('engine') }
