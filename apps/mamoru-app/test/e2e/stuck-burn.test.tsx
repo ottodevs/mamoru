@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { BridgeStuckReason, FundingView, MoneyInFlight } from '@mamoru/domain'
-import { DIY_MINT_URL, isStuck, moneyCopy, StuckNote, stuckReasonText } from '../../src/web/components/money-map.tsx'
+import { DIY_MINT_URL, isStuck, moneyCopy, StuckNote, stuckReasonText, totalScopeNote } from '../../src/web/components/money-map.tsx'
 import { braisFunding, withStuckTransfer } from '../../src/web/fixtures/money.ts'
 import { split } from '../../src/web/lib/money.ts'
 import { bridgeLine } from '../../src/web/lib/positions.ts'
@@ -105,7 +105,8 @@ describe('finish it yourself', () => {
       const { html } = card(withStuckTransfer(code, NOW))
       expect(html).toContain('stuck-note')
       expect(html).not.toContain('stuck-diy')
-    }    // An allowlist: a code this app does not know, or none, never offers it, even with a burn hash.
+    }
+    // An allowlist: a code this app does not know, or none, never offers it, even with a burn hash.
     for (const code of ['burn_reverted', '']) {
       const f2 = withStuckTransfer(code, NOW)
       const row = { ...f2.money!.inFlight[0]!, stuckReason: (code || undefined) as never }
@@ -138,5 +139,21 @@ describe('the progress line under Working', () => {
     const { text, html } = working({ ...f, progress: { ...f.progress!, bridge } })
     expect(text).toContain('Moving 2.07 USDC to Monad (arrives in about 20 minutes)')
     expect(html).not.toContain('stuck-')
+  })
+})
+
+describe('under the balance (#350, option A)', () => {
+  test('a stuck transfer says why and that the money is safe, with or without the engine progress', () => {
+    const f = withStuckTransfer('mint_budget', NOW)
+    const line = `2.07 USDC moving from Base to Monad. ${moneyCopy.stuck.ours} ${moneyCopy.stuckSafe}`
+    expect(totalScopeNote(f, true)).toContain(line)
+    expect(totalScopeNote({ ...f, progress: null }, true)).toContain(line)
+  })
+
+  test('an unknown code reads generic; a transfer that is not stuck keeps the plain line', () => {
+    expect(totalScopeNote(withStuckTransfer('relay_on_vacation', NOW), true)).toContain(`. ${moneyCopy.stuckUnknown} ${moneyCopy.stuckSafe}`)
+    const note = totalScopeNote(braisFunding('flight', NOW), true)!
+    expect(note).toContain('2.07 USDC moving from Base to Monad')
+    expect(note).not.toContain(moneyCopy.stuckSafe)
   })
 })
