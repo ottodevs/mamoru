@@ -2320,29 +2320,7 @@
   }
 }
 
-/* otto/mamoru#245: the stuck-transfer note and its way out (the money map card is gone, #350). */
-.mm-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.06em;
-  color: var(--color-stone);
-  text-decoration: none;
-}
-.mm-link:hover {
-  color: var(--color-emerald);
-}
-.mm-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.2rem 1rem;
-  margin: 0;
-}
-.mm-links:empty {
-  display: none;
-}
+/* otto/mamoru#245: the stuck-transfer note (the money map card is gone, #350). */
 .mm-note {
   margin: 0;
   font-family: var(--font-mono);
@@ -2350,53 +2328,9 @@
   letter-spacing: 0.06em;
   color: var(--color-alert-ink);
 }
-/* otto/mamoru#245: a stuck transfer's way out, closed by default and quiet: the owner opens it only if they want to. */
-.mm-diy > summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  min-height: 2.75rem;
-  margin: -0.6rem 0;
-  list-style: none;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.06em;
-  color: var(--color-stone);
-  cursor: pointer;
-}
-.mm-diy > summary::-webkit-details-marker {
-  display: none;
-}
-.mm-diy > summary::after {
-  content: "";
-  width: 0.38rem;
-  height: 0.38rem;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: translateY(-0.12rem) rotate(45deg);
-  transition: transform 180ms ease-out;
-}
-.mm-diy > summary:hover,
-.mm-diy[open] > summary {
-  color: var(--color-ink);
-}
-.mm-diy[open] > summary::after {
-  transform: translateY(0.08rem) rotate(-135deg);
-}
-.mm-diy-body {
-  display: grid;
-  gap: 0.35rem;
-  padding: 0.6rem 0 0.15rem;
-}
-.mm-diy-body > p {
-  margin: 0;
-}
-/* otto/mamoru#245: only the reason is marked; that the money is safe reads in plain ink, not as an alarm. */
+/* otto/mamoru#245: the stuck note reads in plain ink, not as an alarm. */
 .mm-note-stuck {
   color: var(--color-stone);
-}
-.mm-note-stuck > .mm-note-reason {
-  color: var(--color-alert-ink);
 }
 .progress-stuck {
   display: grid;
