@@ -489,8 +489,13 @@ const SAFE_ERROR_MESSAGE = {
   OPERATOR_BUSY: 'the operator is busy, try again in a moment',
 } as const
 
-/** otto/mamoru#358: blocks of a held position's history one Monad review reads (200 log requests of 100 blocks). */
-const MONAD_HISTORY_STEP_BLOCKS = 20_000n
+/**
+ * otto/mamoru#358: blocks of a held position's history one slice reads on Monad (50 log requests of 100 blocks): small
+ * enough that one 429 loses little, read in a row while `MONAD_HISTORY_READ_MS` lasts. 5000 blocks are about 33 min.
+ */
+const MONAD_HISTORY_STEP_BLOCKS = 5_000n
+/** otto/mamoru#358: an unchanged held-history read error is logged again after this long. */
+const HELD_HISTORY_ERROR_LOG_MS = 15 * 60_000
 /** otto/mamoru#358: how long a Monad review keeps reading those slices after its decision, while far behind. */
 const MONAD_HISTORY_READ_MS = 45_000
 
@@ -7612,6 +7617,8 @@ export class Operator {
     if (refusal) throw new ReasonError('CHAIN_UNSUPPORTED', `${acc.accountKey} engine not started: ${refusal}`)
     this.stopLoop(acc.accountKey)
     if (!acc.sessionKey) throw new Error(`${acc.accountKey} has no session key`)
+    // otto/mamoru#358: the last held-history read error logged per position (an unchanged one waits HELD_HISTORY_ERROR_LOG_MS).
+    const heldErrors = new Map<string, { msg: string; at: number }>()
     acc.runs = (acc.runs ?? 0) + 1
     this.store.save()
     // otto/mamoru#293: a V4 account's one session serves every pool of MamoruRegistry (one engine session per template).
@@ -7679,6 +7686,13 @@ export class Operator {
           this.store.save()
         },
         // otto/mamoru#358: a Monad position's history survives a restart (one slice per review is hours from activation).
+        onHeldHistoryError: (tokenId, e) => {
+          const msg = thrownSummary(e)
+          const last = heldErrors.get(tokenId)
+          if (last && last.msg === msg && Date.now() - last.at < HELD_HISTORY_ERROR_LOG_MS) return
+          heldErrors.set(tokenId, { msg, at: Date.now() })
+          logErr(`[engine ${acc.accountKey}] history of position ${tokenId} not read, read again next review:`, msg)
+        },
         onHeldHistory: (tokenId, h) => {
           const all = { ...acc.heldHistory }
           if (h && h.hash) {

@@ -28,6 +28,7 @@ function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; eve
   const ranges: { from: bigint; to: bigint }[] = []
   const logs = { down: false }
   const hooked: [string, bigint | null][] = []
+  const failed: [string, string][] = []
   const held = new Map()
   const client = {
     getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({ hash: hashOf(blockNumber) }),
@@ -45,13 +46,13 @@ function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; eve
     cfg,
     heldTurn: 0,
     heldHistory: held,
-    hooks: { onHeldHistory: (id: string, h: { through: bigint } | null) => hooked.push([id, h?.through ?? null]) },
+    hooks: { onHeldHistory: (id: string, h: { through: bigint } | null) => hooked.push([id, h?.through ?? null]), onHeldHistoryError: (id: string, e: Error) => failed.push([id, e.message]) },
     historyCursor: { fromBlock: cursor.fromBlock, through: cursor.through, hash: '0x01', ids: new Set(cursor.ids), events: cursor.events },
   })
   const owed = (tokenId: bigint, at: { block: bigint; logIndex: number }, full = false) => (e as unknown as { principalOwed: (t: bigint, a: typeof at, f: boolean) => Promise<Map<bigint, [bigint, bigint]>> }).principalOwed(tokenId, at, full)
   const advance = (safe: bigint, tokenIds: bigint[]) => (e as unknown as { advanceHeldHistory: (o: unknown) => Promise<void> }).advanceHeldHistory({ safeBlock: { number: safe, hash: '0xaa' }, positions: tokenIds.map((tokenId) => ({ tokenId })) })
   const catchUp = (safe: bigint, tokenIds: bigint[]) => (e as unknown as { catchUpHeldHistory: (o: unknown) => Promise<void> }).catchUpHeldHistory({ safeBlock: { number: safe, hash: '0xaa' }, positions: tokenIds.map((tokenId) => ({ tokenId })) })
-  return { owed, ranges, advance, catchUp, logs, held, hooked }
+  return { owed, ranges, advance, catchUp, logs, held, hooked, failed }
 }
 
 describe('principal owed from the observation cursor (otto/mamoru#358)', () => {
@@ -197,6 +198,7 @@ describe('a held position the cursor does not follow, read one slice per review 
       { from: 200_100n, to: 400_099n },
       { from: 400_100n, to: 600_099n },
       { from: 600_100n, to: 800_099n },
+      { from: 800_100n, to: 900_000n },
     ])
     const b = engine(none, [], { historyStepBlocks: 200_000n })
     await b.catchUp(900_000n, [7n])
@@ -205,6 +207,7 @@ describe('a held position the cursor does not follow, read one slice per review 
     c.logs.down = true
     await c.catchUp(900_000n, [7n])
     expect(c.held.size).toBe(0)
+    expect(c.failed).toEqual([['7', 'timeout']])
   })
 
   test('#358 persist (gate): a position no longer held loses its history, stored copy included', async () => {

@@ -552,6 +552,8 @@ export type EngineHooks = {
   onOutOfRange?: (since: ReadonlyMap<bigint, bigint>, seenAt: bigint) => void
   /** otto/mamoru#358: a held position's history read further (or dropped: null), for `heldHistorySeed` after a restart. */
   onHeldHistory?: (tokenId: string, history: HeldHistory | null) => void
+  /** otto/mamoru#358: a held-history slice that could not be read (it is read again); for the operator's log. */
+  onHeldHistoryError?: (tokenId: string, error: unknown) => void
   /** otto/mamoru#101: the shadow risk entries changed (rule, pool), with their latest values; the operator logs it. Never acts. */
   onShadowRisk?: (risk: NonNullable<Decision['shadowRisk']>) => void
 }
@@ -2155,8 +2157,9 @@ export class Engine {
             this.heldHistory.set(id, h)
           }
         }
-        // Caught up within a step: the tail read at harvest time covers the rest.
-        if (h.through >= this.historyFromBlock && safe - h.through <= step) continue
+        // Caught up within a quarter step: the tail read at harvest time covers the rest, with room for the head to
+        // move a review's worth before a harvest asks for at most a step (`principalOwed`).
+        if (h.through >= this.historyFromBlock && safe - h.through <= step / 4n) continue
         if (read) return stored
         read = true
         const to = h.through + step < safe ? h.through + step : safe
@@ -2167,8 +2170,9 @@ export class Engine {
         this.heldHistory.set(id, { ...next, checked: true })
         this.hooks.onHeldHistory?.(id, next)
         stored = true
-      } catch {
+      } catch (e) {
         // read again on the next review
+        this.hooks.onHeldHistoryError?.(id, e)
       }
     }
     return stored
