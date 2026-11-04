@@ -424,6 +424,8 @@ export type OpView = {
   updatedAt: string
   /** transfer: amount in USDC base units, the asset received, and the recipient. */
   amountUsdc?: string
+  /** transfer (otto/mamoru#371): Mamoru's yield fee this withdrawal pays to the relayer, USDC base units, on top of amountUsdc. */
+  feeUsdc?: string
   asset?: string
   to?: Hex0x
   /** deposit: the address that sent it. */

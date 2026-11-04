@@ -96,6 +96,15 @@ export const OPS_FLAGS = {
     label: 'v7: wind down USDC/USDT (opt-in)',
     description: 'For v7 accounts in scope, the engine exits the old USDC/USDT positions in full and the USDC goes to the lending vaults; out of scope they stay as they are (otto/mamoru#210). Scopable to accounts.',
   },
+  /**
+   * otto/mamoru#371, default off: Mamoru keeps 10 % of the yield collected from 5 Nov 2026 on, paid to the operator's
+   * relayer in the owner's next withdrawal, on its own line of the summary the owner signs (the engine cannot pay anyone
+   * but the account). Scopable to accounts.
+   */
+  yield_fee: {
+    label: 'Yield fee (10 % at withdrawal)',
+    description: 'Withdrawals of accounts in scope pay Mamoru 10 % of the yield collected since 5 Nov 2026, to the relayer, shown in the approval (otto/mamoru#371). Scopable to accounts.',
+  },
 } as const
 
 export type OpsFlagName = keyof typeof OPS_FLAGS

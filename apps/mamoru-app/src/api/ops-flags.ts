@@ -12,7 +12,7 @@ type FlagRow = { flag: string; enabled: number; accounts?: string | null }
 const missingTable = (e: unknown) => /no such (table|column)/i.test(e instanceof Error ? e.message : String(e))
 
 /** otto/mamoru#217: the flags that honor an account scope. Every other flag ignores the `accounts` column. */
-export const SCOPABLE_FLAGS: readonly OpsFlagName[] = ['multichain_v6', 'multichain_v6_new', 'one_auth_v4', 'vaults_v7', 'stables_lp_exit']
+export const SCOPABLE_FLAGS: readonly OpsFlagName[] = ['multichain_v6', 'multichain_v6_new', 'one_auth_v4', 'vaults_v7', 'stables_lp_exit', 'yield_fee']
 
 /** Column value meaning "everyone", explicit. NULL means "carry the previous row's scope" (see effectiveScope). */
 export const SCOPE_EVERYONE = '*'

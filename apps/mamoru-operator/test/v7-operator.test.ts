@@ -186,7 +186,7 @@ describe('the opt-in exit of USDC/USDT reads stables_lp_exit per account', () =>
     expect(scope({ stables_lp_exit: [] })).toBe(false)
     expect(scope({ stables_lp_exit: ['other'] })).toBe(false)
     expect(scope({ stables_lp_exit: ['k'] })).toBe(true)
-    expect(scope({ stables_lp_exit: null }, { stables_lp_exit: true })).toBe(true)
+    expect(scope({ stables_lp_exit: null }, { stables_lp_exit: true, yield_fee: false })).toBe(true)
   })
 })
 

@@ -63,6 +63,7 @@ import { ONE_ACTION_GAS_UNITS, gasReserveAlertOverrideFromEnv, gasReserveAlertWe
 import { Lock } from './lock.ts'
 import { classifyEngineError, EngineHealthTracker, GasReserveTracker, logErr, RELAYER_READ_MS, RelayerWatch, safeMetrics, SLOT_BUSY_ALERT_MS, type EngineHealthSnapshot, type GasReserveSnapshot, type RelayerBalance } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
+import { yieldFee, YIELD_FEE_BPS, YIELD_FEE_FROM } from './yield-fee.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
 import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
@@ -787,7 +788,7 @@ type Prepared = {
   extend?: boolean
   base?: Hex[]
   /** transfer: what the history line shows. */
-  meta?: { amountUsdc: string; asset?: string; to: Hex }
+  meta?: { amountUsdc: string; asset?: string; to: Hex; feeUsdc?: string }
   /**
    * transfer (otto/mamoru#155): the price divergence warning this prepare returned, and each diverging swap with the
    * minimum its calldata carries. Submit runs only with this quoteId accepted and no live quote under a minimum.
@@ -1892,7 +1893,7 @@ export class Operator {
    * field counts: null = everyone (and the boolean agrees); a list = only those accounts (key or Safe address);
    * malformed reached us as [] = nobody; missing (an older Worker) = nobody.
    */
-  private inScope(acc: AccountState, flag: 'multichain_v6' | 'multichain_v6_new' | 'one_auth_v4' | 'vaults_v7' | 'stables_lp_exit'): boolean {
+  private inScope(acc: AccountState, flag: 'multichain_v6' | 'multichain_v6_new' | 'one_auth_v4' | 'vaults_v7' | 'stables_lp_exit' | 'yield_fee'): boolean {
     const scope = this.cfg.opsScopedFlags?.()[flag]
     if (scope === null) return this.cfg.opsFlags?.()[flag] === true
     return Array.isArray(scope) && (scope.includes(acc.accountKey.toLowerCase()) || scope.includes(String(acc.ctx.address).toLowerCase()))
@@ -3956,27 +3957,47 @@ export class Operator {
     const r = await this.readOf(acc, live.safe)
     if (!r.deployed && r.usdc < MIN_DEPLOY_USDC) throw belowDeployMinimum(r.usdc, this.chainName())
     const slip = this.policyOf(acc).execution.slippageBps
-    let reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[] = []
-    let swaps: QuotedSwap[] = []
-    // otto/mamoru#210: the stables bucket's vaults pay first (no swap, no price risk); positions only for what they cannot.
-    let vaultExits: VaultExit[] = []
-    let fromVaults = 0n
-    if (r.usdc < amount && r.vaults?.length) {
-      vaultExits = planVaultExit(r.vaults, amount - r.usdc, this.bucketVaults(acc)).exits
-      fromVaults = vaultExits.reduce((s, x) => s + x.assets, 0n)
+    // otto/mamoru#371: Mamoru's yield fee, for an account in the `yield_fee` scope: paid to the relayer in this same
+    // batch, on top of the amount. When the Safe cannot free both, the fee comes out of the amount, and the owner is
+    // told what they receive; a withdrawal no larger than the fee pays no fee (it is owed on the next one).
+    const owed = this.inScope(acc, 'yield_fee') ? yieldFee(acc.ops) : null
+    let fee = owed?.owedUsdc ?? 0n
+    let pay = amount
+    const planFor = async (total: bigint) => {
+      let reduce: { pos: PoolPosition; bps: number; lp: LivePosition }[] = []
+      let swaps: QuotedSwap[] = []
+      // otto/mamoru#210: the stables bucket's vaults pay first (no swap, no price risk); positions only for what they cannot.
+      let vaultExits: VaultExit[] = []
+      let fromVaults = 0n
+      if (r.usdc < total && r.vaults?.length) {
+        vaultExits = planVaultExit(r.vaults, total - r.usdc, this.bucketVaults(acc)).exits
+        fromVaults = vaultExits.reduce((s, x) => s + x.assets, 0n)
+      }
+      if (r.usdc + fromVaults < total) {
+        const plan = await this.reducePlan(acc, live.safe, { ...r, usdc: r.usdc + fromVaults }, total, slip)
+        reduce = plan.reduce
+        swaps = plan.swaps
+      }
+      return { reduce, swaps, vaultExits }
     }
-    if (r.usdc + fromVaults < amount) {
-      const plan = await this.reducePlan(acc, live.safe, { ...r, usdc: r.usdc + fromVaults }, amount, slip)
-      reduce = plan.reduce
-      swaps = plan.swaps
+    let planned: Awaited<ReturnType<typeof planFor>>
+    try {
+      planned = await planFor(amount + fee)
+    } catch (e) {
+      if (fee === 0n || !(e instanceof HttpError) || e.code !== 'INSUFFICIENT_FUNDS') throw e
+      planned = await planFor(amount)
+      if (amount > fee) pay = amount - fee
+      else fee = 0n
     }
-    const out = asset === 'USDC' ? undefined : await this.receiveQuote(asset, amount, r.block, slip)
+    const { reduce, swaps, vaultExits } = planned
+    const out = asset === 'USDC' ? undefined : await this.receiveQuote(asset, pay, r.block, slip)
     const deadline = (await this.client.getBlock()).timestamp + 1800n
     const calls = [
       ...vaultExitCalls(live.safe, vaultExits, this.cfg.registry),
       ...closeCalls(live.safe, reduce.map((x) => x.lp), deadline, false, this.cfg.registry),
       ...swapBackCalls(live.safe, swaps, this.cfg.registry),
-      ...transferBatch({ account: live.safe, to, amountUsdc: amount, reduce: [], deadline, receive: out?.receive, registry: this.cfg.registry }),
+      ...transferBatch({ account: live.safe, to, amountUsdc: pay, reduce: [], deadline, receive: out?.receive, registry: this.cfg.registry }),
+      ...(fee > 0n ? [{ to: address('USDC', this.cfg.registry), value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [this.relayer.address as Address, fee] }) }] : []),
     ]
     const probe = out ? balanceProbe(asset, to, this.cfg.registry) : undefined
     const sim = await this.checkFromSafe(live.safe, calls, r.block, probe)
@@ -3992,21 +4013,27 @@ export class Operator {
       ...swaps.map((sw) => `Swap ${sw.amountIn} ${sw.token} units to at least ${fmtUsdc(sw.amountOutMinimum)} USDC`),
       ...(out
         ? [
-            `Swap ${fmtUsdc(amount)} USDC from your Safe on ${out.route}`,
+            `Swap ${fmtUsdc(pay)} USDC from your Safe on ${out.route}`,
             `Receive at least ${fmtUnits(out.receive.amountOutMinimum, out.decimals)} ${ASSET_LABEL[asset] ?? asset} at ${short} (${to})`,
           ]
-        : [`Send ${fmtUsdc(amount)} USDC from your Safe to ${to}`]),
+        : [`Send ${fmtUsdc(pay)} USDC from your Safe to ${to}`]),
+      ...(fee > 0n
+        ? [
+            `Pay Mamoru's fee: ${fmtUsdc(fee)} USDC to Mamoru's relayer ${this.relayer.address}, ${Number(YIELD_FEE_BPS) / 100}% of the ${fmtUsdc(owed!.collectedUsdc)} USDC your positions earned since ${YIELD_FEE_FROM.slice(0, 10)}${owed!.chargedUsdc > 0n ? `, less ${fmtUsdc(owed!.chargedUsdc)} USDC already paid` : ''}`,
+            ...(pay < amount ? [`The fee comes out of this withdrawal: your Safe cannot free ${fmtUsdc(amount + fee)} USDC, so ${fmtUsdc(pay)} USDC is sent`] : []),
+          ]
+        : []),
     ]
     // otto/mamoru#155: a swap under its pool's TWAP is never refused. The plan (and the minimums the owner signs) stay
     // what they are without it; prepare adds the warning, and submit runs only with it accepted.
-    const div = await this.divergenceOf(acc, r, slip, swaps, out ? { ...out, amountIn: amount } : undefined)
-    const ownerTx = await this.hold(acc, live, 'transfer', calls, summary, { meta: { amountUsdc: amount.toString(), ...(asset === 'USDC' ? {} : { asset }), to }, ...(div ? { divergence: div.warning, accepted: div.accepted } : {}) })
+    const div = await this.divergenceOf(acc, r, slip, swaps, out ? { ...out, amountIn: pay } : undefined)
+    const ownerTx = await this.hold(acc, live, 'transfer', calls, summary, { meta: { amountUsdc: pay.toString(), ...(asset === 'USDC' ? {} : { asset }), to, ...(fee > 0n ? { feeUsdc: fee.toString() } : {}) }, ...(div ? { divergence: div.warning, accepted: div.accepted } : {}) })
     return {
       ...(div ? { divergence: div.warning } : {}),
       reduce: reduce.map((x) => ({ tokenId: x.pos.tokenId.toString(), liquidityBps: x.bps })),
       ...(out
         ? { receive: { asset, quoted: out.quoted.toString(), minimum: out.receive.amountOutMinimum.toString(), decimals: out.decimals, route: out.route } }
-        : { receive: { asset, quoted: amount.toString(), minimum: amount.toString(), decimals: 6, route: 'Direct USDC transfer' } }),
+        : { receive: { asset, quoted: pay.toString(), minimum: pay.toString(), decimals: 6, route: 'Direct USDC transfer' } }),
       ownerTx,
     }
   }
