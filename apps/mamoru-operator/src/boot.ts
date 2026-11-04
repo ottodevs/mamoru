@@ -24,12 +24,15 @@ import { L1Bundler, paymasterFromEnv } from './paymaster.ts'
 import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, proveChain, startRpcProxy, trustedFromEnv, urlsFromEnv, wrongChainCount } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
 import { readSnapshot, SnapshotLoop, snapshotIntervalMs, type Snapshot } from './snapshot.ts'
-import { MULTICALL3 } from '@mamoru/rpc'
+import { MULTICALL3, multicall3Of } from '@mamoru/rpc'
 import { StateStore, loadOrCreateKey } from './state.ts'
 import { EntryStore, withHoldValue } from './yield-entries.ts'
 import { withReceipts, type BlockTimeReader, type ReceiptReader, type ReceiptSource, type SafeBlockReader } from './yield-receipts.ts'
 import { EngineSettingsSource, type SettingsOverride } from './engine-settings.ts'
 import { PeerExposure, parsePeerOperators } from './exposure.ts'
+
+/** otto/mamoru#343: the Monad snapshot loop reads every 5 minutes (RPC budget, otto/mamoru#285); the worked reader tolerates gaps up to 25. */
+const MONAD_SNAPSHOT_MS = 5 * 60_000
 
 /**
  * Wraps a snapshot reader with #129's hold-value baseline, stored in its own file under `stateDir`, and the per-day
@@ -774,6 +777,19 @@ export async function bootOperator(o: BootOptions) {
       safeBlock: async () => (await snapshotClient.getBlock({ blockTag: 'safe' })).number,
     }
     snapshot = new SnapshotLoop(withYieldLedger(o.stateDir, read, receipts), snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
+  }
+  // otto/mamoru#343 phase B: Monad capital is measured for the worked APY like Base's, from the same readSnapshot over the
+  // Monad registry. A plain loop: no hold-value baseline, no yield receipts (both are Base-bound). It does not follow the
+  // `yield_ledger` flag: the Monad operator pulls no engine settings today (no MAMORU_SETTINGS_URL) and must not start
+  // to, so the flag is unreachable here. MAMORU_SNAPSHOT_MONAD=1 turns it on (deploy notes); the app Worker still pulls
+  // /snapshot only while its own `yield_ledger` flag is on. Off: /snapshot answers 404 "snapshot off", as before.
+  const multicall3Monad = chainId === BRIDGE_MONAD_CHAIN_ID && registry.chainId === BRIDGE_MONAD_CHAIN_ID ? multicall3Of(registry) : null
+  if (multicall3Monad && process.env.MAMORU_SNAPSHOT_MONAD === '1') {
+    const snapshotClient = createPublicClient({ transport: http(via('snapshot'), { batch: true, timeout: 60_000 }) })
+    const budget = rpcBudget(rpcMetrics)
+    snapshot = new SnapshotLoop(() => readSnapshot(snapshotClient, multicall3Monad, chainId, registry, operator.snapshotTargets()), MONAD_SNAPSHOT_MS, () => budget.over())
+    snapshot.start()
+    console.log('[snapshot] Monad worked-capital loop on (MAMORU_SNAPSHOT_MONAD=1)')
   }
   let yieldLedgerOn = false
   syncYieldLedger = (): void => {
