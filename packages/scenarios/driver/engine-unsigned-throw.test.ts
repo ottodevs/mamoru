@@ -3,7 +3,7 @@
 // cast, like engine-vault.test.ts.
 import { describe, expect, test } from 'bun:test'
 import type { Decision } from '@mamoru/decide'
-import { BaseError, TimeoutError } from 'viem'
+import { BaseError, InternalRpcError, ResourceUnavailableRpcError, RpcRequestError, TimeoutError } from 'viem'
 import { Engine, isTransportError, thrownSummary } from './engine.ts'
 import { MemoryJournal, type OpRecord } from './journal.ts'
 
@@ -82,6 +82,19 @@ describe('only a provider that did not answer frees the slot (review of #357)', 
       throw wrapped
     })
     await expect(runOp()).rejects.toBe(wrapped)
+    expect(journal.live).toBeNull()
+  })
+
+  test('a provider that answers it failed (-32603, -32002) frees the slot; a revert or bad params do not (live 4 Nov)', async () => {
+    const answered = (code: number, message: string) => new RpcRequestError({ body: { method: 'eth_call' }, error: { code, message }, url: 'https://rpc.monad.example' })
+    expect(isTransportError(new InternalRpcError(answered(-32603, 'internal error')))).toBe(true)
+    expect(isTransportError(new ResourceUnavailableRpcError(answered(-32002, 'unavailable')))).toBe(true)
+    expect(isTransportError(answered(-32602, 'invalid params'))).toBe(false)
+    expect(isTransportError(new BaseError('execution reverted'))).toBe(false)
+    const { journal, runOp } = setup(async () => {
+      throw new InternalRpcError(answered(-32603, 'internal error'))
+    })
+    await expect(runOp()).rejects.toThrow('An internal error was received.')
     expect(journal.live).toBeNull()
   })
 

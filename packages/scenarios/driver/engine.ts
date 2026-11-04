@@ -82,8 +82,12 @@ export function engineGas(baseFee: bigint, caps?: GasCaps): GasSettings | null {
   return { ...gas, maxFeePerGas: caps.maxFeePerGas }
 }
 
-/** viem's errors for a request that got no usable answer: no response in time, a failed HTTP exchange, a closed socket, a rate limit. */
-const TRANSPORT_ERRORS = new Set(['TimeoutError', 'HttpRequestError', 'SocketClosedError', 'WebSocketRequestError', 'LimitExceededRpcError'])
+/**
+ * viem's errors for a request that got no usable answer: no response in time, a failed HTTP exchange, a closed socket,
+ * a rate limit, and a provider that answered that it failed (-32603 internal error, -32002 resource unavailable: live
+ * 4 Nov on Monad, a harvest held the slot again after "An internal error was received."). Never a revert or a refusal.
+ */
+const TRANSPORT_ERRORS = new Set(['TimeoutError', 'HttpRequestError', 'SocketClosedError', 'WebSocketRequestError', 'LimitExceededRpcError', 'InternalRpcError', 'ResourceUnavailableRpcError'])
 
 /** The error and its `.cause` chain (bounded: a cyclic chain ends). */
 function causeChain(e: unknown): unknown[] {
