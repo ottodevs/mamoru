@@ -63,6 +63,10 @@ export const upgradeCopy = {
 
 /** How far back the approvals of one move can be (a plan split in two signatures lands within minutes). */
 const APPROVALS_WINDOW_MS = 30 * 60_000
+/** A move sends its remote share within minutes; without a send this long after the approval, it was no move. */
+export const PRE_SEND_MS = 2 * 60 * 60_000
+/** How long after the send Base's own part of the move may still land (it took 2 minutes on 1 Nov). */
+export const MOVE_TAIL_MS = 30 * 60_000
 /** How long the finished view stays on Home. */
 export const DONE_FOR_MS = 24 * 60 * 60_000
 
@@ -102,13 +106,29 @@ export function upgradeJourney(f: FundingView | undefined, ops: OpView[], now: n
   const monad = f.money?.chains.filter((c) => c.chainId === remoteChain) ?? []
   const monadPositions = monad.reduce((n, c) => n + c.positions.length, 0)
   const monadIdle = monad.reduce((a, c) => a + c.idle.reduce((x, i) => x + BigInt(i.valueUsdc), 0n), 0n)
-  const after = ops.filter((o) => !owner(o) && t(o.updatedAt) >= t(start) && (o.state === 'confirmed' || o.state === 'submitted' || (o.state === 'failed' && !!o.bridge)))
-  const bridgeOp = after.filter((o) => o.bridge && o.bridge.chainId === remoteChain).at(-1)
-  // Only a transfer of this move (after its first approval), failed ones included: a failed send is said, not hidden.
-  const flight = f.money?.inFlight.filter((x) => x.to === remoteChain && (x.burnedAt ? t(x.burnedAt) >= t(start) : !!bridgeOp)).at(-1)
+  const engine = ops.filter((o) => !owner(o) && t(o.updatedAt) >= t(start) && (o.state === 'confirmed' || o.state === 'submitted' || (o.state === 'failed' && !!o.bridge)))
+  // This move's transfer is its FIRST send to the remote chain after the approval (review r2: a later routine top-up is
+  // not this move). The money map's row for that same burn, when there is one, says how far it got.
+  const bridgeOp = engine.filter((o) => o.bridge && o.bridge.chainId === remoteChain).sort((a, b) => t(a.updatedAt) - t(b.updatedAt))[0]
+  const flights = (f.money?.inFlight ?? []).filter((x) => x.to === remoteChain && (x.burnedAt ? t(x.burnedAt) >= t(start) : true))
+  const flight = bridgeOp?.bridge?.burnTx
+    ? flights.find((x) => x.burnTx?.toLowerCase() === bridgeOp.bridge!.burnTx!.toLowerCase())
+    : bridgeOp
+      ? undefined
+      : flights.filter((x) => x.burnedAt).sort((a, b) => t(a.burnedAt!) - t(b.burnedAt!))[0]
   const transfer = flight ? transferOfFlight(flight, now) : bridgeOp?.bridge ? transferOfBridge(bridgeOp.bridge, 8453, now) : undefined
   // A routine renewal of an account already working on Monad is no move: nothing to follow.
   if (!movingTo && !transfer && monadPositions > 0) return null
+  // Review r2: the API does not say a renewal was a move. A move sends the remote share within minutes of its approval;
+  // an approval on the mix with no send after PRE_SEND_MS is a routine renewal (or an account with nothing to send), so
+  // no card. While the move is still on offer or being signed, it shows.
+  const approvedAt = group.filter((o) => o.state === 'confirmed').at(-1)?.updatedAt
+  if (!movingTo && !transfer && (!approvedAt || now - t(approvedAt) > PRE_SEND_MS)) return null
+  // The move ends a while after its send: Base finishes placing its own share in minutes (Brais: 2 min after the burn).
+  // Base ops after that, and progress then, are the engine's routine work, never this move's (review r2).
+  const burnAt0 = transfer?.burnedAt ? t(transfer.burnedAt) : bridgeOp ? t(bridgeOp.updatedAt) : null
+  const end = burnAt0 === null ? Infinity : burnAt0 + MOVE_TAIL_MS
+  const after = engine.filter((o) => t(o.updatedAt) <= end || o === bridgeOp)
 
   const live = group.filter((o) => o.state !== 'failed')
   const allConfirmed = !failed && live.every((o) => o.state === 'confirmed')
@@ -130,7 +150,7 @@ export function upgradeJourney(f: FundingView | undefined, ops: OpView[], now: n
     ...(f.remote ? { safe: { chainId: f.remote.chainId, address: f.remote.address } } : monad[0] ? { safe: { chainId: monad[0].chainId, address: monad[0].safe } } : {}),
   }
   const moves = after.filter((o) => !o.bridge && !remotePool(o.pool, remoteChain))
-  const busy = moves.some((o) => o.state === 'submitted') || (!!f.progress && f.progress.step !== 'bridging')
+  const busy = moves.some((o) => o.state === 'submitted') || (now <= end && !!f.progress && f.progress.step !== 'bridging')
   const sent = !!transfer && transfer.step >= 1
   // Base keeps placing its own share while the Monad share travels (Brais: the WETH swap and mint landed after the burn).
   // The step's time is its last move before the burn, so no later step reads as finished first; what Base did after the

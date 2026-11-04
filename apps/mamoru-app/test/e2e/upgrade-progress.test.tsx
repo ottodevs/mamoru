@@ -3,7 +3,7 @@ import type { OpView } from '@mamoru/domain'
 import { UpgradeProgress } from '../../src/web/components/upgrade-progress.tsx'
 import { braisToday } from '../../src/web/fixtures/money.ts'
 import { braisUpgrade, type UpgradeMoment } from '../../src/web/fixtures/journey.ts'
-import { DONE_FOR_MS, upgradeJourney } from '../../src/web/lib/upgrade-steps.ts'
+import { DONE_FOR_MS, PRE_SEND_MS, upgradeJourney } from '../../src/web/lib/upgrade-steps.ts'
 import { count, render } from './render.ts'
 
 // otto/mamoru#263: Brais's move to v6 on 1 Nov took ten steps over twenty minutes and Home showed none of them. The card
@@ -166,6 +166,43 @@ describe('review r1', () => {
   test('a move stuck for more than a day stays on Home', () => {
     const { funding, ops } = braisUpgrade('waiting', NOW)
     expect(upgradeJourney(funding, ops, NOW + 3 * DONE_FOR_MS)).not.toBeNull()
+  })
+})
+
+describe('review r2: the move has an end', () => {
+  const later = (min: number) => new Date(NOW + min * 60_000).toISOString()
+  const routine = (min: number, state: OpView['state'] = 'confirmed'): OpView => ({ opId: `eng-9-${min}-a-rerange`, kind: 'reduce', step: 'rerange', state, pool: 'pool:WETH/USDC/3000', ...(state === 'confirmed' ? { txHash: `0x${'7'.repeat(64)}` } : {}), updatedAt: later(min) })
+
+  test('routine Base work after the move neither extends the done card nor joins its links', () => {
+    const { funding, ops } = braisUpgrade('done', NOW)
+    const daily = [routine(60 * 20), routine(60 * 44)]
+    expect(upgradeJourney(funding, [...ops, ...daily], NOW + DONE_FOR_MS + 60_000)).toBeNull()
+    const j = upgradeJourney(funding, [...ops, routine(60)], NOW + 2 * 60 * 60_000)!
+    expect(j.done).toBe(true)
+    expect(render(<UpgradeProgress upgrade={j} now={NOW} />).html).not.toContain(`0x${'7'.repeat(64)}`)
+  })
+
+  test('a routine op in progress after the move does not reopen it', () => {
+    const { funding, ops } = braisUpgrade('done', NOW)
+    funding.progress = { step: 'reranging', pool: 'pool:WETH/USDC/3000', since: later(120) }
+    const j = upgradeJourney(funding, [...ops, routine(120, 'submitted')], NOW + 121 * 60_000)!
+    expect(j.done).toBe(true)
+  })
+
+  test('a later top-up to Monad does not replace this move\'s transfer', () => {
+    const { funding, ops } = braisUpgrade('done', NOW)
+    const topUp: OpView = { opId: 'eng-9-9-a-bridge_out', kind: 'enter', step: 'bridge_out', state: 'confirmed', pool: 'pool:WMON/USDC/3000', bridge: { chainId: 143, amountUsdc: '500000', state: 'burned', burnTx: `0x${'8'.repeat(64)}`, burnedAt: later(300) }, txHash: `0x${'8'.repeat(64)}`, updatedAt: later(300) }
+    const j = upgradeJourney(funding, [...ops, topUp], NOW + 301 * 60_000)!
+    expect(j.done).toBe(true)
+    expect(j.steps.find((x) => x.id === 'bridge')!.transfer!.burnTx).not.toBe(`0x${'8'.repeat(64)}`)
+  })
+
+  test('an approval on the mix with no send after it is no move once the send window has passed', () => {
+    const { funding, ops } = braisUpgrade('rebalancing', NOW)
+    funding.progress = null
+    const approvalsOnly = ops.filter((o) => o.opId.startsWith('own-'))
+    expect(upgradeJourney(funding, approvalsOnly, NOW)).not.toBeNull()
+    expect(upgradeJourney(funding, approvalsOnly, NOW + PRE_SEND_MS + 60_000)).toBeNull()
   })
 })
 
