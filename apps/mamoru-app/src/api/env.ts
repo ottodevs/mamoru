@@ -10,6 +10,8 @@ export interface DbStatement {
 }
 export interface Db {
   prepare(sql: string): DbStatement
+  /** D1's batch: the statements run in one transaction, all or none. */
+  batch(statements: DbStatement[]): Promise<unknown>
 }
 
 export type Env = {

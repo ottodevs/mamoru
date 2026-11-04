@@ -502,7 +502,7 @@ describe('funding from the chain: the cap', () => {
     const { h } = setup({ node: chain({ balances: { USDC: 1_000_000n } }) })
     const { cookie, owner } = await onboard(h)
     const real = h.env.DB
-    h.env.DB = { prepare: (sql: string) => { if (sql.includes('account_cap_overrides')) throw new Error('D1 is down'); return real.prepare(sql) } }
+    h.env.DB = { prepare: (sql: string) => { if (sql.includes('account_cap_overrides')) throw new Error('D1 is down'); return real.prepare(sql) }, batch: (st) => real.batch(st) }
     const f = (await (await funding(h, cookie, owner.accountKey)).json()) as FundingView
     expect(f.source).toBe('chain')
     expect(f.capUsdc).toBe('100000000')

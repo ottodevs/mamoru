@@ -17,6 +17,9 @@ class Statement implements DbStatement {
     return { results: this.db.query(this.sql).all(...this.values) as T[] }
   }
   async run(): Promise<unknown> {
+    return this.run1()
+  }
+  run1(): unknown {
     return this.db.query(this.sql).run(...this.values)
   }
 }
@@ -26,5 +29,10 @@ export function memoryD1(): Db & { raw: Database } {
   const db = new Database(':memory:', { strict: true })
   db.exec('PRAGMA foreign_keys = ON')
   for (const file of readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort()) db.exec(readFileSync(join(MIGRATIONS, file), 'utf8'))
-  return { raw: db, prepare: (sql) => new Statement(db, sql) }
+  return {
+    raw: db,
+    prepare: (sql) => new Statement(db, sql),
+    // D1's batch is one transaction: a statement that throws leaves none of the others.
+    batch: async (statements) => db.transaction(() => statements.map((st) => (st as Statement).run1()))(),
+  }
 }

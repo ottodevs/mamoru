@@ -33,7 +33,7 @@ function failingActivityDb(inner: Db): Db {
       return Promise.reject(new Error('activity db unavailable'))
     },
   }
-  return { prepare: (sql: string) => (sql.includes('account_activity') ? boom : inner.prepare(sql)) }
+  return { prepare: (sql: string) => (sql.includes('account_activity') ? boom : inner.prepare(sql)), batch: (statements) => inner.batch(statements) }
 }
 
 describe('account activity tracking', () => {
@@ -93,7 +93,7 @@ describe('account activity tracking', () => {
     const good = h.env.DB
     let attempts = 0
     const failing = failingActivityDb(h.db)
-    h.env.DB = { prepare: (sql: string) => (sql.includes('account_activity') ? (attempts++, failing.prepare(sql)) : failing.prepare(sql)) }
+    h.env.DB = { prepare: (sql: string) => (sql.includes('account_activity') ? (attempts++, failing.prepare(sql)) : failing.prepare(sql)), batch: (st) => failing.batch(st) }
 
     // Past the throttle window, so the write is attempted and fails.
     now = new Date('2026-09-26T18:05:00Z')

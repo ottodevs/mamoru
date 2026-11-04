@@ -33,14 +33,14 @@ const snap = (readAt: string, safes: SafeWire[]): SnapshotWire => ({ chainId: CH
 const T0 = Date.parse('2026-11-03T12:00:00.000Z')
 const at = (s: number) => new Date(T0 + s * 1000).toISOString()
 const NOW = new Date(T0 + 3 * 86_400_000)
-const rowsOf = (db: ReturnType<typeof memoryD1>) => db.raw.query('SELECT pool, value_usd, in_range, dt_s, read_at FROM account_worked_samples ORDER BY read_at, pool').all() as { pool: string; value_usd: number; in_range: number; dt_s: number; read_at: string }[]
+const rowsOf = (db: ReturnType<typeof memoryD1>) => db.raw.query('SELECT pool, value_usd, in_range, read_at FROM account_worked_samples ORDER BY read_at, pool').all() as { pool: string; value_usd: number; in_range: number; read_at: string }[]
 
 describe('writeWorkedSamples', () => {
-  test('the first snapshot is recorded with dt 0; the next carries the seconds between them', async () => {
+  test('stores samples only: one row per pool with its value and time', async () => {
     const db = seed()
     await writeWorkedSamples(db, snap(at(0), [safe([pos('1', 'pool:A', 5 * USDC)])]), NOW)
     await writeWorkedSamples(db, snap(at(300), [safe([pos('1', 'pool:A', 6 * USDC)])]), NOW)
-    expect(rowsOf(db).map((r) => [r.read_at, r.value_usd, r.dt_s])).toEqual([[at(0), 5 * USDC, 0], [at(300), 6 * USDC, 300]])
+    expect(rowsOf(db).map((r) => [r.read_at, r.value_usd])).toEqual([[at(0), 5 * USDC], [at(300), 6 * USDC]])
   })
   test('the same snapshot pulled twice (beta and prod) counts once', async () => {
     const db = seed()
@@ -48,8 +48,35 @@ describe('writeWorkedSamples', () => {
     await writeWorkedSamples(db, s(0), NOW)
     await writeWorkedSamples(db, s(300), NOW)
     await writeWorkedSamples(db, s(300), NOW)
-    expect(rowsOf(db)).toHaveLength(2) // one pool, two distinct snapshots
+    expect(rowsOf(db)).toHaveLength(2)
     expect((await loadWorked(db, CHAIN, KEY))?.day).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 300 }])
+  })
+  test('two Workers writing different snapshots of one account: 630 s from the 12:00 anchor, not 1230', async () => {
+    const db = seed()
+    const s = (t: number) => snap(at(t), [safe([pos('1', 'pool:A', USDC)])])
+    await writeWorkedSamples(db, s(0), NOW) // 12:00
+    await writeWorkedSamples(db, s(600), NOW) // 12:10, one Worker
+    await writeWorkedSamples(db, s(630), NOW) // 12:10:30, the other, which never saw 12:10
+    expect((await loadWorked(db, CHAIN, KEY))?.day).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 630 }])
+  })
+  test('a batch that fails leaves nothing; the retry writes every pool', async () => {
+    const db = seed()
+    const s = snap(at(0), [safe([pos('1', 'pool:A', USDC), pos('2', 'pool:B', 2 * USDC)])])
+    let fail = true
+    const flaky = { ...db, batch: async (st: Parameters<typeof db.batch>[0]) => {
+      if (fail) {
+        fail = false
+        // The first statement would be applied, then the second throws: the transaction undoes it.
+        db.raw.exec('BEGIN')
+        try { await (st[0] as unknown as { run(): Promise<unknown> }).run(); throw new Error('boom') } catch { db.raw.exec('ROLLBACK') }
+        throw new Error('boom')
+      }
+      return db.batch(st)
+    } }
+    await expect(writeWorkedSamples(flaky, s, NOW)).rejects.toThrow('boom')
+    expect(rowsOf(db)).toHaveLength(0)
+    await writeWorkedSamples(flaky, s, NOW)
+    expect(rowsOf(db).map((r) => r.pool)).toEqual(['pool:A', 'pool:B'])
   })
   test('a 26-minute gap counts nothing, and the next snapshot counts again', async () => {
     const db = seed()
@@ -57,17 +84,15 @@ describe('writeWorkedSamples', () => {
     await writeWorkedSamples(db, s(0), NOW)
     await writeWorkedSamples(db, s(26 * 60), NOW)
     await writeWorkedSamples(db, s(26 * 60 + 300), NOW)
-    expect(rowsOf(db).map((r) => r.dt_s)).toEqual([0, 0, 300])
     expect((await loadWorked(db, CHAIN, KEY))?.day).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 300 }])
   })
   test('an emptied NFT (liquidity 0, value 0) is not written; a vault is, in range', async () => {
     const db = seed()
     const s = (t: number) => snap(at(t), [safe([pos('1', 'pool:USDC/cbBTC/500', 0, { liquidity: '0' }), pos('2', 'pool:A', USDC)], [{ name: 'vault:gtUSDCp', shares: '1', valueUsdc: String(2 * USDC) }])])
     await writeWorkedSamples(db, s(0), NOW)
-    await writeWorkedSamples(db, s(300), NOW)
-    expect(rowsOf(db).filter((r) => r.dt_s === 300).map((r) => [r.pool, r.value_usd, r.in_range])).toEqual([['pool:A', USDC, 1], ['vault:gtUSDCp', 2 * USDC, 1]])
+    expect(rowsOf(db).map((r) => [r.pool, r.value_usd, r.in_range])).toEqual([['pool:A', USDC, 1], ['vault:gtUSDCp', 2 * USDC, 1]])
   })
-  test('a snapshot with nothing working still anchors: idle time between two invested snapshots is not counted', async () => {
+  test('a snapshot with nothing working still leaves its time: idle time between two invested snapshots is not counted', async () => {
     const db = seed()
     const on = (t: number) => snap(at(t), [safe([pos('1', 'pool:A', USDC)])])
     const off = (t: number) => snap(at(t), [{ ...safe([]), idleUsdc: String(7 * USDC) }])
@@ -76,8 +101,9 @@ describe('writeWorkedSamples', () => {
     await writeWorkedSamples(db, off(600), NOW)
     await writeWorkedSamples(db, off(900), NOW)
     await writeWorkedSamples(db, on(1200), NOW)
-    expect(rowsOf(db).filter((r) => r.pool === 'idle').map((r) => [r.value_usd, r.in_range, r.dt_s])).toEqual([[7 * USDC, 0, 300], [7 * USDC, 0, 300]])
-    expect((await loadWorked(db, CHAIN, KEY))?.day).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 600 }])
+    expect(rowsOf(db).filter((r) => r.pool === 'idle').map((r) => [r.value_usd, r.in_range])).toEqual([[7 * USDC, 0], [7 * USDC, 0]])
+    // 0-300 and 900-1200 at $1 as measured; the idle snapshots in between are in range 0. Intervals (300,600], (600,900] belong to the idle samples.
+    expect((await loadWorked(db, CHAIN, KEY))?.day).toEqual([{ pool: 'pool:A', usdSeconds: USDC * (300 + 300) }])
   })
   test('an account with nothing working has an asOf and no worked capital', async () => {
     const db = seed()
@@ -109,7 +135,6 @@ describe('loadWorked', () => {
   test('window clipping: a sample older than 24 h counts for the month only', async () => {
     const db = seed()
     const s = (t: number) => snap(at(t), [safe([pos('1', 'pool:A', USDC)])])
-    // Samples every 5 min for 1 h two days back, then for 1 h ending now.
     const T = (d: number, m: number) => -d * 86_400 + m * 300
     for (let m = 0; m <= 12; m++) await writeWorkedSamples(db, s(T(2, m)), NOW)
     for (let m = -12; m <= 0; m++) await writeWorkedSamples(db, s(T(0, m)), NOW)
@@ -118,14 +143,26 @@ describe('loadWorked', () => {
     expect(w?.day).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 12 * 300 }])
     expect(w?.month).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 24 * 300 }])
   })
-  test('a sample 1 s inside the 24 h boundary with dt 600 contributes 1 s to the day, 600 s to the month', async () => {
+  test('a sample 1 s inside the 24 h boundary stands for 1 s of the day and 600 s of the month', async () => {
     const db = seed()
-    const row = (t: number, dt: number) => db.raw.exec(`INSERT INTO account_worked_samples (chain_id, account_key, read_at, t_s, pool, value_usd, in_range, dt_s) VALUES (${CHAIN}, '${KEY}', '${at(t)}', ${T0 / 1000 + t}, 'pool:A', ${USDC}, 1, ${dt})`)
-    row(-86_399, 600) // stands for (-86_999, -86_399]; the window starts at -86_400
-    row(0, 0)
+    const row = (t: number) => db.raw.exec(`INSERT INTO account_worked_samples (chain_id, account_key, read_at, t_s, pool, value_usd, in_range) VALUES (${CHAIN}, '${KEY}', '${at(t)}', ${T0 / 1000 + t}, 'pool:A', ${USDC}, 1)`)
+    row(-86_999)
+    row(-86_399) // stands for (-86_999, -86_399]; the window starts at -86_400
+    row(0)
     const w = await loadWorked(db, CHAIN, KEY)
+    // (-86_399, 0] is a gap (over 25 min) and counts nothing.
     expect(w?.day).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 1 }])
     expect(w?.month).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 600 }])
+  })
+  test('a sample 1 s inside the boundary, snapshots continuous after it: 1 s of the day', async () => {
+    const db = seed()
+    const row = (t: number) => db.raw.exec(`INSERT INTO account_worked_samples (chain_id, account_key, read_at, t_s, pool, value_usd, in_range) VALUES (${CHAIN}, '${KEY}', '${at(t)}', ${T0 / 1000 + t}, 'pool:A', ${USDC}, 1)`)
+    row(-86_999)
+    row(-86_399)
+    for (let t = -86_399 + 600; t < 0; t += 600) row(t)
+    row(0)
+    const day = (await loadWorked(db, CHAIN, KEY))?.day
+    expect(day).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 86_400 }]) // 1 s from the first interval + the rest of the day
   })
   test('the reviewer\'s case: A $1 for 23h40 then $1000 for 10 min, B $100 for 24 h, is 3.66 % not 11.18 %', async () => {
     const db = seed()

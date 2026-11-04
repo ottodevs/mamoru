@@ -59,7 +59,7 @@ export const homeCopy = {
   currentWhat: '24h avg',
   sources: 'Rate sources',
   // otto/mamoru#343: the snapshot loop reads Base only, so money working on Monad is not in these figures yet.
-  baseOnly: 'Both figures cover the money working on Base. Money working on Monad is not counted yet.',
+  baseOnly: { both: 'Both figures cover the money working on Base. Money working on Monad is not counted yet.', month: 'The 30-day figure covers the money working on Base. Money working on Monad is not counted yet.', day: 'The 24h figure covers the money working on Base. Money working on Monad is not counted yet.' },
   monthlySource: 'Monthly',
   currentSource: '24h avg',
   planPools: 'plan pools, nothing placed yet',
@@ -306,7 +306,8 @@ export function Indicators({ f, apy, price, worked = null, noRead = false }: { f
   // Brais, 2 Nov: the 24 h figure is the working capital's, so it needs no scope words.
   const currentTail = current.gap ? homeCopy.gap[current.gap] : partial(current)
   // Brais, 23-oct: the (i) sits right after the label it explains, not floating at the end of the row.
-  const baseOnly = !!(monthly.baseOnly || current.baseOnly)
+  // Each figure has its own scope: the 24 h one can come from the open positions (every chain) while the 30-day one is Base-measured.
+  const baseOnly = monthly.baseOnly && current.baseOnly ? homeCopy.baseOnly.both : monthly.baseOnly ? homeCopy.baseOnly.month : current.baseOnly ? homeCopy.baseOnly.day : null
   const info =
     monthlySrc || currentSrc || baseOnly ? (
       <details className="rate-info" data-testid="rate-sources">
@@ -316,7 +317,7 @@ export function Indicators({ f, apy, price, worked = null, noRead = false }: { f
         <p className="rate-sources">
           {monthlySrc ? <span>{homeCopy.monthlySource}: {monthlySrc}</span> : null}
           {currentSrc ? <span>{homeCopy.currentSource}: {currentSrc}</span> : null}
-          {baseOnly ? <span data-testid="rate-base-only">{homeCopy.baseOnly}</span> : null}
+          {baseOnly ? <span data-testid="rate-base-only">{baseOnly}</span> : null}
         </p>
       </details>
     ) : null

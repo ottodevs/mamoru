@@ -95,6 +95,16 @@ describe('rates over the working capital', () => {
     expect(workedRate(brais, day, at12, 'currentPct', DAY_S).baseOnly).toBeUndefined()
     const { html } = render(<Indicators f={both} apy={at12} price={null} worked={{ asOf: new Date().toISOString(), day, month: day }} />)
     expect(html).toContain('rate-base-only')
+    expect(html).toContain('Both figures cover')
+  })
+  test('each figure has its own scope: a stale 24h falls back to every open position, the 30-day one is Base-measured', () => {
+    const monad = { ...pos('9', 'pool:WMON/USDC/3000', '50000000'), chainId: 143 } as FundingView['positions'][number]
+    const both = { ...brais, positions: [...brais.positions, monad] }
+    const month = [{ pool: 'pool:WETH/USDC/3000', usdSeconds: 1 }]
+    const rates = { ...at12, byPool: [...at12.byPool, { pool: 'pool:WMON/USDC/3000', weight: 0, currentPct: 9, monthlyPct: 9 }] }
+    const { html } = render(<Indicators f={both} apy={rates} price={null} worked={{ asOf: new Date(Date.now() - 7 * 3_600_000).toISOString(), day: month, month }} />)
+    expect(html).toContain('The 30-day figure covers')
+    expect(html).not.toContain('Both figures')
   })
   test('with nothing measured, only positions in range and with liquidity stand in: an out-of-range LP is n/a, never a pool rate', () => {
     const out = { ...brais, positions: [pos('1', 'pool:WETH/USDC/3000', '4790000', false)] }
