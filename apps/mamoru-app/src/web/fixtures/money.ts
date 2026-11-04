@@ -1,4 +1,4 @@
-import type { FundingView, Hex0x, MoneyChain, MoneyInFlight } from '@mamoru/domain'
+import type { BridgeStuckReason, FundingView, Hex0x, MoneyChain, MoneyInFlight } from '@mamoru/domain'
 import { FIXTURE_ADDRESS } from './empty-account.ts'
 
 // otto/mamoru#269: Brais's account around the 2.075638 USDC that crossed Base to Monad by CCTP. In all three moments the
@@ -108,4 +108,21 @@ export function withMonadOnlyPositions(now: number = Date.now()): FundingView {
   monad.positions = placed.map((p) => ({ ...p, chainId: 143, pool: 'pool:WMON/USDC/3000', tokenId: '5101' }))
   monad.totalUsdc = (BigInt(monad.totalUsdc) + PLACED).toString()
   return { ...f, positions: [] }
+}
+
+/**
+ * otto/mamoru#245: the crossing past its deadline, flagged stuck by the operator for `reason` (any string: an unknown code
+ * reads as generic words). The money map's row and the engine's bridging progress both carry the flag and the burn.
+ */
+export function withStuckTransfer(reason: BridgeStuckReason | string = 'mint_budget', now: number = Date.now()): FundingView {
+  const f = braisFunding('flight', now)
+  const t = crossing(now)
+  const stuck = { stuckAt: at(now, -2), stuckReason: reason as BridgeStuckReason }
+  const burnedAt = at(now, -45)
+  const eta = { from: at(now, -32), to: at(now, -26), late: true }
+  return {
+    ...f,
+    progress: { step: 'bridging', pool: 'pool:WMON/USDC/3000', since: burnedAt, bridge: { chainId: 143, amountUsdc: CROSSING.toString(), state: 'burned', burnTx: t.burnTx, burnedAt, recipient: BRAIS_MONAD_SAFE, eta, ...stuck } },
+    money: { ...f.money!, inFlight: [{ ...t, burnedAt, eta, ...stuck }] },
+  }
 }

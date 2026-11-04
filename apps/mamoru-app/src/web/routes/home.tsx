@@ -16,7 +16,7 @@ import { activationLive, everStarted, historyOps, needsRetry, opLine, opTone, TE
 import { historyEntries, moveLine, moveState } from '../lib/moves.ts'
 import { detailHead, MoveDetail, OpDetail, Sheet } from '../components/activity-detail.tsx'
 import { parseUsdc, useOwnerAction } from '../lib/owner-flow.ts'
-import { chainLabel, pairLabel, poolAddress, poolTokens, positionAmounts, progressLine, vaultAddress } from '../lib/positions.ts'
+import { bridgeStuck, chainLabel, pairLabel, poolAddress, poolTokens, positionAmounts, progressLine, vaultAddress } from '../lib/positions.ts'
 import { activateLine, signatureCopy } from '../lib/signature.ts'
 import { currentRate, idleReason, monthlyRate, positionRates, sourceName, type AccountRate, type PositionRate } from '../lib/rates.ts'
 import { acceptancePayload, detectLocale, transferConfirmDisabled, waitLabel, withdrawAnywayLabel, type Locale } from '../lib/price-divergence.ts'
@@ -34,7 +34,7 @@ import { useThrottledRefresh } from '../lib/refresh-throttle.ts'
 import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '../components/monad-consent.tsx'
 import { isVaultTarget } from '../lib/policies.ts'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
-import { MoneyMapCard, moneyCopy, showsMoneyMap, totalScopeNote, unreadChains } from '../components/money-map.tsx'
+import { MoneyMapCard, moneyCopy, showsMoneyMap, StuckNote, totalScopeNote, unreadChains } from '../components/money-map.tsx'
 
 export const homeCopy = {
   total: 'Total balance',
@@ -493,6 +493,7 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
   const inRange = f.positions.filter((p) => p.inRange).length
   // An operation in flight says what it is; between operations the engine says whether more is coming and when it looks next.
   const line = progressLine(f.progress) ?? engineLine(f)
+  const bridge = f.progress?.bridge
   const noRate = apy !== undefined && rows.some((r) => r.monthlyPct === null || (r.inRange && r.currentPct === null))
   return (
     <Fold
@@ -513,10 +514,17 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
       }
       status={
         line ? (
-          <p className="progress mono-label text-stone" role="status" aria-live="polite" data-testid="progress">
-            <span className="progress-dot" aria-hidden="true" />
-            {line}
-          </p>
+          <>
+            <p className="progress mono-label text-stone" role="status" aria-live="polite" data-testid="progress">
+              <span className="progress-dot" aria-hidden="true" />
+              {line}
+            </p>
+            {bridgeStuck(bridge) ? (
+              <div className="progress-stuck">
+                <StuckNote reason={bridge.stuckReason} from={homeChain} to={bridge.chainId} burnTx={bridge.burnTx} />
+              </div>
+            ) : null}
+          </>
         ) : null
       }
     >

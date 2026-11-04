@@ -82,7 +82,13 @@ export function bridgeLine(b: BridgeProgress): string {
   const what = `${usd(b.amountUsdc)} USDC to ${chainLabel(b.chainId)}`
   if (b.state === 'minted') return `Moved ${what}`
   if (b.state === 'failed') return `Did not move ${what}`
-  return b.state === 'burned' ? `Moving ${what} (arrives in about 20 minutes)` : `Moving ${what}`
+  // otto/mamoru#245: a stuck bridge promises no arrival time; the reason is said beside this line.
+  return b.state === 'burned' && !b.stuckAt ? `Moving ${what} (arrives in about 20 minutes)` : `Moving ${what}`
+}
+
+/** otto/mamoru#245: a bridge the operator flagged past its deadline, still on its way. */
+export function bridgeStuck(b: BridgeProgress | undefined): b is BridgeProgress & { stuckAt: string } {
+  return !!b?.stuckAt && (b.state === 'sending' || b.state === 'burned')
 }
 
 /** The subtle one-line state under Working capital while the engine or an owner tx is in flight. */

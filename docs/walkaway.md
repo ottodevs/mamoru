@@ -56,6 +56,26 @@ Developers can build this batch with `walkawayCalls` in [`packages/account/owner
 - The positions are burned.
 - Any session operation on the account now fails.
 
+## A transfer to Monad that never arrives
+
+Mamoru moves the Growth share from Base to your Safe on Monad over Circle CCTP V2: it burns the USDC on Base, Circle signs a message (the attestation), and a relayer calls Monad to mint it. If the app says a transfer to Monad is stuck, the USDC is not lost and Mamoru keeps retrying. You do not have to wait for us: the burn names no caller on Monad, so any wallet can finish it, and the USDC can only go to your Monad Safe.
+
+You need the burn's Base transaction hash (the app links it under "Finish it yourself", or find it in your account's history on Basescan) and a wallet on Monad (chain id 143) with a little MON for gas.
+
+1. **Get the message and the attestation from Circle.** Base is CCTP domain 6:
+
+   ```
+   GET https://iris-api.circle.com/v2/messages/6?transactionHash=<burn tx>
+   ```
+
+   Wait until the entry for your burn has `status` `complete`. Take its `message` and `attestation` (both hex). If the list is empty, Circle has not seen the burn yet: try again later.
+2. **Call `receiveMessage(message, attestation)`** on MessageTransmitterV2 on Monad, `0x81D40F21F12A8F0E3252Bccb954D722d4c464B64`, from any wallet with MON. The function is `receiveMessage(bytes message, bytes attestation) returns (bool)`.
+3. **Check.** The USDC (`0x754704Bc059F8C67012fEd69BC8A327a5aafb603` on Monad) is on your account's Monad Safe, the recipient written in the message. The app sees the mint on its own and marks the transfer as arrived.
+
+If the call reverts because the message was already received, the transfer has been finished already (by Mamoru or by someone else): check the Safe's balance. A message can be received only once, so calling it twice never pays twice.
+
+The same address and ABI are what Mamoru's operator uses (`MESSAGE_TRANSMITTER_V2` in [`apps/mamoru-operator/src/cctp.ts`](../apps/mamoru-operator/src/cctp.ts), `messageTransmitterV2Abi` in [`packages/registry/src/abis.ts`](../packages/registry/src/abis.ts)); the USDC address is the `USDC` entry of [`packages/registry/monad.json`](../packages/registry/monad.json).
+
 ## What we tested
 
 On a local fork of Base pinned at block 51811000 (chain id 31337), with Mamoru's engine, app and the MultiBaas indexer all switched off. The fork is our test bench, not real funds. Last recorded run: [`evidence/scenarios/fork-run-20260926T185126Z-84632e.md`](../evidence/scenarios/fork-run-20260926T185126Z-84632e.md).
