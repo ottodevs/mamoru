@@ -52,13 +52,14 @@ function names(cs: MoneyChain[], all: MoneyChain[]): string {
  * the account spans chains, or, each said on its own when several hold (#350 review r2, r3): a chain never read (clearly,
  * never as 0), a chain showing its last good read, positions not listed, a transfer not confirmed. Null when none holds.
  */
-export function totalScopeNote(f: FundingView | undefined, otherChain: boolean): string | null {
+export function totalScopeNote(f: FundingView | undefined, otherChain: boolean, withMoving = true): string | null {
   if (!f) return null
   if (!f.money) return otherChain || isMultichainTarget(f.approval?.policyId) ? moneyCopy.baseOnly : null
   const notes: string[] = []
   // One line per transfer the total counts outside Working and Idle: on its way, or minted before the destination's read
   // catches up (#350 review r9). A failed one is not in the total and says nothing here.
-  for (const t of f.money.inFlight.filter((t) => t.stage !== 'failed')) notes.push(moneyCopy.moving(usd(t.amountUsdc), chainLabel(t.from), chainLabel(t.to)))
+  // otto/mamoru#264: Home shows each one as its own row (TransferRow) and asks for the rest only (`withMoving` false).
+  if (withMoving) for (const t of f.money.inFlight.filter((t) => t.stage !== 'failed')) notes.push(moneyCopy.moving(usd(t.amountUsdc), chainLabel(t.from), chainLabel(t.to)))
   const unread = unreadChains(f.money)
   if (unread.length) notes.push(moneyCopy.incomplete(names(unread, f.money.chains)))
   // A chain never read is stale too; it is said once, as unread.

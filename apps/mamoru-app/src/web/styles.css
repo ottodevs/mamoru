@@ -1330,6 +1330,27 @@
   letter-spacing: 0.06em;
   color: var(--color-muted);
 }
+/* otto/mamoru#264: a transfer between the owner's Safes, under the balance that counts it: one quiet line that opens. */
+.mm-transfers {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0.35rem 0 0;
+  max-width: 36rem;
+}
+.mm-transfer > summary {
+  display: block;
+  min-height: 0;
+  margin: 0;
+  padding: 0.35rem 0;
+  line-height: 1.5;
+}
+.mm-transfer > summary::after {
+  display: inline-block;
+  margin-left: 0.55rem;
+}
+.mm-transfer > .mm-diy-body {
+  padding: 0.35rem 0 0.6rem;
+}
 .earned-why {
   font-family: var(--font-mono);
   font-size: 0.72rem;

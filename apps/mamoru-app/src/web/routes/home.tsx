@@ -1,4 +1,4 @@
-import type { ApyView, FundingView, WorkedView, Hex0x, OpView, OverCap, PriceDivergenceWarning, WithdrawAsset } from '@mamoru/domain'
+import type { ApyView, FundingView, WorkedView, Hex0x, MoneyInFlight, OpView, OverCap, PriceDivergenceWarning, WithdrawAsset } from '@mamoru/domain'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
@@ -38,6 +38,7 @@ import { moneyCopy, StuckNote, totalScopeNote, unreadChains } from '../component
 import { ChainBadge, SafeRef } from '../components/safe-ref.tsx'
 import { idleWhyLine } from '../lib/idle-why.ts'
 import { mixVsTarget, type MixRow } from '../lib/mix.ts'
+import { TransferRow } from '../components/transfer-row.tsx'
 
 export const homeCopy = {
   total: 'Total balance',
@@ -216,6 +217,7 @@ export function Balance({
   chain = null,
   total = null,
   scopeNote = null,
+  transfers = [],
 }: {
   s: Split | null
   earnedSoFarUsd?: string | null
@@ -232,6 +234,8 @@ export function Balance({
   total?: bigint | null
   /** otto/mamoru#269: why the total is not the whole account (a chain not read yet, an operator that sees Base only). */
   scopeNote?: string | null
+  /** otto/mamoru#264: transfers between the owner's Safes the total counts, one row each, under it. */
+  transfers?: MoneyInFlight[]
 }) {
   const shownPast = past
   return (
@@ -248,6 +252,13 @@ export function Balance({
           <p className="past-reading" data-testid="past-reading">
             {homeCopy.pastReading(agoText(shownPast.readAt))}
           </p>
+        ) : null}
+        {transfers.length && !shownPast ? (
+          <div className="mm-transfers" role="status" aria-live="polite">
+            {transfers.map((t) => (
+              <TransferRow key={t.id} flight={t} />
+            ))}
+          </div>
         ) : null}
         {scopeNote ? (
           <p className="past-reading" data-testid="total-scope" role="status">
@@ -1631,7 +1642,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         down={liveDown}
         chain={fromChain ? (f?.chainRead ?? { positions: 'unknown', listedAt: null }) : null}
         total={total}
-        scopeNote={past && !cached ? moneyCopy.pastScope : totalScopeNote(f, !!monadSleeve)}
+        scopeNote={past && !cached ? moneyCopy.pastScope : totalScopeNote(f, !!monadSleeve, false)}
+        transfers={(f?.money?.inFlight ?? []).filter((t) => t.stage !== 'failed')}
       />
       <Indicators f={noPositions ? undefined : whole?.f} apy={apy.data} price={price} worked={yieldLedger.data?.worked} otherChain={!!monadSleeve} noRead={(!f && liveDown) || noPositions} />
       <WrongNetwork accountKey={accountKey} startPending={canStart || oneOpen} />

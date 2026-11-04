@@ -3,6 +3,7 @@ import { ApiRequestError, type ApiClient } from '../api/client.ts'
 import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-account.ts'
 import { poolsResponse } from './pools.ts'
 import { braisAfterMove } from './brais-after.ts'
+import { braisFlight, type FlightStage } from './transfer.ts'
 import { braisFunding, braisToday, withMonadOnlyPositions, withMonadPosition, withoutMoney, withStaleMonad, withStuckTransfer, withUnreadMonad, type BraisMoment } from './money.ts'
 
 // Dev (VITE_FIXTURES=1) and tests only. Never imported by the production build.
@@ -200,6 +201,9 @@ const braisView = (): FundingView | null => {
   // otto/mamoru#265: ?braismoney=after is his account after the move (1 Nov 11:43); &why=<code> or &nowhy for the Monad reason.
   const why = new URLSearchParams(location.search).get('why')
   if (brais === 'after') return braisAfterMove(Date.now(), param('nowhy') ? null : { code: why ?? 'EHG_SIM_UNAVAILABLE', since: new Date(Date.now() - 3 * 60_000).toISOString() })
+  // otto/mamoru#264: &stage=sending|burned|attested|minting|minted|late picks where the crossing is (real txs and Safe).
+  const stage = new URLSearchParams(location.search).get('stage')
+  if (brais === 'flight' && stage) return braisFlight(stage as FlightStage)
   const f = brais === 'monadonly' ? withMonadOnlyPositions() : brais === 'stuck' ? withStuckTransfer(new URLSearchParams(location.search).get('reason') ?? 'mint_budget') : brais === 'mixed' ? withMonadPosition(braisFunding('minted'), '2000000') : brais === 'today' ? braisToday() : braisFunding((['before', 'flight', 'minted', 'arriving'].includes(brais) ? brais : 'flight') as BraisMoment)
   return param('old') ? withoutMoney(f) : param('unread') ? withUnreadMonad(f) : param('stale') ? withStaleMonad(f) : f
 }
