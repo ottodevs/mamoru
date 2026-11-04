@@ -97,7 +97,8 @@ bad="$(git -C "$tmp" log --format='%h %G?' origin/main..HEAD | awk '$2 != "G"')"
 
 # A change to operator auth, policy ids, finality or a public route carries the e2e:all table (#366): three reviewed
 # changes broke e2e nobody ran (docs/process/releasing.md).
-git -C "$tmp" diff origin/main HEAD >"$tmp.diff"
+# Plumbing-stable format whatever the local git config (noprefix, color, external diff): the rule parses it.
+git -C "$tmp" -c core.quotePath=false diff --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ origin/main HEAD >"$tmp.diff"
 bun "$root/scripts/release/e2e-rule.ts" "$pr" "$tmp.diff" || exit 1
 
 if [ "$new_head" != "$old_head" ]; then

@@ -10,17 +10,20 @@ const FILES: RegExp[] = [
   /^packages\/registry\/[^/]+\.json$/,
 ]
 /** Changed lines anywhere else in shipped code that touch the same things. */
-const LINES = /finalized|operatorSignature|x-mamoru-|policyId/
+const LINES = /finali[sz]ed|finality|confirmations|blockTag|operatorSignature|x-mamoru-|policy_?id/i
 const isTest = (path: string) => /(^|\/)test\/|\.test\.ts$/.test(path)
 const shipped = (path: string) => /^(apps|packages)\//.test(path) && !isTest(path)
 
-/** Why a unified diff needs the e2e table: one reason per file, empty when it does not. */
+/** Why a unified diff (`git diff --src-prefix=a/ --dst-prefix=b/`) needs the e2e table: one reason per file, empty
+ * when it does not. Throws on a non-empty diff it cannot read, so an unexpected format refuses instead of passing. */
 export function e2eReasons(diff: string): string[] {
   const reasons = new Map<string, string>()
   let file = ''
+  let headers = 0
   for (const line of diff.split('\n')) {
     const header = /^diff --git a\/(\S+) b\/(\S+)$/.exec(line)
     if (header) {
+      headers++
       file = header[2]!
       if (!isTest(file) && FILES.some((re) => re.test(file))) reasons.set(file, `${file} (operator auth, routes or policy ids)`)
       continue
@@ -30,8 +33,20 @@ export function e2eReasons(diff: string): string[] {
     const hit = m ? LINES.exec(m[1]!) : null
     if (hit) reasons.set(file, `${file} (changes a line with \`${hit[0]}\`)`)
   }
+  if (headers === 0 && diff.trim() !== '') throw new Error('e2e rule: the diff has no `diff --git a/… b/…` header; refusing rather than reading it as empty')
   return [...reasons.values()]
 }
 
-/** The summary line e2e:all prints last, pasted in the pull request body. */
-export const hasE2eTable = (body: string): boolean => /^\s*\d+\/\d+ passed\s*$/m.test(body)
+/** The summary line e2e:all prints last, pasted in the pull request body: every script passed. A table with failures
+ * needs a waiver that says why (a script that already fails on main). */
+export function e2eTable(body: string): { passed: number; total: number } | undefined {
+  const m = /^\s*(\d+)\/(\d+) passed\s*$/m.exec(body)
+  return m ? { passed: Number(m[1]), total: Number(m[2]) } : undefined
+}
+export const allPassed = (t: { passed: number; total: number } | undefined): boolean => !!t && t.total > 0 && t.passed === t.total
+
+/** MAMORU_E2E_WAIVED="<pr>: <why>" waives the rule for that pull request only, never for every merge in the shell. */
+export function waiverFor(pr: string, env: string | undefined): string | undefined {
+  const m = /^\s*#?(\d+)\s*:\s*(\S.*)$/.exec(env ?? '')
+  return m && m[1] === pr ? m[2]!.trim() : undefined
+}

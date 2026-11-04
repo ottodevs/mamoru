@@ -159,9 +159,10 @@ and each broke e2e nobody ran. Two things keep that from happening again:
   while no green run exists for 48 h. Runs are in `~/.local/state/mamoru-ops-report/e2e-nightly.jsonl`.
 - **Merge rule.** A pull request that changes operator auth, policy ids, finality or a public route runs
   `cd apps/mamoru-operator && bun run e2e:all` on its branch and pastes the table, down to the
-  `N/M passed` line, in its body. `scripts/merge-pr.sh` refuses it otherwise (`scripts/release/lib/e2e-rule.ts`
-  says which files and lines count). `MAMORU_E2E_WAIVED="<why>"` merges without it and posts the reason on
-  the pull request; a script that already fails on main is a reason, a slow run is not.
+  `N/M passed` line, in its body, with every script passing. `scripts/merge-pr.sh` refuses it otherwise
+  (`scripts/release/lib/e2e-rule.ts` says which files and lines count). `MAMORU_E2E_WAIVED="<pr>: <why>"`
+  merges that one pull request anyway and posts the reason on it first; a script that already fails on main
+  is a reason, a slow run is not.
 
 ## Repository settings
 
