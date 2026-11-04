@@ -780,15 +780,16 @@ export async function bootOperator(o: BootOptions) {
   }
   // otto/mamoru#343 phase B: Monad capital is measured for the worked APY like Base's, from the same readSnapshot over the
   // Monad registry. A plain loop: no hold-value baseline, no yield receipts (both are Base-bound). It does not follow the
-  // `yield_ledger` flag: the Monad operator pulls no engine settings today (no MAMORU_SETTINGS_URL) and must not start
+  // `yield_ledger` flag, and syncYieldLedger never touches this loop (its own variable): the Monad operator pulls no engine settings today (no MAMORU_SETTINGS_URL) and must not start
   // to, so the flag is unreachable here. MAMORU_SNAPSHOT_MONAD=1 turns it on (deploy notes); the app Worker still pulls
   // /snapshot only while its own `yield_ledger` flag is on. Off: /snapshot answers 404 "snapshot off", as before.
+  let monadSnapshot: SnapshotLoop | null = null
   const multicall3Monad = chainId === BRIDGE_MONAD_CHAIN_ID && registry.chainId === BRIDGE_MONAD_CHAIN_ID ? multicall3Of(registry) : null
   if (multicall3Monad && process.env.MAMORU_SNAPSHOT_MONAD === '1') {
     const snapshotClient = createPublicClient({ transport: http(via('snapshot'), { batch: true, timeout: 60_000 }) })
     const budget = rpcBudget(rpcMetrics)
-    snapshot = new SnapshotLoop(() => readSnapshot(snapshotClient, multicall3Monad, chainId, registry, operator.snapshotTargets()), MONAD_SNAPSHOT_MS, () => budget.over())
-    snapshot.start()
+    monadSnapshot = new SnapshotLoop(() => readSnapshot(snapshotClient, multicall3Monad, chainId, registry, operator.snapshotTargets()), MONAD_SNAPSHOT_MS, () => budget.over())
+    monadSnapshot.start()
     console.log('[snapshot] Monad worked-capital loop on (MAMORU_SNAPSHOT_MONAD=1)')
   }
   let yieldLedgerOn = false
@@ -886,7 +887,7 @@ export async function bootOperator(o: BootOptions) {
     if (bo.pendingCctp() > 0) console.log(`[operator] bridge-out: ${bo.pendingCctp()} CCTP move(s) to finish on Base`)
     console.log(`[operator] bridge-out from Ethereum available (on per account from /ops), relayer ${relayer.address} (${wei ?? 'unknown'} wei on Ethereum)`)
   }
-  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot, bridgeOut })
+  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot: snapshot ?? monadSnapshot, bridgeOut })
   const eth = await client.getBalance({ address: relayer.address })
   console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) sha ${gitSha} on http://${server.hostname}:${server.port}`)
   // Base keeps its boot line byte for byte; any other chain says whose contracts it reads and the relayer's unit.
@@ -904,6 +905,7 @@ export async function bootOperator(o: BootOptions) {
     stop: () => {
       operator.shutdown()
       snapshot?.stop()
+      monadSnapshot?.stop()
       settings?.stop()
       server.stop(true)
       bundler?.stop()

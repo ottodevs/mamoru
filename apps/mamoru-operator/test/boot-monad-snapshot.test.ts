@@ -6,7 +6,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { bootOperator } from '../src/boot.ts'
-import { metricsSignature } from '@mamoru/operator-auth'
+import { metricsSignature, settingsResponseSignature } from '@mamoru/operator-auth'
 
 const rpc = Bun.serve({
   hostname: '127.0.0.1',
@@ -22,7 +22,7 @@ const rpc = Bun.serve({
   },
 })
 const secret = randomBytes(32).toString('hex')
-const boot = () => bootOperator({ rpcUrl: `http://127.0.0.1:${rpc.port}/`, secret, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-boot-143-snap-')), port: 0, policyId: 'lab-wmon-usdc-monad-v1' })
+const boot = (extra: { settingsUrl?: string } = {}) => bootOperator({ ...extra, rpcUrl: `http://127.0.0.1:${rpc.port}/`, secret, stateDir: mkdtempSync(join(tmpdir(), 'mamoru-boot-143-snap-')), port: 0, policyId: 'lab-wmon-usdc-monad-v1' })
 const status = async (url: string) => {
   const sig = await metricsSignature(secret, 'GET', '/snapshot', Math.floor(Date.now() / 60_000))
   return (await fetch(`${url}/snapshot`, { headers: { 'x-mamoru-sig': sig } })).status
@@ -47,6 +47,26 @@ describe('operator booted on chain 143: snapshot loop', () => {
     process.env.MAMORU_SNAPSHOT_MONAD = '1'
     const op = await boot()
     stops.push(op.stop)
+    expect(await status(op.url)).toBe(503)
+  })
+})
+
+// otto/mamoru#343: the Monad loop lives in its own variable. If the Monad operator ever polls settings, the yield_ledger
+// flag (off there) must not stop it: syncYieldLedger only acts on the Base loop.
+describe('operator on chain 143 that does poll settings', () => {
+  test('a settings sync with yield_ledger off leaves the Monad loop running', async () => {
+    const settings = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      async fetch() {
+        const text = JSON.stringify({ versions: [], betaAccounts: [], flags: { yield_ledger: false }, servedAt: new Date().toISOString() })
+        const sig = await settingsResponseSignature(secret, text, Math.floor(Date.now() / 60_000))
+        return new Response(text, { status: 200, headers: { 'x-mamoru-sig': sig } })
+      },
+    })
+    process.env.MAMORU_SNAPSHOT_MONAD = '1'
+    const op = await boot({ settingsUrl: `http://127.0.0.1:${settings.port}/` })
+    stops.push(op.stop, () => settings.stop(true))
     expect(await status(op.url)).toBe(503)
   })
 })

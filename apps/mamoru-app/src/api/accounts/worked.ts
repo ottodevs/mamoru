@@ -14,6 +14,9 @@ export const WORKED_MAX_GAP_S = 25 * 60
 
 type Sample = { t_s: number; read_at: string; pool: string; value_usd: number; in_range: number }
 
+/** A sleeve whose latest sample is older than this, against the newest sample of the view, is left out (the SPA's 6 h sample-age rule). */
+export const WORKED_STALE_S = 6 * 3600
+
 type Windows = { day: Map<string, number>; month: Map<string, number> }
 
 /**
@@ -33,18 +36,23 @@ type Windows = { day: Map<string, number>; month: Map<string, number> }
 export async function loadWorked(db: Db, chainId: number, accountKey: string): Promise<WorkedView | null> {
   const lastOf = (id: number, key: string) => db.prepare('SELECT t_s, read_at FROM account_worked_samples WHERE chain_id = ? AND account_key = ? ORDER BY t_s DESC LIMIT 1').bind(id, key).first<{ t_s: number; read_at: string }>()
   const own = await lastOf(chainId, accountKey)
-  if (!own) return null
   const sleeves =
     chainId === BASE_CHAIN_ID
       ? (await db.prepare('SELECT s.account_key AS account_key, s.chain_id AS chain_id FROM accounts s JOIN accounts b ON b.user_id = s.user_id WHERE b.account_key = ? AND b.chain_id = ? AND s.chain_id <> ? ORDER BY s.chain_id').bind(accountKey, chainId, BASE_CHAIN_ID).all<{ account_key: string; chain_id: number }>()).results
       : []
-  const lasts = [{ id: chainId, key: accountKey, last: own }]
+  type Last = { t_s: number; read_at: string }
+  const withSamples: { id: number; key: string; last: Last }[] = own ? [{ id: chainId, key: accountKey, last: own }] : []
   for (const sl of sleeves) {
     const last = await lastOf(sl.chain_id, sl.account_key)
-    if (last) lasts.push({ id: sl.chain_id, key: sl.account_key, last })
+    if (last) withSamples.push({ id: sl.chain_id, key: sl.account_key, last })
   }
-  const latest = lasts.reduce((a, b) => (b.last.t_s > a.last.t_s ? b : a)).last
-  const anchor = latest.t_s
+  if (!withSamples.length) return null
+  // A cold Base account (no sample yet) still shows its sleeve's samples: the anchor is the latest of the accounts that have any.
+  const anchor = Math.max(...withSamples.map((l) => l.last.t_s))
+  // A sleeve whose cron stalled is left out: its old samples must not pass for a window that ends at another account's read.
+  const lasts = withSamples.filter((l) => l.id === chainId || anchor - l.last.t_s <= WORKED_STALE_S)
+  // asOf is the account's own latest read when it has one, so a stalled Base cron trips the SPA's sample-age rule even while Monad is fresh.
+  const asOf = own ? own.read_at : lasts.reduce((a, b) => (b.last.t_s > a.last.t_s ? b : a)).last.read_at
   const day = new Map<string, number>()
   const month = new Map<string, number>()
   const chains = { day: [] as number[], month: [] as number[] }
@@ -57,7 +65,7 @@ export async function loadWorked(db: Db, chainId: number, accountKey: string): P
     }
   }
   const pick = (m: Map<string, number>) => [...m].filter(([, v]) => v > 0).sort(([a], [b]) => a.localeCompare(b)).map(([pool, usdSeconds]) => ({ pool, usdSeconds }))
-  return { asOf: latest.read_at, day: pick(day), month: pick(month), ...(lasts.length > 1 ? { chains } : {}) }
+  return { asOf, day: pick(day), month: pick(month), ...(lasts.some((l) => l.id !== chainId) ? { chains } : {}) }
 }
 
 /** One account's worked USDC seconds per pool in the day and month windows ending at `anchor`. */

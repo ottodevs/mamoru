@@ -203,20 +203,46 @@ describe('loadWorked with the owner\'s Monad sleeve', () => {
     await writeWorkedSamples(db, monad(100, 2 * USDC), NOW)
     await writeWorkedSamples(db, monad(400, 2 * USDC), NOW)
     const w = await loadWorked(db, CHAIN, KEY)
-    expect(w?.asOf).toBe(at(400))
+    expect(w?.asOf).toBe(at(300)) // the Base account's own latest read
     // Base (0, 300] = 300 s; Monad (100, 400] = 300 s, the window ends at 400 for both.
     expect(w?.day).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 300 }, { pool: 'pool:WMON/USDC/3000', usdSeconds: 2 * USDC * 300 }])
     expect(w?.chains).toEqual({ day: [143], month: [143] })
   })
-  test('a sleeve with no samples adds no chains (the note stays); one with samples older than the day counts for the month only', async () => {
+  test('a sleeve with no samples adds no chains (the note stays)', async () => {
     const db = seed()
     withSleeve(db)
     await writeWorkedSamples(db, base(0), NOW)
     await writeWorkedSamples(db, base(300), NOW)
     expect((await loadWorked(db, CHAIN, KEY))?.chains).toBeUndefined()
-    await writeWorkedSamples(db, monad(-2 * 86_400, USDC), NOW)
-    await writeWorkedSamples(db, monad(-2 * 86_400 + 300, USDC), NOW)
-    expect((await loadWorked(db, CHAIN, KEY))?.chains).toEqual({ day: [], month: [143] })
+  })
+  test('a cold Base account (no sample yet) still shows its Monad sleeve', async () => {
+    const db = seed()
+    withSleeve(db)
+    expect(await loadWorked(db, CHAIN, KEY)).toBeNull()
+    await writeWorkedSamples(db, monad(0, 2 * USDC), NOW)
+    await writeWorkedSamples(db, monad(300, 2 * USDC), NOW)
+    expect(await loadWorked(db, CHAIN, KEY)).toEqual({ asOf: at(300), day: [{ pool: 'pool:WMON/USDC/3000', usdSeconds: 2 * USDC * 300 }], month: [{ pool: 'pool:WMON/USDC/3000', usdSeconds: 2 * USDC * 300 }], chains: { day: [143], month: [143] } })
+  })
+  test('a stalled Monad sleeve (latest sample over 6 h older) is left out: no chains, the note stays', async () => {
+    const db = seed()
+    withSleeve(db)
+    await writeWorkedSamples(db, monad(-7 * 3600, USDC), NOW)
+    await writeWorkedSamples(db, monad(-7 * 3600 + 300, USDC), NOW)
+    await writeWorkedSamples(db, base(0), NOW)
+    await writeWorkedSamples(db, base(300), NOW)
+    const w = await loadWorked(db, CHAIN, KEY)
+    expect(w?.chains).toBeUndefined()
+    expect(w?.day).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 300 }])
+  })
+  test('a stalled Base cron is not masked by a fresh Monad pull: asOf stays the Base read', async () => {
+    const db = seed()
+    withSleeve(db)
+    await writeWorkedSamples(db, base(0), NOW)
+    await writeWorkedSamples(db, base(300), NOW)
+    await writeWorkedSamples(db, monad(7 * 3600, USDC), NOW)
+    await writeWorkedSamples(db, monad(7 * 3600 + 300, USDC), NOW)
+    const w = await loadWorked(db, CHAIN, KEY)
+    expect(w?.asOf).toBe(at(300)) // the SPA's 6 h rule then drops the whole view
   })
   test('no sleeve: the view has no chains key; another owner\'s sleeve is never merged', async () => {
     const db = seed()
