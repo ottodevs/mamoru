@@ -111,3 +111,61 @@ describe('when there is nothing to show', () => {
     expect(upgradeJourney(funding, ops, NOW)).toBeNull()
   })
 })
+
+describe('review r1', () => {
+  const at = (min: number) => new Date(NOW + min * 60_000).toISOString()
+
+  test('a failed approval retried and confirmed is done, not "Confirming" forever', () => {
+    const { funding, ops } = braisUpgrade('waiting', NOW)
+    const retried = [{ ...ops[0]!, opId: 'own-12-renew', state: 'failed' as const, txHash: undefined, updatedAt: new Date(Date.parse(ops[0]!.updatedAt) - 60_000).toISOString() }, ...ops]
+    const j = upgradeJourney(funding, retried, NOW)!
+    expect(j.steps[0]!.state).toBe('done')
+    expect(j.steps[0]!.detail).toBe('2 approvals')
+  })
+
+  test('a failed send is said as failed, not pending with a green bar', () => {
+    const { funding, ops } = braisUpgrade('bridging', NOW)
+    funding.money!.inFlight = funding.money!.inFlight.map((x) => ({ ...x, stage: 'failed' as const }))
+    const j = upgradeJourney(funding, ops.map((o) => (o.bridge ? { ...o, bridge: { ...o.bridge, state: 'failed' as const } } : o)), NOW)!
+    const bridge = j.steps.find((s) => s.id === 'bridge')!
+    expect(bridge.state).toBe('failed')
+    expect(bridge.detail).toBe('The send did not go through. That money is still on Base.')
+    expect(j.title).toBe('This step did not complete')
+  })
+
+  test('Monad money that predates the send is no arrival', () => {
+    const { funding, ops } = braisUpgrade('rebalancing', NOW)
+    funding.money!.chains.push({ chainId: 143, safe: funding.remote!.address, explorerUrl: '', read: { block: 1, at: at(0), stale: false }, idle: [{ token: 'USDC', amount: '500000', decimals: 6, valueUsdc: '500000' }], positions: [], gas: { symbol: 'MON', amount: '0' }, totalUsdc: '500000' })
+    const j = upgradeJourney(funding, ops, NOW)!
+    expect(j.steps.find((s) => s.id === 'arrive')!.state).toBe('pending')
+    expect(j.steps.find((s) => s.id === 'lp')!.state).toBe('pending')
+  })
+
+  test('between two Base moves, before the send, rebalancing is still active', () => {
+    const { funding, ops } = braisUpgrade('rebalancing', NOW)
+    funding.progress = null
+    const j = upgradeJourney(funding, ops.filter((o) => o.state === 'confirmed'), NOW)!
+    expect(j.steps.find((s) => s.id === 'rebalance')!.state).toBe('active')
+    expect(j.title).toBe('Adjusting your Base positions')
+  })
+
+  test('an op in a Monad pool is no Base move: not linked on Basescan, does not pull rebalance back', () => {
+    const { funding, ops } = braisUpgrade('waiting', NOW)
+    const monadOp: OpView = { opId: 'eng-9-1-a-enter_mint', kind: 'enter', step: 'enter_mint', state: 'submitted', pool: 'pool:WMON/USDC/3000', txHash: `0x${'9'.repeat(64)}`, updatedAt: at(-1) }
+    const j = upgradeJourney(funding, [...ops, monadOp], NOW)!
+    expect(j.steps.find((s) => s.id === 'rebalance')!.state).toBe('done')
+    expect(render(<UpgradeProgress upgrade={j} now={NOW} />).html).not.toContain(`basescan.org/tx/0x${'9'.repeat(64)}`)
+  })
+
+  test('a renewal of an account that sent money to Monad before shows nothing, even with no Monad position now', () => {
+    const { funding, ops } = braisUpgrade('waiting', NOW)
+    const renew: OpView = { opId: 'own-30-renew', kind: 'renew', state: 'confirmed', txHash: `0x${'e'.repeat(64)}`, updatedAt: at(2 * 24 * 60) }
+    expect(upgradeJourney(funding, [...ops, renew], NOW + 2 * DONE_FOR_MS + 10 * 60_000)).toBeNull()
+  })
+
+  test('a move stuck for more than a day stays on Home', () => {
+    const { funding, ops } = braisUpgrade('waiting', NOW)
+    expect(upgradeJourney(funding, ops, NOW + 3 * DONE_FOR_MS)).not.toBeNull()
+  })
+})
+

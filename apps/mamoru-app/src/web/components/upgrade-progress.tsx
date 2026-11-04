@@ -1,4 +1,4 @@
-import { txLink, sleeveChain } from '../lib/chain.tsx'
+import { knownChain, txLink, sleeveChain } from '../lib/chain.tsx'
 import { shortHex } from '../lib/format.ts'
 import { clockOrDate } from '../lib/time.ts'
 import { upgradeCopy, type StepState, type Upgrade, type UpgradeStep } from '../lib/upgrade-steps.ts'
@@ -56,7 +56,7 @@ function StepRow({ s, now }: { s: UpgradeStep; now: number }) {
           <span className="mm-links">
             {s.links.map((l) => {
               const href = txLink(l.chainId, l.tx)
-              return href ? (
+              return href && knownChain(l.chainId) ? (
                 <a key={l.tx} className="mm-link inline!" href={href} target="_blank" rel="noreferrer" title={`View on ${sleeveChain(l.chainId).explorer.name}`}>
                   {l.text}{' '}
                   <span className="whitespace-nowrap">
