@@ -1,4 +1,5 @@
 import type { Server } from 'bun'
+import { createEmulator, type Emulation, type Emulator, type Forward, type RpcMsg } from './emulate.ts'
 
 type JsonRpcRequest = { jsonrpc: '2.0'; id: unknown; method: string; params?: unknown[] }
 
@@ -55,9 +56,11 @@ export type ResponseRewrite = (method: string, result: unknown) => unknown
 /**
  * The port the engine and its adapters talk to. It forwards to anvil and
  * refuses anvil_*, evm_* and hardhat_* (INV-NO-ANVIL-IN-ENGINE). `refuse`
- * removes more methods, as a provider without them would (LAB-08 b).
+ * removes more methods, as a provider without them would (LAB-08 b). `emulation` (otto/mamoru#273) puts a recorded
+ * provider profile in front of anvil (proxy/emulate.ts); without it nothing changes.
  */
-export function startEnginePort(target: string, rewrite?: ResponseRewrite, refuse: string[] = []): EnginePort {
+export function startEnginePort(target: string, rewrite?: ResponseRewrite, refuse: string[] = [], emulation?: Emulation): EnginePort {
+  const emulator: Emulator | undefined = emulation && createEmulator(emulation)
   const stats: EnginePortStats = { forwarded: 0, rejectedLabMethods: 0, rejected: [] }
   const handleOne = async (msg: JsonRpcRequest): Promise<unknown> => {
     const lab = isLabOnlyMethod(msg.method)
@@ -66,17 +69,22 @@ export function startEnginePort(target: string, rewrite?: ResponseRewrite, refus
       stats.rejected.push(msg.method)
       return { jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: `method ${msg.method} is not available on the engine port` } }
     }
-    stats.forwarded++
-    const res = await fetch(target, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(msg) })
-    const json = (await res.json()) as { result?: unknown }
-    if (rewrite && 'result' in json) json.result = rewrite(msg.method, json.result)
-    return json
+    const forward: Forward = async (m: RpcMsg) => {
+      stats.forwarded++
+      const res = await fetch(target, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(m) })
+      const json = (await res.json()) as { result?: unknown }
+      if (rewrite && 'result' in json) json.result = rewrite(m.method, json.result)
+      return json
+    }
+    if (emulator) return emulator.handle(msg, forward)
+    return forward(msg)
   }
   const server: Server<undefined> = Bun.serve({
     hostname: LOOPBACK,
     port: 0,
     async fetch(req) {
       if (req.method !== 'POST') return new Response('method not allowed', { status: 405 })
+      if (emulator?.rateLimited()) return Response.json({ jsonrpc: '2.0', id: null, error: { code: 429, message: 'Too Many Requests' } }, { status: 429 })
       const payload = (await req.json()) as JsonRpcRequest | JsonRpcRequest[]
       const out = Array.isArray(payload) ? await Promise.all(payload.map(handleOne)) : await handleOne(payload)
       return Response.json(out)

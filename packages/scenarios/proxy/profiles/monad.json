@@ -1,0 +1,127 @@
+{
+  "chain": "monad",
+  "recordedAt": "2026-11-04",
+  "endpoints": {
+    "rpc.monad.xyz": {
+      "refusedMethods": {},
+      "refusedParams": [
+        {
+          "method": "eth_simulateV1",
+          "path": [
+            0,
+            "validation"
+          ],
+          "equals": false,
+          "error": {
+            "code": -32000,
+            "message": "`\"validation\": false` is not supported yet"
+          }
+        }
+      ],
+      "simulateGasUsedIsLimit": true,
+      "simulateSenderNotEoa": {
+        "code": -32000,
+        "message": "sender not eoa"
+      },
+      "getLogs": {
+        "maxSpan": 100,
+        "error": {
+          "code": -32614,
+          "message": "eth_getLogs is limited to a 100 range"
+        }
+      },
+      "unknownBlock": {
+        "code": -32602,
+        "message": "Block requested not found. Request might be querying historical state that is not available. If possible, reformulate query to point to more recent blocks"
+      }
+    },
+    "rpc1.monad.xyz": {
+      "refusedMethods": {
+        "eth_simulateV1": {
+          "code": -32601,
+          "message": "Method not found"
+        }
+      },
+      "refusedParams": [],
+      "simulateGasUsedIsLimit": false,
+      "simulateSenderNotEoa": null,
+      "getLogs": {
+        "maxSpan": 100,
+        "error": {
+          "code": -32602,
+          "message": "block range too large"
+        }
+      },
+      "unknownBlock": {
+        "code": -32602,
+        "message": "Block requested not found. Request might be querying historical state that is not available. If possible, reformulate query to point to more recent blocks"
+      }
+    },
+    "rpc3.monad.xyz": {
+      "refusedMethods": {
+        "eth_simulateV1": {
+          "code": -32601,
+          "message": "Method not found"
+        }
+      },
+      "refusedParams": [],
+      "simulateGasUsedIsLimit": false,
+      "simulateSenderNotEoa": null,
+      "getLogs": {
+        "maxSpan": 500,
+        "error": {
+          "code": -32062,
+          "message": "Block range is too large"
+        }
+      },
+      "unknownBlock": {
+        "code": -32602,
+        "message": "Block requested not found. Request might be querying historical state that is not available. If possible, reformulate query to point to more recent blocks"
+      }
+    },
+    "monadinfra": {
+      "refusedMethods": {
+        "eth_simulateV1": {
+          "code": -32601,
+          "message": "Method not found"
+        }
+      },
+      "refusedParams": [],
+      "simulateGasUsedIsLimit": false,
+      "simulateSenderNotEoa": null,
+      "getLogs": {
+        "maxSpan": 100,
+        "error": {
+          "code": -32602,
+          "message": "block range too large"
+        }
+      },
+      "unknownBlock": {
+        "code": -32602,
+        "message": "Block requested not found. Request might be querying historical state that is not available. If possible, reformulate query to point to more recent blocks"
+      }
+    },
+    "drpc": {
+      "refusedMethods": {
+        "eth_simulateV1": {
+          "code": 35,
+          "message": "method is not available on free plan, please upgrade to paid plan"
+        }
+      },
+      "refusedParams": [],
+      "simulateGasUsedIsLimit": false,
+      "simulateSenderNotEoa": null,
+      "getLogs": {
+        "maxSpan": 100,
+        "error": {
+          "code": 35,
+          "message": "ranges over 10000 blocks are not supported on free plan"
+        }
+      },
+      "unknownBlock": {
+        "code": -32000,
+        "message": "unsupported block number"
+      }
+    }
+  }
+}
