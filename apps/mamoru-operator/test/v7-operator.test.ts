@@ -3,18 +3,18 @@
 // vault-family session per vault, also on V3 alone (no pause gate, no UniActionPolicy). v6 is not touched.
 // Fake deployed addresses; V3 and the gate are the registry pins withPinnedV6Base() gives.
 import { describe, expect, test } from 'bun:test'
-import { decodeFunctionData, parseAbi, slice, type Hex } from 'viem'
+import { decodeFunctionData, pad, parseAbi, slice, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, Address } from '@mamoru/domain'
 import { address as registryAddress, baseRegistry, smartSessionAbi } from '@mamoru/registry'
 import { encodeVaultFamilyInit, grantKey } from '@mamoru/policy'
 import { remoteInput, remoteSafe } from '@mamoru/account/remote'
 import { resolveV4Policy, resolveV5Policy, resolveV6Policy, resolveV7Policy } from '../src/boot.ts'
-import { upgradeSplitOf, type Operator, type OperatorConfig } from '../src/operator.ts'
+import { HttpError, upgradeSplitOf, type Operator, type OperatorConfig } from '../src/operator.ts'
 import type { RemoteProvision } from '../src/remote-peer.ts'
 import type { AccountState, StoredGrant } from '../src/state.ts'
 import { FIXTURE_SESSION_KEY, GATE_V3_BASE_PINNED, V3_BASE_PINNED, withPinnedV3, withPinnedV6Base } from '../../../packages/account/remote/fixture.ts'
-import { ctx, world } from './owner-world.ts'
+import { ctx, quiet, sign, world } from './owner-world.ts'
 
 const V1 = `0x${'11'.repeat(20)}`
 const GAS = `0x${'22'.repeat(20)}`
@@ -226,5 +226,77 @@ describe('owner transaction of the move to v7', () => {
     expect(text).toContain('Lending: it may supply USDC to')
     expect(text).toContain('nothing new goes into USDC/USDT')
     expect(t.remote!.address).toBe(remoteSafe(remoteInput(ctx, t.remote!.spec, pinnedV3)).address)
+  })
+})
+
+describe('otto/mamoru#368: a Start activates on v7 wherever v7 is offered', () => {
+  /** A Base operator whose default policy is v5, offering v6 and v7; what a Start of a fresh account `k` prepares. */
+  async function start(flags: Flags, scoped: Scoped, extra: Partial<OperatorConfig> = {}) {
+    const p = fakePeer()
+    const w = world(0n, { policy: v5, ...cfg7(flags, scoped, { remotePeers: { 143: p.peer }, ...extra }) })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    const t = await w.op.prepareActivate(ctx)
+    const held = priv(w.op).prepared.get(t.prepareId)!
+    return { t, held, names: held.grants!.map((g) => g.name), policyIds: new Set(held.grants!.map((g) => g.grant.policyId)), peer: p }
+  }
+
+  test('vaults_v7 for everyone: the Start is v7 in ONE approval (vaults, bridge-out to its own Safe on Monad), nothing left for a second one', async () => {
+    const r = await start({ vaults_v7: true }, { vaults_v7: null })
+    expect(r.policyIds).toEqual(new Set([v7.policyId]))
+    expect(r.names).toContain('bridge-out')
+    expect(r.names.some((n) => n.includes('vault:gtUSDCp'))).toBe(true)
+    expect(r.t.remote).toBeDefined()
+    const want = v7.session.grants.filter((g) => !g.perPosition).map(grantKey).sort()
+    expect([...r.names].sort()).toEqual(want)
+    // Review r1: the remote Safe is the one these keys, the Monad session key and the spec give, and bridge-out mints
+    // only to it, in the very transaction the owner signs.
+    const remote = r.t.remote!
+    expect(remote.spec).toMatchObject({ chainId: 143, sessionKey: SESSION_KEY })
+    expect(remote.address).toBe(remoteSafe(remoteInput(ctx, remote.spec, pinnedV3)).address)
+    const burn = r.held.grants!.find((g) => g.name === 'bridge-out')!.grant.actions.find((a) => a.params.some((x) => x.field === 'mintRecipient'))!
+    expect(burn.params.find((x) => x.field === 'mintRecipient')).toMatchObject({ condition: 'EQUAL', ref: BigInt(remote.address) })
+    expect(r.held.tx.data.toLowerCase()).toContain(pad(remote.address, { size: 32 }).slice(2).toLowerCase())
+    expect(r.t.summary.join('\n')).toContain(remote.address)
+  })
+
+  test('review r1: armed for its deposit, it fires as the v7 the owner signed even after vaults_v7 is narrowed, and stays v7', async () => {
+    let scoped: Scoped = { vaults_v7: null }
+    const p = fakePeer()
+    const w = world(0n, { policy: v5, ...cfg7({ vaults_v7: true }, {}, { remotePeers: { 143: p.peer }, opsScopedFlags: () => scoped }) })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    const t = await w.op.prepareActivate(ctx)
+    expect(await w.op.submit(ctx, 'activate', sign(t))).toMatchObject({ code: 'ARMED' })
+    const acc = w.state.accounts.k!
+    expect(acc.armed?.remote).toMatchObject({ address: t.remote!.address })
+    scoped = { vaults_v7: ['someone-else'] }
+    w.chain.usdc = 10_000_000n
+    await quiet(() => (w.op as unknown as { fireArmed(a: AccountState, u: bigint): Promise<void> }).fireArmed(acc, 10_000_000n))
+    await new Promise((r) => setTimeout(r, 10))
+    expect(acc.active).toBe(true)
+    expect(acc.policyId).toBe(v7.policyId)
+    expect(acc.remote).toMatchObject({ chainId: 143, address: t.remote!.address })
+    // Its own policy decides from now on: v7, never the default, and nothing left to move to.
+    expect(w.op.policyOf(acc).policyId).toBe(v7.policyId)
+    expect(w.op.v4Target(acc)).toBeNull()
+  })
+
+  test('review r1: no Monad operator reachable: the v7 Start is refused (503), never quietly started on another policy', async () => {
+    const w = world(0n, { policy: v5, ...cfg7({ vaults_v7: true }, { vaults_v7: null }) })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    const e = await w.op.prepareActivate(ctx).catch((x: unknown) => x)
+    expect(e instanceof HttpError && e.code).toBe('REMOTE_UNAVAILABLE')
+  })
+
+  test('in scope by account key: v7, ahead of a v6 new-account scope; out of scope: v6 by its own scope, else the default', async () => {
+    expect((await start({}, { vaults_v7: ['k'], multichain_v6_new: ['k'] })).policyIds).toEqual(new Set([v7.policyId]))
+    expect((await start({}, { vaults_v7: ['someone-else'], multichain_v6_new: ['k'] })).policyIds).toEqual(new Set([v6.policyId]))
+    expect((await start({ vaults_v7: true }, {})).policyIds).toEqual(new Set([v5.policyId]))
+  })
+
+  test('v7 not configured: exactly as before', async () => {
+    expect((await start({ vaults_v7: true }, { vaults_v7: null }, { v7Policy: undefined })).policyIds).toEqual(new Set([v5.policyId]))
   })
 })

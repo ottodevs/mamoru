@@ -1895,8 +1895,12 @@ export class Operator {
    * otto/mamoru#231: the policy a Start activates. v6 (Base + the account's own Safe on Monad, provisioned by this same
    * approval, the bridge held until it runs) for an account in the `multichain_v6_new` scope where this operator offers
    * v6 on the same chain; the operator's default policy otherwise. v6 is never the process default (assertBootPolicies).
+   * otto/mamoru#368: v7 first, wherever it is offered (`vaults_v7`): a new account starts on the newest policy, never
+   * on the default only to be asked for the move right after.
    */
   activationPolicy(acc: AccountState): PolicyVersion {
+    const v7 = this.cfg.v7Policy
+    if (v7 && v7.chain === this.cfg.policy.chain && this.inScope(acc, 'vaults_v7')) return v7
     const v6 = this.cfg.v6Policy
     if (v6 && v6.chain === this.cfg.policy.chain && this.inScope(acc, 'multichain_v6_new')) return v6
     return this.cfg.policy
