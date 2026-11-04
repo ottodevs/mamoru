@@ -281,7 +281,7 @@ describe('#6 sponsorship of owner transactions is bounded', () => {
     acc.grants = [GRANT]
     acc.sponsored = [at(1_000, 'transfer', 15_000_000_000_000n)]
     expect(await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1000000' }).catch((e: unknown) => e)).toMatchObject({ code: 'SPONSOR_DAILY_BUDGET' })
-    const stop = await w.op.prepareStop(ctx, { revokeOnly: true })
+    const stop = await w.op.prepareStop(ctx)
     expect(stop.summary.some((l) => l.includes('network fee'))).toBe(false)
   })
 
@@ -573,6 +573,16 @@ describe('Sol review round 2 on 411bf85', () => {
     expect(again.summary[0]).toBe("Revoke the engine's 1 session grant(s)")
     w.knobs.grantsDown = true
     expect(await w.op.prepareStop(ctx, { revokeOnly: true }).catch((e: unknown) => e)).toMatchObject({ status: 503, code: 'GRANT_CHECK_UNAVAILABLE' })
+  })
+
+  test('a cached head behind the latest owner op is read again uncached before a grant check defers (e2e-fork, 4 Nov)', async () => {
+    const w = world(10_000_000n)
+    const tx = await w.op.prepareActivate(ctx)
+    await quiet(() => w.op.submit(ctx, 'activate', sign(tx)))
+    // The activation landed in block 101; the client's cached head still says 100.
+    w.knobs.cachedHead = 100n
+    const stop = await w.op.prepareStop(ctx)
+    expect(stop.summary[0]).toMatch(/^Revoke the engine's \d+ session grant\(s\)$/)
   })
 
   test('#4 no further mint once the admitted positions fill one bounded read', () => {

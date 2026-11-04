@@ -3544,7 +3544,10 @@ export class Operator {
   private async headAtLeast(acc: AccountState, min: bigint): Promise<bigint | null> {
     const floor = this.floorOf(acc, min)
     try {
-      const head = await this.client.getBlockNumber()
+      // The cached head (viem keeps it for the polling interval) may predate an owner op that just confirmed and raised the
+      // floor: asked once more uncached before deferring, or a Stop right after a transfer answers 503 for seconds.
+      let head = await this.client.getBlockNumber()
+      if (head < floor) head = await this.client.getBlockNumber({ cacheTime: 0 })
       if (head >= floor) return head
       console.log(`[grants] ${acc.accountKey} provider head ${head} behind block ${floor}: deferred`)
       return null

@@ -60,6 +60,8 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
   const sent: { to: string; data?: Hex; value?: bigint }[] = []
   const chain = { deployed: false, usdc, nonce: 0n, safeEth: 0n, positions: [] as { tokenId: bigint; liquidity: bigint }[] }
   const knobs = {
+    /** What a cached head read answers (viem keeps the head for its polling interval); an uncached one reads the chain. */
+    cachedHead: null as bigint | null,
     sim: 'ok' as Answer,
     call: 'ok' as Answer,
     /** Reads of position NFTs fail (an inventory too large for the provider). */
@@ -131,7 +133,7 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     return encodeFunctionResult({ abi: nonfungiblePositionManagerAbi, functionName: 'positions', result: [0n, `0x${'0'.repeat(40)}`, address(e.token0!, baseRegistry), address(e.token1!, baseRegistry), e.fee!, -600, 600, p.liquidity, 0n, 0n, 0n, 0n] })
   }
   const client = {
-    getBlockNumber: async () => (knobs.blockHead > 101n ? knobs.blockHead : 101n), // at least the block its receipts land in (101): #60 never reads grants below it
+    getBlockNumber: async (a: { cacheTime?: number } = {}) => (a.cacheTime !== 0 && knobs.cachedHead !== null ? knobs.cachedHead : knobs.blockHead > 101n ? knobs.blockHead : 101n), // at least the block its receipts land in (101): #60 never reads grants below it
     // A block has a hash of its own; `blockHashes` is what a read of that height by number answers instead (another
     // node, behind or on another view, than the one that gave the head).
     getBlock: async (a: { blockNumber?: bigint } = {}) => {
