@@ -26,10 +26,12 @@ const decreaseLog = (blockNumber: bigint, logIndex: number, amount0: bigint) => 
 
 function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; events: ChainPositionEvent[] }, tailLogs: unknown[] = [], cfg: { historyStepBlocks?: bigint } = {}, hashOf: (n: bigint) => Hex = () => '0xaa') {
   const ranges: { from: bigint; to: bigint }[] = []
+  const logs = { down: false }
   const client = {
     getBlock: async ({ blockNumber }: { blockNumber: bigint }) => ({ hash: hashOf(blockNumber) }),
     request: async ({ method, params }: { method: string; params: [{ fromBlock: Hex; toBlock: Hex }] }) => {
       if (method !== 'eth_getLogs') throw new Error(`unexpected ${method}`)
+      if (logs.down) throw new Error('timeout')
       ranges.push({ from: BigInt(params[0].fromBlock), to: BigInt(params[0].toBlock) })
       return tailLogs
     },
@@ -39,12 +41,13 @@ function engine(cursor: { fromBlock: bigint; through: bigint; ids: string[]; eve
     registry: baseRegistry,
     historyFromBlock: 100n,
     cfg,
+    heldTurn: 0,
     heldHistory: new Map(),
     historyCursor: { fromBlock: cursor.fromBlock, through: cursor.through, hash: '0x01', ids: new Set(cursor.ids), events: cursor.events },
   })
   const owed = (tokenId: bigint, at: { block: bigint; logIndex: number }, full = false) => (e as unknown as { principalOwed: (t: bigint, a: typeof at, f: boolean) => Promise<Map<bigint, [bigint, bigint]>> }).principalOwed(tokenId, at, full)
   const advance = (safe: bigint, tokenIds: bigint[]) => (e as unknown as { advanceHeldHistory: (o: unknown) => Promise<void> }).advanceHeldHistory({ safeBlock: { number: safe, hash: '0xaa' }, positions: tokenIds.map((tokenId) => ({ tokenId })) })
-  return { owed, ranges, advance }
+  return { owed, ranges, advance, logs }
 }
 
 describe('principal owed from the observation cursor (otto/mamoru#358)', () => {
@@ -129,6 +132,31 @@ describe('a held position the cursor does not follow, read one slice per review 
     expect(ranges).toEqual([
       { from: 100n, to: 400_099n },
       { from: 100n, to: 400_099n },
+    ])
+  })
+
+  test('gate: a forked read whose re-read fails is gone at once; the harvest waits instead of folding it', async () => {
+    let fork = false
+    const { owed, ranges, advance, logs } = engine(none, [], { historyStepBlocks: 400_000n }, (n) => (fork && n === 800_099n ? '0xbb' : '0xaa'))
+    await advance(900_000n, [7n])
+    await advance(900_000n, [7n])
+    expect(await owed(7n, { block: 900_010n, logIndex: 0 })).toEqual(new Map())
+    fork = true
+    logs.down = true
+    await advance(900_000n, [7n])
+    await expect(owed(7n, { block: 900_010n, logIndex: 0 })).rejects.toThrow('OBS_RPC_UNAVAILABLE')
+    expect(ranges.at(-1)).toEqual({ from: 800_100n, to: 900_009n })
+  })
+
+  test('gate: one slice per review across positions, from a start that rotates', async () => {
+    const { ranges, advance } = engine(none, [], { historyStepBlocks: 400_000n })
+    await advance(900_000n, [7n, 8n])
+    await advance(900_000n, [7n, 8n])
+    await advance(900_000n, [7n, 8n])
+    expect(ranges).toEqual([
+      { from: 100n, to: 400_099n },
+      { from: 100n, to: 400_099n },
+      { from: 400_100n, to: 800_099n },
     ])
   })
 

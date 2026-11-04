@@ -661,6 +661,7 @@ export class Engine {
   /** Position history read so far: each review scans only the blocks after it. */
   private readonly historyCursor = historyCursor()
   /** otto/mamoru#358: history of held positions the observation's cursor does not follow, read up to `through` (a safe block). */
+  private heldTurn = 0
   private readonly heldHistory = new Map<string, { through: bigint; hash: Hex | null; events: ChainPositionEvent[] }>()
   depositsAfter: bigint
   lastObservation?: Observation
@@ -943,7 +944,15 @@ export class Engine {
     }
     if (this.cfg.policy.range.lazy) obs = withOutOfRangeSince(obs, this.outOfRange)
     this.lastObservation = obs
-    await this.advanceHeldHistory(obs)
+    // otto/mamoru#358: the held history is read after the decision and its op, never in front of a risk rule.
+    try {
+      return await this.decideAndRun(obs)
+    } finally {
+      await this.advanceHeldHistory(obs)
+    }
+  }
+
+  private async decideAndRun(obs: Observation): Promise<ReviewResult> {
     const decision = decide(obs, this.cfg.policy)
     // #101: report only when the set of rules that would fire changes, not on every review.
     const shadowSig = (decision.shadowRisk ?? []).map((r) => `${r.code}:${r.pool}:${r.window ?? ''}`).join(',')
@@ -2080,17 +2089,28 @@ export class Engine {
     const safe = obs.safeBlock.number
     // A safe head not yet past activation has nothing to read (and must not move a slice back before it).
     if (safe < this.historyFromBlock) return
-    for (const { tokenId } of obs.positions) {
+    let read = false
+    // One slice per review across all positions (about 200 log requests on Monad), from a start that rotates so a
+    // position whose reads keep failing does not hold the others back (gate of #358).
+    const ids = obs.positions.map((p) => p.tokenId)
+    const start = ids.length ? this.heldTurn++ % ids.length : 0
+    for (const tokenId of [...ids.slice(start), ...ids.slice(0, start)]) {
       if (c.fromBlock === this.historyFromBlock && c.ids.has(String(tokenId))) continue
       let h = this.heldHistory.get(String(tokenId)) ?? { through: this.historyFromBlock - 1n, hash: null, events: [] }
       try {
-        // The last slice's end is still canonical, or what was read starts over (gate of #358: no fork mix across slices).
-        if (h.hash && (await this.client.getBlock({ blockNumber: h.through })).hash !== h.hash) h = { through: this.historyFromBlock - 1n, hash: null, events: [] }
+        // The last slice's end is still canonical, or what was read starts over and leaves the map at once, so a harvest
+        // never folds a forked read (gate of #358: no fork mix across slices).
+        if (h.hash && (await this.client.getBlock({ blockNumber: h.through })).hash !== h.hash) {
+          this.heldHistory.delete(String(tokenId))
+          h = { through: this.historyFromBlock - 1n, hash: null, events: [] }
+        }
         // Caught up within a step: the tail read at harvest time covers the rest.
         if (h.through >= this.historyFromBlock && safe - h.through <= step) {
           this.heldHistory.set(String(tokenId), h)
           continue
         }
+        if (read) return
+        read = true
         const to = h.through + step < safe ? h.through + step : safe
         const before = (await this.client.getBlock({ blockNumber: to })).hash
         const events = await readPositionHistory(this.client, [tokenId], h.through + 1n, to, this.registry)
