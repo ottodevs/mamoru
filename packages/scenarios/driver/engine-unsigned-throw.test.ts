@@ -3,9 +3,11 @@
 // cast, like engine-vault.test.ts.
 import { describe, expect, test } from 'bun:test'
 import type { Decision } from '@mamoru/decide'
-import { TimeoutError } from 'viem'
-import { Engine, thrownSummary } from './engine.ts'
+import { BaseError, TimeoutError } from 'viem'
+import { Engine, isTransportError, thrownSummary } from './engine.ts'
 import { MemoryJournal, type OpRecord } from './journal.ts'
+
+const timeout = () => new TimeoutError({ body: { method: 'eth_simulateV1', params: [] }, url: 'https://rpc.monad.example' })
 
 const harvest = {
   decisionId: '0xd1',
@@ -27,13 +29,13 @@ function setup(run: (op: OpRecord, j: MemoryJournal) => Promise<void>) {
 describe('a throw before signing frees the slot (otto/mamoru#357)', () => {
   test('a timeout while proposed: the op is discarded with OBS_RPC_UNAVAILABLE, the error still reaches the caller', async () => {
     const { journal, op, runOp } = setup(async () => {
-      throw new Error('The request took too long to respond.\nURL: https://rpc.monad.example')
+      throw timeout()
     })
     await expect(runOp()).rejects.toThrow('The request took too long to respond.')
     expect(journal.live).toBeNull()
     expect(journal.op(op.opId).state).toBe('discarded')
     expect(journal.op(op.opId).stateCode).toBe('OBS_RPC_UNAVAILABLE')
-    expect(journal.transitions.at(-1)?.detail).toBe('thrown before signing: The request took too long to respond.')
+    expect(journal.transitions.at(-1)?.detail).toBe('provider did not answer before signing: The request took too long to respond. (eth_simulateV1)')
     // The next decision gets a slot.
     expect(() => journal.propose(journal.recordDecision({ ...harvest, decisionId: '0xd2' as const }), 'collect')).not.toThrow()
   })
@@ -42,9 +44,9 @@ describe('a throw before signing frees the slot (otto/mamoru#357)', () => {
     const { journal, op, runOp } = setup(async (o, j) => {
       j.move(o.opId, 'prepared', 'EHG_OK')
       j.move(o.opId, 'simulated', 'EHG_OK')
-      throw new Error('timeout')
+      throw timeout()
     })
-    await expect(runOp()).rejects.toThrow('timeout')
+    await expect(runOp()).rejects.toThrow('took too long')
     expect(journal.op(op.opId).state).toBe('discarded')
     expect(journal.live).toBeNull()
   })
@@ -54,11 +56,43 @@ describe('a throw before signing frees the slot (otto/mamoru#357)', () => {
       j.move(o.opId, 'prepared', 'EHG_OK')
       j.move(o.opId, 'simulated', 'EHG_OK')
       j.move(o.opId, 'signed', 'OP_SIGNED')
-      throw new Error('timeout')
+      throw timeout()
     })
-    await expect(runOp()).rejects.toThrow('timeout')
+    await expect(runOp()).rejects.toThrow('took too long')
     expect(journal.op(op.opId).state).toBe('signed')
     expect(journal.live?.opId).toBe(op.opId)
+  })
+})
+
+describe('only a provider that did not answer frees the slot (review of #357)', () => {
+  test('a bug (any other throw) keeps the op live: fail-stop, as before', async () => {
+    const { journal, op, runOp } = setup(async () => {
+      throw new TypeError('cannot read properties of undefined')
+    })
+    await expect(runOp()).rejects.toThrow(TypeError)
+    expect(journal.live?.opId).toBe(op.opId)
+    expect(journal.op(op.opId).state).toBe('proposed')
+  })
+
+  test('a timeout wrapped by a contract read (cause chain) is a provider error', async () => {
+    const wrapped = new BaseError('ContractFunctionExecutionError', { cause: new BaseError('CallExecutionError', { cause: timeout() }) })
+    expect(isTransportError(wrapped)).toBe(true)
+    expect(thrownSummary(wrapped)).toContain('(eth_simulateV1)')
+    const { journal, runOp } = setup(async () => {
+      throw wrapped
+    })
+    await expect(runOp()).rejects.toBe(wrapped)
+    expect(journal.live).toBeNull()
+  })
+
+  test('a discard that fails never hides the provider error', async () => {
+    const { journal, runOp } = setup(async () => {
+      throw timeout()
+    })
+    journal.discardUnsigned = () => {
+      throw new Error('journal broke')
+    }
+    await expect(runOp()).rejects.toThrow('took too long')
   })
 })
 

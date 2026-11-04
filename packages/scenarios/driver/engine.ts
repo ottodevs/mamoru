@@ -80,19 +80,37 @@ export function engineGas(baseFee: bigint, caps?: GasCaps): GasSettings | null {
   if (baseFee + MAX_PRIORITY_FEE_PER_GAS > caps.maxFeePerGas) return null
   return { ...gas, maxFeePerGas: caps.maxFeePerGas }
 }
-/** What a V4 op's gas limits are sized by (decide's proposal kinds, exits together). */
+
+/** viem's errors for a request that got no usable answer: no response in time, a failed HTTP exchange, a closed socket, a rate limit. */
+const TRANSPORT_ERRORS = new Set(['TimeoutError', 'HttpRequestError', 'SocketClosedError', 'WebSocketRequestError', 'LimitExceededRpcError'])
+
+/** The error and its `.cause` chain (bounded: a cyclic chain ends). */
+function causeChain(e: unknown): unknown[] {
+  const out: unknown[] = []
+  for (let x: unknown = e; x && out.length < 8 && !out.includes(x); x = (x as { cause?: unknown }).cause) out.push(x)
+  return out
+}
+
+/** otto/mamoru#357: a throw that is the provider not answering (anywhere in its cause chain), not a bug or a refusal. */
+export function isTransportError(e: unknown): boolean {
+  return causeChain(e).some((x) => TRANSPORT_ERRORS.has((x as { name?: unknown })?.name as string))
+}
+
 /**
- * otto/mamoru#357: the first line of a throw, and for a viem request error the JSON-RPC methods of its request body (a
- * batch carries several), so the journal says which read timed out. Never the URL: it may carry a provider key.
+ * otto/mamoru#357: the first line of a throw, and for a viem request error (anywhere in its cause chain) the JSON-RPC
+ * methods of its request body (a batch carries several), so the journal says which read timed out. Never the URL.
  */
 export function thrownSummary(e: unknown): string {
   const first = (e as Error)?.message?.split('\n')[0] ?? String(e)
-  const meta = (e as { metaMessages?: unknown })?.metaMessages
-  const body = Array.isArray(meta) ? meta.find((m): m is string => typeof m === 'string' && m.startsWith('Request body:')) : undefined
-  const methods = body ? [...new Set([...body.matchAll(/"method":"([A-Za-z0-9_]+)"/g)].map((m) => m[1]))] : []
+  const bodies = causeChain(e).flatMap((x) => {
+    const meta = (x as { metaMessages?: unknown })?.metaMessages
+    return Array.isArray(meta) ? meta.filter((m): m is string => typeof m === 'string' && m.startsWith('Request body:')) : []
+  })
+  const methods = [...new Set(bodies.flatMap((b) => [...b.matchAll(/"method":"([A-Za-z0-9_]+)"/g)].map((m) => m[1])))]
   return methods.length ? `${first} (${methods.join(', ')})` : first
 }
 
+/** What a V4 op's gas limits are sized by (decide's proposal kinds, exits together). */
 export type V4OpKind = 'swap' | 'mint' | 'increase' | 'exit' | 'harvest' | 'bridge' | 'vault' | 'registerRemote' | 'announceReady' | 'relayMessage'
 export type GasLimits = { verificationGasLimit: bigint; callGasLimit: bigint; preVerificationGas: bigint }
 
@@ -923,15 +941,23 @@ export class Engine {
   }
 
   /**
-   * otto/mamoru#357: a throw that is not a refusal (a Monad RPC timeout in prepare or the simulation) left the unsigned
-   * op live, and every review after it held DECIDE_SLOT_BUSY until a restart. It is discarded; the error still reaches
-   * the caller, which logs the review error.
+   * otto/mamoru#357: a provider that did not answer (a Monad RPC timeout in prepare or the simulation) left the unsigned
+   * op live, and every review after it held DECIDE_SLOT_BUSY until a restart. Such an op is discarded. Nothing of it left
+   * the process: `run` signs locally with the session key and records `signed` before the bundler sees any byte, so an op
+   * still proposed, prepared or simulated was never sent. Any other throw (a bug) keeps the op live, as before: fail-stop.
+   * The original error always reaches the caller, which logs the review error.
    */
   private async runOp(op: OpRecord, obs: Observation, decision: Decision): Promise<void> {
     try {
       await this.run(op, obs, decision)
     } catch (e) {
-      this.journal.discardUnsigned(op.opId, 'OBS_RPC_UNAVAILABLE', `thrown before signing: ${thrownSummary(e)}`)
+      if (isTransportError(e)) {
+        try {
+          this.journal.discardUnsigned(op.opId, 'OBS_RPC_UNAVAILABLE', `provider did not answer before signing: ${thrownSummary(e)}`)
+        } catch (d) {
+          console.error(`[engine] ${op.opId}: discard after a provider error failed: ${(d as Error)?.message?.split('\n')[0] ?? String(d)}`)
+        }
+      }
       throw e
     }
   }
