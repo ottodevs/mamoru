@@ -58,6 +58,8 @@ export const homeCopy = {
   // Brais's label, literal (otto/mamoru#198, 23-oct). Brais, 2 Nov: the figure is the last 24 h of the capital that worked.
   currentWhat: '24h avg',
   sources: 'Rate sources',
+  // otto/mamoru#343: the snapshot loop reads Base only, so money working on Monad is not in these figures yet.
+  baseOnly: 'Both figures cover the money working on Base. Money working on Monad is not counted yet.',
   monthlySource: 'Monthly',
   currentSource: '24h avg',
   planPools: 'plan pools, nothing placed yet',
@@ -304,8 +306,9 @@ export function Indicators({ f, apy, price, worked = null, noRead = false }: { f
   // Brais, 2 Nov: the 24 h figure is the working capital's, so it needs no scope words.
   const currentTail = current.gap ? homeCopy.gap[current.gap] : partial(current)
   // Brais, 23-oct: the (i) sits right after the label it explains, not floating at the end of the row.
+  const baseOnly = !!(monthly.baseOnly || current.baseOnly)
   const info =
-    monthlySrc || currentSrc ? (
+    monthlySrc || currentSrc || baseOnly ? (
       <details className="rate-info" data-testid="rate-sources">
         <summary aria-label={homeCopy.sources}>
           <span aria-hidden="true">i</span>
@@ -313,6 +316,7 @@ export function Indicators({ f, apy, price, worked = null, noRead = false }: { f
         <p className="rate-sources">
           {monthlySrc ? <span>{homeCopy.monthlySource}: {monthlySrc}</span> : null}
           {currentSrc ? <span>{homeCopy.currentSource}: {currentSrc}</span> : null}
+          {baseOnly ? <span data-testid="rate-base-only">{homeCopy.baseOnly}</span> : null}
         </p>
       </details>
     ) : null

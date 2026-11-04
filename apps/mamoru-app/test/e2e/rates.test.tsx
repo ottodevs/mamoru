@@ -82,12 +82,19 @@ describe('rates over the working capital', () => {
   test('the 30-day figure is the pools\' 30-day means over the capital that worked in the month', () => {
     expect(workedRate(brais, [{ pool: 'pool:WETH/USDC/3000', usdSeconds: 1 }], at12, 'monthlyPct', MONTH_S).pct).toBe(53.1)
   })
-  test('a vault is not in the ledger: its value now counts for the window beside the ledger\'s pools', () => {
-    const vault = { ...pos('9', 'vault:steakUSDC', '10000000'), vault: { name: 'vault:steakUSDC' } } as FundingView['positions'][number]
-    const withVault = { ...brais, positions: [...brais.positions, vault] }
+  test('a vault is measured like a pool: its vault:* name carries its rate from apy.byPool', () => {
     const rates = { ...at12, byPool: [...at12.byPool, { pool: 'vault:steakUSDC', weight: 0, currentPct: 5, monthlyPct: 5 }] }
-    const r = workedRate(withVault, [{ pool: 'pool:WETH/USDC/3000', usdSeconds: 10_000_000 * DAY_S }], rates, 'currentPct', DAY_S)
+    const r = workedRate(brais, [{ pool: 'pool:WETH/USDC/3000', usdSeconds: 10_000_000 * DAY_S }, { pool: 'vault:steakUSDC', usdSeconds: 10_000_000 * DAY_S }], rates, 'currentPct', DAY_S)
     expect(r.pct).toBe(8.5)
+  })
+  test('money working on Monad has no samples yet: the Base figure stands and says it covers Base only', () => {
+    const monad = { ...pos('9', 'pool:WMON/USDC/3000', '50000000'), chainId: 143 } as FundingView['positions'][number]
+    const both = { ...brais, positions: [...brais.positions, monad] }
+    const day = [{ pool: 'pool:WETH/USDC/3000', usdSeconds: 1 }]
+    expect(workedRate(both, day, at12, 'currentPct', DAY_S)).toMatchObject({ pct: 12, baseOnly: true })
+    expect(workedRate(brais, day, at12, 'currentPct', DAY_S).baseOnly).toBeUndefined()
+    const { html } = render(<Indicators f={both} apy={at12} price={null} worked={{ asOf: new Date().toISOString(), day, month: day }} />)
+    expect(html).toContain('rate-base-only')
   })
   test('a pool that worked with no rate: n/a, never dropped', () => {
     const r = workedRate(brais, [{ pool: 'pool:USDC/cbBTC/500', usdSeconds: 1 }], at12, 'currentPct', DAY_S)

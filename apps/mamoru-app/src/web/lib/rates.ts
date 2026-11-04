@@ -112,7 +112,8 @@ export function positionRates(f: FundingView, apy: ApyView | undefined, price: b
 // 'no-read' (otto/mamoru#208): the live balance read failed, so there is nothing to rate.
 export type RateGap = 'loading' | 'no-read' | 'no-positions' | 'no-data' | 'no-value'
 
-export type AccountRate = { pct: number | null; gap: RateGap | null; covered: number; of: number }
+/** `baseOnly` (otto/mamoru#343): a worked-capital figure that leaves out money working on another chain, which has no samples yet. */
+export type AccountRate = { pct: number | null; gap: RateGap | null; covered: number; of: number; baseOnly?: boolean }
 
 function weighted(rows: PositionRate[], pick: (r: PositionRate) => number | null): { pct: number | null; covered: number } {
   let sum = 0
@@ -177,9 +178,11 @@ export const MONTH_S = 30 * DAY_S
  * Brais, 2 Nov: an account rate counts only the money that works, so idle money is left out. It is each pool's rate
  * (`pick`: the pool's 24 h fee APR, or its 30-day mean), weighted by the capital that worked in that pool during
  * the window and by how long it worked. Capital that worked earlier at another rate still counts. Those weights
- * come from the yield ledger (`worked`, Base LP positions). Vaults are not in the ledger, so a vault's value now
- * counts for the whole window. With nothing in the ledger for the window, the positions open now stand in the same
- * way. If a pool that worked has no rate, the figure is n/a.
+ * are measured at each snapshot (`worked`, otto/mamoru#343: LP positions in range and vaults, a vault under its
+ * `vault:*` name, which is also its key in `apy.byPool`). The snapshot loop reads Base only, so money working on
+ * another chain has no samples: the figure then covers Base and says so (`baseOnly`), it never invents capital.
+ * With nothing measured for the window, the positions open now stand in, every chain. If a pool that worked has no
+ * rate, the figure is n/a.
  */
 export function workedRate(f: FundingView, worked: WorkedView['day'] | null | undefined, apy: ApyView | undefined, pick: 'currentPct' | 'monthlyPct', windowS: number, price: bigint | null = null): AccountRate {
   if (!apy) return { pct: null, gap: 'loading', covered: 0, of: 0 }
@@ -187,8 +190,13 @@ export function workedRate(f: FundingView, worked: WorkedView['day'] | null | un
   const add = (pool: string, w: number) => weights.set(pool, (weights.get(pool) ?? 0) + w)
   const fromLedger = !!worked?.length
   for (const w of worked ?? []) add(w.pool, w.usdSeconds)
+  let baseOnly = false
   for (const p of f.positions) {
-    if (fromLedger && !p.vault) continue
+    if (fromLedger) {
+      const chainId = (p as { chainId?: number }).chainId
+      if (chainId !== undefined && chainId !== 8453 && (valueOf(p, price).value ?? 0n) > 0n) baseOnly = true
+      continue
+    }
     const name = p.vault?.name ?? poolName(p.pool)
     const { value } = valueOf(p, price)
     if (value === null || !name) return { pct: null, gap: 'no-value', covered: 0, of: 0 }
@@ -207,7 +215,7 @@ export function workedRate(f: FundingView, worked: WorkedView['day'] | null | un
     covered++
   }
   if (covered < of || w <= 0) return { pct: null, gap: 'no-data', covered, of }
-  return { pct: Math.round((sum / w) * 100) / 100, gap: null, covered, of }
+  return { pct: Math.round((sum / w) * 100) / 100, gap: null, covered, of, ...(baseOnly ? { baseOnly } : {}) }
 }
 
 /** The data source named in an ApyView source line ("Plan pools, 30-day mean · DefiLlama" -> "DefiLlama"). */

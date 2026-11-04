@@ -55,6 +55,9 @@ export type SafeWire = {
   feesUsdc: string
   owedUsdc: string
   totalUsdc: string
+  /** otto/mamoru#210: shares in the registry's USDC vaults, each valued at its share price. Absent: none held. */
+  vaults?: { name: string; shares: string; valueUsdc: string }[]
+  vaultUsdc?: string
 }
 /** One UTC day's full totals, not a delta: writing them again is a no-op. `collectedUsdc` is absent while a fee of that day is unpriced. */
 export type DayReceiptWire = {
@@ -273,6 +276,54 @@ export async function writeYieldLedger(db: Db, snapshot: SnapshotWire, now: Date
   return { written, skipped }
 }
 
+/** Longest stretch one snapshot may stand for. The cron pulls every few minutes; a longer silence is a gap whose capital nobody saw. */
+export const WORKED_MAX_DT_S = 25 * 60
+const WORKED_KEEP_MS = 31 * 86_400_000
+
+/**
+ * otto/mamoru#343: what capital worked, measured at each snapshot. For every account of the snapshot, one row per LP
+ * pool and per vault holding value now, carrying the seconds since the account's previous stored snapshot (`dt_s`);
+ * the reader sums value x seconds where the position was in range. The first snapshot of an account, a snapshot
+ * more than 25 minutes after the previous one (a gap nobody saw) and a pull of a snapshot already stored write
+ * rows with dt_s 0 (or nothing, for the repeat): they only anchor the next one. ON CONFLICT DO NOTHING, so the beta
+ * and prod Workers pulling the same snapshot never count it twice. Rows older than 31 days are deleted.
+ * A pool's row sums its in-range positions; a pool with only out-of-range ones gets in_range 0.
+ */
+export async function writeWorkedSamples(db: Db, snapshot: SnapshotWire, now: Date): Promise<{ accounts: number; rows: number }> {
+  let accounts = 0
+  let rows = 0
+  const at = Date.parse(snapshot.readAt)
+  if (!Number.isFinite(at)) return { accounts, rows }
+  for (const safe of snapshot.safes) {
+    const account = await resolveAccount(db, snapshot.chainId, safe.safe)
+    if (!account) continue
+    const last = await db.prepare('SELECT MAX(read_at) AS read_at FROM account_worked_samples WHERE chain_id = ? AND account_key = ?').bind(snapshot.chainId, account.accountKey).first<{ read_at: string | null }>()
+    const dt = last?.read_at ? Math.round((at - Date.parse(last.read_at)) / 1000) : null
+    if (dt !== null && dt <= 0) continue
+    const dtS = dt === null || dt > WORKED_MAX_DT_S ? 0 : dt
+    const by = new Map<string, { inV: number; outV: number }>()
+    const add = (pool: string, value: bigint, inRange: boolean) => {
+      if (value <= 0n) return
+      const cur = by.get(pool) ?? { inV: 0, outV: 0 }
+      if (inRange) cur.inV += Number(value)
+      else cur.outV += Number(value)
+      by.set(pool, cur)
+    }
+    for (const p of safe.positions) if (BigInt(p.liquidity) > 0n) add(p.pool, BigInt(p.valueUsdc), p.inRange)
+    for (const v of safe.vaults ?? []) add(v.name, BigInt(v.valueUsdc), true)
+    for (const [pool, { inV, outV }] of by) {
+      await db
+        .prepare('INSERT INTO account_worked_samples (chain_id, account_key, read_at, pool, value_usd, in_range, dt_s) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING')
+        .bind(snapshot.chainId, account.accountKey, snapshot.readAt, pool, inV > 0 ? inV : outV, inV > 0 ? 1 : 0, dtS)
+        .run()
+      rows++
+    }
+    accounts++
+  }
+  await db.prepare('DELETE FROM account_worked_samples WHERE read_at < ?').bind(new Date(now.getTime() - WORKED_KEEP_MS).toISOString()).run()
+  return { accounts, rows }
+}
+
 async function digestOf(day: DayReceiptWire): Promise<string> {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(day)))
   return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -349,6 +400,7 @@ export async function pullYieldLedger(db: Db, operatorUrl: string, operatorSecre
   if (!snapshot) return null
   const accounts = await writeAccountSnapshot(db, snapshot, now)
   const positions = await writeYieldLedger(db, snapshot, now)
+  await writeWorkedSamples(db, snapshot, now)
   await writeReceipts(db, snapshot, now)
   return { accounts: accounts.written, positions: positions.written }
 }
