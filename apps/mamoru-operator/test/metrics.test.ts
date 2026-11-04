@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyEngineError, classifyRpcError, cuFor, CU_TABLE, DEFAULT_CU, EngineHealthTracker, GasReserveTracker, logErr, redactSecrets, RpcMetrics, safeMetrics, type EngineErrorClass } from '../src/metrics.ts'
+import { SLOT_BUSY_ALERT_MS, classifyEngineError, classifyRpcError, cuFor, CU_TABLE, DEFAULT_CU, EngineHealthTracker, GasReserveTracker, logErr, redactSecrets, RpcMetrics, safeMetrics, type EngineErrorClass } from '../src/metrics.ts'
 
 const dirs: string[] = []
 function tmpDir(): string {
@@ -679,5 +679,29 @@ describe('classifyEngineError with the thrown value itself', () => {
     for (const v of [revoked.proxy, hostile, Object.create(null), Symbol('x'), 10n, () => {}]) {
       expect(() => classifyEngineError('REVIEW_ERROR', v)).not.toThrow()
     }
+  })
+})
+
+describe('EngineHealthTracker.slot (otto/mamoru#277)', () => {
+  test('a slot held SLOT_BUSY_ALERT_MS pages once; slotBusyForS counts it; a free review resets', () => {
+    const t = new EngineHealthTracker()
+    const t0 = 1_000_000
+    expect(t.slot('acc-1', true, t0)).toBe(false)
+    expect(t.slot('acc-1', true, t0 + SLOT_BUSY_ALERT_MS - 1)).toBe(false)
+    expect(t.snapshot('acc-1', t0 + 90_000).slotBusyForS).toBe(90)
+    expect(t.slot('acc-1', true, t0 + SLOT_BUSY_ALERT_MS)).toBe(true)
+    expect(t.slot('acc-1', true, t0 + 2 * SLOT_BUSY_ALERT_MS)).toBe(false)
+    expect(t.slot('acc-1', false, t0 + 2 * SLOT_BUSY_ALERT_MS)).toBe(false)
+    expect(t.snapshot('acc-1', t0 + 3 * SLOT_BUSY_ALERT_MS).slotBusyForS).toBe(0)
+    // A new run of busy reviews pages again.
+    expect(t.slot('acc-1', true, t0 + 3 * SLOT_BUSY_ALERT_MS)).toBe(false)
+    expect(t.slot('acc-1', true, t0 + 4 * SLOT_BUSY_ALERT_MS)).toBe(true)
+  })
+
+  test('accounts are apart', () => {
+    const t = new EngineHealthTracker()
+    t.slot('a', true, 0)
+    expect(t.slot('b', true, SLOT_BUSY_ALERT_MS)).toBe(false)
+    expect(t.slot('a', true, SLOT_BUSY_ALERT_MS)).toBe(true)
   })
 })

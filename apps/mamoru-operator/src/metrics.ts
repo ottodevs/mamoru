@@ -539,13 +539,36 @@ export type EngineHealthSnapshot = {
   lastErrorAt: string | null
   reviewsLastHour: number
   errorsLastHour: number
+  /** otto/mamoru#277: seconds the account's reviews have held DECIDE_SLOT_BUSY in a row (0: the slot is free). */
+  slotBusyForS: number
 }
+
+/** otto/mamoru#277: a slot held this long (an op neither sent nor settled) pages ops once; #357 held one 13 h unseen. */
+export const SLOT_BUSY_ALERT_MS = 30 * 60_000
 
 type AccountHealth = { lastAt: number; lastCode: string | null; consecutiveErrors: number; lastErrorClass: EngineErrorClass | null; lastErrorAt: number | null; hourStart: number; reviews: number; errors: number }
 
 /** Per-account engine review stats, in-memory only (reset on operator restart; the journal in state.ts is the durable record). Keyed by a `Map` (see `Buckets` above for why, applies equally to an attacker- or bug-influenced accountKey). */
 export class EngineHealthTracker {
   private byAccount = new Map<string, AccountHealth>()
+  /** otto/mamoru#277: since when each account's reviews hold DECIDE_SLOT_BUSY, and whether that run was paged. */
+  private busy = new Map<string, { since: number; paged: boolean }>()
+
+  /**
+   * otto/mamoru#277: a review that reached a decision says whether it held the slot busy. True exactly once per run of
+   * busy reviews, when it reaches SLOT_BUSY_ALERT_MS: the caller pages then. A failed review changes nothing.
+   */
+  slot(accountKey: string, slotBusy: boolean, now: number = Date.now()): boolean {
+    if (!slotBusy) {
+      this.busy.delete(accountKey)
+      return false
+    }
+    const b = this.busy.get(accountKey) ?? { since: now, paged: false }
+    this.busy.set(accountKey, b)
+    if (b.paged || now - b.since < SLOT_BUSY_ALERT_MS) return false
+    b.paged = true
+    return true
+  }
 
   /** One `engine.review()` pass finished: `ok` false for an observation failure or a thrown error. `errorClass` is a closed enum, never free text (see `classifyEngineError`). */
   record(accountKey: string, ok: boolean, code: string | null, errorClass: EngineErrorClass | undefined, now: number = Date.now()): void {
@@ -582,6 +605,7 @@ export class EngineHealthTracker {
       lastErrorAt: h?.lastErrorAt ? new Date(h.lastErrorAt).toISOString() : null,
       reviewsLastHour: fresh ? h!.reviews : 0,
       errorsLastHour: fresh ? h!.errors : 0,
+      slotBusyForS: Math.max(0, Math.floor((now - (this.busy.get(accountKey)?.since ?? now)) / 1000)),
     }
   }
 }

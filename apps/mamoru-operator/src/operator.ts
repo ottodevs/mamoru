@@ -61,7 +61,7 @@ import { closeCalls, planReduce, planVaultExit, routeOf, swapBackCalls, vaultExi
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
 import { ONE_ACTION_GAS_UNITS, gasReserveAlertOverrideFromEnv, gasReserveAlertWei, reserveRefillWei } from './gas-reserve.ts'
 import { Lock } from './lock.ts'
-import { classifyEngineError, EngineHealthTracker, GasReserveTracker, logErr, safeMetrics, type EngineHealthSnapshot, type GasReserveSnapshot } from './metrics.ts'
+import { classifyEngineError, EngineHealthTracker, GasReserveTracker, logErr, safeMetrics, SLOT_BUSY_ALERT_MS, type EngineHealthSnapshot, type GasReserveSnapshot } from './metrics.ts'
 import type { Relayer } from './relayer.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
@@ -7633,6 +7633,10 @@ export class Operator {
             if (last?.detail) logErr(prefix, last.detail)
             else console.log(prefix)
             safeMetrics(() => this.engineHealth.record(acc.accountKey, true, d.code, undefined))
+            // otto/mamoru#277: an op that holds the slot for long (neither sent nor settled) pages ops once.
+            safeMetrics(() => {
+              if (this.engineHealth.slot(acc.accountKey, d.reason === 'DECIDE_SLOT_BUSY')) logErr('[alert]', `engine ${acc.accountKey.slice(0, 8)}@${this.cfg.chainId} has held DECIDE_SLOT_BUSY for over ${SLOT_BUSY_ALERT_MS / 60_000} min: an op is neither sent nor settled (live op ${engine.journal.live ? `${engine.journal.live.opId} ${engine.journal.live.state}` : 'unknown'}); nothing else runs for this account until it clears`)
+            })
             // otto/mamoru#278: Growth above its target and band on the remote Safe: ask it for the excess.
             if (d.returnDue) await this.askReturn(acc, d.returnDue.amount, r.observation.remote?.value ?? 0n, startedAt).catch((e) => logErr(`[return] ${acc.accountKey}:`, e))
             // otto/mamoru#8: this review's own balance read (no extra RPC call), against the account's alert threshold.
