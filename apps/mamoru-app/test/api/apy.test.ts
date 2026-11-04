@@ -271,5 +271,52 @@ describe('GET /api/apy', () => {
       await getApy(fakeFetch({}).fetcher, cache, op)
       expect(op.calls.length).toBe(1)
     })
+    describe('the Monad pool from the Monad operator (otto/mamoru#349)', () => {
+      const MON = 'pool:WMON/USDC/3000'
+      const monadBody = (asOf = NOW.getTime() / 1000 - 3600) => ({ chainId: 143, pools: { [MON]: { ...opPool(10, 20, 3000), asOf } } })
+      /** Base and Monad operators behind one fetch, told apart by host; `monad` null leaves OPERATOR_URL_143 unset. */
+      async function both(monad: { body?: unknown; status?: number; throws?: boolean } | null, cache?: ApyCache) {
+        const calls: string[] = []
+        const operatorFetch = (async (url: string | URL | Request) => {
+          const u = String(url)
+          calls.push(u)
+          if (u.startsWith('https://monad.test')) {
+            if (monad?.throws) throw new Error('down')
+            return Response.json(monad?.body, { status: monad?.status ?? 200 })
+          }
+          return Response.json(ALL)
+        }) as NonNullable<Parameters<typeof harness>[1]>['operatorFetch']
+        const h = harness(() => NOW, { apyFetch: fakeFetch({}).fetcher, ...(cache ? { apyCache: () => cache } : {}), operatorFetch, env: { OPERATOR_URL: 'https://op.test', OPERATOR_SECRET: 's', ...(monad ? { OPERATOR_URL_143: 'https://monad.test/' } : {}) } })
+        const res = await h.request('/api/apy')
+        return { view: (await res.json()) as ApyView, calls }
+      }
+
+      test('rated at the Monad operator\'s stats, signed, beside the Base pools, outside the reference weights', async () => {
+        const { view, calls } = await both({ body: monadBody() })
+        expect(view.byPool?.find((b) => b.pool === MON)).toEqual({ pool: MON, weight: 0, currentPct: 10, monthlyPct: 20 })
+        expect(calls).toContain('https://monad.test/pool-stats')
+        expect(view.byPool?.find((b) => b.pool === 'pool:USDC/USDT/100')?.currentPct).toBe(2)
+        expect(view.currentPct).toBe(5) // the reference mix is Base only: 2*.5 + 5*.4 + 20*.1
+      })
+
+      test('own cache key: both operators are kept side by side', async () => {
+        const cache = memoryCache()
+        await both({ body: monadBody() }, cache)
+        const { view, calls } = await both({ body: monadBody() }, cache)
+        expect(calls).toEqual([])
+        expect(view.byPool?.find((b) => b.pool === MON)?.currentPct).toBe(10)
+        expect(view.byPool?.find((b) => b.pool === 'pool:USDC/USDT/100')?.currentPct).toBe(2)
+      })
+
+      test('unset, unreachable, wrong chain, stale or unread: the pool is absent, Base unchanged', async () => {
+        const stale = monadBody(NOW.getTime() / 1000 - 8 * 3600)
+        const unread = { chainId: 143, pools: { [MON]: opPool(null, null, 3000) } }
+        for (const m of [null, { throws: true }, { status: 503, body: { error: 'x' } }, { body: { ...monadBody(), chainId: 8453 } }, { body: stale }, { body: unread }]) {
+          const { view } = await both(m)
+          expect(view.byPool?.some((b) => b.pool === MON)).toBe(false)
+          expect(view.byPool?.map((b) => b.currentPct).slice(0, 3)).toEqual([2, 5, 20])
+        }
+      })
+    })
   })
 })

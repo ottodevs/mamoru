@@ -86,6 +86,13 @@ describe('current rate', () => {
     const mixed = { ...placed, positions: [pos('1', 'pool:USDC/USDT/100', '10000000'), pos('2', 'pool:WETH/USDC/500', '90000000')] }
     expect(currentRate(positionRates(mixed, apy), apy)).toMatchObject({ pct: null, gap: 'no-data', covered: 1, of: 2 })
   })
+  test('a Base + Monad account gets a 24h figure once the Monad pool is rated (otto/mamoru#349)', () => {
+    const monad = { ...pos('9', 'pool:WMON/USDC/3000', '50000000'), chainId: 143 } as FundingView['positions'][number]
+    const f: FundingView = { ...placed, positions: [placed.positions[0]!, monad] }
+    expect(currentRate(positionRates(f, apy), apy)).toMatchObject({ pct: null, gap: 'no-data' })
+    const rated: ApyView = { ...apy, byPool: [...apy.byPool!, { pool: 'pool:WMON/USDC/3000', weight: 0, currentPct: 10, monthlyPct: 20 }] }
+    expect(currentRate(positionRates(f, rated), rated)).toMatchObject({ pct: 6.5, gap: null, covered: 2 })
+  })
   test('a cbBTC position with no price is not weighted on a guess', () => {
     const old = { ...placed, positions: [{ tokenId: '1', pool: 'pool:USDC/cbBTC/500', liquidity: '1', inRange: true, amountUsdc: '1000000', amountCbbtc: '1000' }] }
     expect(currentRate(positionRates(old, apy, null), apy)).toMatchObject({ pct: null, gap: 'no-value' })

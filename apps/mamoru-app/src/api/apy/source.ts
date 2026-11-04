@@ -1,6 +1,6 @@
 import type { ApyView } from '@mamoru/domain'
 import { conservadorLiveV2 } from '@mamoru/policy'
-import { baseRegistry, entry } from '@mamoru/registry'
+import { baseRegistry, entry, monadRegistry } from '@mamoru/registry'
 
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>
 /** The slice of the Workers Cache API used here; tests pass an in-memory one. */
@@ -208,9 +208,9 @@ function source(label: string, covered: number, total: number): string {
  * One current and one monthly APY for the account. Before our positions earn fees this is a
  * reference: the plan's pools' APYs weighted by the policy's bucket weights.
  */
-export async function apyView(fetcher: Fetcher, cache: ApyCache | null, now: Date, pools: PlanPool[] = planPools(), operator: OperatorStats = async () => null): Promise<ApyView> {
+export async function apyView(fetcher: Fetcher, cache: ApyCache | null, now: Date, pools: PlanPool[] = planPools(), operator: OperatorStats = async () => null, monad: OperatorStats = async () => null): Promise<ApyView> {
   const weights = pools.map((p) => p.weight)
-  const stats = await operator().catch(() => null)
+  const [stats, monadStats] = await Promise.all([operator().catch(() => null), monad().catch(() => null)])
   const [current, monthly, vaults] = await Promise.all([
     Promise.all(pools.map((p) => poolCurrent(fetcher, cache, p, stats?.[p.name]))),
     Promise.all(pools.map((p) => poolMonthly(fetcher, cache, p, now, stats?.[p.name]))),
@@ -226,9 +226,23 @@ export async function apyView(fetcher: Fetcher, cache: ApyCache | null, now: Dat
     currentSource: source(labelOf(current, OPERATOR_CURRENT_SOURCE, CURRENT_SOURCE, CURRENT_SOURCE), c.covered, pools.length),
     monthlyPct: m.pct,
     monthlySource: source(labelOf(monthly, OPERATOR_MONTHLY_SOURCE, MONTHLY_SOURCE, '28/30-day mean · GeckoTerminal/DefiLlama'), m.covered, pools.length),
-    byPool: [...pools.map((p, i) => ({ pool: p.name, weight: p.weight, currentPct: round(current[i]?.v), monthlyPct: round(monthly[i]?.v) })), ...vaults],
+    byPool: [...pools.map((p, i) => ({ pool: p.name, weight: p.weight, currentPct: round(current[i]?.v), monthlyPct: round(monthly[i]?.v) })), ...vaults, ...monadRates(monadStats)],
     asOf: now.toISOString(),
   }
+}
+
+/** otto/mamoru#349: the Monad sleeve's pool, rated beside the plan pools at weight 0 (a position's rate, never the reference mix). */
+export const MONAD_POOL = 'pool:WMON/USDC/3000'
+const MONAD_CHAIN_ID = 143
+
+/** The Monad pool's rates from its operator's stats; absent (never 0 %) when unset, unreachable, stale or unread. */
+function monadRates(stats: Record<string, OperatorPoolStats> | null) {
+  const st = stats?.[MONAD_POOL]
+  if (!st) return []
+  const fee = entry(MONAD_POOL, monadRegistry).fee ?? 3000
+  const currentPct = round(feeApr(st.volumeLastDayUsd, fee, st.tvlUsd))
+  const monthlyPct = round(feeApr(st.volume28dAvgUsd, fee, st.tvlUsd))
+  return currentPct === null && monthlyPct === null ? [] : [{ pool: MONAD_POOL, weight: 0, currentPct, monthlyPct }]
 }
 
 /** The source line names what the shown figures came from: the operator's stats, upstream, or both. */
@@ -247,7 +261,7 @@ export const OPERATOR_MAX_AGE_S = 7 * 3600
  * otto/mamoru#248: the Base operator's GET /pool-stats, signed like /metrics, kept 5 minutes in the Workers Cache (the
  * operator itself refreshes hourly). Null when unsigned, unreachable or malformed: the upstream path takes over.
  */
-export function operatorPoolStats(url: string | undefined, secret: string | undefined, fetcher: Fetcher, cache: ApyCache | null, sign: (secret: string, path: string) => Promise<string>, now: Date): OperatorStats {
+export function operatorPoolStats(url: string | undefined, secret: string | undefined, fetcher: Fetcher, cache: ApyCache | null, sign: (secret: string, path: string) => Promise<string>, now: Date, chainId = 8453, cacheName = 'operator-pool-stats'): OperatorStats {
   // The age check runs on every read, cached or not: a cached pool keeps its asOf.
   const fresh = (pools: Record<string, OperatorPoolStats & { asOf: number }>) => {
     const out: Record<string, OperatorPoolStats> = {}
@@ -258,14 +272,14 @@ export function operatorPoolStats(url: string | undefined, secret: string | unde
   }
   return async () => {
     if (!url || !secret) return null
-    const key = `${KEY}/operator-pool-stats`
+    const key = `${KEY}/${cacheName}`
     const hit = await get<Record<string, OperatorPoolStats & { asOf: number }>>(cache, key)
     if (hit && typeof hit === 'object') return fresh(hit)
     try {
       const res = await fetcher(url.replace(/\/+$/, '') + '/pool-stats', { headers: { 'x-mamoru-sig': await sign(secret, '/pool-stats'), accept: 'application/json' }, signal: AbortSignal.timeout(OPERATOR_TIMEOUT_MS) })
       if (res.status !== 200) return null
       const body = (await res.json()) as { chainId?: unknown; pools?: unknown }
-      if (body.chainId !== 8453 || !body.pools || typeof body.pools !== 'object') return null
+      if (body.chainId !== chainId || !body.pools || typeof body.pools !== 'object') return null
       const pools: Record<string, OperatorPoolStats & { asOf: number }> = {}
       for (const [name, v] of Object.entries(body.pools as Record<string, Record<string, unknown>>)) {
         if (!v || typeof v !== 'object') continue
@@ -279,6 +293,11 @@ export function operatorPoolStats(url: string | undefined, secret: string | unde
       return null
     }
   }
+}
+
+/** otto/mamoru#349: the Monad operator's GET /pool-stats (chain 143), under its own cache key; same signing, timeout and 7 h rule. */
+export function monadOperatorPoolStats(url: string | undefined, secret: string | undefined, fetcher: Fetcher, cache: ApyCache | null, sign: (secret: string, path: string) => Promise<string>, now: Date): OperatorStats {
+  return operatorPoolStats(url, secret, fetcher, cache, sign, now, MONAD_CHAIN_ID, 'operator-pool-stats-143')
 }
 
 const round = (v: number | null | undefined): number | null => (v === null || v === undefined ? null : round2(v))
