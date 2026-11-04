@@ -44,7 +44,7 @@ import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSess
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
 import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
-import { Engine, engineGas, isTransportError, v4EngineGas, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
+import { Engine, engineGas, isTransportError, thrownSummary, v4EngineGas, type BridgeSigning, type EngineConfig, type EngineSession } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
 import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
 import { buildMoneyMap, chainLegOf, returnRows, unreadLeg, type ReturnLeg } from './money-map.ts'
@@ -7712,7 +7712,8 @@ export class Operator {
           }
         } catch (e) {
           // `e` goes to the classifier as it is: reading or coercing an odd thrown value here could itself throw.
-          logErr(`[engine ${acc.accountKey}] review error:`, e)
+          // otto/mamoru#358: with the JSON-RPC methods of a request that failed (a Monad harvest timed out on an unknown read).
+          logErr(`[engine ${acc.accountKey}] review error:`, thrownSummary(e))
           safeMetrics(() => this.engineHealth.record(acc.accountKey, false, 'REVIEW_ERROR', classifyEngineError('REVIEW_ERROR', e)))
         }
         // otto/mamoru#340: the history's own look for deposits, rarely (DEPOSIT_IDLE_SCAN_MS), so its cursor never falls
