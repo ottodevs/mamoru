@@ -19,16 +19,18 @@ type SumRow = { pool: string; day: number; month: number }
 export async function loadWorked(db: Db, chainId: number, accountKey: string): Promise<WorkedView | null> {
   const last = await db.prepare('SELECT MAX(read_at) AS read_at FROM account_worked_samples WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).first<{ read_at: string | null }>()
   if (!last?.read_at) return null
-  const anchor = Date.parse(last.read_at)
-  const iso = (windowS: number) => new Date(anchor - windowS * 1000).toISOString()
+  const anchor = Math.floor(Date.parse(last.read_at) / 1000)
+  // A row stands for (t_s - dt_s, t_s]: only the part inside (anchor - window, anchor] counts, so a sample just
+  // inside the boundary gives its few seconds, not its whole dt.
+  const part = (windowS: number) => `value_usd * MAX(0, MIN(t_s, ${anchor}) - MAX(t_s - dt_s, ${anchor - windowS}))`
   const rows = await db
     .prepare(
-      `SELECT pool, SUM(CASE WHEN read_at > ? THEN value_usd * dt_s ELSE 0 END) AS day, SUM(value_usd * dt_s) AS month
+      `SELECT pool, SUM(${part(DAY_S)}) AS day, SUM(${part(MONTH_S)}) AS month
        FROM account_worked_samples
-       WHERE chain_id = ? AND account_key = ? AND in_range = 1 AND read_at > ? AND read_at <= ?
+       WHERE chain_id = ? AND account_key = ? AND in_range = 1 AND t_s > ? AND t_s <= ?
        GROUP BY pool ORDER BY pool`,
     )
-    .bind(iso(DAY_S), chainId, accountKey, iso(MONTH_S), last.read_at)
+    .bind(chainId, accountKey, anchor - MONTH_S, anchor)
     .all<SumRow>()
   const pick = (k: 'day' | 'month') => rows.results.filter((r) => r[k] > 0).map((r) => ({ pool: r.pool, usdSeconds: r[k] }))
   return { asOf: last.read_at, day: pick('day'), month: pick('month') }

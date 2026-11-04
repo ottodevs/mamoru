@@ -197,6 +197,8 @@ export function workedRate(f: FundingView, worked: WorkedView['day'] | null | un
       if (chainId !== undefined && chainId !== 8453 && (valueOf(p, price).value ?? 0n) > 0n) baseOnly = true
       continue
     }
+    // Only money working now stands in: a position out of range, emptied or worth nothing earns nothing.
+    if (!p.vault && (!p.inRange || BigInt(p.liquidity || '0') <= 0n)) continue
     const name = p.vault?.name ?? poolName(p.pool)
     const { value } = valueOf(p, price)
     if (value === null || !name) return { pct: null, gap: 'no-value', covered: 0, of: 0 }

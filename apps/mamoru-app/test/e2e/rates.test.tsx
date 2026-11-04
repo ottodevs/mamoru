@@ -96,6 +96,14 @@ describe('rates over the working capital', () => {
     const { html } = render(<Indicators f={both} apy={at12} price={null} worked={{ asOf: new Date().toISOString(), day, month: day }} />)
     expect(html).toContain('rate-base-only')
   })
+  test('with nothing measured, only positions in range and with liquidity stand in: an out-of-range LP is n/a, never a pool rate', () => {
+    const out = { ...brais, positions: [pos('1', 'pool:WETH/USDC/3000', '4790000', false)] }
+    expect(workedRate(out, null, at12, 'currentPct', DAY_S)).toMatchObject({ pct: null, gap: 'no-positions' })
+    const empty = { ...brais, positions: [{ ...pos('1', 'pool:WETH/USDC/3000', '0'), liquidity: '0' }] }
+    expect(workedRate(empty, null, at12, 'currentPct', DAY_S)).toMatchObject({ pct: null, gap: 'no-positions' })
+    const mixed = { ...brais, positions: [pos('1', 'pool:WETH/USDC/3000', '4790000', false), pos('2', 'pool:USDC/USDT/100', '1000000')] }
+    expect(workedRate(mixed, null, at12, 'currentPct', DAY_S).pct).toBe(3)
+  })
   test('a pool that worked with no rate: n/a, never dropped', () => {
     const r = workedRate(brais, [{ pool: 'pool:USDC/cbBTC/500', usdSeconds: 1 }], at12, 'currentPct', DAY_S)
     expect(r.pct).toBeNull()

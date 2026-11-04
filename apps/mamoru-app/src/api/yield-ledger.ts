@@ -311,10 +311,13 @@ export async function writeWorkedSamples(db: Db, snapshot: SnapshotWire, now: Da
     }
     for (const p of safe.positions) if (BigInt(p.liquidity) > 0n) add(p.pool, BigInt(p.valueUsdc), p.inRange)
     for (const v of safe.vaults ?? []) add(v.name, BigInt(v.valueUsdc), true)
+    // The anchor: always one row, so the next snapshot measures its dt from this one even when nothing worked.
+    const idle = Number(safe.idleUsdc)
+    if (!by.size) by.set('idle', { inV: 0, outV: Number.isFinite(idle) ? idle : 0 })
     for (const [pool, { inV, outV }] of by) {
       await db
-        .prepare('INSERT INTO account_worked_samples (chain_id, account_key, read_at, pool, value_usd, in_range, dt_s) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING')
-        .bind(snapshot.chainId, account.accountKey, snapshot.readAt, pool, inV > 0 ? inV : outV, inV > 0 ? 1 : 0, dtS)
+        .prepare('INSERT INTO account_worked_samples (chain_id, account_key, read_at, t_s, pool, value_usd, in_range, dt_s) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING')
+        .bind(snapshot.chainId, account.accountKey, snapshot.readAt, Math.floor(at / 1000), pool, inV > 0 ? inV : outV, inV > 0 ? 1 : 0, dtS)
         .run()
       rows++
     }
