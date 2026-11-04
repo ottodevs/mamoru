@@ -97,6 +97,20 @@ describe('rates over the working capital', () => {
     expect(html).toContain('rate-base-only')
     expect(html).toContain('Both figures cover')
   })
+  test('with Monad samples in the window the note is gone; without them in that window it stays (otto/mamoru#343 phase B)', () => {
+    const monad = { ...pos('9', 'pool:WMON/USDC/3000', '50000000'), chainId: 143 } as FundingView['positions'][number]
+    const both = { ...brais, positions: [...brais.positions, monad] }
+    const day = [{ pool: 'pool:WETH/USDC/3000', usdSeconds: 1 }, { pool: 'pool:WMON/USDC/3000', usdSeconds: 1 }]
+    expect(workedRate(both, day, at12, 'currentPct', DAY_S, null, true, true).baseOnly).toBeUndefined()
+    const asOf = new Date().toISOString()
+    const rates = { ...at12, byPool: [...at12.byPool, { pool: 'pool:WMON/USDC/3000', weight: 0, currentPct: 9, monthlyPct: 9 }] }
+    const shown = (chains: { day: number[]; month: number[] }) => render(<Indicators f={both} apy={rates} price={null} otherChain worked={{ asOf, day, month: day, chains }} />).html
+    expect(shown({ day: [143], month: [143] })).not.toContain('rate-base-only')
+    const dayOnly = shown({ day: [], month: [143] })
+    expect(dayOnly).toContain('rate-base-only')
+    expect(dayOnly).toContain('The 24h figure covers')
+    expect(shown({ day: [], month: [] })).toContain('Both figures cover')
+  })
   test('a Monad sleeve alone (its position closed) still marks the figure Base only', () => {
     const day = [{ pool: 'pool:WETH/USDC/3000', usdSeconds: 1 }]
     expect(workedRate(brais, day, at12, 'currentPct', DAY_S, null, true)).toMatchObject({ pct: 12, baseOnly: true })

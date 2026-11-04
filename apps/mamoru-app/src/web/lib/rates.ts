@@ -179,14 +179,15 @@ export const MONTH_S = 30 * DAY_S
  * (`pick`: the pool's 24 h fee APR, or its 30-day mean), weighted by the capital that worked in that pool during
  * the window and by how long it worked. Capital that worked earlier at another rate still counts. Those weights
  * are measured at each snapshot (`worked`, otto/mamoru#343: LP positions in range and vaults, a vault under its
- * `vault:*` name, which is also its key in `apy.byPool`). The snapshot loop reads Base only, so money working on
- * another chain has no samples: the figure then covers Base and says so (`baseOnly`), it never invents capital.
+ * `vault:*` name, which is also its key in `apy.byPool`). Money working on another chain has samples only when that
+ * chain's operator runs the snapshot loop (`otherMeasured`, the window has samples of the owner's Monad sleeve, phase B):
+ * without them the figure covers Base and says so (`baseOnly`), it never invents capital.
  * With nothing measured for the window, the positions open now stand in, every chain. If a pool that worked has no
  * rate, the figure is n/a.
  * The fallback for an empty measured window is deliberate (otto/mamoru#343, review r3): a new position is sampled
  * within one cron tick, and n/a in that gap is what product asked to avoid.
  */
-export function workedRate(f: FundingView, worked: WorkedView['day'] | null | undefined, apy: ApyView | undefined, pick: 'currentPct' | 'monthlyPct', windowS: number, price: bigint | null = null, otherChain = false): AccountRate {
+export function workedRate(f: FundingView, worked: WorkedView['day'] | null | undefined, apy: ApyView | undefined, pick: 'currentPct' | 'monthlyPct', windowS: number, price: bigint | null = null, otherChain = false, otherMeasured = false): AccountRate {
   if (!apy) return { pct: null, gap: 'loading', covered: 0, of: 0 }
   const weights = new Map<string, number>()
   const add = (pool: string, w: number) => weights.set(pool, (weights.get(pool) ?? 0) + w)
@@ -207,6 +208,7 @@ export function workedRate(f: FundingView, worked: WorkedView['day'] | null | un
     if (value === null || !name) return { pct: null, gap: 'no-value', covered: 0, of: 0 }
     if (value > 0n) add(name, Number(value) * windowS)
   }
+  if (otherMeasured) baseOnly = false
   const of = weights.size
   if (of === 0) return { pct: null, gap: 'no-positions', covered: 0, of: 0 }
   let sum = 0

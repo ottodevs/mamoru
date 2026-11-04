@@ -1,10 +1,10 @@
 import { createApp } from './api/app.ts'
-import type { Env } from './api/env.ts'
+import { operatorUrlFor, type Env } from './api/env.ts'
 import { DRAIN_PER_CRON, drainFeedback } from './api/feedback.ts'
 import { readOpsFlags } from './api/ops-flags.ts'
 import { pullOperatorMetrics } from './api/operator-metrics.ts'
 import { runOperatorLinkWatch } from './api/operator-link-watch.ts'
-import { pullYieldLedger, type OperatorFetch } from './api/yield-ledger.ts'
+import { pullWorkedSamples, pullYieldLedger, type OperatorFetch } from './api/yield-ledger.ts'
 
 // mamoru-app Worker (plan §19.1): /api/* runs here first; everything else is the SPA from ASSETS.
 const app = createApp()
@@ -22,6 +22,14 @@ export async function runYieldLedger(env: Env, fetcher: OperatorFetch = (input, 
     await pullYieldLedger(env.DB, env.OPERATOR_URL, env.OPERATOR_SECRET, fetcher, new Date())
   } catch (e) {
     console.error('yield-ledger: cron run failed', e instanceof Error ? e.message : String(e))
+  }
+  // otto/mamoru#343 phase B: Monad capital for the worked APY, behind the same flag. Worked samples only; its own
+  // try so a Monad failure never costs the Base pull. Unset URL, 404 (its loop is off) or unreachable: skipped quietly.
+  try {
+    const monadUrl = operatorUrlFor(env, 143)
+    if (monadUrl && (await readOpsFlags(env.DB)).yield_ledger) await pullWorkedSamples(env.DB, 143, monadUrl, env.OPERATOR_SECRET, fetcher, new Date())
+  } catch (e) {
+    console.error('yield-ledger: monad worked samples run failed', e instanceof Error ? e.message : String(e))
   }
 }
 

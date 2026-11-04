@@ -399,3 +399,15 @@ export async function pullYieldLedger(db: Db, operatorUrl: string, operatorSecre
   await writeReceipts(db, snapshot, now)
   return { accounts: accounts.written, positions: positions.written }
 }
+
+/**
+ * otto/mamoru#343 phase B: one cron tick for a chain whose operator measures capital only for the worked APY (Monad):
+ * pulls its /snapshot and stores the worked samples under the sleeve's account_key, and nothing else. The yield
+ * ledger, the account snapshot and the receipts are Base-bound and stay on `pullYieldLedger`. Null when the operator
+ * answers nothing (loop off, 404, not reachable) or answers for another chain than `chainId`.
+ */
+export async function pullWorkedSamples(db: Db, chainId: number, operatorUrl: string, operatorSecret: string, fetcher: OperatorFetch, now: Date): Promise<{ accounts: number; rows: number } | null> {
+  const snapshot = await fetchSnapshot(operatorUrl, operatorSecret, fetcher)
+  if (!snapshot || snapshot.chainId !== chainId) return null
+  return writeWorkedSamples(db, snapshot, now)
+}

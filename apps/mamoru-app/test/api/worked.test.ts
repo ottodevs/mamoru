@@ -182,3 +182,49 @@ describe('loadWorked', () => {
     expect(r.pct).toBe(3.66)
   })
 })
+
+// otto/mamoru#343 phase B: the owner's Monad sleeve is measured like the Base account and merged into its view.
+describe('loadWorked with the owner\'s Monad sleeve', () => {
+  const MKEY = 'acct-worked-monad'
+  const MSAFE = '0xabcdef0000000000000000000000000000005678'
+  const withSleeve = (db: ReturnType<typeof seed>, user = 'u1') =>
+    db.raw.exec(
+      `INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at)
+       VALUES ('${MKEY}', '${user}', 143, '${MSAFE}', '[]', 'cred-m', '0x1', '0x2', '2', 'v1', '2026-10-01T00:00:00.000Z')`,
+    )
+  const monad = (t: number, value: number): SnapshotWire => ({ ...snap(at(t), [{ ...safe([pos('7', 'pool:WMON/USDC/3000', value)]), safe: MSAFE, accountKey: MKEY.slice(0, 8) }]), chainId: 143 })
+  const base = (t: number) => snap(at(t), [safe([pos('1', 'pool:A', USDC)])])
+
+  test('Base and Monad samples merge per pool, each interval from its own times; chains names Monad', async () => {
+    const db = seed()
+    withSleeve(db)
+    await writeWorkedSamples(db, base(0), NOW)
+    await writeWorkedSamples(db, base(300), NOW)
+    await writeWorkedSamples(db, monad(100, 2 * USDC), NOW)
+    await writeWorkedSamples(db, monad(400, 2 * USDC), NOW)
+    const w = await loadWorked(db, CHAIN, KEY)
+    expect(w?.asOf).toBe(at(400))
+    // Base (0, 300] = 300 s; Monad (100, 400] = 300 s, the window ends at 400 for both.
+    expect(w?.day).toEqual([{ pool: 'pool:A', usdSeconds: USDC * 300 }, { pool: 'pool:WMON/USDC/3000', usdSeconds: 2 * USDC * 300 }])
+    expect(w?.chains).toEqual({ day: [143], month: [143] })
+  })
+  test('a sleeve with no samples adds no chains (the note stays); one with samples older than the day counts for the month only', async () => {
+    const db = seed()
+    withSleeve(db)
+    await writeWorkedSamples(db, base(0), NOW)
+    await writeWorkedSamples(db, base(300), NOW)
+    expect((await loadWorked(db, CHAIN, KEY))?.chains).toBeUndefined()
+    await writeWorkedSamples(db, monad(-2 * 86_400, USDC), NOW)
+    await writeWorkedSamples(db, monad(-2 * 86_400 + 300, USDC), NOW)
+    expect((await loadWorked(db, CHAIN, KEY))?.chains).toEqual({ day: [], month: [143] })
+  })
+  test('no sleeve: the view has no chains key; another owner\'s sleeve is never merged', async () => {
+    const db = seed()
+    db.raw.exec(`INSERT INTO users (user_id, email, created_at) VALUES ('u2', 'x@y.z', '2026-10-01T00:00:00.000Z')`)
+    withSleeve(db, 'u2')
+    await writeWorkedSamples(db, base(0), NOW)
+    await writeWorkedSamples(db, monad(0, USDC), NOW)
+    await writeWorkedSamples(db, monad(300, USDC), NOW)
+    expect(await loadWorked(db, CHAIN, KEY)).toEqual({ asOf: at(0), day: [], month: [] })
+  })
+})

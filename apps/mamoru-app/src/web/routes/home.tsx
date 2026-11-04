@@ -58,7 +58,7 @@ export const homeCopy = {
   // Brais's label, literal (otto/mamoru#198, 23-oct). Brais, 2 Nov: the figure is the last 24 h of the capital that worked.
   currentWhat: '24h avg',
   sources: 'Rate sources',
-  // otto/mamoru#343: the snapshot loop reads Base only, so money working on Monad is not in these figures yet.
+  // otto/mamoru#343: shown while the window has no samples of the Monad sleeve (its operator's snapshot loop off, or no money there yet).
   baseOnly: { both: 'Both figures cover the money working on Base. Money working on Monad is not counted yet.', month: 'The 30-day figure covers the money working on Base. Money working on Monad is not counted yet.', day: 'The 24h figure covers the money working on Base. Money working on Monad is not counted yet.' },
   monthlySource: 'Monthly',
   currentSource: '24h avg',
@@ -297,8 +297,8 @@ export function Indicators({ f, apy, price, worked = null, otherChain = false, n
   // A ledger more than 6 h behind (its cron stalled) would show an old window, for both figures: the positions open now stand in instead.
   const fresh = worked && Date.now() - Date.parse(worked.asOf) < LEDGER_DAY_MAX_AGE_MS ? worked : null
   const nothingWorked = !!f && f.positions.length === 0 && !fresh?.month.length
-  const monthly = !f ? { pct: null, gap: waiting, covered: 0, of: 0, plan: false } : nothingWorked ? monthlyRate([], apy) : { ...workedRate(f, fresh?.month, apy, 'monthlyPct', MONTH_S, price, otherChain), plan: false }
-  const current = f ? workedRate(f, fresh?.day, apy, 'currentPct', DAY_S, price, otherChain) : { pct: null, gap: waiting, covered: 0, of: 0 }
+  const monthly = !f ? { pct: null, gap: waiting, covered: 0, of: 0, plan: false } : nothingWorked ? monthlyRate([], apy) : { ...workedRate(f, fresh?.month, apy, 'monthlyPct', MONTH_S, price, otherChain, !!fresh?.chains?.month.length), plan: false }
+  const current = f ? workedRate(f, fresh?.day, apy, 'currentPct', DAY_S, price, otherChain, !!fresh?.chains?.day.length) : { pct: null, gap: waiting, covered: 0, of: 0 }
   const partial = (r: AccountRate) => (r.pct !== null && r.covered < r.of ? `${r.covered} of ${r.of} pools with a rate` : null)
   const monthlySrc = sourceName(apy?.monthlySource)
   const currentSrc = sourceName(apy?.currentSource)
