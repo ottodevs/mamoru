@@ -39,6 +39,8 @@ import { ChainBadge, SafeRef } from '../components/safe-ref.tsx'
 import { idleWhyLine } from '../lib/idle-why.ts'
 import { mixVsTarget, type MixRow } from '../lib/mix.ts'
 import { TransferRow } from '../components/transfer-row.tsx'
+import { UpgradeProgress } from '../components/upgrade-progress.tsx'
+import { upgradeJourney } from '../lib/upgrade-steps.ts'
 
 export const homeCopy = {
   total: 'Total balance',
@@ -1531,6 +1533,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // A renewal the owner signed is on its way: the row that asks for it steps aside until it settles.
   const renewing = opList.some((o) => o.kind === 'renew' && !TERMINAL.has(o.state))
   const renewAsk = renewAskFor(f, renewing)
+  const upgrade = f?.source === 'chain' ? null : upgradeJourney(f, opList)
   useEffect(() => {
     if (renewAsk && !askedBefore(renewAsk)) setRenewAsked(true)
   }, [renewAsk])
@@ -1698,6 +1701,8 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           {/* otto/mamoru#311: Base is approved and the account is starting, so Start's row is gone; the one approval stays
               on screen for its Ethereum part, and says when it is done. */}
           {!canStart && (oneOpen || one.finished) ? <OneApprovalStart flow={one} title={homeCopy.notRunning} startLabel={homeCopy.start} /> : null}
+          {/* otto/mamoru#263: the move to the mix with Monad, step by step, while it runs and for a day after. */}
+          {upgrade ? <UpgradeProgress upgrade={upgrade} /> : null}
           {noPositions ? null : <Working f={whole!.f} s={whole!.s} apy={apy.data} price={price} otherChainsUsdc={otherChainsUsdc} onStop={!fromChain && (f.active || whole!.f.positions.length > 0) ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />}
           <Idle f={whole!.f} s={whole!.s} home={s as Split} />
           <History ops={opList} onRetry={retry} loaded={ops.isSuccess} />
