@@ -76,8 +76,11 @@ const STUCK_GROUP: Record<BridgeStuckReason, keyof typeof moneyCopy.stuck> = {
   not_sent: 'ours',
 }
 
-/** No burn landed for these, so there is no Circle message to finish by hand. */
-const NO_BURN = new Set<string>(['not_sent', 'burn_unmatched'])
+/**
+ * The burn landed on Base for these, so Circle has a message to finish by hand. An allowlist: a code this app does not
+ * know, or none, never offers it (not_sent and burn_unmatched mean no burn landed).
+ */
+const BURN_LANDED = new Set<string>(['no_attestation', 'mint_pending', 'mint_reverted', 'gas_ceiling', 'mint_budget', 'relayer_unfunded', 'mint_off', 'monad_unreachable'])
 
 /** The walkaway section that finishes a Base to Monad transfer by hand. */
 export const DIY_MINT_URL = `${WALKAWAY_URL}#a-transfer-to-monad-that-never-arrives`
@@ -226,7 +229,7 @@ function FlightRow({ t, now }: { t: MoneyInFlight; now: number }) {
           {late ? moneyCopy.late(clockOrDate(eta.to, nowDate)) : moneyCopy.eta(clockOrDate(eta.from, nowDate), clockOrDate(eta.to, nowDate))}
         </p>
       ) : null}
-      {stuck ? <StuckNote reason={t.stuckReason} from={t.from} to={t.to} burnTx={t.burnTx} /> : null}
+      {stuck ? <StuckNote reason={t.stuckReason} from={t.from} to={t.to} burnTx={t.burnTx} landed={t.stage !== 'sending'} /> : null}
       <p className="mm-links">
         <TxLink chainId={t.from} tx={t.burnTx} label={moneyCopy.sentOn} />
         <TxLink chainId={t.to} tx={t.mintTx} label={moneyCopy.arrivedOn} />
@@ -240,14 +243,14 @@ function FlightRow({ t, now }: { t: MoneyInFlight; now: number }) {
  * otto/mamoru#245: why a transfer is stuck and that the money is safe; for a burn on its way to Monad, a closed
  * disclosure with the burn and the guide to mint it by hand (CCTP V2 lets anyone call receiveMessage there).
  */
-export function StuckNote({ reason, from, to, burnTx }: { reason: string | undefined; from: number; to: number; burnTx: string | undefined }) {
+export function StuckNote({ reason, from, to, burnTx, landed }: { reason: string | undefined; from: number; to: number; burnTx: string | undefined; landed: boolean }) {
   const burn = burnTx ? txLink(from, burnTx) : null
   return (
     <>
       <p className="mm-note mm-note-stuck" role="status" data-testid="stuck-note">
         <span className="mm-note-reason">{stuckReasonText(reason)}</span> {moneyCopy.stuckSafe}
       </p>
-      {burn && to === 143 && !NO_BURN.has(reason ?? '') ? (
+      {burn && landed && to === 143 && BURN_LANDED.has(reason ?? '') ? (
         <details className="mm-diy" data-testid="stuck-diy">
           <summary>{moneyCopy.diy}</summary>
           <div className="mm-diy-body">

@@ -118,7 +118,19 @@ describe('finish it yourself', () => {
       const { html } = card(withStuckTransfer(code, NOW))
       expect(html).toContain('stuck-note')
       expect(html).not.toContain('stuck-diy')
+    }    // An allowlist: a code this app does not know, or none, never offers it, even with a burn hash.
+    for (const code of ['burn_reverted', '']) {
+      const f2 = withStuckTransfer(code, NOW)
+      const row = { ...f2.money!.inFlight[0]!, stuckReason: (code || undefined) as never }
+      expect(render(<MoneyMapCard money={{ ...f2.money!, inFlight: [row] }} now={NOW} />).html).not.toContain('stuck-diy')
     }
+    // A burn not confirmed on Base yet (sending) has nothing to finish.
+    const sending = withStuckTransfer('mint_budget', NOW)
+    const row = { ...sending.money!.inFlight[0]!, stage: 'sending' as const }
+    expect(render(<MoneyMapCard money={{ ...sending.money!, inFlight: [row] }} now={NOW} />).html).not.toContain('stuck-diy')
+    const w = working({ ...sending, progress: { ...sending.progress!, bridge: { ...sending.progress!.bridge!, state: 'sending' } } })
+    expect(w.text).toContain(moneyCopy.stuck.ours)
+    expect(w.html).not.toContain('stuck-diy')
   })
 })
 

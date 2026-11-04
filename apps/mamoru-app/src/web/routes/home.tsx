@@ -521,7 +521,7 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
             </p>
             {bridgeStuck(bridge) ? (
               <div className="progress-stuck">
-                <StuckNote reason={bridge.stuckReason} from={homeChain} to={bridge.chainId} burnTx={bridge.burnTx} />
+                <StuckNote reason={bridge.stuckReason} from={homeChain} to={bridge.chainId} burnTx={bridge.burnTx} landed={bridge.state === 'burned'} />
               </div>
             ) : null}
           </>
