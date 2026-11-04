@@ -109,13 +109,16 @@ export function upgradeJourney(f: FundingView | undefined, ops: OpView[], now: n
   const engine = ops.filter((o) => !owner(o) && t(o.updatedAt) >= t(start) && (o.state === 'confirmed' || o.state === 'submitted' || (o.state === 'failed' && !!o.bridge)))
   // This move's transfer is its FIRST send to the remote chain after the approval (review r2: a later routine top-up is
   // not this move). The money map's row for that same burn, when there is one, says how far it got.
-  const bridgeOp = engine.filter((o) => o.bridge && o.bridge.chainId === remoteChain).sort((a, b) => t(a.updatedAt) - t(b.updatedAt))[0]
-  const flights = (f.money?.inFlight ?? []).filter((x) => x.to === remoteChain && (x.burnedAt ? t(x.burnedAt) >= t(start) : true))
+  // Review r3: the earliest send that did not fail; a failed one the engine retried is not this move's state. Only when
+  // none has gone through yet, the latest (failed) one says so.
+  const sends = engine.filter((o) => o.bridge && o.bridge.chainId === remoteChain).sort((a, b) => t(a.updatedAt) - t(b.updatedAt))
+  const bridgeOp = sends.find((o) => o.state !== 'failed' && o.bridge!.state !== 'failed') ?? sends.at(-1)
+  const flights = (f.money?.inFlight ?? []).filter((x) => x.to === remoteChain && (x.burnedAt ? t(x.burnedAt) >= t(start) : true)).sort((a, b) => t(a.burnedAt ?? '') - t(b.burnedAt ?? ''))
   const flight = bridgeOp?.bridge?.burnTx
     ? flights.find((x) => x.burnTx?.toLowerCase() === bridgeOp.bridge!.burnTx!.toLowerCase())
     : bridgeOp
       ? undefined
-      : flights.filter((x) => x.burnedAt).sort((a, b) => t(a.burnedAt!) - t(b.burnedAt!))[0]
+      : (flights.find((x) => x.stage !== 'failed') ?? flights.at(-1))
   const transfer = flight ? transferOfFlight(flight, now) : bridgeOp?.bridge ? transferOfBridge(bridgeOp.bridge, 8453, now) : undefined
   // A routine renewal of an account already working on Monad is no move: nothing to follow.
   if (!movingTo && !transfer && monadPositions > 0) return null
@@ -186,17 +189,21 @@ export function upgradeJourney(f: FundingView | undefined, ops: OpView[], now: n
     links: transfer?.mintTx ? [{ chainId: transfer.to, tx: transfer.mintTx, text: `Arrived on ${chainLabel(transfer.to)}` }] : [],
     ...(transfer ? { transfer } : {}),
   }
+  // Review r3: the card's life is bounded by this move's own events. A day after its transfer arrived it is gone, whatever
+  // the Monad position does later (a position closed then must never bring the move back).
+  const arrivedAt = arrived ? Math.max(...[transfer!.mintedAt, bridgeOp?.updatedAt, transfer!.burnedAt].flatMap((x) => (x ? [t(x)] : []))) : null
+  if (arrivedAt !== null && Number.isFinite(arrivedAt) && now - arrivedAt > DONE_FOR_MS) return null
+  // This move's own Monad entry, if the app ever has that op (today Monad's ops live on the Monad account); else the
+  // positions, read only inside that day.
+  const entered = arrivedAt !== null && ops.some((o) => !owner(o) && o.kind === 'enter' && o.state === 'confirmed' && remotePool(o.pool, remoteChain) && t(o.updatedAt) >= arrivedAt)
   const lp: UpgradeStep = {
     id: 'lp', label: upgradeCopy.labels.lp,
-    state: arrived && monadPositions > 0 ? 'done' : arrived && monadIdle >= MIN_ENTRY_USDC ? 'waiting' : 'pending',
-    ...(arrived && monadPositions === 0 && monadIdle >= MIN_ENTRY_USDC ? { detail: upgradeCopy.waitingLp(usd(monadIdle)) } : {}),
+    state: arrived && (entered || monadPositions > 0) ? 'done' : arrived && monadIdle >= MIN_ENTRY_USDC ? 'waiting' : 'pending',
+    ...(arrived && !entered && monadPositions === 0 && monadIdle >= MIN_ENTRY_USDC ? { detail: upgradeCopy.waitingLp(usd(monadIdle)) } : {}),
     links: [],
   }
   const steps = [approve, safe, rebalance, bridge, arrive, lp]
   const done = steps.every((s) => s.state === 'done')
-  // Done: stays a day after its last known step time (the Monad position has none of its own: the arrival's stands in).
-  const doneAt = Math.max(...steps.flatMap((s) => (s.at ? [t(s.at)] : [])), ...afterBurn.map((o) => t(o.updatedAt)), t(start))
-  if (done && now - doneAt > DONE_FOR_MS) return null
   const current = done ? steps.length - 1 : steps.findIndex((s) => s.state !== 'done')
   const cur = steps[current]!
   return { startedAt: start, steps, current, done, title: done ? upgradeCopy.done : headline(cur) }

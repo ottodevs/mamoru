@@ -163,9 +163,14 @@ describe('review r1', () => {
     expect(upgradeJourney(funding, [...ops, renew], NOW + 2 * DONE_FOR_MS + 10 * 60_000)).toBeNull()
   })
 
-  test('a move stuck for more than a day stays on Home', () => {
-    const { funding, ops } = braisUpgrade('waiting', NOW)
+  test('a move whose transfer has not arrived after more than a day stays on Home', () => {
+    const { funding, ops } = braisUpgrade('bridging', NOW)
     expect(upgradeJourney(funding, ops, NOW + 3 * DONE_FOR_MS)).not.toBeNull()
+  })
+
+  test('arrived but never invested: gone a day after the arrival (r3: bounded by the move, not by live positions)', () => {
+    const { funding, ops } = braisUpgrade('waiting', NOW)
+    expect(upgradeJourney(funding, ops, NOW + 3 * DONE_FOR_MS)).toBeNull()
   })
 })
 
@@ -203,6 +208,34 @@ describe('review r2: the move has an end', () => {
     const approvalsOnly = ops.filter((o) => o.opId.startsWith('own-'))
     expect(upgradeJourney(funding, approvalsOnly, NOW)).not.toBeNull()
     expect(upgradeJourney(funding, approvalsOnly, NOW + PRE_SEND_MS + 60_000)).toBeNull()
+  })
+})
+
+describe('review r3', () => {
+  test('a finished move never comes back when the Monad position closes later', () => {
+    const { funding, ops } = braisUpgrade('done', NOW)
+    const monad = funding.money!.chains.find((c) => c.chainId === 143)!
+    monad.positions = []
+    monad.idle = [{ token: 'USDC', amount: '2075000', decimals: 6, valueUsdc: '2075000' }]
+    expect(upgradeJourney(funding, ops, NOW + DONE_FOR_MS + 60 * 60_000)).toBeNull()
+    expect(upgradeJourney(funding, ops, NOW + 30 * DONE_FOR_MS)).toBeNull()
+  })
+
+  test('a failed first send that the engine retried is not this move\'s state', () => {
+    const { funding, ops } = braisUpgrade('waiting', NOW)
+    const ok = ops.find((o) => o.bridge)!
+    const failedFirst: OpView = { ...ok, opId: 'eng-3-2-0-bridge_out', state: 'confirmed', bridge: { chainId: 143, amountUsdc: ok.bridge!.amountUsdc, state: 'failed' }, txHash: undefined, updatedAt: new Date(Date.parse(ok.updatedAt) - 60_000).toISOString() }
+    const j = upgradeJourney(funding, [...ops, failedFirst], NOW)!
+    expect(j.steps.find((x) => x.id === 'bridge')!.state).toBe('done')
+    expect(j.steps.find((x) => x.id === 'arrive')!.state).toBe('done')
+    expect(j.title).toBe('Waiting to invest on Monad')
+  })
+
+  test('with only failed sends, the latest one is said', () => {
+    const { funding, ops } = braisUpgrade('bridging', NOW)
+    funding.money!.inFlight = []
+    const sends = ops.map((o) => (o.bridge ? { ...o, bridge: { ...o.bridge, state: 'failed' as const } } : o))
+    expect(upgradeJourney(funding, sends, NOW)!.steps.find((x) => x.id === 'bridge')!.state).toBe('failed')
   })
 })
 
