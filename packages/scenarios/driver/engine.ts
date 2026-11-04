@@ -381,6 +381,8 @@ export type EngineConfig = {
    * and a harvest before that falls back to the full read, as before.
    */
   historyStepBlocks?: bigint
+  /** otto/mamoru#358: how long a review may keep reading held-history slices after its decision. Absent: one slice. */
+  historyReadMs?: number
   /** Session uses already confirmed on chain before this engine started (restart): replayed into the ledger so caps and usage limits count them. */
   priorIncluded?: { permissionId: Hex; calls: Execution[] }[]
   /**
@@ -972,7 +974,7 @@ export class Engine {
     try {
       return await this.decideAndRun(obs)
     } finally {
-      await this.advanceHeldHistory(obs)
+      await this.catchUpHeldHistory(obs)
     }
   }
 
@@ -2105,15 +2107,27 @@ export class Engine {
    * the observation's cursor does not follow, up to the observation's safe block. A slice counts only if the block it
    * ends at has the same hash after the read as before it. Best effort: a slice that fails is read again next review.
    */
-  private async advanceHeldHistory(obs: Observation): Promise<void> {
+  /**
+   * otto/mamoru#358: far behind (a new account on Monad, reviews budget-limited to one per 15 min), more slices while
+   * each one lands and `historyReadMs` lasts; without it, one slice per review.
+   */
+  private async catchUpHeldHistory(obs: Observation): Promise<void> {
+    const until = Date.now() + (this.cfg.historyReadMs ?? 0)
+    let more: boolean
+    do more = await this.advanceHeldHistory(obs)
+    while (more && Date.now() < until)
+  }
+
+  private async advanceHeldHistory(obs: Observation): Promise<boolean> {
     const step = this.cfg.historyStepBlocks
     // Only where it is set: elsewhere (Base) nothing is read here, and a harvest reads as before.
-    if (step === undefined) return
+    if (step === undefined) return false
     const c = this.historyCursor
     const safe = obs.safeBlock.number
     // A safe head not yet past activation has nothing to read (and must not move a slice back before it).
-    if (safe < this.historyFromBlock) return
+    if (safe < this.historyFromBlock) return false
     let read = false
+    let stored = false
     // One slice per review across all positions (about 200 log requests on Monad), from a start that rotates so a
     // position whose reads keep failing does not hold the others back (gate of #358).
     const ids = obs.positions.map((p) => p.tokenId)
@@ -2143,7 +2157,7 @@ export class Engine {
         }
         // Caught up within a step: the tail read at harvest time covers the rest.
         if (h.through >= this.historyFromBlock && safe - h.through <= step) continue
-        if (read) return
+        if (read) return stored
         read = true
         const to = h.through + step < safe ? h.through + step : safe
         const before = (await this.client.getBlock({ blockNumber: to })).hash
@@ -2152,10 +2166,12 @@ export class Engine {
         const next = { from: this.historyFromBlock, through: to, hash: before, events: [...h.events, ...events] }
         this.heldHistory.set(id, { ...next, checked: true })
         this.hooks.onHeldHistory?.(id, next)
+        stored = true
       } catch {
         // read again on the next review
       }
     }
+    return stored
   }
 
   /**

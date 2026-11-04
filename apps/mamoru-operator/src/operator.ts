@@ -491,6 +491,8 @@ const SAFE_ERROR_MESSAGE = {
 
 /** otto/mamoru#358: blocks of a held position's history one Monad review reads (200 log requests of 100 blocks). */
 const MONAD_HISTORY_STEP_BLOCKS = 20_000n
+/** otto/mamoru#358: how long a Monad review keeps reading those slices after its decision, while far behind. */
+const MONAD_HISTORY_READ_MS = 45_000
 
 /** An error and its `.cause` chain (bounded). */
 function causeChainOf(e: unknown): { name?: unknown; message?: unknown; details?: unknown }[] {
@@ -7632,7 +7634,7 @@ export class Operator {
         depositsAfter: BigInt(acc.depositsAfter),
         historyFromBlock: BigInt(acc.historyFromBlock),
         // otto/mamoru#358: Monad's providers serve 100-block log ranges; one read of a position's whole history timed out.
-        ...(this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? { historyStepBlocks: MONAD_HISTORY_STEP_BLOCKS } : {}),
+        ...(this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? { historyStepBlocks: MONAD_HISTORY_STEP_BLOCKS, historyReadMs: MONAD_HISTORY_READ_MS } : {}),
         sessions,
         priorIncluded,
         carried: acc.carried ?? [],
