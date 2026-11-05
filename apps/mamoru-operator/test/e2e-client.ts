@@ -33,3 +33,24 @@ export async function signedCall<T>(
     return { status: res.status, json: (await res.json()) as T }
   }
 }
+
+/**
+ * Runs a prepare on the operator object first, never signed, and drops it, so the signed HTTP prepare after it reads a
+ * warm fork. A cold prepare reads thousands of slots through a rate-limited upstream (anvil's 330 CU/s; the keyed
+ * provider answers 429 past ~30 req/s) and outlasts the operator's 120 s idle timeout: the request dies with a 401 on the
+ * re-sent stale ts or a closed socket (multipool, overcap, rerange on 4 Nov). Dropped because an unsigned non-activate
+ * prepare holds the account's engine review for up to REVIEW_HOLD_MAX_MS.
+ */
+export async function warmPrepare(operator: object, prepare: () => Promise<{ prepareId: string }>): Promise<void> {
+  const o = operator as unknown as { prepared: Map<string, unknown>; store: { state: { accounts: Record<string, { sponsored?: unknown[] }> } } }
+  // A prepare may reserve sponsorship in the account's day budget; the unsigned warm-up gives it back, so the signed
+  // prepare after it is not refused for a budget it never used (e2e-two-chain reset `sponsored` by hand for this).
+  const sponsored = new Map(Object.entries(o.store.state.accounts).map(([k, a]) => [k, a.sponsored?.slice()]))
+  const { prepareId } = await prepare()
+  o.prepared.delete(prepareId)
+  for (const [k, a] of Object.entries(o.store.state.accounts)) {
+    const before = sponsored.get(k)
+    if (before) a.sponsored = before
+    else delete a.sponsored
+  }
+}

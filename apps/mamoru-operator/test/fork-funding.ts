@@ -25,3 +25,19 @@ export async function advanceFinality(lab: Lab, blocks = 70): Promise<void> {
   const fin = (await lab.client.getBlock({ blockTag: 'finalized' })).number as bigint
   if (fin < sent) throw new Error(`finalized ${fin} did not pass block ${sent} after mining ${blocks}`)
 }
+
+/** A fork pinned at an older block starts with that block's clock, while the operator decides deadlines against the later
+ *  of the wall clock and the head (a gas reserve swap's deadline is the head's time plus minutes, so it is born expired:
+ *  RESERVE_SWAP_EXPIRED, e2e v4/v5 on 4 Nov). Moves the fork's clock to now; a fork already there is left alone. */
+export async function catchUpClock(lab: Lab): Promise<void> {
+  const behind = Math.floor(Date.now() / 1000) - Number(await lab.timestamp())
+  if (behind > 0) await lab.warp(behind)
+}
+
+/** Anvil's fork upstream settings for the Base e2e: anvil's defaults (its own 330 CU/s throttle, 5 retries), which the
+ *  keyed provider needs (it answers 429 past ~30 req/s). FORK_CUPS sets another rate, FORK_CUPS=0 none. Extra retry and
+ *  backoff flags were tried on 4 Nov and anvil 1.7.1 then deadlocked mid-run (no block, every thread in a futex wait). */
+export function forkUpstreamArgs(): string[] {
+  const cups = process.env.FORK_CUPS
+  return cups === undefined ? [] : cups === '0' ? ['--no-rate-limit'] : ['--compute-units-per-second', cups]
+}

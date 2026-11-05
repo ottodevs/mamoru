@@ -1,5 +1,5 @@
-// E2E of a deposit over the cap (otto/mamoru#4): the owner arms with 0 USDC, 101.92 USDC lands, the operator reports
-// DEPOSIT_OVER_CAP instead of starting, the owner withdraws the excess from the still undeployed Safe, then starts.
+// E2E of a deposit over the cap (otto/mamoru#4): the owner arms with 0 USDC, 101.92 USDC lands, the operator holds the
+// approval and reports DEPOSIT_OVER_CAP instead of starting, the owner withdraws the excess from the still undeployed Safe, then starts.
 // Same harness as e2e-armed.ts: the live operator on an anvil fork of Base that keeps chain id 8453.
 // The upstream RPC comes from the environment only (RPC_URL or BASE_RPC_URL, or ~/.config/mamoru-operator/env)
 // and reaches anvil through a loopback proxy; the operator talks to anvil through the engine port, which
@@ -20,7 +20,8 @@ import { Lab } from '../../../packages/scenarios/fixtures/lab.ts'
 import { WHALE } from '../../../packages/scenarios/fixtures/world.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { bootOperator } from '../src/boot.ts'
-import { signedCall } from './e2e-client.ts'
+import { signedCall, warmPrepare } from './e2e-client.ts'
+import { forkUpstreamArgs } from './fork-funding.ts'
 
 const envFile = join(homedir(), '.config/mamoru-operator/env')
 if (!process.env.RPC_URL && existsSync(envFile)) {
@@ -48,7 +49,7 @@ const anvilBin = Bun.which('anvil') ?? join(homedir(), '.foundry/bin/anvil')
 const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
 const port = portProbe.port as number
 portProbe.stop(true)
-const argv = ['--fork-url', proxy.url, '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
+const argv = ['--fork-url', proxy.url, ...forkUpstreamArgs(), '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
 assertNoKeyInArgv(argv, ['RPC_URL', 'BASE_RPC_URL'])
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-operator-e2e-'))
 const anvil = Bun.spawn([anvilBin, ...argv], { stdout: Bun.file(join(dir, 'anvil.log')), stderr: Bun.file(join(dir, 'anvil.log')), env: sanitizedEnv() })
@@ -160,20 +161,24 @@ try {
   check(!f0.deployed && f0.usdc === '0' && !f0.active && !f0.overCap && f0.capUsdc === LIVE_CAP_USDC.toString(), `funding before arming: not deployed, 0 USDC, cap ${f0.capUsdc}, no over-cap report`)
 
   // --- arm, then a deposit over the cap lands --------------------------------------
+  // Warm the cold fork in-process first (see warmPrepare): the signed prepare then fits the operator's idle timeout.
+  await warmPrepare(op.operator, () => op.operator.prepareActivate(ctx))
   const prep = await call<OwnerTxToSign>('POST', `${base}/activate/prepare`)
   const armed = await call<OpView>('POST', `${base}/activate`, browserSign(prep.json))
   check(armed.status === 200 && armed.json.code === 'ARMED', 'activation armed with 0 USDC')
   await lab.whaleTransfer('USDC', WHALE, ctx.address, DEPOSIT)
   log(`Safe funded with ${DEPOSIT} USDC units, cap ${LIVE_CAP_USDC}`)
+  // Since 46f6b26e (4 Oct) an armed approval over the cap is kept, waiting, with the amounts on its op: the owner's
+  // signature is not the operator's to drop (it runs if the cap is raised, or ends when the owner moves the Safe nonce).
   const until = Date.now() + 60_000
   let refused: OpView | undefined
   for (;;) {
     refused = (await ops()).find((o) => o.opId === armed.json.opId)
-    if (refused?.state === 'failed') break
-    if (Date.now() > until) throw new Error(`E2E FAILED: armed op still ${JSON.stringify(refused)}`)
+    if (refused && (refused.amountUsdc === DEPOSIT.toString() || refused.state !== 'proposed')) break
+    if (Date.now() > until) throw new Error(`E2E FAILED: armed op never reported the deposit over the cap: ${JSON.stringify(refused)}`)
     await Bun.sleep(1_000)
   }
-  check(refused.code === 'DEPOSIT_OVER_CAP' && refused.amountUsdc === DEPOSIT.toString() && refused.capUsdc === LIVE_CAP_USDC.toString(), `the armed op reports the refusal: ${JSON.stringify(refused)}`)
+  check(refused.state === 'proposed' && refused.code === 'ARMED' && refused.amountUsdc === DEPOSIT.toString() && refused.capUsdc === LIVE_CAP_USDC.toString(), `the armed op waits over the cap, with the amounts: ${JSON.stringify(refused)}`)
   const f1 = await funding()
   check(!f1.deployed && !f1.active && f1.usdc === DEPOSIT.toString(), 'the Safe was not deployed and the engine did not start; the deposit is untouched')
   check(f1.overCap?.code === 'DEPOSIT_OVER_CAP' && f1.overCap.excessUsdc === EXCESS.toString(), `funding reports ${JSON.stringify(f1.overCap)}`)
@@ -214,7 +219,7 @@ try {
 
   const stats = enginePort.stats()
   check(stats.rejectedLabMethods === 0, `operator made ${stats.forwarded} RPC calls, 0 anvil_/evm_ methods`)
-  log(`RESULT PASS: over-cap refused ${refused.opId}, excess out ${transfer.txHash}, start ${activate.txHash}, stop ${stop.txHash}`)
+  log(`RESULT PASS: over-cap held ${refused.opId}, excess out ${transfer.txHash}, start ${activate.txHash}, stop ${stop.txHash}`)
 } catch (e) {
   console.error((e as Error).message)
   process.exitCode = 1

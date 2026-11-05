@@ -1,5 +1,5 @@
 // E2E of the live re-range (lane U9) on an anvil fork of Base that keeps chain id 8453: one passkey activates
-// enter + manage-any; the engine enters; the TEST ONLY pushes the pool price out of range with a whale swap on
+// enter + manage-any (plus one extension approval when the gas cap left manage-any out); the engine enters; the TEST ONLY pushes the pool price out of range with a whale swap on
 // anvil; the engine re-ranges by itself (decrease + collect + burn, then a new centred mint). Every token that
 // left the Safe went to the pool, and a session userOp that collects to another recipient fails validation.
 // Base on the E2E of the live operator.
@@ -26,7 +26,9 @@ import { Lab, decodeEntryPointError } from '../../../packages/scenarios/fixtures
 import { WHALE } from '../../../packages/scenarios/fixtures/world.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { bootOperator } from '../src/boot.ts'
+import { DEFAULT_SPONSOR, SPONSOR_BOUNDS, type SponsorPolicy } from '../src/sponsorship.ts'
 import { signedCall } from './e2e-client.ts'
+import { forkUpstreamArgs } from './fork-funding.ts'
 
 const envFile = join(homedir(), '.config/mamoru-operator/env')
 if (!process.env.RPC_URL && existsSync(envFile)) {
@@ -54,7 +56,7 @@ const anvilBin = Bun.which('anvil') ?? join(homedir(), '.foundry/bin/anvil')
 const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
 const port = portProbe.port as number
 portProbe.stop(true)
-const argv = ['--fork-url', proxy.url, '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
+const argv = ['--fork-url', proxy.url, ...forkUpstreamArgs(), '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
 assertNoKeyInArgv(argv, ['RPC_URL', 'BASE_RPC_URL'])
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-operator-e2e-'))
 const anvil = Bun.spawn([anvilBin, ...argv], { stdout: Bun.file(join(dir, 'anvil.log')), stderr: Bun.file(join(dir, 'anvil.log')), env: sanitizedEnv() })
@@ -103,6 +105,9 @@ try {
   const secret = randomBytes(32).toString('hex')
   const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: process.env.E2E_POLICY })
   stopOperator = op.stop
+  // anvil quotes a gas price ~100x Base's: the extension renewal below (~11M gas) is over the default 0.01 ETH daily
+  // sponsorship there (SPONSOR_DAILY_BUDGET), on Base it costs ~1e-4 ETH. Raised to the top of SPONSOR_BOUNDS, as e2e-v4 does.
+  ;(op.operator.cfg as { sponsor?: SponsorPolicy }).sponsor = { ...DEFAULT_SPONSOR, weiPerDay: SPONSOR_BOUNDS.weiPerDay[1] }
   check(op.operator.cfg.live && op.operator.cfg.policy.session.grants.some((g) => g.name === 'manage-any'), `operator live with ${op.operator.cfg.policy.policyId} (manage-any)`)
   await lab.setBalance(op.operator.relayer.address, 10n ** 18n)
 
@@ -148,18 +153,34 @@ try {
   }
 
   // --- activate: one passkey, enter + manage-any -------------------------------
-  const prep = await call<OwnerTxToSign>('POST', `${base}/activate/prepare`)
-  if (prep.status !== 200) throw new Error(`E2E FAILED: activate/prepare ${prep.status} ${JSON.stringify(prep.json)}`)
+  // Prepared and submitted on the operator object (the same calls the routes make), as e2e-v4 does: a cold three-pool
+  // prepare reads thousands of slots through a rate-limited upstream and can outlast the server's 120 s idle timeout;
+  // the HTTP path of activate/renew is covered by e2e-fork, e2e-armed and e2e-overcap.
+  const prep = { json: await op.operator.prepareActivate(ctx) }
   log(`activate to sign: ${prep.json.summary.join(' | ')}`)
-  const act = await call<OpView>('POST', `${base}/activate`, browserSign(prep.json))
+  const act = { json: await op.operator.submit(ctx, 'activate', browserSign(prep.json)) }
   const activated = await waitFor('activation', 120_000, async () => {
     const o = (await ops()).find((x) => x.opId === act.json.opId)
     return o?.state === 'confirmed' ? o : null
   })
+  // A multi-pool activation leaves the manage-any/convert-any pairs of the lower-preference pools out to fit Base's 2^24
+  // per-tx gas cap (fitActivation); the renew route adds them with one more approval (planExtend). The re-range needs them.
+  const extensions: string[] = []
+  for (let i = 0; i < 4 && (await funding()).approval?.missing; i++) {
+    const p = { json: await op.operator.prepareRenew(ctx) }
+    log(`extension to sign: ${p.json.summary.join(' | ')}`)
+    const r = { json: await op.operator.submit(ctx, 'renew', browserSign(p.json)) }
+    const done = await waitFor('the extension', 120_000, async () => {
+      const o = (await ops()).find((x) => x.opId === r.json.opId)
+      if (o?.state === 'failed') throw new Error(`E2E FAILED: the extension failed ${o.code}`)
+      return o?.state === 'confirmed' ? o : null
+    })
+    extensions.push(done.txHash!)
+  }
   const state = (op.operator as unknown as { store: { state: { accounts: Record<string, { sessionKey: Hex; grants: { name: string; permissionId: Hex }[] }> } } }).store.state.accounts[ctx.accountKey]!
   check(
-    ['enter-swap', 'enter-mint', 'manage-any', 'convert-any'].every((n) => state.grants.some((g) => g.name.split(':')[0] === n)),
-    `one owner tx (${activated.txHash}) enabled ${state.grants.map((g) => g.name).join(', ')}`,
+    ['enter-swap', 'enter-mint', 'manage-any', 'convert-any'].every((n) => state.grants.some((g) => g.name.split(':')[0] === n)) && !(await funding()).approval?.missing,
+    `activation (${activated.txHash}) and ${extensions.length} extension(s) (${extensions.join(', ')}) enabled ${state.grants.map((g) => g.name).join(', ')}`,
   )
   const fromBlock = BigInt(activated.block!)
   const safe = ctx.address as Address
@@ -250,8 +271,11 @@ try {
   const tokens = [...new Set(policyPools.flatMap((p) => [p.token0!, p.token1!]))].map((t) => address(t, baseRegistry))
   const poolAddrs = new Set(policyPools.map((p) => p.address.toLowerCase()))
   const erc20Out = await lab.client.getLogs({ address: tokens, event: transferEvt[0], args: { from: safe }, fromBlock, toBlock })
-  const strays = erc20Out.filter((l) => !poolAddrs.has(l.args.to!.toLowerCase()))
-  check(erc20Out.length > 0 && strays.length === 0, `${erc20Out.length} ERC-20 transfers out of the Safe since activation, all to policy pools (mint and swap payments); 0 elsewhere`)
+  // The activation buys the Safe's gas reserve with USDC in the same batch (otto/mamoru#15), on a WETH/USDC pool that need
+  // not be a policy pool: allowed in the activation transaction only.
+  const reservePools = new Set(['pool:WETH/USDC/500', 'pool:WETH/USDC/3000'].map((n) => entry(n, baseRegistry).address.toLowerCase()))
+  const strays = erc20Out.filter((l) => !poolAddrs.has(l.args.to!.toLowerCase()) && !(l.transactionHash === activated.txHash && reservePools.has(l.args.to!.toLowerCase())))
+  check(erc20Out.length > 0 && strays.length === 0, `${erc20Out.length} ERC-20 transfers out of the Safe since activation, all to policy pools (mint and swap payments) or the activation's gas reserve swap; ${strays.length} elsewhere ${strays.map((l) => `${l.args.to} ${l.transactionHash}`).join(', ')}`)
   const nftOut = parseEventLogs({ abi: nonfungiblePositionManagerAbi, eventName: 'Transfer', logs: await lab.client.getLogs({ address: npm, fromBlock, toBlock }) }).filter((l) => l.args.from.toLowerCase() === safe.toLowerCase())
   check(nftOut.every((l) => l.args.to === '0x0000000000000000000000000000000000000000'), `${nftOut.length} position NFTs left the Safe, all burned`)
   check((await lab.balanceOf('USDC', ATTACKER)) === attackerBefore[0] && (await lab.balanceOf('cbBTC', ATTACKER)) === attackerBefore[1], 'the attacker address received nothing')

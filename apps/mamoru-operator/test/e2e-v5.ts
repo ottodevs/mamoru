@@ -31,6 +31,7 @@ import { bootOperator } from '../src/boot.ts'
 import { readSafe } from '../src/chain.ts'
 import { DEFAULT_SPONSOR, SPONSOR_BOUNDS, type SponsorPolicy } from '../src/sponsorship.ts'
 import { signedCall } from './e2e-client.ts'
+import { catchUpClock, forkUpstreamArgs } from './fork-funding.ts'
 
 process.env.RPC_URL = process.env.BASE_FORK_RPC_URL ?? 'https://mainnet.base.org'
 const DEPOSIT = 20_000_000n
@@ -50,11 +51,11 @@ const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new R
 const port = portProbe.port as number
 portProbe.stop(true)
 // Pinned to the Lab manifest's block (E2E_FORK_BLOCK to change it): anvil keeps that block's state cached, so the
-// deploy's ring raise does not read thousands of cold slots through the public RPC. No compute-unit throttle (the
-// public endpoint needs none at this volume; FORK_CUPS sets one) and a 120 s upstream timeout: the ring raise's gas
+// deploy's ring raise does not read thousands of cold slots through the public RPC. Anvil's own upstream throttle
+// (forkUpstreamArgs; FORK_CUPS changes it) and a 120 s upstream timeout: the ring raise's gas
 // estimate reads hundreds of cold slots in one request.
 const forkBlock = process.env.E2E_FORK_BLOCK ?? '51811000'
-const argv = ['--fork-url', proxy.url, '--fork-block-number', forkBlock, ...(process.env.FORK_CUPS ? ['--compute-units-per-second', process.env.FORK_CUPS] : ['--no-rate-limit']), '--timeout', '120000', '--fork-retry-backoff', '2000', '--retries', '10', '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
+const argv = ['--fork-url', proxy.url, '--fork-block-number', forkBlock, ...forkUpstreamArgs(), '--timeout', '120000', '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
 assertNoKeyInArgv(argv, ['RPC_URL', 'BASE_RPC_URL'])
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-operator-e2e-v5-'))
 const anvil = Bun.spawn([anvilBin, ...argv], { stdout: Bun.file(join(dir, 'anvil.log')), stderr: Bun.file(join(dir, 'anvil.log')), env: sanitizedEnv() })
@@ -99,6 +100,8 @@ const gasReport: string[] = []
 
 try {
   log(`fork of Base at block ${await lab.client.getBlockNumber()}, chain ${await lab.client.getChainId()}`)
+  // The pinned block is weeks old: its clock is moved to now, or the gas reserve swap is born past its deadline.
+  await catchUpClock(lab)
   const dep = await deployPolicies()
   log(`deployed MamoruActionPolicy ${dep.policy}, MamoruGasPolicy ${dep.gasPolicy}, MamoruActionPolicyV2 ${dep.v2} (guardian ${GUARDIAN.address})`)
 

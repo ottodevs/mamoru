@@ -20,6 +20,7 @@ import { WHALE } from '../../../packages/scenarios/fixtures/world.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { bootOperator } from '../src/boot.ts'
 import { signedCall } from './e2e-client.ts'
+import { forkUpstreamArgs } from './fork-funding.ts'
 
 const envFile = join(homedir(), '.config/mamoru-operator/env')
 if (!process.env.RPC_URL && existsSync(envFile)) {
@@ -44,7 +45,7 @@ const anvilBin = Bun.which('anvil') ?? join(homedir(), '.foundry/bin/anvil')
 const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
 const port = portProbe.port as number
 portProbe.stop(true)
-const argv = ['--fork-url', proxy.url, '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
+const argv = ['--fork-url', proxy.url, ...forkUpstreamArgs(), '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
 assertNoKeyInArgv(argv, ['RPC_URL', 'BASE_RPC_URL'])
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-operator-e2e-'))
 const anvil = Bun.spawn([anvilBin, ...argv], { stdout: Bun.file(join(dir, 'anvil.log')), stderr: Bun.file(join(dir, 'anvil.log')), env: sanitizedEnv() })

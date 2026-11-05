@@ -5,6 +5,11 @@ type JsonRpcRequest = { jsonrpc: '2.0'; id: unknown; method: string; params?: un
 
 const LOOPBACK = '127.0.0.1'
 
+/** The most one upstream request through the fork proxy may take before it is asked again. */
+export const UPSTREAM_TIMEOUT_MS = 30_000
+/** How long the fork proxy keeps asking again after an upstream 429 before anvil gets it. */
+export const RATE_LIMIT_WAIT_MS = 40_000
+
 export type ForkProxy = { url: string; requests: () => number; stop: () => void }
 
 /**
@@ -23,11 +28,17 @@ export function startForkProxy(envVar = 'RPC_URL'): ForkProxy {
       if (req.method !== 'POST') return new Response('method not allowed', { status: 405 })
       count++
       const body = await req.text()
+      const started = Date.now()
       for (let attempt = 0; ; attempt++) {
         try {
-          const res = await fetch(upstream, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
-          if (res.status === 429 && attempt < 5) {
-            await Bun.sleep(250 * (attempt + 1))
+          // Bounded: an upstream request with no answer is asked again here, under anvil's own 45 s fork timeout,
+          // instead of holding the fork read behind it until anvil gives up.
+          const res = await fetch(upstream, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) })
+          // A 429 is asked again here for up to RATE_LIMIT_WAIT_MS rather than handed to anvil after a few tries: a keyed
+          // provider answers 429 past ~30 req/s, and a refused fork read reaching anvil is the suspected trigger of the
+          // mid-run stalls seen with anvil 1.7.1 on 4 Nov (not proven). Still under anvil's 45 s fork timeout.
+          if (res.status === 429 && Date.now() - started < RATE_LIMIT_WAIT_MS) {
+            await Bun.sleep(Math.min(2_000, 250 * (attempt + 1)))
             continue
           }
           return new Response(await res.text(), { status: res.status, headers: { 'content-type': 'application/json' } })

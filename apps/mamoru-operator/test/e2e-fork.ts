@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { toHex, type Hex } from 'viem'
+import { parseUnits, toHex, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, FundingView, OpView, OwnerSignature, OwnerTxToSign, TransferPlan, WithdrawAsset } from '@mamoru/domain'
 import { baseRegistry, address } from '@mamoru/registry'
@@ -19,7 +19,8 @@ import { Lab } from '../../../packages/scenarios/fixtures/lab.ts'
 import { WHALE } from '../../../packages/scenarios/fixtures/world.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { bootOperator } from '../src/boot.ts'
-import { signedCall } from './e2e-client.ts'
+import { signedCall, warmPrepare } from './e2e-client.ts'
+import { forkUpstreamArgs } from './fork-funding.ts'
 
 const envFile = join(homedir(), '.config/mamoru-operator/env')
 if (!process.env.RPC_URL && existsSync(envFile)) {
@@ -47,7 +48,7 @@ const anvilBin = Bun.which('anvil') ?? join(homedir(), '.foundry/bin/anvil')
 const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
 const port = portProbe.port as number
 portProbe.stop(true)
-const argv = ['--fork-url', proxy.url, '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
+const argv = ['--fork-url', proxy.url, ...forkUpstreamArgs(), '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
 assertNoKeyInArgv(argv, ['RPC_URL', 'BASE_RPC_URL'])
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-operator-e2e-'))
 const anvil = Bun.spawn([anvilBin, ...argv], { stdout: Bun.file(join(dir, 'anvil.log')), stderr: Bun.file(join(dir, 'anvil.log')), env: sanitizedEnv() })
@@ -146,6 +147,7 @@ try {
     }
   }
   let lastPlan: TransferPlan | undefined
+  let lastSummary: string[] = []
   async function ownerAction(kind: 'activate' | 'transfer' | 'stop', prepareBody?: unknown): Promise<OpView> {
     const prep = await call<OwnerTxToSign | TransferPlan>('POST', `${base}/${kind}/prepare`, prepareBody)
     if (prep.status !== 200) throw new Error(`E2E FAILED: ${kind}/prepare ${prep.status} ${JSON.stringify(prep.json)}`)
@@ -154,6 +156,7 @@ try {
       lastPlan = prep.json
       log(`transfer plan reduce ${JSON.stringify(prep.json.reduce)} receive ${JSON.stringify(prep.json.receive)}`)
     }
+    lastSummary = tx.summary
     log(`${kind} to sign: ${tx.summary.join(' | ')}`)
     const res = await call<OpView>('POST', `${base}/${kind}`, browserSign(tx))
     if (res.status !== 200) throw new Error(`E2E FAILED: ${kind} ${res.status} ${JSON.stringify(res.json)}`)
@@ -164,12 +167,17 @@ try {
   check(!f0.deployed && f0.usdc === DEPOSIT.toString() && !f0.active, `funding before activation: not deployed, ${f0.usdc} USDC, inactive`)
 
   // a signature over another tx is refused
+  // Warm the cold fork in-process first (see warmPrepare): the signed prepare then fits the operator's idle timeout.
+  await warmPrepare(op.operator, () => op.operator.prepareActivate(ctx))
   const p0 = await call<OwnerTxToSign>('POST', `${base}/activate/prepare`)
   const wrong = browserSign({ ...p0.json, safeTxHash: `0x${'11'.repeat(32)}` as Hex })
   check((await call('POST', `${base}/activate`, wrong)).status === 400, 'an assertion over another hash is refused with 400')
 
   // --- activate --------------------------------------------------------------
   const activate = await ownerAction('activate')
+  // Since the activation buys the Safe's gas reserve with USDC in the same batch, that USDC leaves the round trip too.
+  const reserveLine = lastSummary.map((l) => /^Convert ([\d.]+) USDC to at least .* gas reserve$/.exec(l)).find((m) => m)
+  const reserveUsdc = reserveLine ? parseUnits(reserveLine[1]!, 6) : 0n
   const f1 = await funding()
   check(f1.deployed && f1.active && BigInt(f1.eth) >= BigInt(f1.gasReserveWei), `Safe deployed, engine active, ETH ${f1.eth} >= reserve ${f1.gasReserveWei}`)
 
@@ -227,7 +235,7 @@ try {
   const cbbtcValueCap = 10_000n // dust: < ~$10 at any sane BTC price is not the claim; we assert < 0.0001 BTC
   check(!f3.active && f3.positions.length === 0 && BigInt(f3.cbbtc) < cbbtcValueCap, `after stop: inactive, no positions, cbBTC ${f3.cbbtc} units (dust), USDC ${f3.usdc}, ETH ${f3.eth}`)
   const usdcAfter = BigInt(f3.usdc)
-  check(usdcAfter > DEPOSIT - TRANSFER - big - 3n * WITHDRAW - 100_000n, `Safe holds ${usdcAfter} USDC units after round trip (deposit ${DEPOSIT} - transfers ${TRANSFER + big + 3n * WITHDRAW}, costs within 0.1 USDC)`)
+  check(usdcAfter > DEPOSIT - reserveUsdc - TRANSFER - big - 3n * WITHDRAW - 100_000n, `Safe holds ${usdcAfter} USDC units after round trip (deposit ${DEPOSIT} - gas reserve ${reserveUsdc} - transfers ${TRANSFER + big + 3n * WITHDRAW}, costs within 0.1 USDC)`)
 
   const all = await ops()
   const txs = new Set(all.filter((o) => o.txHash).map((o) => o.txHash))

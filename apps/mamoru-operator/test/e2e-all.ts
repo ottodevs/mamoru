@@ -2,7 +2,7 @@
 // Needs foundry on PATH and RPC_URL, BASE_RPC_URL, BASE_FORK_RPC_URL, L1_RPC_URL (public ones work). E2E_TIMEOUT_S: per script (default 900).
 // Usage: bun run e2e:all [name ...]   (names without the e2e- prefix, e.g. fork v4)
 import { spawn } from 'node:child_process'
-import { closeSync, mkdirSync, openSync, readdirSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 const root = join(import.meta.dir, '../../..')
@@ -16,6 +16,22 @@ const scripts = readdirSync(import.meta.dir)
   .filter((f) => /^e2e-.+\.ts$/.test(f) && !NOT_SCRIPTS.has(f))
   .filter((f) => wanted.length === 0 || wanted.includes(f.slice(4, -3)))
   .sort()
+
+// e2e-v4 and e2e-v5 deploy MamoruActionPolicy from its forge artifact (gitignored, so a fresh worktree has none and they
+// failed in 1 s, 4 Nov). Built here first: incremental, a fraction of a second when nothing changed, ~4 min from cold.
+const NEEDS_POLICY_BUILD = new Set(['e2e-v4.ts', 'e2e-v5.ts'])
+if (scripts.some((f) => NEEDS_POLICY_BUILD.has(f))) {
+  const dir = join(root, 'contracts/action-policy')
+  const run = (cmd: string[]) => {
+    const r = Bun.spawnSync(cmd, { cwd: dir, stdout: 'inherit', stderr: 'inherit', env: process.env })
+    if (r.exitCode !== 0) {
+      console.error(`${cmd.join(' ')} failed in contracts/action-policy (exit ${r.exitCode}): foundry on PATH?`)
+      process.exit(1)
+    }
+  }
+  if (!existsSync(join(dir, 'lib/forge-std'))) run(['./install.sh'])
+  run(['forge', 'build', '--silent'])
+}
 
 const rows: { name: string; result: 'PASS' | 'FAIL' | 'TIMEOUT'; secs: number; log: string }[] = []
 for (const f of scripts) {

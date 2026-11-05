@@ -48,7 +48,7 @@ import type { AccountRow } from '../../mamoru-app/src/api/accounts/store.ts'
 import { verifyRemote, type RemoteOffer } from '../../mamoru-app/src/api/remote.ts'
 import { bootOperator } from '../src/boot.ts'
 import { MESSAGE_TRANSMITTER_V2 } from '../src/cctp.ts'
-import { signedCall } from './e2e-client.ts'
+import { signedCall, warmPrepare } from './e2e-client.ts'
 import { DEFAULT_SPONSOR, SPONSOR_BOUNDS, type SponsorPolicy } from '../src/sponsorship.ts'
 
 const REPO = join(import.meta.dir, '../../..')
@@ -344,7 +344,9 @@ try {
   const safeNonce0 = await base.client.readContract({ address: ctx.address, abi: safeAbi, functionName: 'nonce' })
   // Warm the cold fork: the same prepare on the operator object (never signed), so the Worker's 90 s timeout is not the
   // fork's slot reads through the public RPC.
-  await bo.prepareRenew(ctx)
+  // warmPrepare drops it again: left unsigned, it held the engine's review for REVIEW_HOLD_MAX_MS (5 min), which put the
+  // bridge past the e2e:all timeout (4 Nov).
+  await warmPrepare(bo, () => bo.prepareRenew(ctx))
   ;((bo as unknown as { store: { state: { accounts: Record<string, { sponsored?: unknown[] }> } } }).store.state.accounts[ctx.accountKey]!).sponsored = []
   const prep = await worker<OwnerTxToSign & { remote?: RemoteOffer }>('POST', '/renew/prepare', {})
   check(prep.status === 200 && !!prep.json.remote, 'Worker renew/prepare: 200 with the remote Safe offer', `${prep.status} ${JSON.stringify(prep.json).slice(0, 160)}`)

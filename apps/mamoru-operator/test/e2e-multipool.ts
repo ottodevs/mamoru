@@ -22,7 +22,8 @@ import { WHALE } from '../../../packages/scenarios/fixtures/world.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { bootOperator } from '../src/boot.ts'
 import { positionUsdc, readSafe, inUsdc } from '../src/chain.ts'
-import { signedCall } from './e2e-client.ts'
+import { signedCall, warmPrepare } from './e2e-client.ts'
+import { forkUpstreamArgs } from './fork-funding.ts'
 
 const envFile = join(homedir(), '.config/mamoru-operator/env')
 if (!process.env.RPC_URL && existsSync(envFile)) {
@@ -49,7 +50,7 @@ const anvilBin = Bun.which('anvil') ?? join(homedir(), '.foundry/bin/anvil')
 const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
 const port = portProbe.port as number
 portProbe.stop(true)
-const argv = ['--fork-url', proxy.url, '--compute-units-per-second', process.env.FORK_CUPS ?? '330', '--fork-retry-backoff', '2000', '--retries', '10', '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
+const argv = ['--fork-url', proxy.url, ...forkUpstreamArgs(), '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
 assertNoKeyInArgv(argv, ['RPC_URL', 'BASE_RPC_URL'])
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-operator-e2e-'))
 const anvil = Bun.spawn([anvilBin, ...argv], { stdout: Bun.file(join(dir, 'anvil.log')), stderr: Bun.file(join(dir, 'anvil.log')), env: sanitizedEnv() })
@@ -185,6 +186,8 @@ try {
   check(!f0.deployed && f0.usdc === DEPOSIT.toString() && !f0.active, `funding before activation: not deployed, ${f0.usdc} USDC, inactive`)
 
   // --- activate: one passkey signature enables the enter grants of the three pairs ---
+  // Warm the cold fork in-process first (see warmPrepare): the signed prepare then fits the operator's idle timeout.
+  await warmPrepare(op.operator, () => op.operator.prepareActivate(ctx))
   const activate = await ownerAction('activate')
   const f1 = await funding()
   check(f1.deployed && f1.active, `Safe deployed, engine active (${activate.txHash})`)
