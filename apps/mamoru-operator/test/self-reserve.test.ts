@@ -12,6 +12,7 @@ import {
   SELF_RESERVE_MIN_USDC,
   SELF_RESERVE_TWAP_TOLERANCE_BPS,
   reserveExpired,
+  headTooOld,
   selfReserveConfirmed,
   selfReservePlan,
   usdcForWeiAtTick,
@@ -106,6 +107,13 @@ describe('self-funded reserve or the relayer top-up', () => {
     expect(reserveExpired(d, d - 601n)).toBe(false)
     expect(reserveExpired(d, d - 600n)).toBe(true)
     expect(reserveExpired(d, d + 1n)).toBe(true)
+  })
+
+  test('#372: no swap is priced from a head more than five minutes behind the host clock', () => {
+    const wall = 1_790_604_800n
+    expect(headTooOld(wall - 300n, wall)).toBe(false)
+    expect(headTooOld(wall - 301n, wall)).toBe(true)
+    expect(headTooOld(wall + 30n, wall)).toBe(false)
   })
 })
 

@@ -43,7 +43,7 @@ import { peerAnnounce, readinessMismatch, stepReady, userOpOutcome, type Announc
 import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, userOpHash, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
-import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
+import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, headTooOld, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
 import { Engine, engineGas, isTransportError, thrownSummary, v4EngineGas, type BridgeSigning, type EngineConfig, type EngineSession, type HeldHistory } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
 import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
@@ -3899,7 +3899,20 @@ export class Operator {
     if (this.offBase()) return null
     const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
     let probe: { receive: LiveReceive; quoted: bigint; route: string; pool: string } | null = null
+    // The swap's time: read only when one could be planned (ETH short, USDC in the Safe).
+    let timestamp = 0n
     if (r.eth < target && r.usdc > 0n) {
+      try {
+        ;({ timestamp } = await this.client.getBlock({ blockNumber: r.block }))
+      } catch (e) {
+        logErr(`[activate] ${safe} no time for block ${r.block}, gas reserve not bought in the batch:`, e)
+        return null
+      }
+      const wall = BigInt(Math.floor(Date.now() / 1000))
+      if (headTooOld(timestamp, wall)) {
+        console.log(`[activate] ${safe} gas reserve not bought in the batch: STALE_HEAD (block ${r.block} is ${wall - timestamp} s behind the host clock)`)
+        return null
+      }
       try {
         probe = await this.receiveQuote('ETH', SELF_RESERVE_PROBE_USDC, r.block, this.cfg.policy.execution.slippageBps)
       } catch (e) {
@@ -3932,7 +3945,6 @@ export class Operator {
       logErr(`[activate] ${safe} no quote for the gas reserve swap:`, e)
       return null
     }
-    const { timestamp } = await this.client.getBlock({ blockNumber: r.block })
     return { reserve: { fee, amountIn: plan.amountIn, amountOutMinimum: plan.minOut, deadline: timestamp + SELF_RESERVE_DEADLINE_SECONDS }, route: probe!.route }
   }
 
