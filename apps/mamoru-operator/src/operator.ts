@@ -3897,21 +3897,22 @@ export class Operator {
   private async selfReserve(safe: Address, r: SafeRead): Promise<{ reserve: LiveGasReserve; route: string } | null> {
     // otto/mamoru#61: the reserve swap is priced and routed in WETH on Base's pools. Off Base the relayer tops the Safe up.
     if (this.offBase()) return null
-    let timestamp: bigint
-    try {
-      ;({ timestamp } = await this.client.getBlock({ blockNumber: r.block }))
-    } catch (e) {
-      logErr(`[activate] ${safe} no time for block ${r.block}, gas reserve not bought in the batch:`, e)
-      return null
-    }
-    const wall = BigInt(Math.floor(Date.now() / 1000))
-    if (headTooOld(timestamp, wall)) {
-      console.log(`[activate] ${safe} gas reserve not bought in the batch: STALE_HEAD (block ${r.block} is ${wall - timestamp} s behind the host clock)`)
-      return null
-    }
     const target = this.cfg.policy.gasReserveWei + TOP_UP_MARGIN_WEI
     let probe: { receive: LiveReceive; quoted: bigint; route: string; pool: string } | null = null
+    // The swap's time: read only when one could be planned (ETH short, USDC in the Safe).
+    let timestamp = 0n
     if (r.eth < target && r.usdc > 0n) {
+      try {
+        ;({ timestamp } = await this.client.getBlock({ blockNumber: r.block }))
+      } catch (e) {
+        logErr(`[activate] ${safe} no time for block ${r.block}, gas reserve not bought in the batch:`, e)
+        return null
+      }
+      const wall = BigInt(Math.floor(Date.now() / 1000))
+      if (headTooOld(timestamp, wall)) {
+        console.log(`[activate] ${safe} gas reserve not bought in the batch: STALE_HEAD (block ${r.block} is ${wall - timestamp} s behind the host clock)`)
+        return null
+      }
       try {
         probe = await this.receiveQuote('ETH', SELF_RESERVE_PROBE_USDC, r.block, this.cfg.policy.execution.slippageBps)
       } catch (e) {

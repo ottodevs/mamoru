@@ -63,7 +63,8 @@ describe('the activation buys its own gas reserve', () => {
 
   test('#372: a head more than five minutes behind the host prices no swap: the start goes on the relayer path', async () => {
     const w = selfWorld(20_000_000n)
-    w.knobs.blockTime -= 7_200n
+    // 15 min: within the deadline's hour, so only the stale-head check refuses it.
+    w.knobs.blockTime -= 900n
     const tx = (await quiet(() => w.op.prepareActivate(ctx))).out
     expect(tx.summary.some((l) => l.startsWith('Convert'))).toBe(false)
   })
