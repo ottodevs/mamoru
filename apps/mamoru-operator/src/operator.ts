@@ -43,7 +43,7 @@ import { peerAnnounce, readinessMismatch, stepReady, userOpOutcome, type Announc
 import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, userOpHash, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
-import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
+import { SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReserveDeadline, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
 import { Engine, engineGas, isTransportError, thrownSummary, v4EngineGas, type BridgeSigning, type EngineConfig, type EngineSession, type HeldHistory } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
 import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
@@ -3933,7 +3933,7 @@ export class Operator {
       return null
     }
     const { timestamp } = await this.client.getBlock({ blockNumber: r.block })
-    return { reserve: { fee, amountIn: plan.amountIn, amountOutMinimum: plan.minOut, deadline: timestamp + SELF_RESERVE_DEADLINE_SECONDS }, route: probe!.route }
+    return { reserve: { fee, amountIn: plan.amountIn, amountOutMinimum: plan.minOut, deadline: selfReserveDeadline(timestamp, BigInt(Math.floor(Date.now() / 1000))) }, route: probe!.route }
   }
 
   /** Planned under the account lock: an in-flight engine op (reduce, re-range) lands first, so the plan sees its liquidity. */
@@ -5444,7 +5444,7 @@ export class Operator {
     }
     // otto/mamoru#15: its reserve swap at or near its deadline can never run. An approval never sent is dropped and the
     // owner asked for a new one (a failed start); one sent before goes on to executeOwner, which leaves it to the chain.
-    if (!tried && a.reserveDeadline && reserveExpired(BigInt(a.reserveDeadline), BigInt(Math.floor(Date.now() / 1000)))) {
+    if (!tried && a.reserveDeadline && reserveExpired(BigInt(a.reserveDeadline), await this.chainNow())) {
       console.log(`[armed] ${acc.accountKey} ${a.opId} gas reserve swap near its deadline, never sent: dropped, the owner approves again`)
       return this.disarm(acc, RESERVE_SWAP_EXPIRED)
     }

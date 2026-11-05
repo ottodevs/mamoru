@@ -76,6 +76,15 @@ export function selfReserveConfirmed(minOut: bigint, quoted: bigint): boolean {
   return quoted >= minOut
 }
 
+/**
+ * otto/mamoru#372: a swap's deadline, on the same clock reserveExpired is judged by: the later of the read block's time
+ * and the host's. Built from the block alone, a head that lags the host (a stalled node, a fork pinned in the past)
+ * gave a swap born at or past its own margin, so every start failed RESERVE_SWAP_EXPIRED.
+ */
+export function selfReserveDeadline(blockSeconds: bigint, wallSeconds: bigint): bigint {
+  return (blockSeconds > wallSeconds ? blockSeconds : wallSeconds) + SELF_RESERVE_DEADLINE_SECONDS
+}
+
 /** Whether a swap with this deadline can no longer be simulated or sent: within the margin of it, or past it. */
 export function reserveExpired(deadline: bigint, nowSeconds: bigint): boolean {
   return nowSeconds + SELF_RESERVE_DEADLINE_MARGIN_SECONDS >= deadline
