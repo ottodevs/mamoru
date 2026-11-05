@@ -281,8 +281,10 @@ describe('#6 sponsorship of owner transactions is bounded', () => {
     acc.grants = [GRANT]
     acc.sponsored = [at(1_000, 'transfer', 15_000_000_000_000n)]
     expect(await w.op.prepareTransfer(ctx, { to: TO, amountUsdc: '1000000' }).catch((e: unknown) => e)).toMatchObject({ code: 'SPONSOR_DAILY_BUDGET' })
-    const stop = await w.op.prepareStop(ctx)
+    const stop = await w.op.prepareStop(ctx, { revokeOnly: true })
     expect(stop.summary.some((l) => l.includes('network fee'))).toBe(false)
+    const plain = await w.op.prepareStop(ctx)
+    expect(plain.summary.some((l) => l.includes('network fee'))).toBe(false)
   })
 
   test('past every limit, with a Safe that cannot pay: Stop falls back to an emergency revocation, counted, two a day', async () => {
