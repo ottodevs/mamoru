@@ -4,7 +4,6 @@ import { sleeveChain, txLink } from '../lib/chain.tsx'
 import { shortHex } from '../lib/format.ts'
 import { usd } from '../lib/money.ts'
 import { chainLabel } from '../lib/positions.ts'
-import { clockTime } from '../lib/time.ts'
 import { isMultichainTarget } from './monad-consent.tsx'
 
 // otto/mamoru#269: the balance is the whole money, chain by chain and in flight. otto/mamoru#350 (Brais, 3 Nov): the
@@ -16,9 +15,6 @@ export const moneyCopy = {
   confirming: 'The total is being confirmed.',
   // Brais, 3 Nov (literal): a bridge in progress is part of the total and says so under it.
   moving: (amount: string, from: string, to: string) => `${amount} USDC moving from ${from} to ${to}`,
-  // #350 review r1: the card used to say this per chain; a chain read that failed keeps its last value, and says so.
-  stale: (chain: string, at: string) => `${chain} could not be read just now. Showing its last value, read at ${at}.`,
-  staleNoTime: (chain: string) => `${chain} could not be read just now. Showing its last value.`,
   partial: (chains: string) => `Some positions on ${chains} could not be listed, so the total may be short.`,
   pastScope: 'May not include other chains.',
   // otto/mamoru#245: a burn past its deadline. One sentence per group of reason codes, never an amount; the second
@@ -50,7 +46,7 @@ function names(cs: MoneyChain[], all: MoneyChain[]): string {
 /**
  * The line under the balance when the total is not the whole, fresh account: an operator that sends no money map while
  * the account spans chains, or, each said on its own when several hold (#350 review r2, r3): a chain never read (clearly,
- * never as 0), a chain showing its last good read, positions not listed, a transfer not confirmed. Null when none holds.
+ * never as 0), positions not listed, a transfer not confirmed. Null when none holds.
  */
 export function totalScopeNote(f: FundingView | undefined, otherChain: boolean, withMoving = true): string | null {
   if (!f) return null
@@ -62,13 +58,8 @@ export function totalScopeNote(f: FundingView | undefined, otherChain: boolean, 
   if (withMoving) for (const t of f.money.inFlight.filter((t) => t.stage !== 'failed')) notes.push(moneyCopy.moving(usd(t.amountUsdc), chainLabel(t.from), chainLabel(t.to)))
   const unread = unreadChains(f.money)
   if (unread.length) notes.push(moneyCopy.incomplete(names(unread, f.money.chains)))
-  // A chain never read is stale too; it is said once, as unread.
-  const stale = f.money.chains.filter((c) => c.read.stale && c.read.at !== null)
-  // One sentence per stale chain, each with its own read time (#350 review r6).
-  for (const c of stale) {
-    const at = clockTime(c.read.at!)
-    notes.push(at ? moneyCopy.stale(names([c], f.money.chains), at) : moneyCopy.staleNoTime(names([c], f.money.chains)))
-  }
+  // Ot, 5 Nov: a chain read that failed and kept its last value says nothing to the owner. Its value stays in the total;
+  // the failed read is ours to watch (operator logs, later /ops), not a line under the balance.
   const partial = f.money.chains.filter((c) => c.partial)
   if (partial.length) notes.push(moneyCopy.partial(names(partial, f.money.chains)))
   if (f.money.inFlight.some((t) => t.unsure)) notes.push(moneyCopy.confirming)
