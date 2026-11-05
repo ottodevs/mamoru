@@ -12,8 +12,7 @@ import {
   SELF_RESERVE_MIN_USDC,
   SELF_RESERVE_TWAP_TOLERANCE_BPS,
   reserveExpired,
-  selfReserveDeadline,
-  SELF_RESERVE_DEADLINE_SECONDS,
+  headTooOld,
   selfReserveConfirmed,
   selfReservePlan,
   usdcForWeiAtTick,
@@ -110,14 +109,11 @@ describe('self-funded reserve or the relayer top-up', () => {
     expect(reserveExpired(d, d + 1n)).toBe(true)
   })
 
-  test('#372: a head behind the host clock never gives a swap born expired', () => {
+  test('#372: no swap is priced from a head more than five minutes behind the host clock', () => {
     const wall = 1_790_604_800n
-    // The read block is two hours old (a stalled node, a fork pinned in the past): the deadline counts from the host.
-    const lagging = selfReserveDeadline(wall - 7_200n, wall)
-    expect(lagging).toBe(wall + SELF_RESERVE_DEADLINE_SECONDS)
-    expect(reserveExpired(lagging, wall)).toBe(false)
-    // A head ahead of the host counts from the head, the clock the chain checks the deadline against.
-    expect(selfReserveDeadline(wall + 30n, wall)).toBe(wall + 30n + SELF_RESERVE_DEADLINE_SECONDS)
+    expect(headTooOld(wall - 300n, wall)).toBe(false)
+    expect(headTooOld(wall - 301n, wall)).toBe(true)
+    expect(headTooOld(wall + 30n, wall)).toBe(false)
   })
 })
 

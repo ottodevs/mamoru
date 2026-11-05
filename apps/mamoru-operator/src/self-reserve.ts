@@ -77,12 +77,14 @@ export function selfReserveConfirmed(minOut: bigint, quoted: bigint): boolean {
 }
 
 /**
- * otto/mamoru#372: a swap's deadline, on the same clock reserveExpired is judged by: the later of the read block's time
- * and the host's. Built from the block alone, a head that lags the host (a stalled node, a fork pinned in the past)
- * gave a swap born at or past its own margin, so every start failed RESERVE_SWAP_EXPIRED.
+ * otto/mamoru#372: the swap is priced (quote, TWAP) at the read block and its deadline counts from that block's time.
+ * A head that far behind the host (a stalled node) prices from a stale market and gives a swap born near or past its
+ * deadline: no swap is planned, the relayer tops the Safe up as for any other start.
  */
-export function selfReserveDeadline(blockSeconds: bigint, wallSeconds: bigint): bigint {
-  return (blockSeconds > wallSeconds ? blockSeconds : wallSeconds) + SELF_RESERVE_DEADLINE_SECONDS
+export const SELF_RESERVE_MAX_HEAD_LAG_SECONDS = 300n
+
+export function headTooOld(blockSeconds: bigint, wallSeconds: bigint): boolean {
+  return wallSeconds - blockSeconds > SELF_RESERVE_MAX_HEAD_LAG_SECONDS
 }
 
 /** Whether a swap with this deadline can no longer be simulated or sent: within the margin of it, or past it. */
