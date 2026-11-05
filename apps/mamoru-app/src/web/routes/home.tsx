@@ -37,10 +37,7 @@ import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 import { moneyCopy, StuckNote, totalScopeNote, unreadChains } from '../components/money-map.tsx'
 import { ChainBadge, SafeRef } from '../components/safe-ref.tsx'
 import { idleWhyLine } from '../lib/idle-why.ts'
-import { mixVsTarget, type MixRow } from '../lib/mix.ts'
 import { TransferRow } from '../components/transfer-row.tsx'
-import { UpgradeProgress } from '../components/upgrade-progress.tsx'
-import { upgradeJourney } from '../lib/upgrade-steps.ts'
 
 export const homeCopy = {
   total: 'Total balance',
@@ -96,10 +93,6 @@ export const homeCopy = {
   colAmount: 'Amount',
   colShare: 'Share',
   target: (pct: number) => (pct === 0 ? 'target 0%, closing' : `target ${pct}%`),
-  // otto/mamoru#265: the account's mix now against its policy's, per bucket, under the positions.
-  mix: 'Your mix',
-  mixTarget: (pct: string) => `target ${pct}%`,
-  chainSum: (amount: string) => `${amount} USDC`,
   leftOver: 'Left over, under the 0.10 USDC minimum.',
   // otto/mamoru#210: a row of USDC supplied to a lending vault.
   lending: 'USDC lending',
@@ -497,45 +490,6 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
  * range, value in USDC with each token, share of working capital and the pool's current and monthly rates. A
  * paused (out-of-range) position earns 0% today and says Mamoru puts it back to work.
  */
-type ChainGroup = { chainId: number; safe: string; value: bigint | null; rows: number[] }
-
-/**
- * otto/mamoru#265: with the money map of an account on more than one chain, the positions by the Safe that holds them,
- * the group with the most money first and, inside it, the largest position first (#350). `f.positions` is the map's
- * chains' positions in order (wholeMoney), so each chain owns the next run of rows. Null for an account on one chain.
- */
-export function chainGroups(f: FundingView, rows: PositionRate[]): ChainGroup[] | null {
-  const m = f.money
-  if (!m || new Set(m.chains.map((c) => c.chainId)).size < 2 || m.chains.reduce((n, c) => n + c.positions.length, 0) !== f.positions.length) return null
-  const sorted = bySize(rows)
-  let at = 0
-  const groups: ChainGroup[] = []
-  for (const c of m.chains) {
-    const own = new Set(c.positions.map((_, i) => at + i))
-    at += c.positions.length
-    if (!own.size) continue
-    const mine = sorted.filter((k) => own.has(k))
-    const values = mine.map((k) => rows[k]!.valueUsdc)
-    groups.push({ chainId: c.chainId, safe: c.safe, value: values.some((v) => v === null) ? null : values.reduce<bigint>((a, v) => a + v!, 0n), rows: mine })
-  }
-  return groups.sort((a, b) => (a.value === b.value ? 0 : a.value === null ? 1 : b.value === null ? -1 : b.value > a.value ? 1 : -1))
-}
-
-/** "YOUR MIX  Stable 50.3% target 50% · Balanced 34.6% target 35% · Growth 15.1% target 15%". */
-function MixLine({ rows }: { rows: MixRow[] }) {
-  const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1))
-  return (
-    <p className="m-0 mt-3 flex flex-col gap-x-5 gap-y-1 border-t border-wash pt-3 font-mono text-[0.75rem] tracking-[0.04em] sm:flex-row sm:flex-wrap sm:items-baseline" data-testid="mix">
-      <span className="uppercase tracking-[0.14em] text-stone">{homeCopy.mix}</span>
-      {rows.map((r) => (
-        <span key={r.bucket} data-testid="mix-row">
-          {r.bucket} <span className="text-ink">{r.nowPct.toFixed(1)}%</span> <span className="text-stone">{homeCopy.mixTarget(fmt(r.targetPct))}</span>
-        </span>
-      ))}
-    </p>
-  )
-}
-
 /** Range holds name a token id only, and ids repeat across chains: they belong to the account's own chain's positions. */
 function holdsApply(p: { chainId?: number }, homeChain: number): boolean {
   return p.chainId === undefined || p.chainId === homeChain
@@ -554,10 +508,6 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
   const line = progressLine(f.progress) ?? engineLine(f)
   const bridge = f.progress?.bridge
   const noRate = apy !== undefined && rows.some((r) => r.monthlyPct === null || (r.inRange && r.currentPct === null))
-  // otto/mamoru#265: an account on more than one chain lists its positions by chain, each under its Safe.
-  const groups = chainGroups(f, rows)
-  const order = groups ? groups.flatMap((g) => g.rows) : bySize(rows)
-  const mix = mixVsTarget(f, price)
   return (
     <Fold
       defaultOpen
@@ -602,24 +552,13 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
             <span className="wc-rate">{homeCopy.monthly}</span>
           </div>
           <ul className="m-0 list-none p-0">
-            {(groups ?? [{ chainId: 0, safe: '', value: null, rows: bySize(rows) }]).map((g, gi) => (
-              <Fragment key={`${g.chainId}:${g.safe}`}>
-                {groups ? (
-                  <li className={`flex flex-wrap items-center gap-x-3 gap-y-[0.35rem] pt-5 pb-2${gi ? ' mt-2 border-t border-wash' : ''}`} data-testid="chain-group">
-                    {/* Brais, 3 Nov (#350): no Safe address in Working capital; the Safe shows in Idle capital, where money waits. */}
-                    <ChainBadge chainId={g.chainId} />
-                    {g.value !== null ? <span className="ml-auto font-mono text-[0.78rem] tracking-[0.04em] text-stone">{homeCopy.chainSum(usd(g.value))}</span> : null}
-                  </li>
-                ) : null}
-                {g.rows.map((k) => {
-                  const p = f.positions[k]! as FundingView['positions'][number] & { chainId?: number }
-                  return <PositionRow key={`${p.chainId ?? ''}:${p.tokenId}`} p={p} r={rows[k]!} i={order.indexOf(k)} readFromChain={f.source === 'chain'} hold={holdsApply(p, homeChain) ? f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code : undefined} />
-                })}
-              </Fragment>
-            ))}
+            {/* Ot, 5 Nov: one list, largest first; each row names its own chain, no header per chain. */}
+            {bySize(rows).map((k, i) => {
+              const p = f.positions[k]! as FundingView['positions'][number] & { chainId?: number }
+              return <PositionRow key={`${p.chainId ?? ''}:${p.tokenId}`} p={p} r={rows[k]!} i={i} readFromChain={f.source === 'chain'} hold={holdsApply(p, homeChain) ? f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code : undefined} />
+            })}
           </ul>
           {noRate ? <p className="m-0 pt-2 font-mono text-[0.72rem] text-stone">{homeCopy.noRate}</p> : null}
-          {mix ? <MixLine rows={mix} /> : null}
         </>
       )}
       {onStop || onStart ? (
@@ -1533,7 +1472,6 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   // A renewal the owner signed is on its way: the row that asks for it steps aside until it settles.
   const renewing = opList.some((o) => o.kind === 'renew' && !TERMINAL.has(o.state))
   const renewAsk = renewAskFor(f, renewing)
-  const upgrade = f?.source === 'chain' ? null : upgradeJourney(f, opList)
   useEffect(() => {
     if (renewAsk && !askedBefore(renewAsk)) setRenewAsked(true)
   }, [renewAsk])
@@ -1702,7 +1640,6 @@ export function HomeView({ accountKey }: { accountKey: string }) {
               on screen for its Ethereum part, and says when it is done. */}
           {!canStart && (oneOpen || one.finished) ? <OneApprovalStart flow={one} title={homeCopy.notRunning} startLabel={homeCopy.start} /> : null}
           {/* otto/mamoru#263: the move to the mix with Monad, step by step, while it runs and for a day after. */}
-          {upgrade ? <UpgradeProgress upgrade={upgrade} /> : null}
           {noPositions ? null : <Working f={whole!.f} s={whole!.s} apy={apy.data} price={price} otherChainsUsdc={otherChainsUsdc} onStop={!fromChain && (f.active || whole!.f.positions.length > 0) ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />}
           <Idle f={whole!.f} s={whole!.s} home={s as Split} />
           <History ops={opList} onRetry={retry} loaded={ops.isSuccess} />

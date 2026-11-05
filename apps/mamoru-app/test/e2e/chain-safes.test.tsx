@@ -2,13 +2,12 @@ import { describe, expect, test } from 'bun:test'
 import { braisAfterMove, BRAIS_BASE_SAFE, BRAIS_MONAD_SAFE_REAL } from '../../src/web/fixtures/brais-after.ts'
 import { braisFunding, braisToday } from '../../src/web/fixtures/money.ts'
 import { idleWhyLine, knownIdleWhy } from '../../src/web/lib/idle-why.ts'
-import { mixVsTarget } from '../../src/web/lib/mix.ts'
 import { moneyTotal, split, wholeMoney } from '../../src/web/lib/money.ts'
 import { Idle, Working } from '../../src/web/routes/home.tsx'
 import { count, render } from './render.ts'
 
 // otto/mamoru#265: Brais's account after the move (1 Nov 11:43): positions by chain under each Safe, the 2.08 USDC idle on
-// his Monad Safe with why it waits (in words, never the code), and the mix against its target (50.3/34.6/15.1 vs 50/35/15).
+// his Monad Safe with why it waits (in words, never the code).
 
 const NOW = Date.parse('2026-11-01T11:43:00.000Z')
 const views = (f: ReturnType<typeof braisAfterMove>) => {
@@ -40,26 +39,13 @@ describe('reasons in words', () => {
 })
 
 describe('Brais after the move', () => {
-  test('the mix against the target: 50.3 / 34.6 / 15.1 vs 50 / 35 / 15', () => {
-    const mix = mixVsTarget(braisAfterMove(NOW))!
-    expect(mix.map((r) => r.bucket)).toEqual(['Stable', 'Balanced', 'Growth'])
-    expect(mix.map((r) => r.targetPct)).toEqual([50, 35, 15])
-    const [stable, balanced, growth] = mix.map((r) => r.nowPct)
-    expect(stable).toBeCloseTo(50.3, 0)
-    expect(balanced).toBeCloseTo(34.6, 0)
-    expect(growth).toBeCloseTo(15.1, 0)
-    expect(stable! + balanced! + growth!).toBeLessThanOrEqual(100)
-  })
-
-  test('Working: the Base positions under a Base header, no Safe address (Brais, 3 Nov), and the mix line', () => {
+  test('Working: one list, no header per chain, no Safe address, no mix line (Ot, 5 Nov)', () => {
     const { working } = views(braisAfterMove(NOW))
-    expect(count(working.html, 'data-testid="chain-group"')).toBe(1)
+    expect(working.html).not.toContain('data-testid="chain-group"')
     expect(working.html).not.toContain('data-testid="safe-ref"')
     expect(working.html).not.toContain(BRAIS_BASE_SAFE)
     expect(working.text).toContain('11.70 USDC')
-    expect(working.text).toContain('Your mix')
-    expect(working.text).toContain('Growth 15.1%')
-    expect(working.text).toContain('target 15%')
+    expect(working.text).not.toContain('Your mix')
   })
 
   test('Idle: the Monad Safe, its 2.07 USDC and why it waits; Base dust is not a row', () => {
@@ -87,17 +73,12 @@ describe('Brais after the move', () => {
 })
 
 describe('other moments', () => {
-  test('positions on Base and Monad: two groups, the larger first, each named by its chain', () => {
+  test('positions on Base and Monad: one list, largest first, each row names its chain', () => {
     const { f: w, s } = wholeMoney(braisToday(NOW))
     const { html } = render(<Working f={w} s={s} onStop={null} />)
-    const groups = html.split('data-testid="chain-group"').slice(1)
-    expect(groups.length).toBe(2)
-    expect(groups[0]).toContain('Base')
-    expect(groups[1]).toContain('Monad')
-    expect(html).not.toContain('data-testid="safe-ref"')
-    // The rows of each group follow its head, largest first (#350).
-    expect(groups[0]!.indexOf('Gauntlet USDC Prime')).toBeLessThan(groups[0]!.indexOf('WETH/USDC'))
-    expect(groups[1]).toContain('WMON/USDC')
+    expect(html).not.toContain('data-testid="chain-group"')
+    expect(html.indexOf('Gauntlet USDC Prime')).toBeLessThan(html.indexOf('WETH/USDC'))
+    expect(html).toContain('WMON/USDC')
   })
 
   test('one chain only (no Monad yet): nothing new, no Safe, no mix', () => {
@@ -106,14 +87,7 @@ describe('other moments', () => {
     const working = render(<Working f={w} s={s} onStop={null} />)
     const idle = render(<Idle f={w} s={s} />)
     expect(working.html).not.toContain('data-testid="chain-group"')
-    expect(working.html).not.toContain('data-testid="mix"')
     expect(idle.html).not.toContain('data-testid="safe-ref"')
-    expect(mixVsTarget(f)).toBeNull()
   })
 
-  test('a map that is not complete gives no mix (a share of a partial total would be wrong)', () => {
-    const f = braisAfterMove(NOW)
-    f.money!.complete = false
-    expect(mixVsTarget(f)).toBeNull()
-  })
 })

@@ -4,7 +4,6 @@ import { emptyAccount, FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from './empty-acco
 import { poolsResponse } from './pools.ts'
 import { braisAfterMove } from './brais-after.ts'
 import { braisFlight, type FlightStage } from './transfer.ts'
-import { braisUpgrade, type UpgradeMoment } from './journey.ts'
 import { braisFunding, braisToday, withMonadOnlyPositions, withMonadPosition, withoutMoney, withStaleMonad, withStuckTransfer, withUnreadMonad, type BraisMoment } from './money.ts'
 
 // Dev (VITE_FIXTURES=1) and tests only. Never imported by the production build.
@@ -208,10 +207,6 @@ const braisView = (): FundingView | null => {
   const f = brais === 'monadonly' ? withMonadOnlyPositions() : brais === 'stuck' ? withStuckTransfer(new URLSearchParams(location.search).get('reason') ?? 'mint_budget') : brais === 'mixed' ? withMonadPosition(braisFunding('minted'), '2000000') : brais === 'today' ? braisToday() : braisFunding((['before', 'flight', 'minted', 'arriving'].includes(brais) ? brais : 'flight') as BraisMoment)
   return param('old') ? withoutMoney(f) : param('unread') ? withUnreadMonad(f) : param('stale') ? withStaleMonad(f) : f
 }
-// ?upgrade=signing|rebalancing|bridging|waiting|done (dev only, otto/mamoru#263): Brais's move to v6 on 1 Nov at that moment.
-const upgradeMoment = typeof location !== 'undefined' && liveGate ? new URLSearchParams(location.search).get('upgrade') : null
-const upgradeStartedAt = Date.now()
-const upgradeView = () => (upgradeMoment ? braisUpgrade(upgradeMoment as UpgradeMoment, upgradeStartedAt) : null)
 const upgradeApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 1000) + 300 * 86_400, renewDue: false, expired: false, policyId: 'conservador-live-v5', upgrade: true, upgradePolicy: 'conservador-live-v6' } })
 const dueApproval = (): Partial<FundingView> => ({ active: true, approval: { validUntil: Math.floor(Date.now() / 86_400_000) * 86_400 + 10 * 86_400, renewDue: true, expired: false } })
 // ?history (dev only, otto/mamoru#235): a running account with events in each state, and one more landing 4 s in.
@@ -382,7 +377,7 @@ export const fixtureClient: ApiClient = {
       ? new Promise((_, reject) => setTimeout(() => reject(new ApiRequestError(503, { error: 'The operator is not reachable. Nothing was sent. Try again.', code: 'OPERATOR_UNAVAILABLE' })), 150))
       : operatorChain || operatorChainIdle
         ? delay(chainView())
-        : delay(isMonad(k) ? monadState.funding : (upgradeView()?.funding ?? braisView() ?? liveState.funding)),
+        : delay(isMonad(k) ? monadState.funding : (braisView() ?? liveState.funding)),
   // ?wrongchain (dev only): 150 USDC was sent on Ethereum to the Base address.
   otherChains: () =>
     delay({
@@ -406,7 +401,7 @@ export const fixtureClient: ApiClient = {
       earnedDaily: Array.from({ length: 14 }, (_, i) => ({ day: new Date(Date.now() - (14 - i) * 86_400_000).toISOString().slice(0, 10), earnedUsd: String(Math.round(2800 * i + (i > 6 && i < 9 ? -1200 : 0) + 300 * Math.sin(i))) })),
       lastBalance: { totalUsd: '24873120', readAt: new Date(Date.now() - (operatorDown ? 3 * 60 : 1) * 60_000).toISOString() },
     }),
-  ops: (k) => delay({ ops: isMonad(k) ? monadState.ops : (upgradeView()?.ops ?? liveState.ops) }),
+  ops: (k) => delay({ ops: isMonad(k) ? monadState.ops : liveState.ops }),
   activatePrepare: (k) =>
     delay(
       fixtureTx(
