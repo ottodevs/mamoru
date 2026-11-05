@@ -35,8 +35,6 @@ import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '..
 import { isVaultTarget } from '../lib/policies.ts'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 import { moneyCopy, StuckNote, totalScopeNote, unreadChains } from '../components/money-map.tsx'
-import { ChainBadge, SafeRef } from '../components/safe-ref.tsx'
-import { idleWhyLine } from '../lib/idle-why.ts'
 import { TransferRow } from '../components/transfer-row.tsx'
 
 export const homeCopy = {
@@ -93,7 +91,6 @@ export const homeCopy = {
   colAmount: 'Amount',
   colShare: 'Share',
   target: (pct: number) => (pct === 0 ? 'target 0%, closing' : `target ${pct}%`),
-  leftOver: 'Left over, under the 0.10 USDC minimum.',
   // otto/mamoru#210: a row of USDC supplied to a lending vault.
   lending: 'USDC lending',
   // otto/mamoru#297: next to the range gauge; the dust, cost and cooldown holds below keep their own, truer lines.
@@ -622,36 +619,7 @@ function idleByChain(f: FundingView): string | null {
   return parts.length > 1 ? parts.map((x) => `${chainLabel(x.c.chainId)} ${usd(x.v)}`).join(' · ') : null
 }
 
-type IdleChain = { chainId: number; safe: string; value: bigint; tokens: { token: string; amount: string; decimals: number }[]; line: string }
-
-/**
- * otto/mamoru#265: each Safe holding idle money, when the money map spans more than one chain; null otherwise. The line
- * says why it waits: the engine's reason for that chain in words, else, on the account's own chain, what Idle said before,
- * else that it waits (or is a remainder under the smallest entry). Dust under a cent is left out.
- */
-export function idleChains(f: FundingView, home: Split, homeChain: number): IdleChain[] | null {
-  const m = f.money
-  if (!m || new Set(m.chains.map((c) => c.chainId)).size < 2) return null
-  const out: IdleChain[] = []
-  for (const c of m.chains) {
-    const value = c.idle.reduce((a, t) => a + BigInt(t.valueUsdc), 0n)
-    if (value < DUST_USDC) continue
-    const why = c.idle.find((t) => t.why)?.why
-    const own = idleReason(f, home)
-    const line = why
-      ? idleWhyLine(why, c.chainId)
-      : c.chainId === homeChain
-        ? `${own.charAt(0).toUpperCase()}${own.slice(1)}.`
-        : value < MIN_ENTRY_USDC
-          ? homeCopy.leftOver
-          : idleWhyLine(undefined, c.chainId)
-    out.push({ chainId: c.chainId, safe: c.safe, value, tokens: c.idle.filter((t) => t.amount !== '0'), line })
-  }
-  return out.length ? out.sort((a, b) => (b.value > a.value ? 1 : b.value < a.value ? -1 : 0)) : null
-}
-
 export function Idle({ f, s, home = s }: { f: FundingView; s: Split; /** The account's own (Base) balance: why money is idle is said of it, never of money on another chain. */ home?: Split }) {
-  const homeChain = useChain().chainId
   const reason = f.money && home.idle < DUST_USDC && s.idle >= DUST_USDC ? null : idleReason(f, home)
   // One idle token that is not USDC (cbBTC left over, say) is named on the line itself, since nothing opens.
   const only = s.idleTokens.length === 1 && s.idleTokens[0]!.token !== 'USDC' ? s.idleTokens[0]! : null
@@ -678,38 +646,6 @@ export function Idle({ f, s, home = s }: { f: FundingView; s: Split; /** The acc
       </span>
     </>
   )
-  // otto/mamoru#265: on more than one chain, the idle money of each Safe and why it waits. Open when money waits on a
-  // chain other than the account's own (the Monad share after a move), so the Safe and the reason are in view.
-  const chains = idleChains(f, home, homeChain)
-  if (chains) {
-    return (
-      <Fold testId="idle" head={head} labelledBy="idle-title" defaultOpen={chains.some((c) => c.chainId !== homeChain && c.value >= MIN_ENTRY_USDC)}>
-        <ul className="m-0 list-none p-0 pt-1" data-testid="idle-chains">
-          {chains.map((c, i) => (
-            <li key={`${c.chainId}:${c.safe}`} className={`grid gap-2 py-3${i ? ' border-t border-wash' : ''}`} data-testid="idle-chain">
-              <span className="flex flex-wrap items-center gap-x-3 gap-y-[0.35rem]">
-                <ChainBadge chainId={c.chainId} />
-                <span className="order-3 basis-full sm:order-2 sm:basis-auto">
-                  <SafeRef chainId={c.chainId} safe={c.safe} />
-                </span>
-                <span className="order-2 ml-auto text-[1.05rem] tabular-nums sm:order-3">
-                  {usd(c.value)} <span className="wc-unit">USDC</span>
-                </span>
-              </span>
-              {c.tokens.length > 1 || (c.tokens[0] && c.tokens[0].token !== 'USDC') ? (
-                <span className="font-mono text-[0.75rem] tracking-[0.04em] text-stone">
-                  {c.tokens.map((t) => `${tokenAmount(t.amount, t.token, t.decimals)} ${t.token}`).join(' · ')}
-                </span>
-              ) : null}
-              <span className="max-w-[44rem] text-[0.95rem] leading-[1.45]" data-testid="idle-why">
-                {c.line}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </Fold>
-    )
-  }
   // #226: the same head as every panel; it opens only when there is more than one token to list.
   if (s.idleTokens.length <= 1) {
     return (
