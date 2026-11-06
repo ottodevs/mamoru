@@ -1,5 +1,6 @@
-// Spec 013 §4: GET /api/stats, public (no session; it never sets c.var.accountKey, so no activity is recorded).
-// One payload, all history, built from D1 only and passed through the k >= 3 guard before it is cached or sent.
+// Spec 013 §4 with amendment A1: GET /api/stats, public (no session; it never sets c.var.accountKey, so no activity is
+// recorded). One payload (snapshots, distributions, series), built from D1 only and passed through the k >= 3 guard
+// before it is cached or sent.
 // Cached at the edge 300 s; rate-limited per hashed client address (STATS_READ_LIMIT); a D1 failure serves the cached
 // copy with its own dataAsOf, else 503 STATS_UNAVAILABLE.
 import { Hono } from 'hono'
@@ -40,7 +41,8 @@ export function statsRoutes(cache: () => StatsCache | null = workersCache) {
     }
     const store = cache()
     const cached = await store?.match(STATS_CACHE_KEY).catch(() => undefined)
-    const age = cached ? (Date.now() - Number(cached.headers.get('x-stats-built') ?? 0)) / 1000 : Infinity
+    const nowMs = c.var.now().getTime()
+    const age = cached ? (nowMs - Number(cached.headers.get('x-stats-built') ?? 0)) / 1000 : Infinity
     if (cached && age < STATS_TTL_S) {
       c.header('cache-control', CACHE_CONTROL)
       return c.json((await cached.json()) as StatsView)
@@ -50,13 +52,15 @@ export function statsRoutes(cache: () => StatsCache | null = workersCache) {
       view = guardStats(await statsInput(c.env.DB, c.var.now()))
     } catch (e) {
       console.error('stats: not built', e instanceof Error ? e.message : String(e))
-      if (cached) {
+      // A copy older than an hour holds figures A1 says to hide (stale): it is not served.
+      if (cached && age <= 3600) {
         c.header('cache-control', 'no-store')
         return c.json((await cached.json()) as StatsView)
       }
       return apiError(c, 503, 'Stats are not available right now. Try again in a minute.', 'STATS_UNAVAILABLE')
     }
-    await store?.put(STATS_CACHE_KEY, new Response(JSON.stringify(view), { headers: { 'content-type': 'application/json', 'x-stats-built': String(Date.now()) } })).catch(() => {})
+    // Stored for a day (the route decides freshness from x-stats-built), so a D1 outage can still serve the last copy.
+    await store?.put(STATS_CACHE_KEY, new Response(JSON.stringify(view), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=86400', 'x-stats-built': String(nowMs) } })).catch(() => {})
     c.header('cache-control', CACHE_CONTROL)
     return c.json(view)
   })
