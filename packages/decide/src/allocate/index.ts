@@ -2,12 +2,18 @@ import type { ChainId, ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasIncrease, hasManageAny, preferenceTotal, type PolicyVersion } from '@mamoru/policy'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { safeSavings } from '../enter/index.ts'
-import { convertKey, inEdgeBand, rerangeOf } from '../rerange/index.ts'
+import { bucketValues, convertKey, DRIFT_BPS, inEdgeBand, rerangeOf } from '../rerange/index.ts'
+import { reinvestFits } from '../harvest/index.ts'
 import { depthOf } from '../depth/index.ts'
 import { rangeFor, widthFor, widthOf } from '../geometry/index.ts'
 import { purgaIdentity, registryOf } from '../gates/index.ts'
 import type { GateStep, Observation, PoolObs, PositionObs, Proposal } from '../types.ts'
 import { amountsForLiquidity, bucketVaults, inSavings, opCostInSavings, vaultValue, volatileOf } from '../value.ts'
+
+/** otto/mamoru#107 (spec 012 HRV-R4): idle USDC on a sleeve this long at or above the threshold goes home. */
+export const RETURN_DWELL_SECONDS = 6n * 3_600n
+/** otto/mamoru#107 (spec 012 HRV-R4): after a return home, nothing is bridged back to that chain for this long. */
+export const RETURN_HOLD_SECONDS = 24n * 3_600n
 
 /** Default smallest entry when the policy sets none: 0.10 of a 6-decimal savings asset. */
 export const DEFAULT_MIN_ENTRY = 100_000n
@@ -255,7 +261,17 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
           if (row) row.code = 'DECIDE_WAIT_VAULT_LIQUIDITY'
           continue
         }
-        const assets = want < v.maxDeposit ? want : v.maxDeposit
+        let assets = want < v.maxDeposit ? want : v.maxDeposit
+        // otto/mamoru#107 (spec 012 HRV-R7): on V4 a vault never takes more than the policy's vault ratio of C leaves.
+        const ratioRoom = obs.budget?.vaultRoom
+        if (ratioRoom !== undefined && ratioRoom < assets) {
+          if (ratioRoom < vaultMin) {
+            waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_BUDGET', amount: want })
+            if (row) row.code = 'DECIDE_WAIT_BUDGET'
+            continue
+          }
+          assets = ratioRoom
+        }
         if (!row) continue
         row.code = 'STRATEGY_PREFERENCE_DEVIATION'
         picked = i
@@ -393,6 +409,13 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       const gap = target - (obs.remote?.value ?? 0n)
       if (gap < minEntry || gap * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
       let amount = gap < free ? gap : free
+      // otto/mamoru#107 (spec 012 HRV-R4): no ping-pong. For 24 h after money came home from that chain nothing goes back,
+      // unless its sleeve placed everything it had (its idle USDC under the threshold).
+      const returned = obs.remote?.returnedAt
+      if (returned !== undefined && obs.block.timestamp - BigInt(returned) < RETURN_HOLD_SECONDS && !(obs.remote?.idle !== undefined && obs.remote.idle < entryMin)) {
+        waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE', amount })
+        continue
+      }
       if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n || !bridgeLive) {
         waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE', amount })
         continue
@@ -425,8 +448,50 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n || total === 0n) break
       const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
       const excess = obs.remote.value - target
-      if (excess < entryMin || excess * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
-      returnDue = { bucket: rb.id, chainId: rb.chainId, amount: excess }
+      const over = excess >= entryMin && excess * 10_000n > target * BigInt(policy.rebalanceBandBps ?? 0) ? excess : 0n
+      // otto/mamoru#107 (spec 012 HRV-R4): also the sleeve's own idle USDC, once it has sat at or above the threshold for
+      // the dwell period (its engine could not place it), even with the sleeve under its target: no veto between chains.
+      const idle = obs.remote.idle ?? 0n
+      const since = obs.remote.idleSince
+      const idleDue = idle >= entryMin && since !== undefined && obs.block.timestamp - BigInt(since) >= RETURN_DWELL_SECONDS ? idle : 0n
+      const amount = over > idleDue ? over : idleDue
+      if (amount === 0n) continue
+      returnDue = { bucket: rb.id, chainId: rb.chainId, amount }
+    }
+    // otto/mamoru#107 (spec 012 HRV-R3): free savings no bucket takes this review (each inside its fill band, or what it
+    // waits for kept aside) go to the Stable bucket's vault, past the band, up to one unit under the line where the
+    // drain side would redeem them (DRIFT_BPS, as `reduceOf` measures it), within the vault ratio of C on V4.
+    if (!proposal && !unsafeDeposit && free > 0n) {
+      const vi = rows.findIndex((r) => r.vault && !r.blocked)
+      // What another bucket waits for stays; the vault bucket's own wait (under its floor) is what the sweep places.
+      const kept = waiting.filter((w) => vi < 0 || w.bucket !== rows[vi]!.b.id).reduce((s, w) => s + w.amount, 0n)
+      const spare = free > kept ? free - kept : 0n
+      if (vi >= 0 && spare >= vaultMin) {
+        const r = rows[vi]!
+        const drain = bucketValues(obs, policy, new Set(policy.buckets.flatMap((b) => b.pools)))
+        const bv = drain.buckets.find((b) => b.bucket === r.b.id)
+        const bvTotal = drain.total
+        // A held `exitOptIn` bucket counts as Stable on the drain side too (reduceOf's credit).
+        const credit = r.value - vaultValue(obs, r.b)
+        const ceiling = bv ? bv.target + (bvTotal * BigInt(DRIFT_BPS)) / 10_000n - 1n - credit : 0n
+        let amount = bv && ceiling > bv.value ? ceiling - bv.value : 0n
+        if (amount > spare) amount = spare
+        const ratioRoom = obs.budget?.vaultRoom
+        const byRatio = ratioRoom !== undefined && ratioRoom < amount
+        if (byRatio) amount = ratioRoom
+        const open = bucketVaults(obs, r.b).filter((v) => v.maxDeposit >= vaultMin)
+        const v = open.find((x) => liveSession(obs, grantKeyFor(policy, 'vault-supply', x.name))) ?? open[0]
+        if (v && amount > v.maxDeposit) amount = v.maxDeposit
+        if (byRatio && amount < vaultMin) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_BUDGET', amount: spare })
+        else if (v && amount >= vaultMin) {
+          if (!reinvestFits(obs, policy, amount)) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_BUDGET', amount })
+          else {
+            buckets[vi]!.code = 'STRATEGY_PREFERENCE_DEVIATION'
+            picked = vi
+            proposal = { kind: 'vault_deposit', grant: grantKeyFor(policy, 'vault-supply', v.name) as `vault-supply:${string}`, bucket: r.b.id, pool: v.name, vault: v.name, assets: amount }
+          }
+        }
+      }
     }
     if (total === 0n) for (const row of buckets) if (row.code === 'STRATEGY_PREFERENCE') row.code = 'DECIDE_NO_CAPITAL'
     return { total, buckets, proposal, picked, sale: pickedSale > 0n, pendingMint, waiting, displaced, displacedAt, returnDue }

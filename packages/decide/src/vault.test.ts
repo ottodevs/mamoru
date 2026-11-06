@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV7, grantKey } from '@mamoru/policy'
 import { baseRegistry, address, entry } from '@mamoru/registry'
 import { quoteMint, sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
-import { allocate, bucketValues, decide, type Observation, type PoolObs, type PositionObs, type VaultObs } from './index.ts'
+import { allocate, bucketValues, decide, positionValue, type Observation, type PoolObs, type PositionObs, type VaultObs } from './index.ts'
 
 // otto/mamoru#210: conservador-live-v7, the stables bucket in ERC-4626 vaults (Morpho gtUSDCp first, Aave waBasUSDC).
 const V7 = conservadorLiveV7
@@ -264,5 +264,106 @@ describe('conservador-live-v7: the stables bucket in vaults (otto/mamoru#210)', 
     const o = obs({ vaults: [vault('vault:gtUSDCp', 0n), vault('vault:waBasUSDC', 0n), { name: 'vault:other', shares: 10n ** 9n, assets: 10n ** 9n, maxWithdraw: 10n ** 9n, maxDeposit: 0n, maxRedeem: 10n ** 9n }] })
     expect(allocate(o, V7, false).total).toBe(0n)
     expect(decide(o, V7).proposal).toBeNull()
+  })
+})
+
+describe('sweep of free savings into the Stable vault (otto/mamoru#107, spec 012 HRV-R3)', () => {
+  // v7 without its Growth sleeve, so the two Base buckets are the whole account (50/85 Stable, 35/85 WETH/USDC).
+  const BASE_ONLY = { ...V7, remoteBuckets: [] } as typeof V7
+  const WETH = POOLS[2]!
+  /**
+   * 3,000 USDC account whose buckets are each just inside their 3 % fill band once `extra` free USDC (harvested fees,
+   * sold) is counted: Stable 25 USDC short, WETH/USDC 35 short. No bucket takes an entry; before #107 the USDC sat idle.
+   */
+  function settled(extra: bigint, over: Partial<Observation> = {}): Observation {
+    const total = 3_000n * USDC
+    const stable = (total * 50n) / 85n - 25n * USDC
+    const risk = (total * 35n) / 85n - 35n * USDC
+    const free = total - stable - risk
+    const probe: PositionObs = { tokenId: 3n, pool: WETH.name, tickLower: -193_380 - 600, tickUpper: -193_380 + 600, liquidity: 10n ** 15n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true }
+    const pos = { ...probe, liquidity: (probe.liquidity * risk) / positionValue(probe, WETH, 'USDC') }
+    return obs({ balances: { USDC: free + extra - 60n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, positions: [pos], vaults: [vault('vault:gtUSDCp', stable), vault('vault:waBasUSDC', 0n)], remote: undefined, ...over })
+  }
+
+  const drainLine = (o: Observation) => {
+    const { total, buckets } = bucketValues(o, BASE_ONLY, new Set(BASE_ONLY.buckets.flatMap((b) => b.pools)))
+    const s = buckets.find((b) => b.bucket === 'stables')!
+    return { value: s.value, line: s.target + (total * 500n) / 10_000n }
+  }
+
+  test('free USDC no bucket takes goes to the vault past the fill band, under the drain line (HRV-S10)', () => {
+    const o = settled(60n * USDC)
+    const d = decide(o, BASE_ONLY)
+    expect(d.proposal).toMatchObject({ kind: 'vault_deposit', vault: 'vault:gtUSDCp', bucket: 'stables' })
+    const assets = (d.proposal as { assets: bigint }).assets
+    const { value, line } = drainLine(o)
+    expect(assets >= 40n * USDC).toBe(true)
+    expect(value + assets < line).toBe(true)
+  })
+
+  test('after the sweep, the next review redeems nothing (HRV-S12)', () => {
+    const o = settled(60n * USDC)
+    const p = decide(o, BASE_ONLY).proposal as { kind: string; vault: string; assets: bigint }
+    expect(p.kind).toBe('vault_deposit')
+    const after = { ...o, balances: { ...o.balances, USDC: o.balances.USDC! - p.assets }, vaults: o.vaults!.map((v) => (v.name === p.vault ? vault(v.name, v.assets + p.assets) : v)) }
+    const d = decide(after, BASE_ONLY)
+    expect(d.proposal?.kind).not.toBe('vault_redeem')
+  })
+
+  test('money another bucket waits for is never swept (HRV-S11)', () => {
+    // 50 of the 60 kept for the Growth sleeve on Monad, not ready: 10 left is under the vault floor.
+    const o = settled(60n * USDC, { remote: { value: 0n, inFlight: 0n, ready: false } })
+    const d = decide(o, V7)
+    expect(d.proposal?.kind).not.toBe('vault_deposit')
+  })
+
+  test('V4: the vault at its ratio of C takes nothing, and says why (HRV-S05)', () => {
+    const o = settled(60n * USDC, { budget: { room: 10n ** 15n, vaultRoom: 0n } })
+    const d = decide(o, BASE_ONLY)
+    expect(d.proposal?.kind).not.toBe('vault_deposit')
+    expect((d.waiting ?? []).some((w) => w.bucket === 'stables' && w.code === 'DECIDE_WAIT_BUDGET')).toBe(true)
+  })
+
+  test('V4: a fresh deposit never puts more in the vault than its ratio of C leaves', () => {
+    const fresh = { balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } }
+    const some = decide(obs({ ...fresh, budget: { room: 10n ** 15n, vaultRoom: 100n * USDC } }), V7)
+    expect(some.proposal).toMatchObject({ kind: 'vault_deposit', assets: 100n * USDC })
+    const none = decide(obs({ ...fresh, budget: { room: 10n ** 15n, vaultRoom: 0n } }), V7)
+    expect(none.proposal?.kind).not.toBe('vault_deposit')
+    expect(none.buckets.find((b) => b.bucket === 'stables')?.code).toBe('DECIDE_WAIT_BUDGET')
+  })
+
+  test('V4: room that would not cover re-minting the positions holds the sweep (HRV-R7)', () => {
+    const o = settled(60n * USDC, { budget: { room: 1n } })
+    const d = decide(o, BASE_ONLY)
+    expect(d.proposal?.kind).not.toBe('vault_deposit')
+    expect((d.waiting ?? []).some((w) => w.code === 'DECIDE_WAIT_BUDGET')).toBe(true)
+  })
+})
+
+describe('idle USDC on the sleeve comes home (otto/mamoru#107, spec 012 HRV-R4)', () => {
+  const NOW = 1_000_000n
+  const sessions = obs().sessions.map((x) => ({ ...x, validUntil: Number(NOW) * 2 }))
+  const at = (o: Partial<Observation>) => obs({ block: { number: 100n, hash: `0x${'11'.repeat(32)}`, timestamp: NOW }, sessions, balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, ...o })
+
+  test('30 USDC idle on the sleeve for 6 h comes home, even with the sleeve under its target (HRV-S06)', () => {
+    const d = decide(at({ remote: { value: 40n * USDC, inFlight: 0n, ready: true, idle: 30n * USDC, idleSince: Number(NOW) - 6 * 3_600 } }), V7)
+    expect(d.returnDue).toEqual({ bucket: 'growth', chainId: 143, amount: 30n * USDC })
+  })
+
+  test('not before the dwell period, and never while a bridge is in flight', () => {
+    expect(decide(at({ remote: { value: 40n * USDC, inFlight: 0n, ready: true, idle: 30n * USDC, idleSince: Number(NOW) - 3_600 } }), V7).returnDue).toBeUndefined()
+    expect(decide(at({ remote: { value: 40n * USDC, inFlight: 5n * USDC, ready: true, idle: 30n * USDC, idleSince: Number(NOW) - 7 * 3_600 } }), V7).returnDue).toBeUndefined()
+  })
+
+  test('for 24 h after a return nothing is bridged back to that chain (HRV-S18)', () => {
+    const remote = { value: 40n * USDC, inFlight: 0n, ready: true, idle: 30n * USDC, returnedAt: Number(NOW) - 2 * 3_600 }
+    const held = decide(at({ remote }), V7)
+    expect(held.proposal?.kind).not.toBe('bridge_out')
+    expect((held.waiting ?? []).some((w) => w.bucket === 'growth' && w.code === 'DECIDE_WAIT_BRIDGE')).toBe(true)
+    // The sleeve placed everything it had: the hold lifts.
+    expect(decide(at({ remote: { ...remote, idle: 0n } }), V7).proposal?.kind).toBe('bridge_out')
+    // A day later it lifts anyway.
+    expect(decide(at({ remote: { ...remote, returnedAt: Number(NOW) - 25 * 3_600 } }), V7).proposal?.kind).toBe('bridge_out')
   })
 })
