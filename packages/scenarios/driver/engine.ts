@@ -1,7 +1,7 @@
 import { encodeFunctionData, getAddress, isAddressEqual, pad, parseAbi, parseEventLogs, toFunctionSelector, toHex, zeroHash, type Hex, type Log, type PublicClient } from 'viem'
 import type { LocalAccount } from 'viem/accounts'
 import { ReasonError, type Address, type ReasonCode } from '@mamoru/domain'
-import { amountsOf, decide, outOfRangeSinceOf, placedOf, safeSavings, twapFloor, withOutOfRangeSince, type Decision, type Observation, type Proposal, type SessionObs } from '@mamoru/decide'
+import { amountsOf, decide, outOfRangeSinceOf, placedOf, safeSavings, twapFloor, withOutOfRangeSince, type Decision, type Observation, type Proposal, type SessionObs, type BridgeLimit } from '@mamoru/decide'
 import { signBlocker } from '@mamoru/journal'
 import { hasIncrease, hasManageAny, TWAP_SHORT_WINDOW_SECONDS, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import { assertPinnedCode, baseRegistry, address, entry, entryPointV07Abi, erc20Abi, erc4626Abi, isDeployed, mamoruActionPolicyV2Abi, nonfungiblePositionManagerAbi, smartSessionAbi, tokenMessengerV2Abi, uniswapV3PoolAbi, type Registry, type RegistryName } from '@mamoru/registry'
@@ -455,6 +455,11 @@ export type EngineConfig = {
    */
   remote?: (block: bigint) => Promise<NonNullable<Observation['remote']>>
   /**
+   * otto/mamoru#376 (spec 011 CAP-R5): what the bridge-out grant still allows, set on that session as
+   * `SessionObs.bridgeLimit` at every review. Absent: the session carries none, which decide reads as unknown (waits).
+   */
+  bridgeLimit?: () => BridgeLimit
+  /**
    * otto/mamoru#293: under MamoruActionPolicyV4 the bridge-out recipient is not in any session rule: V4 mints only to the
    * remote it registered and the guardian marked ready. The operator passes that address (read from V4) so the engine
    * checks the simulated burn against it. Absent under V4: no bridge-out is ever prepared.
@@ -810,6 +815,7 @@ export class Engine {
       validUntil: s.grant.userOp.validUntil,
       active: !this.ledger.get(s.permissionId)?.revoked,
       usesLeft: Math.max(0, s.grant.userOp.usageLimit - this.ledger.usesOf(s.permissionId)),
+      ...(s.name === 'bridge-out' && this.cfg.bridgeLimit ? { bridgeLimit: this.cfg.bridgeLimit() } : {}),
     }))
   }
 

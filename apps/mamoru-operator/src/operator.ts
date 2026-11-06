@@ -50,7 +50,7 @@ import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
 import { buildMoneyMap, chainLegOf, returnRows, unreadLeg, type ReturnLeg } from './money-map.ts'
 import type { GuardReadsState } from './guard-reads-state.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
-import type { Observation, PeerPositionObs, Proposal } from '@mamoru/decide'
+import type { BridgeLimit, Observation, PeerPositionObs, Proposal } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, POSITION_DUST_USDC, amountsForLiquidity, idleTokens, inUsdc, livePool, nativePricePool, positionUsdc, positionView, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
@@ -66,6 +66,7 @@ import type { Relayer } from './relayer.ts'
 import { yieldFee, YIELD_FEE_BPS, YIELD_FEE_FROM } from './yield-fee.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
+import { bridgeLeftOf } from './bridge-left.ts'
 import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
@@ -621,7 +622,7 @@ export type OperatorConfig = {
    * account's engine reads its remote value from it and records every bridge-out in it before signing. Absent: no
    * account has a remote value, and no bridge-out is ever signed.
    */
-  bridgeMonad?: Pick<MonadBridge, 'remote' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs' | 'capUsdc' | 'metrics' | 'tickRelayer' | 'relayers'>
+  bridgeMonad?: Pick<MonadBridge, 'remote' | 'burns' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs' | 'capUsdc' | 'metrics' | 'tickRelayer' | 'relayers'>
   /** otto/mamoru#278 (Base): a V4 home's returns from its remote Safe, followed to the mint here. Absent: none asked. */
   returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'floor' | 'open' | 'request' | 'lastClosedAt' | 'capUsdc' | 'returns' | 'holds' | 'noteReported'>
   /**
@@ -1006,7 +1007,7 @@ export class Operator {
   /** otto/mamoru#340: per account, the last look for a deposit (watchDeposits): when, how far, and the one in flight. */
   private readonly depositLooks = new Map<string, DepositLook>()
   /** #149: usage counters read from the chain per account (readChainUsage), keyed by lower-case permission id. */
-  private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage>; budgets?: Map<string, number>; paused?: boolean }>()
+  private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage>; budgets?: Map<string, number>; paused?: boolean; readAt?: number }>()
   /** Ops whose execTransaction went to the provider in this attempt: only then can a refusal be about a copy already out. */
   private readonly execTried = new Set<string>()
   /** Armed ops being sent again after a failed attempt: an earlier copy may have landed although its reply said no. */
@@ -2084,12 +2085,14 @@ export class Operator {
     const had = this.chainUsage.get(acc.accountKey)
     if (had && had.grants === ids && Date.now() - had.at < CHAIN_USAGE_TTL_MS) return
     // Taken before the read, so a slow or failing RPC is not asked again on every poll.
-    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: had?.grants === ids ? had.byGrant : new Map() })
+    // `readAt` stays the time of the read `byGrant` came from (otto/mamoru#376: what is left of a bridge grant is judged against it).
+    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: had?.grants === ids ? had.byGrant : new Map(), ...(had?.grants === ids && had.readAt !== undefined ? { readAt: had.readAt } : {}) })
+    const readAt = Date.now()
     const byGrant = await readChainUsage(this.client as never, acc.ctx.address as Address, acc.grants, this.cfg.registry)
     const budgets = await this.readBudgets(acc)
     const paused = (await this.readPaused(acc)) === true
     if (!byGrant.size && !budgets?.size && !paused) return
-    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant, ...(budgets?.size ? { budgets } : {}), ...(paused ? { paused } : {}) })
+    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant, ...(budgets?.size ? { budgets } : {}), ...(paused ? { paused } : {}), readAt })
     const ledger = this.runners.get(acc.accountKey)?.engine.ledger
     for (const g of acc.grants) {
       const c = byGrant.get(g.permissionId.toLowerCase())
@@ -6252,6 +6255,22 @@ export class Operator {
     }
   }
 
+  /**
+   * otto/mamoru#376 (spec 011 CAP-R5): what the account's bridge-out grant still allows. V4: no total (`none`, set from
+   * the policy family). V3: the chain's counter of the grant's cumulative rule plus what the journal knows the chain has
+   * not counted yet (bridge-left.ts); a failed send after the last read asks for a fresh read and waits until then.
+   */
+  private bridgeLimitFor(acc: AccountState): BridgeLimit {
+    if (this.onV4(acc)) return { kind: 'none' }
+    const g = acc.grants.find((x) => x.name === 'bridge-out')
+    const usage = this.chainUsage.get(acc.accountKey)
+    const burns = (this.cfg.bridgeMonad?.burns() ?? []).filter((b) => b.accountKey === acc.accountKey)
+    const limit = bridgeLeftOf({ grant: g?.grant, chain: g ? usage?.byGrant.get(g.permissionId.toLowerCase()) : undefined, chainReadAt: usage?.readAt, burns })
+    // Expire the cached read so the next refresh rebuilds what is left from the chain.
+    if (limit.kind === 'unknown' && usage?.readAt !== undefined && burns.some((b) => b.state === 'failed' && Date.parse(b.updatedAt) > usage.readAt!)) usage.at = 0
+    return limit
+  }
+
   // ---- one authorization: MamoruActionPolicyV4 (otto/mamoru#293, spec 010) ----------------------------------
 
   private v4PoolsCache: RegistryPoolsCache | null = null
@@ -7732,6 +7751,7 @@ export class Operator {
         // otto/mamoru#210: v7's USDC/USDT is wound down only for an account in the `stables_lp_exit` scope (opt-in).
         exitOptIn: () => this.inScope(acc, 'stables_lp_exit'),
         ...this.remoteOf(acc),
+        bridgeLimit: () => this.bridgeLimitFor(acc),
         rerangeHistory: rerangeHistoryOf(acc.ops, Math.floor(Date.now() / 1000)),
         ...(outOfRangeSeedOf(acc.outOfRange) ? { outOfRangeSeed: outOfRangeSeedOf(acc.outOfRange)! } : {}),
         ...(heldHistorySeedOf(acc.heldHistory) ? { heldHistorySeed: heldHistorySeedOf(acc.heldHistory)! } : {}),
