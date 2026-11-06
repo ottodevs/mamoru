@@ -76,9 +76,17 @@ describe('writeIncome and writeDayBackfill', () => {
     const dep = flow('deposit', 100_000_000n, 100n * E18, T0 - 3600)
     await writeIncome(db, snap(T0, [{ shares: 100n * E18, value: 101_000_000n }], [{ safe: SAFE, days: [], vault: { flows: [], explained: null } }]), new Date(), resolve)
     await writeIncome(db, snap(T0 + 600, [{ shares: 100n * E18, value: 101_500_000n }], [{ safe: SAFE, days: [], vault: { flows: [], explained: null } }]), new Date(), resolve)
-    expect(income().map((r) => r.usd)).toEqual([null, null])
+    expect(income().map((r) => r.usd)).toEqual([null, null, null])
     await writeIncome(db, snap(T0 + 1200, [{ shares: 100n * E18, value: 102_000_000n }], [{ safe: SAFE, days: [], vault: { flows: [dep], explained: { 'vault:gtUSDCp': (100n * E18).toString() } } }]), new Date(), resolve)
-    expect(income().map((r) => [r.source, r.from_s, r.usd])).toEqual([['backfill', null, 1_000_000], ['vault-yield', T0, 500_000], ['vault-yield', T0 + 600, 500_000]])
+    expect(income().map((r) => [r.source, r.from_s, r.usd])).toEqual([['backfill', null, 1_000_000], ['backfill', null, 0], ['vault-yield', T0, 500_000], ['vault-yield', T0 + 600, 500_000]])
+  })
+
+  test('while a receipt is unread a not-counted row stands for vaults this pull cannot see, closed at 0 once flows are known', async () => {
+    await writeIncome(db, snap(T0, [], [{ safe: SAFE, days: [], vault: { flows: [], explained: null } }]), new Date(), resolve)
+    expect(income()).toEqual([{ event_id: `vault-pending:${CHAIN}:${KEY}`, source: 'backfill', t_s: T0, from_s: null, usd: null }])
+    const flows = [flow('deposit', 100_000_000n, 100n * E18, T0 - 7200, 1), flow('withdraw', 101_000_000n, 100n * E18, T0 - 3600, 2)]
+    await writeIncome(db, snap(T0 + 600, [], [{ safe: SAFE, days: [], vault: { flows, explained: { 'vault:gtUSDCp': '0' } } }]), new Date(), resolve)
+    expect(income().map((r) => [r.event_id.split(':')[0], r.usd])).toEqual([['vault-backfill', 1_000_000], ['vault-pending', 0]])
   })
 
   test('explained shares unknown at the first sample → the backfill is not counted (null)', async () => {
@@ -141,6 +149,16 @@ describe('earned (spec 012 HRV-R9): income up to the snapshot plus accrued at it
     )
     db.raw.exec(`INSERT INTO yield_ledger_account_receipts (day, chain_id, address, account_key, env, gas_paid_wei, collected_usdc, digest, updated_at) VALUES ('2026-11-01', ${CHAIN}, '${SAFE}', '${KEY}', 'prod', '0', 100000000, 'x', 'x')`)
     expect(await loadEarned(db, CHAIN, KEY)).toMatchObject({ totalUsd: '0', status: 'partial', notCounted: ['history'] })
+  })
+
+  test('a held vault whose last sample is well before the snapshot (a failed income write) → partial', async () => {
+    const db = memoryD1()
+    db.raw.exec(
+      `INSERT INTO account_snapshot_latest (chain_id, address, account_key, env, block, read_at, deployed, idle_usdc, lp_usdc, fees_usdc, owed_usdc, total_usdc, positions_json, updated_at)
+       VALUES (${CHAIN}, '${SAFE}', '${KEY}', 'prod', 1, '${new Date(tA * 1000).toISOString()}', 1, 0, 0, 0, 0, 0, '[]', 'x')`,
+    )
+    db.raw.exec(`INSERT INTO yield_ledger_vault_samples (chain_id, account_key, vault, t_s, shares, value_usdc, explained_shares, explained) VALUES (${CHAIN}, '${KEY}', 'vault:gtUSDCp', ${tA - 3600}, '100', 100, '100', 1)`)
+    expect(await loadEarned(db, CHAIN, KEY)).toMatchObject({ status: 'partial', notCounted: ['vault-yield'] })
   })
 
   test('loadEarned reads the cutoff from the latest snapshot and is null without one', async () => {

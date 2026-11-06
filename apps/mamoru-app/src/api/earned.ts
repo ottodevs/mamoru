@@ -25,6 +25,8 @@ export type EarnedView = {
 type IncomeRow = { event_id: string; source: string; t_s: number; from_s: number | null; usd: number | null }
 
 const DAY = 86_400
+/** A held vault's latest sample older than this before the snapshot means a missed income write. */
+const VAULT_SAMPLE_LAG_S = 15 * 60
 /** A vault interval longer than this (samples run every few minutes) makes the 24 h figure partial. */
 const LONG_INTERVAL_S = 2 * 3600
 
@@ -93,11 +95,11 @@ export async function loadEarned(db: Db, chainId: number, accountKey: string): P
       db.prepare('SELECT event_id, source, t_s, from_s, usd FROM yield_ledger_income WHERE chain_id = ? AND account_key = ? AND t_s <= ?').bind(chainId, accountKey, tA).all<IncomeRow>(),
       db
         .prepare(
-          `SELECT s.shares, s.explained FROM yield_ledger_vault_samples s
+          `SELECT s.shares, s.explained, s.t_s FROM yield_ledger_vault_samples s
            WHERE s.chain_id = ? AND s.account_key = ? AND s.t_s = (SELECT MAX(x.t_s) FROM yield_ledger_vault_samples x WHERE x.chain_id = s.chain_id AND x.account_key = s.account_key AND x.vault = s.vault)`,
         )
         .bind(chainId, accountKey)
-        .all<{ shares: string; explained: number }>(),
+        .all<{ shares: string; explained: number; t_s: number }>(),
       // The receipts know more collected fees than the income rows hold (no pull since the migration, or an income
       // write that failed): the total is short and says so, never 'complete'.
       db
@@ -108,7 +110,9 @@ export async function loadEarned(db: Db, chainId: number, accountKey: string): P
         .bind(chainId, accountKey)
         .first<{ short: number }>(),
     ])
-    const unexplained = vaults.results.some((v) => BigInt(v.shares) > 0n && v.explained !== 1)
+    // A held vault whose last sample is well before the snapshot (its income write failed, or it was skipped): its
+    // yield since then is not in the ledger yet, so the figure is partial, not complete.
+    const unexplained = vaults.results.some((v) => BigInt(v.shares) > 0n && (v.explained !== 1 || v.t_s < tA - VAULT_SAMPLE_LAG_S))
     return { asOf: latest.read_at, ...earnedFrom(rows.results, tA, BigInt(latest.fees_usdc), unexplained, short?.short === 1) }
   } catch (e) {
     if (/no such table/i.test(e instanceof Error ? e.message : String(e))) return null
