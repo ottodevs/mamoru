@@ -92,6 +92,12 @@ describe('writeIncome and writeDayBackfill', () => {
     expect(income().find((r) => r.event_id.startsWith('vault-pending'))!.usd).toBeNull()
   })
 
+  test('a vault wire marked incomplete (a receipt given up on) stores the sample as not explained: earned is partial', async () => {
+    const flows = [flow('deposit', 100_000_000n, 100n * E18, T0 - 3600)]
+    await writeIncome(db, snap(T0, [{ shares: 100n * E18, value: 101_000_000n }], [{ safe: SAFE, days: [], vault: { flows, explained: { 'vault:gtUSDCp': (100n * E18).toString() }, incomplete: true } }]), new Date(), resolve)
+    expect(db.raw.query('SELECT explained FROM yield_ledger_vault_samples').get()).toEqual({ explained: 0 })
+  })
+
   test('explained shares unknown at the first sample → the backfill is not counted (null)', async () => {
     await writeIncome(db, snap(T0, [{ shares: 100n * E18, value: 101_000_000n }], [{ safe: SAFE, days: [], vault: { flows: [], explained: null } }]), new Date(), resolve)
     expect(income()[0]).toMatchObject({ source: 'backfill', usd: null })

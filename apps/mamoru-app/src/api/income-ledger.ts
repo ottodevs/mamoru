@@ -11,8 +11,12 @@ import type { Db } from './env.ts'
 import type { SnapshotWire } from './yield-ledger.ts'
 
 export type IncomeEventWire = { id: string; t: number; source: 'harvest' | 're-range'; usdc?: string }
-export type VaultFlowWire = { vault: string; kind: 'deposit' | 'withdraw'; assets: string; shares: string; logIndex: number; id: string; t: number }
-export type AccountVaultWire = { flows: VaultFlowWire[]; explained: Record<string, string> | null }
+export type VaultFlowWire = { vault: string; kind: 'deposit' | 'withdraw'; assets: string; shares: string; logIndex: number; id: string; t: number; block?: number }
+/** `incomplete`: the operator gave up on a receipt, so explained shares may be short: every vault of the account is partial. */
+export type AccountVaultWire = { flows: VaultFlowWire[]; explained: Record<string, string> | null; incomplete?: true }
+
+/** Chain order: time, then block (several blocks share a second on Monad), then log index. */
+const chainOrder = (a: VaultFlowWire, b: VaultFlowWire) => a.t - b.t || (a.block ?? 0) - (b.block ?? 0) || a.logIndex - b.logIndex
 
 const ONE = 10n ** 18n
 
@@ -29,7 +33,7 @@ export type VaultPoint = { t: number; shares: bigint; value: bigint; explained: 
  */
 export function vaultYield(prev: VaultPoint, now: VaultPoint, flows: readonly VaultFlowWire[]): bigint | null {
   if (prev.explained === null) return null
-  const inside = flows.filter((f) => f.t > prev.t && f.t <= now.t).sort((a, b) => a.t - b.t || a.logIndex - b.logIndex)
+  const inside = flows.filter((f) => f.t > prev.t && f.t <= now.t).sort(chainOrder)
   // The holding must move exactly as the flows say: a change no flow explains (a receipt not read yet, shares from
   // outside) leaves the interval not counted (null) instead of measuring it against a missing price.
   const moved = inside.reduce((n, f) => n + (f.kind === 'deposit' ? BigInt(f.shares) : -BigInt(f.shares)), 0n)
@@ -137,7 +141,7 @@ export async function writeIncome(db: Db, snapshot: SnapshotWire & { receipts?: 
         stmts.push(
           db
             .prepare('INSERT INTO yield_ledger_vault_samples (chain_id, account_key, vault, t_s, shares, value_usdc, explained_shares, explained) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING')
-            .bind(chainId, account.accountKey, vault, t, shares.toString(), Number(value), e === null ? null : e.toString(), isExplained(shares, e) ? 1 : 0),
+            .bind(chainId, account.accountKey, vault, t, shares.toString(), Number(value), e === null ? null : e.toString(), isExplained(shares, e) && !r?.vault?.incomplete ? 1 : 0),
         )
         samples++
         if (prev) {
