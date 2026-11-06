@@ -23,12 +23,15 @@ export type GuardInput = {
   sources: StatsView['sources']
 }
 
+/** Allow-if: only a whole number of owners at or above k publishes. NaN, undefined, negatives and fractions withhold. */
+export const enoughOwners = (owners: unknown): owners is number => Number.isInteger(owners) && (owners as number) >= MIN_OWNERS
+
 export function ownersBand(owners: number): StatsOwnersBand | undefined {
+  if (!enoughOwners(owners)) return undefined
   if (owners >= 50) return '50+'
   if (owners >= 25) return '25+'
   if (owners >= 10) return '10+'
-  if (owners >= MIN_OWNERS) return '3+'
-  return undefined
+  return '3+'
 }
 
 const dollars = (usd: number) => Math.round(usd)
@@ -37,7 +40,7 @@ const dollars = (usd: number) => Math.round(usd)
 function guardFigure(f: GuardFigure): StatsFigure {
   const base = { dataAsOf: f.dataAsOf, ...(f.stale ? { stale: true as const } : {}) }
   if (f.usd === null) return { usd: null, reason: f.reason ?? 'NOT_COUNTED', ...base }
-  if (f.owners < MIN_OWNERS) return { usd: null, reason: 'TOO_FEW_ACCOUNTS', ...base }
+  if (!enoughOwners(f.owners)) return { usd: null, reason: 'TOO_FEW_ACCOUNTS', ...base }
   return { usd: dollars(f.usd), ...(f.reason ? { reason: f.reason } : {}), ...base }
 }
 
@@ -48,17 +51,19 @@ function guardPoint(p: GuardPoint): StatsPoint {
   return { day: p.day, usd: dollars(p.usd), owners, ...(p.reason ? { reason: p.reason } : {}) }
 }
 
-const passes = (p: GuardPoint) => p.usd !== null && p.owners >= MIN_OWNERS
+const passes = (p: GuardPoint) => p.usd !== null && enoughOwners(p.owners)
 
 export function guardStats(input: GuardInput): StatsView {
   const f = input.fundedAccounts
   const fundedAccounts: StatsView['fundedAccounts'] =
     f.count === null ? { count: null, reason: f.reason ?? 'NOT_COUNTED', dataAsOf: f.dataAsOf }
-    : f.owners < MIN_OWNERS ? { count: null, reason: 'TOO_FEW_ACCOUNTS', dataAsOf: f.dataAsOf }
+    : !enoughOwners(f.owners) ? { count: null, reason: 'TOO_FEW_ACCOUNTS', dataAsOf: f.dataAsOf }
     : { count: f.count, ...(f.reason ? { reason: f.reason } : {}), dataAsOf: f.dataAsOf }
-  // A chain split goes out only when every one of its points passes: a withheld day inside a chain series would
-  // let the other chain's total be subtracted from the aggregate.
-  const chains = input.chains?.filter((c) => c.tvl.length > 0 && c.tvl.every(passes)).map((c) => ({ chainId: c.chainId, tvl: c.tvl.map(guardPoint) }))
+  // The chain split goes out whole or not at all: if any chain fails on any day, publishing the others would let
+  // the withheld chain be computed as total minus the published chains (complementary suppression).
+  const all = input.chains ?? []
+  const splitPasses = all.length > 0 && all.every((c) => c.tvl.length > 0 && c.tvl.every(passes))
+  const chains = splitPasses ? all.map((c) => ({ chainId: c.chainId, tvl: c.tvl.map(guardPoint) })) : undefined
   return {
     tvlNow: guardFigure(input.tvlNow),
     tvl: input.tvl.map(guardPoint),
@@ -67,7 +72,7 @@ export function guardStats(input: GuardInput): StatsView {
     earned24h: { ...guardFigure(input.earned24h), vaultYield: input.earned24h.vaultYield },
     earnedTotal: { ...guardFigure(input.earnedTotal), since: input.earnedTotal.since, vaultYield: input.earnedTotal.vaultYield },
     fundedAccounts,
-    ...(chains && chains.length > 0 ? { chains } : {}),
+    ...(chains ? { chains } : {}),
     sources: input.sources,
   }
 }

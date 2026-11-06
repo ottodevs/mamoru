@@ -40,16 +40,38 @@ describe('guardStats: k >= 3 on every published figure (STATS-R9)', () => {
     expect(v.fundedAccounts).toEqual({ count: null, reason: 'TOO_FEW_ACCOUNTS', dataAsOf: AS_OF })
   })
 
-  test('a chain split goes out only when every point passes', () => {
-    const v = guardStats(input({
+  test('the chain split goes out whole or not at all (no complementary suppression)', () => {
+    const ok = guardStats(input({
       chains: [
         { chainId: 8453, tvl: [{ day: '2026-11-05', usd: 300, owners: 5 }, { day: '2026-11-06', usd: 3800, owners: 7 }] },
-        { chainId: 143, tvl: [{ day: '2026-11-05', usd: 20, owners: 1 }, { day: '2026-11-06', usd: 37, owners: 3 }] },
+        { chainId: 143, tvl: [{ day: '2026-11-05', usd: 20, owners: 3 }, { day: '2026-11-06', usd: 37, owners: 3 }] },
       ],
     }))
-    expect(v.chains?.map((c) => c.chainId)).toEqual([8453])
-    const none = guardStats(input({ chains: [{ chainId: 143, tvl: [{ day: '2026-11-06', usd: 37, owners: 2 }] }] }))
-    expect(none.chains).toBeUndefined()
+    expect(ok.chains?.map((c) => c.chainId)).toEqual([8453, 143])
+    // Base 10 owners, Monad 2: publishing Base alone would reveal Monad as total minus Base.
+    const withheld = guardStats(input({
+      chains: [
+        { chainId: 8453, tvl: [{ day: '2026-11-06', usd: 3800, owners: 10 }] },
+        { chainId: 143, tvl: [{ day: '2026-11-06', usd: 37, owners: 2 }] },
+      ],
+    }))
+    expect(withheld.chains).toBeUndefined()
+    expect(JSON.stringify(withheld)).not.toContain('"chainId"')
+  })
+
+  test('fail closed on a malformed owner count: NaN, undefined, negative, fraction', () => {
+    for (const owners of [NaN, undefined as unknown as number, -5, 2.5, 3.5, Infinity]) {
+      const v = guardStats(input({
+        tvlNow: fig(100, owners),
+        tvl: [{ day: '2026-11-06', usd: 100, owners }],
+        fundedAccounts: { count: 4, owners, dataAsOf: AS_OF },
+        chains: [{ chainId: 8453, tvl: [{ day: '2026-11-06', usd: 100, owners }] }],
+      }))
+      expect(v.tvlNow.usd).toBeNull()
+      expect(v.tvl[0]!.usd).toBeNull()
+      expect(v.fundedAccounts.count).toBeNull()
+      expect(v.chains).toBeUndefined()
+    }
   })
 
   test('not counted keeps its reason (G4), never shown as too few or as 0', () => {
