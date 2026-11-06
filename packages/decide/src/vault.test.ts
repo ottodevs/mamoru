@@ -343,7 +343,8 @@ describe('sweep of free savings into the Stable vault (otto/mamoru#107, spec 012
 
 describe('idle USDC on the sleeve comes home (otto/mamoru#107, spec 012 HRV-R4)', () => {
   const NOW = 1_000_000n
-  const sessions = obs().sessions.map((x) => ({ ...x, validUntil: Number(NOW) * 2 }))
+  // V3 bridge-out with room left (spec 011): only the return-home rules decide here.
+  const sessions = obs().sessions.map((x) => ({ ...x, validUntil: Number(NOW) * 2, ...(x.grant === 'bridge-out' ? { bridgeLimit: { kind: 'v3' as const, perCall: 10n ** 12n, amountLeft: 10n ** 12n } } : {}) }))
   const at = (o: Partial<Observation>) => obs({ block: { number: 100n, hash: `0x${'11'.repeat(32)}`, timestamp: NOW }, sessions, balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, ...o })
 
   test('30 USDC idle on the sleeve for 6 h comes home, even with the sleeve under its target (HRV-S06)', () => {
