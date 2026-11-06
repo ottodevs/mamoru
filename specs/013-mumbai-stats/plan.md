@@ -48,7 +48,9 @@ Portfolio and by `/api/stats`. Stats only sums it over accounts and applies the 
 - **One cutoff T for every headline:** T = the oldest of the latest fee samples of the accounts that contribute (each
   account's latest sample is fresh within the stale rule of §3.6, older ones are `partial`). All figures are "as of T".
 - Per account, t_a = its latest fee sample at or before T. Samples run every 10 min; if t_a < T − 15 min, that
-  account makes the figure `partial` (the gap may hide earnings). Each account uses its own t_a for both sides:
+  account makes the figure `partial`. The earned figures are presented **as of min(t_a)** over contributing accounts
+  (`dataAsOf`), never as of T: an account read a few minutes earlier is shown as data up to its read, which is true;
+  earnings after its t_a appear with its next sample. Approximate by decision (Ot and Brais, 6 Nov). Each account uses its own t_a for both sides:
   total earned = Σ income with `t_s ≤ t_a` (all sources, incl. `backfill`) + accrued at t_a. A Collect after t_a is
   still in the accrued level at t_a and is not counted as income yet: no double count.
 - **Earned 24h, rolling**, per account (t_a − 24h, t_a] (windows differ by at most the sampling interval):
