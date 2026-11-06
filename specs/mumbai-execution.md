@@ -12,14 +12,14 @@ Priority: 011 cap, then 012 harvest, then 013 stats. Work runs in three blocks w
 
 ## Shared files: one branch at a time
 
-Tasks from different specs that edit the same file stack in this order (the later one branches from the earlier one's branch, or waits for its merge):
+Tasks that edit the same file stack in this order, across specs and within one: the later task **branches from the earlier task's branch** (never from `origin/main` while the earlier one is unmerged) and is rebased when it merges. The coordinator merges in the same order.
 
 | File | Order |
 |---|---|
 | `packages/decide/src/types.ts`, `packages/decide/src/allocate/index.ts` | 011 T-CAP-06 → 011 T-CAP-07 → 012 HT2 → 012 HT3 |
 | `apps/mamoru-operator/src/operator.ts` | 011 (T-CAP-06/07 operator parts) → 012 HT5. 013 does not touch it |
 | `apps/mamoru-operator/src/yield-receipts.ts`, `state.ts` | 012 HT6 → 013 B4 |
-| `apps/mamoru-app/src/api/yield-ledger.ts` | 013 B1 → 013 B5 |
+| `apps/mamoru-app/src/api/yield-ledger.ts` | 012 HT7 → 013 B1 → 013 B5 |
 
 Migrations are written as `XXXX_*.sql`; the coordinator numbers them at merge in merge order. Operator changes from all three specs share redeploys: one to beta per block, one to production at the end.
 
