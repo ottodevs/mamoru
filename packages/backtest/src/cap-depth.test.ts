@@ -135,6 +135,15 @@ describe(`a large account under the prod depth settings, Base pools at block ${f
         expect(placed[n]! > 0n).toBe(true)
         expect(placed[n]! <= room[n]!.shareRoom + USDC).toBe(true)
       }
+      // The placement claim itself (SCN-CAP-02): 10k places almost all (idle under 1 %); 100k places the pools' room
+      // (at least 77 % of the deposit) and the rest sits idle exactly as DECIDE_WAIT_DEPTH says.
+      const placedSum = Object.values(placed).reduce((s, v) => s + v, 0n)
+      if (whole === 10_000n) expect(idle * 100n <= deposit).toBe(true)
+      else {
+        expect(placedSum * 100n >= deposit * 77n).toBe(true)
+        const waitedSum = waiting.reduce((s, x) => s + x.amount, 0n)
+        expect(waitedSum > 0n && waitedSum <= idle).toBe(true)
+      }
       // The engine stopped by itself: the last review proposes nothing. What it holds back is typed, never refused.
       expect(r.last.proposal).toBeNull()
       for (const x of waiting) expect(['DECIDE_WAIT_DEPTH', 'DECIDE_WAIT_GAS']).toContain(x.code)
@@ -148,11 +157,13 @@ describe(`a large account under the prod depth settings, Base pools at block ${f
         const short = target - placed[pool]!
         if (short * 100n > target) expect(waiting.find((x) => x.bucket === b.id)?.code).toBe('DECIDE_WAIT_DEPTH')
       }
-      // A full Stop: every position closed, every volatile token sold back, within 1% of the deposit.
+      // A full Stop: every position closed, every volatile token sold back, within 10 bps of the deposit (6-7 today).
+      // Simplified on purpose: one fixed liquidity per pool (no tick crossing, no QuoterV2) and every position closed at
+      // once; execution against the live quoter is what the fork e2e (e2e-depth.ts) proves.
       const back = stop(w)
       console.log(`[#376] ${usd(deposit)} USDC Stop returns ${(Number(back) / 1e6).toFixed(2)} USDC (${((Number(deposit - back) * 10_000) / Number(deposit)).toFixed(1)} bps under the deposit)`)
       expect(w.positions.length).toBe(0)
-      expect(back * 10_000n >= deposit * 9_900n).toBe(true)
+      expect(back * 10_000n >= deposit * 9_990n).toBe(true)
     })
   }
 })
