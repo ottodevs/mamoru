@@ -168,6 +168,10 @@ export type YieldLedgerView = {
   accruedUsd: string | null // uncollected fees right now, USDC base units (yield only, never owed principal)
   collectedUsd: string | null // lifetime fees collected (harvest, close), USDC base units; null until any receipt exists
   earnedSoFarUsd: string | null // accruedUsd + collectedUsd, USDC base units: the figure "earned so far" shows
+  // otto/mamoru#107 (spec 012 HRV-R10): 'partial' when a part of earned could not be counted (`notCounted` names which),
+  // so the figure above is a floor and the app marks it. Absent from older Workers: read as 'complete'.
+  earnedStatus?: 'complete' | 'partial'
+  notCounted?: ('vault-yield' | 'accrued-24h')[]
   gasPaidWei: string | null // lifetime gas Mamoru paid for this account's ops, wei; shown separately, never subtracted from earnedSoFarUsd
   valueVsHoldUsd: string | null // today's (position value + accrued) minus the hold baseline, summed over positions, USDC base units; can be negative
   feeAccruedUsd: string | null // #108 readiness: 10% of collectedUsd, stored, never charged by anything that reads this

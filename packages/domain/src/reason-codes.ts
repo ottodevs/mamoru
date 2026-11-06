@@ -104,6 +104,12 @@ export const REASON_CODES = [
   'DECIDE_WAIT_VAULT_LIQUIDITY',
   // otto/mamoru#376 (spec 011 CAP-R5): a V3 bridge-out grant's total is used up, or what is left of it cannot be read; the remote bucket's share waits here.
   'DECIDE_WAIT_BRIDGE_LIMIT',
+  // otto/mamoru#107: a reinvestment (harvest sale, vault sweep) waits so the spending limit left still covers re-minting every position (V4).
+  'DECIDE_WAIT_BUDGET',
+  // otto/mamoru#107: harvested volatile worth less than its sale costs (3x, 1x after 7 days) waits and adds up until it pays.
+  'DECIDE_WAIT_HARVEST_SALE',
+  // otto/mamoru#107: the signed approval does not allow this step (e.g. a V3 sleeve bringing USDC home); it goes after the owner renews.
+  'DECIDE_WAIT_RENEWAL',
   // otto/mamoru#215: savings go to the account's own sleeve on another chain (CCTP), for the bucket served there.
   'DECIDE_BRIDGE_OUT',
   // otto/mamoru#278: the home account asked this remote Safe to send savings back; it frees them and bridges them home, nothing else.
