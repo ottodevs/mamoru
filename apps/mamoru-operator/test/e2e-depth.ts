@@ -204,6 +204,11 @@ try {
   if (waitedByCode.size === 0) log('waited code=none usdc=0')
   log(`chain revert reasons seen: ${seenReverts.size ? [...seenReverts].map(([r, n]) => `${r} x${n}`).join(', ') : 'none'}`)
 
+  // Settled is not enough: a stalled engine (a hold such as SESSION_MISSING) leaves money idle with no typed wait.
+  const idleUsdc = BigInt(f.usdc)
+  const typedWait = [...waitedByCode.values()].reduce((x, y) => x + y, 0n)
+  check(idleUsdc <= typedWait + DEPOSIT / 100n, `idle USDC ${usd(idleUsdc)} is explained by typed waits (${usd(typedWait)}) within 1 % of the deposit`)
+
   // (a) placed + idle = deposit, give or take gas and swap costs (0.5 %). Waiting money is still idle in the Safe.
   const placed = f.positions.reduce((a, p) => a + BigInt(p.valueUsdc ?? '0'), 0n)
   const waitingSum = [...waitedByCode.values()].reduce((a, b) => a + b, 0n)
@@ -227,7 +232,7 @@ try {
     log(`window ${b.id}: needs ${usd(need)} against ${usd(limit)} per day`)
     if (need > limit) excess += need - limit
   }
-  log(`expected window excess: ${usd(excess)} USDC`)
+  log(`expected window excess: ${usd(excess)} USDC (zero when every bucket's target fits its BudgetWindow: then no window denial is expected and (b) checks that none is needed)`)
   if (excess > 0n) {
     check(REVERTS.some((r) => seenReverts.has(r)), '(b) a spending-window denial is in the log')
     check(waitingSum >= excess, `(b) at least the window excess (${usd(excess)}) is waiting (${usd(waitingSum)})`)
