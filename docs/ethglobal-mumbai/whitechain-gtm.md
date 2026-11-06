@@ -1,6 +1,6 @@
 # Whitechain · go-to-market plan
 
-Written during ETHGlobal Mumbai 2026 for the Whitechain prize. Whitechain asked us for a go-to-market strategy, not code: its new chain has no DEX, lending or liquidity live yet, and Mamoru routes deposits to venues that already exist. On an empty chain there is nothing to route to. So this document is the integration plan we will run with Whitechain once the first venue is up, and the evidence that we can ship it.
+Written during ETHGlobal Mumbai 2026 for the Whitechain prize. Whitechain asked us for a go-to-market strategy, not code. Mamoru does not create yield: it routes deposits to DEX and lending venues that already have liquidity, and Whitechain told us its relaunched chain does not have those venues live yet. So this document is the integration plan we will run with Whitechain once the first venue is up, and the evidence that we can ship it.
 
 ## 1. What Mamoru is
 
@@ -18,7 +18,7 @@ People who hold crypto and do not know what to do with it, crypto-native or not.
 
 ## 4. Channels we already run
 
-- **Founder-led, in person.** Live demos at Devcon and at ETHGlobal Mumbai: people open an account on their own phone, then we follow up one by one from a list of named prospects.
+- **Founder-led, in person.** Live demos at Devcon and at ETHGlobal Mumbai: people open an account on their own phone, then we follow up one by one.
 - **A narrow network on purpose.** Farcaster as the beachhead, small and connected, with a 2 to 4 week deadline to show deposits.
 - **Chain integrations.** Each chain we join brings its community. We did it with Monad. Whitechain is the next one.
 
@@ -26,7 +26,7 @@ People who hold crypto and do not know what to do with it, crypto-native or not.
 
 A new chain's hardest problem is the first liquidity: venues without users, and users without venues. We cover both sides:
 
-- **We deploy the AMM**, a Uniswap v3 fork (GPL), on Whitechain.
+- **We deploy an AMM** if the chain has none: a Uniswap v3 fork (GPL), the venue our engine already operates on Base and Monad.
 - **Whitechain seeds the liquidity** in the stablecoin it chooses first: USDT, EURC or USDC.
 - **Mamoru brings the demand.** Every deposit becomes liquidity in that AMM from day one.
 
@@ -41,7 +41,7 @@ Liquidity for launch, the stablecoin to start with, and one technical contact. I
 What already exists in this repository and is the template for a new chain:
 
 - One registry file per chain: [`packages/registry/base.json`](../../packages/registry/base.json) and [`packages/registry/monad.json`](../../packages/registry/monad.json). A new chain is a new file, not a new engine.
-- The same engine runs per chain, and USDC moves between chains over Circle CCTP with no fee.
+- The same engine runs per chain, and USDC moves between Base and Monad over Circle CCTP standard transfers (`apps/mamoru-operator/src/bridge-monad.ts`).
 - During Mumbai: the per-account cap went from 1,000 to 10,000 USDC, proven on a fork against real pool depth; the harvest now sells fees to USDC and reinvests them; and public Stats show TVL, accounts and earnings with no login ([`ETHGLOBAL.md`](../../ETHGLOBAL.md)).
 
 ## Questions for Whitechain
