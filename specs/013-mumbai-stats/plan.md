@@ -47,11 +47,13 @@ Portfolio and by `/api/stats`. Stats only sums it over accounts and applies the 
 
 - **One cutoff T for every headline:** T = the oldest of the latest fee samples of the accounts that contribute (each
   account's latest sample is fresh within the stale rule of §3.6, older ones are `partial`). All figures are "as of T".
-- Total earned = Σ `yield_ledger_income.usd` with `t_s ≤ T` (all sources, incl. `backfill`) + accrued at T. A Collect
-  after T is not yet counted (its fees are still in the accrued level at T): no double count.
-- **Earned 24h, rolling**, one window for all accounts, (T − 24h, T]:
-  Σ income with `T − 24h < t_s ≤ T` and `source ≠ 'backfill'` (Collect events at block time, vault-yield rows at
-  sample time) + (accrued at T − accrued at T − 24h). A Collect after T is left for the next sample, so fees are never
+- Per account, t_a = its latest fee sample at or before T (all within the sampling interval of T, 10 min; older than
+  T − 1 h → that account makes the figure `partial`). Each account uses its own t_a for both sides:
+  total earned = Σ income with `t_s ≤ t_a` (all sources, incl. `backfill`) + accrued at t_a. A Collect after t_a is
+  still in the accrued level at t_a and is not counted as income yet: no double count.
+- **Earned 24h, rolling**, per account (t_a − 24h, t_a] (windows differ by at most the sampling interval):
+  Σ income with `t_a − 24h < t_s ≤ t_a` and `source ≠ 'backfill'` (Collect events at block time, vault-yield rows at
+  sample time) + (accrued at t_a − accrued at t_a − 24h). A Collect after t_a is left for the next sample, so fees are never
   counted both as accrued and as collected. **Approximate by decision** (Ot and Brais, 6 Nov 17:16Z): vault yield
   comes from share-value samples, and the (i) does not promise an exact figure.
 - Accrued at a time = the nearest `account_worked_samples` row at or before it; needs
