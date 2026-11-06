@@ -50,7 +50,7 @@ export type StoredOp = OpView & {
   /** otto/mamoru#129: an op's gas and collected fees, read once from its receipt (yield-receipts.ts). */
   facts?: OpFacts
   /** spec 012 (#305 review): how many times its receipt was not found, and since when (ms); cleared once read (yield-receipts.ts gaveUp). */
-  factsMisses?: { count: number; first: number }
+  factsMisses?: { txHash: string; count: number; first: number }
   /**
    * otto/mamoru#163: an owner activation or renewal, every signed copy of its execTransaction (relayer tx hash and
    * nonce), kept before it left; `reverted` once its receipt says so. A revert leaves the Safe nonce unspent and the

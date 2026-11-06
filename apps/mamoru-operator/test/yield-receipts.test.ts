@@ -345,10 +345,18 @@ describe('#305 peer-gate fixes: history stays as it was, ids are unique, a lost 
 
   test('P1-3: a receipt given up on (20 misses over a day) leaves the vault state known but incomplete, not unknown forever', () => {
     const flows = [{ vault: 'vault:gtUSDCp', kind: 'deposit' as const, assets: '100', shares: '90', logIndex: 3 }]
-    const lost = { ...op('eng-9', undefined, '0xdead'), factsMisses: { count: 20, first: Date.now() - 25 * 3_600_000 } } as StoredOp
+    const lost = { ...op('eng-9', undefined, '0xdead'), factsMisses: { txHash: '0xdead', count: 20, first: Date.now() - 25 * 3_600_000 } } as StoredOp
     expect(vaultWire([op('eng-1', v2('0xaa', [], flows)), lost])).toMatchObject({ explained: { 'vault:gtUSDCp': '90' }, incomplete: true })
-    const young = { ...lost, factsMisses: { count: 20, first: Date.now() - 3_600_000 } } as StoredOp
+    const young = { ...lost, factsMisses: { txHash: '0xdead', count: 20, first: Date.now() - 3_600_000 } } as StoredOp
     expect(vaultWire([op('eng-1', v2('0xaa', [], flows)), young])?.explained).toBeNull()
+  })
+
+  test('misses recorded against a replaced hash do not count for the new one; an owner op on its way holds the state unknown', () => {
+    const flows = [{ vault: 'vault:gtUSDCp', kind: 'deposit' as const, assets: '100', shares: '90', logIndex: 3 }]
+    const replaced = { ...op('eng-9', undefined, '0xbeef'), factsMisses: { txHash: '0xdead', count: 20, first: Date.now() - 25 * 3_600_000 } } as StoredOp
+    expect(vaultWire([op('eng-1', v2('0xaa', [], flows)), replaced])?.explained).toBeNull()
+    const owner = { opId: 'own-5', kind: 'transfer', state: 'submitted', updatedAt: 'x' } as StoredOp
+    expect(vaultWire([op('eng-1', v2('0xaa', [], flows)), owner])?.explained).toBeNull()
   })
 
   test('an engine op on its way (no hash yet) holds the vault state unknown', () => {

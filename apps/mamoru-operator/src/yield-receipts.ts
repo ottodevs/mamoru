@@ -164,11 +164,12 @@ export const GIVE_UP_MS = 24 * 3_600_000
 /** The op's receipt keeps failing (spec 012, #305 review): still retried, but no longer blocks `explained`; the account's vault yield is partial instead. */
 export function gaveUp(op: StoredOp): boolean {
   const m = op.factsMisses
-  return !!m && m.count >= GIVE_UP_MISSES && Date.now() - m.first >= GIVE_UP_MS
+  // Misses count for the hash they were recorded against: a replaced transaction starts again.
+  return !!m && m.txHash?.toLowerCase() === op.txHash?.toLowerCase() && m.count >= GIVE_UP_MISSES && Date.now() - m.first >= GIVE_UP_MS
 }
 
-/** An engine op on its way (no receipt read can exist yet): what it moves is not in any flow until it lands. */
-const inFlight = (op: StoredOp): boolean => op.opId.startsWith('eng-') && (op.state === 'proposed' || op.state === 'submitted') && !op.txHash
+/** An engine or owner op on its way (no receipt read can exist yet): what it moves is not in any flow until it lands. */
+const inFlight = (op: StoredOp): boolean => (op.opId.startsWith('eng-') || op.opId.startsWith('own-')) && (op.state === 'proposed' || op.state === 'submitted') && !op.txHash
 
 /**
  * Facts read again for a newer layout keep what the old ones had priced: a price is frozen at the first snapshot after
@@ -383,7 +384,8 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
       const txHash = op.txHash as Hex
       const r = await readReceipt(txHash)
       if (!r) {
-        op.factsMisses = { count: (op.factsMisses?.count ?? 0) + 1, first: op.factsMisses?.first ?? Date.now() }
+        const same = op.factsMisses?.txHash?.toLowerCase() === txHash.toLowerCase()
+        op.factsMisses = { txHash, count: (same ? op.factsMisses!.count : 0) + 1, first: same ? op.factsMisses!.first : Date.now() }
         changed = true
         continue
       }
