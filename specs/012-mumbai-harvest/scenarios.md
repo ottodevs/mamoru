@@ -7,7 +7,7 @@ policy and account shape, live = read-only on prod data. Evidence in `specs/012-
 |---|---|---|---|---|---|
 | HRV-S01 | R1 R3 R8 | fork | v7 Base account (live policy), managed USDC/cbBTC position with fees > 3x cost, plus 0.001 cbBTC principal idle | reviews until settled | same account: `harvest` (collect X cbBTC) → `enter_swap harvestSale` amountIn = X exactly (principal untouched) → `vault_deposit` or entry of the USDC; receipts reconcile (collected = sold; USDC out of sale = USDC placed ± dust) |
 | HRV-S02 | R2 | unit | harvested-unsold worth 0.5x sale cost | 3 reviews with 2 more harvests | waits `DECIDE_WAIT_HARVEST_SALE` until > cost, then one sale of the sum |
-| HRV-S03 | R7 | unit | V4, `room` < 1.25 x LP value + sale value | review | no sale/sweep, `DECIDE_WAIT_BUDGET` |
+| HRV-S03 | R7 | unit | V4, `room` < 1.5 x LP value + sale value | review | no sale/sweep, `DECIDE_WAIT_BUDGET` |
 | HRV-S04 | R7 | unit | same room, a position out of range | review | `rerange` proposed |
 | HRV-S05 | R7 | unit | vault at `ratioBps x C`, free 100 | review | no deposit, `DECIDE_WAIT_BUDGET` |
 | HRV-S06 | R4 | unit | V4, remote idle 30 USDC ≥ entryMin for 6 h, sleeve below target | review | `returnDue` 30 |

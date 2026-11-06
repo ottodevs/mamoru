@@ -7,7 +7,7 @@ Only what this spec adds. Session-key and walkaway models (`specs/001-mamoru-v1/
 |---|---|---|---|
 | HT-01 | Harvest path sells principal | sale = `min(harvested-unsold, balance)`; counter from receipts, clipped to balance | HRV-S01 |
 | HT-02 | Sweep/drain loop burns gas and V4 room | sweep stops 1 unit below the drain line | HRV-S12 |
-| HT-03 | Reinvestment spends the room re-ranges need | reserve 1.25 x all LP value; re-range never gated | HRV-S03, S04 |
+| HT-03 | Reinvestment spends the room re-ranges need | reserve 1.5 x all LP value; re-range never gated | HRV-S03, S04 |
 | HT-04 | Bridge ping-pong Base ↔ Monad | return only after 6 h idle; no `bridge_out` for 24 h after a return | HRV-S18 |
 | HT-05 | Harvest burst after release | one op per account per review; relayer nonce serial; gas policy rate | S21 observation |
 | HT-06 | Vault yield overstated | flows from receipts; unexplained shares → not counted, marked | HRV-S08, S15 |
