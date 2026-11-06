@@ -55,6 +55,14 @@ describe('policyDepth: MamoruActionPolicy._depth, read for read (otto/mamoru#378
     expect(r.asked).toEqual([-10, -15])
   })
 
+  it('a net that takes the running liquidity below zero counts as zero liquidity, as the contract does (`liq > 0 ? liq : 0`)', async () => {
+    const l = 10n ** 18n
+    const r = pool(0, l, 5, { 5: -3n * l })
+    const once = await policyDepth(pool(0, l, 60), 5, true)
+    // Up from 0: spot to 5 at l, then liquidity l − 3l < 0 → nothing more from 5 to 10.
+    expect(await policyDepth(r, 10, true)).toBe(once)
+  })
+
   it('policyDepthIn takes the smaller side, the other one quoted into the budget token at the band edge', async () => {
     const r = pool(0, 10n ** 18n, 1)
     const in1 = await policyDepthIn(r, T0, T1, 10, true)
