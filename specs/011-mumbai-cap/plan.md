@@ -112,12 +112,12 @@ per call ≤ 2,000 (20 % of 10k), total ≤ 5,000 per approval.
   `validAfter`. Then `amountLeft` = total − (that on-chain sum + every journal move broadcast but not yet in those logs),
   and bridging resumes. Implemented in T-CAP-06.
 - A spending-window revert on an entry or swap (V4 `Cap24hExceeded`/`Cap30Exceeded`/`BudgetExceeded`, V3
-  `POLICY_DENIED_AMOUNT`), on any op that spends (entry, swap, vault deposit): the operator backs off **every
-  spending op** for that account and chain until the window can have moved, logging the reason once. 24 h window
-  (`Cap24hExceeded`): until 24 h after the oldest spend in it. 30-day or budget (`Cap30Exceeded`, `BudgetExceeded`):
-  until the oldest spend in the 30 days is 30 days old when the journal knows it, else one re-probe per 24 h (at most one
-  revert a day). Unknown window (V3 `POLICY_DENIED_AMOUNT`): one re-probe per 24 h. Exits, collects and redeems are not
-  spends and are never held back. No retry inside the window, no UI
+  `POLICY_DENIED_AMOUNT`), on any op that spends (entry, swap, vault deposit): the operator records the denied value
+  `d` for that account and chain and holds **only spending ops of value ≥ d**; smaller ops still go (they may fit). The
+  hold lifts at the first of: 24 h after the oldest spend in the window (`Cap24hExceeded`), or the next re-probe, at
+  most one every 6 h for the other reasons (at most 4 reverts a day per account and chain, bounded gas). A re-probe that
+  succeeds clears the hold; one that is denied again keeps it with the new `d`. Logged once per hold. Exits, collects and
+  redeems are not spends and are never held back. No retry inside the window, no UI
   message (owners' decision). T-CAP-07.
 - Fork e2e flakes on RPC: rerun once; record both.
 
