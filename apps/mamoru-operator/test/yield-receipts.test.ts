@@ -252,6 +252,14 @@ describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
     ])
   })
 
+  test('a V4 redeem (owner V4, receiver the Safe) is the Safe\'s withdrawal; a third party\'s redeem to the Safe is not', () => {
+    const V4 = address('MamoruActionPolicyV4', baseRegistry)
+    const viaV4 = log(VAULT, encodeEventTopics({ abi: vaultAbi, eventName: 'Withdraw', args: { sender: V4, receiver: SAFE, owner: V4 } }) as Hex[], encodeAbiParameters([{ type: 'uint256' }, { type: 'uint256' }], [101n, 100n]))
+    const other = log(VAULT, encodeEventTopics({ abi: vaultAbi, eventName: 'Withdraw', args: { sender: OTHER, receiver: SAFE, owner: OTHER } }) as Hex[], encodeAbiParameters([{ type: 'uint256' }, { type: 'uint256' }], [5n, 5n]))
+    const f = factsFromLogs([userOp(SAFE, 1n), viaV4, other], SAFE, T)
+    expect(f.vaultFlows).toEqual([{ vault: 'vault:gtUSDCp', kind: 'withdraw', assets: '101', shares: '100', logIndex: expect.any(Number) }])
+  })
+
   test('facts of an older layout are read again; the frozen prices and fee scope survive the re-read', () => {
     const old: OpFacts = { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '7', gasUsdc: '3', fees: [{ tokenId: '42', pool: LIVE_POOL, fee0: '5', fee1: '6', usdc: '11' }], feeable: true }
     expect(needsFacts(op('eng-1', old, '0xaa'))).toBe(true)

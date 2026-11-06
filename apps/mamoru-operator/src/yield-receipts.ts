@@ -126,9 +126,13 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
     fees.push({ tokenId: e.args.tokenId.toString(), pool, fee0: f[0].toString(), fee1: f[1].toString(), logIndex: e.logIndex })
   }
   const vaults = registry.entries.filter((x) => x.kind === 'vault')
+  // MamoruActionPolicyV4.redeem pulls the Safe's shares and redeems them as their owner, paying the Safe: its Withdraw
+  // has owner = V4 and receiver = the Safe. Those are the Safe's shares leaving too.
+  const v4 = registry.entries.filter((x) => x.name === 'MamoruActionPolicyV4').map((x) => x.address)
   const vaultFlows: VaultFlow[] = []
   for (const e of parseEventLogs({ abi: vaultEventsAbi, logs: logs.filter((l) => vaults.some((v) => isAddressEqual(l.address, v.address))) })) {
-    if (!isAddressEqual(e.args.owner, safe)) continue
+    const viaV4 = e.eventName === 'Withdraw' && isAddressEqual(e.args.receiver, safe) && v4.some((a) => isAddressEqual(e.args.owner, a))
+    if (!isAddressEqual(e.args.owner, safe) && !viaV4) continue
     const vault = vaults.find((v) => isAddressEqual(e.address, v.address))!.name
     vaultFlows.push({ vault, kind: e.eventName === 'Deposit' ? 'deposit' : 'withdraw', assets: e.args.assets.toString(), shares: e.args.shares.toString(), logIndex: e.logIndex })
   }
