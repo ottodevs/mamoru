@@ -33,29 +33,36 @@ forecasts.
 ### Content of /stats
 
 - **STATS-R5. Total deposits (TVL).** A line of the daily total over 1W, 1M, 3M and ALL, and the current figure.
-  Counts LP positions, idle tokens, uncollected fees and vault shares, on Base and Monad, for prod and beta accounts.
+  Counts LP positions, idle tokens, uncollected fees, vault shares and USDC in flight between chains, on Base and
+  Monad, for prod and beta accounts.
 - **STATS-R6. Total volume.** Daily bars of capital the engine placed or moved: new or increased LP positions plus
-  vault deposits, in USDC at the time of the operation.
-- **STATS-R7. Earned in the last 24h** and **Total earned**: LP fees (accrued and collected) plus vault yield
-  (spec 012 HRV-R4, ledger label `vault-yield`).
+  vault deposits, valued at the op's block.
+- **STATS-R7. Earned in the last 24h** (rolling 24 h ending at the data time) and **Total earned**: LP fees (accrued
+  and collected) plus vault yield (spec 012 HRV-R4, `yield_ledger_income.source = 'vault-yield'`).
+- **STATS-R7b. Funded accounts.** Number of owners whose accounts hold more than 1 USDC now (the "users" figure the
+  pitch cites, PRD §4). Copy needs OK.
 - **STATS-R8. Hover or tap** on a chart shows that day's figure and its UTC date. Nothing projected forward.
 - **STATS-R9. Aggregates only.** No account key, address, user id, transaction hash or per-account figure leaves the
-  server for this page. No figure, series point or breakdown backed by fewer than 3 distinct owners is shown; it is
-  withheld with reason `TOO_FEW_ACCOUNTS`.
-- **STATS-R10. Truth on screen (constitution XVI).** Each figure says where it comes from and when it was read. A
-  figure that is missing shows as "not counted", never 0. A chain whose history starts later than the series is
-  labeled: the stretch before Monad's first day reads "Base only".
-- **STATS-R11.** The four (i) texts are English, one sentence each, and are merged only with Ot's and Brais's OK.
+  server for this page. **Every published figure** (TVL now, each series point, Earned 24h, Total earned, Funded
+  accounts, any per-chain split) is backed by at least 3 distinct owners or withheld with reason `TOO_FEW_ACCOUNTS`.
+  The same rule binds every figure committed to the repo (mockups, screenshots, samples).
+- **STATS-R10. Truth on screen (constitution XVI).** Each figure says where it comes from and its `dataAsOf`: the
+  oldest chain read that contributes to it, not the request time. Data older than 1 h is flagged stale. A missing
+  figure shows as "not counted", never 0. A chain whose history starts later than the series is labeled: the stretch
+  before Monad's first day reads "Base only".
+- **STATS-R11.** The (i) texts are English, one sentence each, and are merged only with Ot's and Brais's OK.
   Proposals in design.md §5.
 - **STATS-R12.** Test accounts (`accounts.is_test = 1`, `env = 'test'`) and rows of unknown environment are never
   counted.
 - **STATS-R13. Load.** The public endpoint is cached at the edge and rate-limited per client, and reads only D1
   (never the operator or an RPC) on a request.
+- **STATS-R18. Release content.** Volume (B4) and vault yield (spec 012) are required in the production release.
+  "Not counted" for either is allowed only as an interim state on beta.
 
 ### Portfolio (with a session)
 
 - **STATS-R14. Total value** with a chart as the main element: the account's daily close over Base and Monad, plus
-  today's samples.
+  today's samples, each chain at its last known value at each time (never an exact-timestamp join).
 - **STATS-R15. Earned so far** in its own card, including vault yield (same definition as STATS-R7, scoped to the
   owner's accounts).
 - **STATS-R16. Add capital and Withdraw** sit at the top of Portfolio. Their flows do not change.
@@ -64,43 +71,46 @@ forecasts.
 
 ## Metric definitions
 
-UTC days. Money in USDC base units (6 decimals) server side, shown in USD with the rules of design.md §4.
+UTC days. Money in USDC base units (6 decimals) server side, published rounded to whole dollars, shown with the rules
+of design.md §4. Every figure goes through the k ≥ 3 guard (R9) last.
 
 | Metric | Definition | Source |
 |---|---|---|
-| TVL(day) | Σ `account_daily.total_close_usdc` over rows of that day with `env IN ('prod','beta')` | `account_daily` (Base from its first row; Monad from Day0-Monad, plan §3) |
-| TVL now | Σ `account_snapshot_latest.total_usdc`, same env filter, rows read in the last 30 min | `account_snapshot_latest` |
-| Owners(day) | `COUNT(DISTINCT accounts.user_id)` behind that day's rows (a Base account and its Monad sleeve are one owner) | join `accounts` |
-| LP earned(day) | Σ (`fees_close_usdc − fees_open_usdc` + `collected_usdc`) per row; a row with `collected_usdc` NULL makes the day partial | `account_daily` (comment in 0009) |
-| Vault yield(day) | Σ ledger entries labeled `vault-yield` for the day | spec 012 HRV-R4/R8 |
-| Earned 24h | LP earned + vault yield of the last complete UTC day | as above |
+| Value(account, day) | `account_daily.total_close_usdc`; if the account has no row that day but has one in the 2 previous days, that last close, and the day is `partial` | `account_daily` (Base from its first row; Monad from Day0-Monad, plan §3) |
+| TVL(day) | Σ Value(account, day) over accounts with `env IN ('prod','beta')` + in-flight USDC at day close (plan §3.5) | as above |
+| TVL now | Σ `account_snapshot_latest.total_usdc` (rows older than 30 min carried ≤ 2 days, then `partial`) + in-flight now | `account_snapshot_latest` |
+| Owners | `COUNT(DISTINCT accounts.user_id)` behind a figure (a Base account and its Monad sleeve are one owner) | join `accounts` |
+| Funded accounts | owners whose Σ TVL now over their accounts > 1 USDC | as TVL now |
+| LP earned(day) | Σ (`fees_close_usdc − fees_open_usdc` + `collected_usdc`); any NULL `collected_usdc` → day `partial` | `account_daily` |
+| Vault yield(day) | Σ `yield_ledger_income.usd` with `source = 'vault-yield'`; any NULL → `partial` | spec 012 |
+| Earned 24h | Σ over accounts [accrued fees now − accrued fees at now−24h + fees collected by ops with block time in (now−24h, now]] + vault yield prorated (plan §3.2) | plan §3.2 |
 | Total earned | Σ earned over every day with data | as above |
-| Volume(day) | Σ `placed_usdc` (LP mint/increase + vault deposit, priced at the op's block) | new column, plan §4 |
+| Volume(day) | Σ placed USD of ops with block time in that day; any unpriced op → day `partial`, value null | plan §3.3 |
 
 ## Edge cases
 
-- **E1.** A day where the cron missed an account: the day is summed as read. No carry-forward (XX: no extra branch
-  without measured need). The tooltip shows how many owners the day counts.
-- **E2.** `collected_usdc` unpriced for a day: that day's earned is marked partial in the series and in Total earned.
-- **E3.** Monad series empty or < 3 owners: the per-chain split is withheld, the total still counts Monad's rows.
-- **E4.** Vault yield not yet in the ledger (spec 012 not deployed): Earned shows LP only, labeled "fees only, vault
-  yield not counted".
-- **E5.** Volume before its first recorded day: "not counted" for those days, never 0 bars.
-- **E6.** A request at day rollover: the current UTC day is partial and drawn as such (last point marked "today, so
-  far"), never mixed into "last 24h".
-- **E7.** D1 unreachable: the endpoint answers 503 with `STATS_UNAVAILABLE`; the page says the figures could not be
-  read and when it last had them, if cached.
+- **E1.** An account missing from a day's read: carried forward from its last close ≤ 2 days, point `partial`
+  (tooltip: "some accounts carried from their last reading"). Older than 2 days: not counted, point `partial`.
+  Never a fake dip.
+- **E2.** `collected_usdc` or vault yield unpriced: that day's earned is `partial`, and so is Total earned.
+- **E3.** A per-chain split with < 3 owners: withheld; the totals still count that chain.
+- **E4.** Vault yield or volume not yet available: "not counted" on beta only (R18).
+- **E5.** Volume before its first recorded day: "not counted", never 0 bars.
+- **E6.** The current UTC day is drawn as partial ("today, so far").
+- **E7.** D1 unreachable: 503 `STATS_UNAVAILABLE`; the cached copy is served with its own `dataAsOf`.
+- **E8.** USDC in flight between chains: counted once, by the rule in plan §3.5; when the rule cannot be applied the
+  point is `partial`.
 
 ## Acceptance (Given / When / Then)
 
 Scenario ids are in `scenarios.md`.
 
-- **G1 (STATS-R2).** Given a browser with no cookies, when it opens `/stats`, then the page renders the four figures
+- **G1 (STATS-R2).** Given a browser with no cookies, when it opens `/stats`, then the page renders the figures
   and no passkey prompt or redirect happens.
 - **G2 (STATS-R9).** Given the API response of `/api/stats`, when it is searched for any `account_key`, Safe address,
   `user_id` or tx hash present in D1, then none is found.
-- **G3 (STATS-R9).** Given a day backed by 2 owners, when the series is built, then that point is null with
-  `TOO_FEW_ACCOUNTS` and the chart draws a gap.
+- **G3 (STATS-R9).** Given any figure (series point, TVL now, Earned 24h, Total earned, Funded accounts, chain split)
+  backed by 2 owners, when the response is built, then it is null with `TOO_FEW_ACCOUNTS`.
 - **G4 (STATS-R10).** Given a metric with no source rows, when it is shown, then it reads "not counted".
 - **G5 (STATS-R5).** Given the D1 on 6 Nov, when TVL(day) for Base is computed, then it equals the sum of
   `total_close_usdc` and includes the gtUSDCp shares (1,385.92 checked against idle+LP 671.19 + vault 714.15 + fees
@@ -110,3 +120,9 @@ Scenario ids are in `scenarios.md`.
 - **G7 (STATS-R1, R3).** Given a signed-in owner, when they open `/`, then Portfolio shows; the menu reaches `/stats`
   and back without losing the session.
 - **G8 (STATS-R12).** Given a test account with funds, when TVL is computed, then its rows are not in the sum.
+- **G9 (STATS-R5, E1).** Given an account read on day 1 and day 3 but not day 2, when TVL(day 2) is built, then the
+  account counts at its day-1 close and the point is `partial`.
+- **G10 (STATS-R7).** Given a harvest at 14:00 UTC today, when Earned 24h is read at 15:00, then it includes that
+  harvest's collected fees.
+- **G11 (STATS-R18).** Given the production release candidate, when `/api/stats` is read on beta, then volume and
+  vault yield are counted (not `not_counted`).

@@ -42,34 +42,74 @@ it would be wrong; XX).
 
 ### 3.2 Earned
 
-- LP: per spec.md table, from `account_daily` (Base and, from Day0-Monad, Monad).
-- Vault yield: read from spec 012's tables `yield_ledger_income` (`source = 'vault-yield'`) and
-  `yield_ledger_vault_daily` (012 plan §3.1). Until 012 lands, the endpoint returns
-  `vaultYield: { status: 'not_counted' }` and the UI says "fees only".
+- Total earned by day: LP from `account_daily` (Base and, from Day0-Monad, Monad); vault yield from 012's
+  `yield_ledger_income` (`source = 'vault-yield'`), checked against `yield_ledger_vault_daily`.
+- **Earned 24h, rolling**, ending at `dataAsOf`:
+  - LP accrued: Σ per account (accrued fees at its last sample ≤ now − accrued fees at its last sample ≤ now−24h).
+    Needs a fees column on the samples: `ALTER TABLE account_worked_samples ADD COLUMN fees_usd INTEGER` (per pool row,
+    from the snapshot's `positions[].feesUsdc`; null for vault and idle rows). 31-day retention is enough.
+  - LP collected: Σ `collected_usdc` of ops in `yield_ledger_ops` (§3.3) with `at` in (now−24h, now]. A position
+    closed or harvested in the window leaves accrued and enters collected: counted once.
+  - Vault yield: the last complete UTC day's `vault-yield` income, taken as the last 24 h. Why: ERC-4626 yield accrues
+    continuously through the share price, so one day's delta is the 24 h figure within rounding; a sample difference
+    would need deposits and redeems inside the window, which only 012's `net_deposited_usdc` tracks, per day (XX).
+    The (i) does not change; the source line says "vault yield: last full day".
+  - Any unpriced op or missing sample in the window → `partial`.
+- Vault yield missing: "not counted" is a beta-only state (spec R18).
 
-### 3.3 Volume: one new receipt fact
+### 3.3 Per-op ledger: collected, placed, time
 
-The operator already reads every engine op's receipt once (`apps/mamoru-operator/src/yield-receipts.ts`) and serves
-per-day totals on `/snapshot` (`receipts[].days[]`). Add:
+The operator already reads every engine op's receipt once (`apps/mamoru-operator/src/yield-receipts.ts`, facts frozen
+on the stored op) and serves per-day totals on `/snapshot`. 012 HT6 extends these facts; this task stacks on it.
+Add:
 
-- `OpFacts.placed?: { pool: string; amount0: string; amount1: string }[]` from the NonfungiblePositionManager
-  `IncreaseLiquidity(tokenId, liquidity, amount0, amount1)` events of this Safe's userOp (emitted on mint and on
-  increase), and `vaultDeposits?: { vault: string; assets: string }[]` from ERC-4626 `Deposit(sender, owner, assets,
-  shares)` where `owner` = the Safe.
-- Priced like fees: at the first snapshot that prices the pool (vault assets are USDC, no pricing), then frozen.
-- `DayReceiptWire.placedUsdc?: string`, absent while a part of the day is unpriced.
-- Backfill: facts carry `v: 2`. A stored op with facts of `v` < 2 and a txHash is re-read once through the same
-  `FACTS_PER_TICK` queue, so the history of volume comes from the ops the operator already stores. Old ops whose
-  receipt can no longer be fetched stay unpriced: their days read "not counted".
-- Worker: migration `migrations/d1/XXXX_receipts_placed.sql`: `ALTER TABLE yield_ledger_account_receipts ADD COLUMN
-  placed_usdc INTEGER;` (additive, null = not counted). `writeReceipts` writes it.
+- `OpFacts.placed?: { pool: string; amount0: string; amount1: string }[]` from NonfungiblePositionManager
+  `IncreaseLiquidity(tokenId, liquidity, amount0, amount1)` events of this Safe's userOp (mint and increase), and
+  `vaultDeposits?: { vault: string; assets: string }[]` from ERC-4626 `Deposit(sender, owner, assets, shares)` with
+  `owner` = the Safe.
+- **Priced at the op's block:** the USDC leg is exact from the event amounts; the volatile leg at the pool's `slot0`
+  read with `eth_call` at the op's `blockNumber`, then frozen. A read that fails (no archive state for an old block)
+  leaves the op unpriced: never a later price.
+- Wire: `receipts[].ops?: { id, at, collectedUsdc?, placedUsdc?, priced: boolean }[]` for ops of the last 35 days.
+- Worker: migration `migrations/d1/XXXX_ledger_ops.sql` creates
+  `yield_ledger_ops (chain_id, account_key, env, op_id, at, collected_usdc INTEGER, placed_usdc INTEGER, priced INTEGER,
+  updated_at, PRIMARY KEY (chain_id, op_id))` and the `fees_usd` column of §3.2. `writeReceipts` upserts ops.
+- Volume(day) = Σ `placed_usdc` of ops whose `at` falls in the day; **one unpriced op makes the day `partial` with
+  value null**, never a short sum.
+- Backfill: facts carry `v: 2`; a stored op with older facts and a txHash is re-read once through the
+  `FACTS_PER_TICK` queue. Ops older than the wire window are written by the first pulls after deploy, oldest first.
 
 ### 3.4 Owners and the k ≥ 3 guard
 
-Every aggregate is computed with its owner count: `COUNT(DISTINCT a.user_id)` joining `accounts a ON a.account_key =
-d.account_key`. A point whose count is < 3 is replaced by `null` with `reason: 'TOO_FEW_ACCOUNTS'` before the
-response is built (`stats/privacy.ts`, one pure function, unit-tested). Per-chain series exist in the response only
-when every point passes; otherwise the chain split is dropped and only totals go out.
+Every published figure is computed with its owner count: `COUNT(DISTINCT a.user_id)` joining `accounts a ON
+a.account_key = x.account_key`. `stats/privacy.ts` (pure, unit-tested) runs over the whole `StatsView` before it is
+cached: series points, `tvlNow`, `earned24h`, `earnedTotal`, `fundedAccounts` and each per-chain split. Anything
+with < 3 owners becomes `null` with `TOO_FEW_ACCOUNTS`. A chain split is dropped unless every point passes. The
+guard is also the only way a figure reaches the repo (design D2).
+
+### 3.5 USDC in flight between chains
+
+Base → Monad: the Base operator keeps the CCTP burns journal (`bridge-monad.ts`) and already has the single rule the
+engine and the money map use (`inFlightBurns`, otto/mamoru#269): a burn is in flight while not minted, or when it was
+minted at a Monad block after the block of the Monad read being valued. The Base snapshot wire adds
+`bridges?: { safe, accountKey, amountUsdc, state, mintedBlock? }[]` (unpruned burns). The Worker applies that rule
+against the `block` of the Monad sleeve's row it has stored, and adds the result to TVL now and to the day's close.
+This counts each USDC once: on the source side until the Monad read that includes the mint, then in the sleeve.
+
+Monad → Base (return home, `return-home.ts`): if its journal exposes the same fields, the same rule against the Base
+row's block; otherwise any open return makes TVL now and that day's point `partial`. B8 decides which by reading the
+code, and says so in its PR.
+
+### 3.6 Freshness
+
+`dataAsOf` per figure = the oldest `read_at` (or day close block time) among the rows that contribute. The UI shows
+"data as of 18:20 UTC"; older than 1 h → flagged stale. `readAt` (request time) is not shown.
+
+### 3.7 Accepted risk: differences between readings
+
+Two public readings (two days, or now and the last close) can be subtracted. If one of three owners alone deposits in
+between, the difference is that deposit. Any public TVL has this; Ot accepted public aggregates (PRD §5.3). Mitigation
+only: whole-dollar rounding of every published figure, owner counts in bands. No further guard.
 
 ## 4. API: `GET /api/stats`
 
@@ -81,36 +121,39 @@ when every point passes; otherwise the chain split is dropped and only totals go
   this unit only adds a file and one export line):
 
 ```ts
-type Point = { day: string; usd: number | null; reason?: 'TOO_FEW_ACCOUNTS' | 'NOT_COUNTED' | 'PARTIAL'; owners?: number }
+type Reason = 'TOO_FEW_ACCOUNTS' | 'NOT_COUNTED' | 'PARTIAL'
+type Figure = { usd: number | null; reason?: Reason; dataAsOf: string | null; stale?: true }
+type Point = { day: string; usd: number | null; reason?: Reason; owners?: '3+' | '10+' | '25+' | '50+' }
 type StatsView = {
-  readAt: string                 // ISO, when D1 was read
-  tvlNow: { usd: number | null; readAt: string | null; reason?: string }
+  tvlNow: Figure
   tvl: Point[]                   // daily
   monadFrom: string | null       // Day0-Monad; earlier points are "Base only"
-  volume: Point[]                // daily, from first day with placed_usdc
-  earned24h: { usd: number | null; day: string; partial: boolean; vaultYield: 'counted' | 'not_counted' }
-  earnedTotal: { usd: number | null; since: string; partial: boolean; vaultYield: 'counted' | 'not_counted' }
-  sources: { tvl: string; volume: string; earned: string }   // human labels for "where it comes from"
+  volume: Point[]                // daily
+  earned24h: Figure & { vaultYield: 'counted' | 'not_counted' }
+  earnedTotal: Figure & { since: string; vaultYield: 'counted' | 'not_counted' }
+  fundedAccounts: { count: number | null; reason?: Reason; dataAsOf: string | null }
+  chains?: { chainId: number; tvl: Point[] }[]   // only when every point passes the guard
+  sources: { tvl: string; volume: string; earned: string }
 }
 ```
 
-`owners` is sent only rounded down to a band (`3+`, `10+`, `25+`, `50+`) to avoid inferring individual flows from
-day-to-day count changes. USD numbers are rounded to whole dollars server side.
+`owners` is sent only as a band. USD numbers, including TVL now, are rounded to whole dollars server side (§3.7).
 
 - Cache: `caches.default` keyed `https://stats.internal/v1`, TTL 300 s (precedent: `api/apy/routes.ts`).
   Response header `cache-control: public, max-age=60, s-maxage=300`, overriding the `/api/*` default `no-store`
   for this route only.
 - Rate limit: new binding `STATS_READ_LIMIT` (`wrangler.jsonc`, both envs), 60 per minute per hashed client IP, like
   `middleware/read-limit.ts`. A 429 carries `retry-after: 60` and `READ_RATE_LIMITED`.
-- Errors: D1 failure → 503 `STATS_UNAVAILABLE`; the cached copy, if any, is served with its `readAt`.
+- Errors: D1 failure → 503 `STATS_UNAVAILABLE`; the cached copy, if any, is served with its own `dataAsOf`.
 
 ## 5. Portfolio data
 
 - Total value chart: new `GET /api/accounts/:accountKey/value-series` in `api/accounts/` (behind the existing session
   and `accountReadLimit`): daily `total_close_usdc` of the owner's accounts (Base + sleeves, `sleevesOfUser`) summed by
-  day, plus today's points from `account_worked_samples` summed per `read_at` (31-day retention; enough for today).
-- Earned so far: extend the existing `earnedSoFar` (`api/accounts/yield.ts`) with vault yield when spec 012 provides
-  it. Same "not counted" rule.
+  day, plus today's points from `account_worked_samples`: on a common 10-min grid, each chain contributes its last
+  sample at or before the grid time (last known value), never an exact `read_at` join; a chain with no sample in the
+  last 30 min marks the point `partial`.
+- Earned so far: `earnedSoFarUsd` with 012's `vaultYieldUsd` (012 plan). Required for prod (spec R18).
 
 ## 6. Charts
 
@@ -128,15 +171,16 @@ design phase may replace this with a library only with a measured reason (bundle
 | XV Panel / VIII Login and view | Logged-in Portfolio stays the owner's; `/stats` is a separate public view, no account data |
 | **XVI Truth on screen** | Source and read time per figure; missing = "not counted"; partial days and "Base only" labeled; no forecasts |
 | XVII Secrets | No new secret; the rate-limit key hashes the IP with the existing session secret |
-| XIX Between chains | Monad counted once (its sleeve rows), in transit not double counted: TVL sums Safes only |
-| **XX Simplicity** | One endpoint, one payload, one cache key; no carry-forward; no backfill from samples; SVG over a library unless measured |
+| XIX Between chains | Monad counted once (its sleeve rows); USDC in flight counted once by the #269 rule (§3.5), else `partial` |
+| **XX Simplicity** | One endpoint, one payload, one cache key; one guard over the whole view; carry-forward bounded at 2 days; reuse of the #269 in-flight rule; SVG over a library unless measured |
 
 ## 8. Deploy notes (coordinator)
 
-1. Migration `XXXX_receipts_placed.sql`: apply before the Worker that writes `placed_usdc`.
-2. Operator: one redeploy with the receipt `v: 2` facts (shares the batch redeploy with specs 011/012). Its first
-   ticks re-read old receipts at `FACTS_PER_TICK`; watch RPC call counts on `/metrics`.
-3. `wrangler.jsonc`: new `STATS_READ_LIMIT` ratelimit binding (namespace ids `377001` prod, `377002` beta).
-4. Worker to beta; Ot and Brais check `/stats` without a session on `beta.mamoru.lol/stats`; then prod with the rest
-   of the event release (PRD decision 5).
-5. Order: migration → operator → Worker. The Worker tolerates an operator without `placedUsdc` (volume "not counted").
+1. Migration `XXXX_ledger_ops.sql` (new table + `account_worked_samples.fees_usd`): before the Worker that writes it.
+2. Operator: one redeploy with receipt facts `v: 2`, per-op wire and `bridges` (shared with the 011/012 batch). Its
+   first ticks re-read old receipts and `eth_call` historical `slot0` at `FACTS_PER_TICK`; watch RPC counts on `/metrics`.
+3. `wrangler.jsonc`: new `STATS_READ_LIMIT` ratelimit binding (namespace ids `377001` prod, `377002` beta; checked
+   unused).
+4. Order: migration → operator → Worker with B1 + B5 → Worker with B6 (B6 merges only after B1 and B5, tasks.md).
+5. Beta: Ot and Brais check `beta.mamoru.lol/stats` without a session; STATS-S13/S14 pass on beta; volume and vault
+   yield counted (R18). Then prod with the rest of the event release (PRD decision 5).

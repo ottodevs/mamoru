@@ -67,17 +67,18 @@ Use, in this order. Paths on lady:
 | Earned in the last 24h | Fees and yield Mamoru accounts earned in the last 24 hours. |
 | Total earned | All fees and yield earned by Mamoru accounts since launch. |
 
-Note for the OK: spec.md defines "last 24h" as the last complete UTC day (daily rows cannot give a rolling 24 h).
-Either the text says "on the last full day (UTC)" or the label becomes "Earned yesterday". Ot and Brais choose.
+| Funded accounts | Mamoru accounts holding more than $1 right now. (needs OK) |
+
+"Earned in the last 24h" is a rolling 24 h (plan §3.2); the label stays as the PRD has it.
 
 Other strings: "Start saving", "not counted", "Base only", "Fewer than 3 accounts: not shown", "so far", source
-line ("From Mamoru's on-chain reads, updated every 10 min · read 18:20 UTC"). All in the mockups for the same OK.
+line ("From Mamoru's on-chain reads · data as of 18:20 UTC", with a stale flag past 1 h). All in the mockups for the same OK.
 
 ## 6. Deliverables and gate (D3, D4)
 
 1. Mockups as static HTML in this folder (`design/stats-1280.html`, `design/stats-390.html`,
    `design/portfolio-1280.html`, `design/portfolio-390.html`) using the real tokens and **real figures** from D1
-   (export of `/api/stats` shape), plus screenshots (`design/*.png`).
+   (only D2's guarded export; Portfolio with round example figures, labeled), plus screenshots (`design/*.png`).
 2. States shown: with and without session (menu), loading, a gap (< 3 owners), "not counted", partial today, error.
 3. An `impeccable` critique pass and a `hallmark` audit, findings fixed, a short note of what changed.
 4. Posted in Mattermost `#devcon-8` for Ot and Brais.
