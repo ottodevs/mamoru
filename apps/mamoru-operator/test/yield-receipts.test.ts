@@ -260,11 +260,14 @@ describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
     expect(next.fees[0]).toEqual({ tokenId: '42', pool: LIVE_POOL, fee0: '5', fee1: '6', logIndex: 3, usdc: '11' })
   })
 
-  test('two collects of one position in one transaction are one event at the first log index, amounts summed', () => {
-    const f = factsFromLogs([userOp(SAFE, 1n), poolCollect(5n, 0n), npmCollect(42n, SAFE, 5n, 0n), poolCollect(6n, 0n), npmCollect(42n, SAFE, 6n, 0n)], SAFE, T)
+  test('each collect is its own fee and event; the freed principal is taken in log order', () => {
+    // A decrease freed 5 of token0; the first collect pays 5 (all principal), the second pays 6 (all fees).
+    const f = factsFromLogs([userOp(SAFE, 1n), decrease(42n, 5n, 0n), poolCollect(5n, 0n), npmCollect(42n, SAFE, 5n, 0n), poolCollect(6n, 0n), npmCollect(42n, SAFE, 6n, 0n)], SAFE, T)
     expect(f.fees).toHaveLength(1)
-    expect(f.fees[0]).toMatchObject({ tokenId: '42', fee0: '11', fee1: '0' })
-    expect(f.fees[0]!.logIndex).toBeLessThan(idx - 1)
+    expect(f.fees[0]).toMatchObject({ tokenId: '42', fee0: '6', fee1: '0', logIndex: idx - 1 })
+    const g = factsFromLogs([userOp(SAFE, 1n), poolCollect(5n, 0n), npmCollect(43n, SAFE, 5n, 0n), poolCollect(6n, 0n), npmCollect(43n, SAFE, 6n, 0n)], SAFE, T)
+    expect(g.fees.map((x) => [x.fee0, x.logIndex])).toEqual([['5', idx - 3], ['6', idx - 1]])
+    expect(dayReceipts([op('eng-1', { ...g, txHash: '0xaa' })])[0]!.positions).toEqual([{ tokenId: '43', collected0: '11', collected1: '0' }])
   })
 
   test('an account with no receipt day yet but receipts pending still reports its vault state as unknown', async () => {

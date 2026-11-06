@@ -43,11 +43,7 @@ export type FeeFact = {
   fee1: string
   /** Raw USDC, set once by the first snapshot that prices the pool. */
   usdc?: string
-  /**
-   * spec 012 HRV-R5: the position manager's first Collect log index for this position in the transaction: with the
-   * txHash it is the income event's id. Collects of one position in one transaction are one event (their amounts
-   * summed, the freed principal taken once), so no amount is lost or split across ids.
-   */
+  /** spec 012 HRV-R5: the position manager's Collect log index: with the txHash it is the income event's id. */
   logIndex?: number
 }
 
@@ -108,7 +104,7 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
     .filter((e) => isAddressEqual(e.args.owner, npm))
     .map((e) => ({ logIndex: e.logIndex, pool: e.address }))
   const freed = new Map<bigint, [bigint, bigint]>()
-  const collected = new Map<bigint, { pool: string; amounts: [bigint, bigint]; logIndex: number }>()
+  const collected: { tokenId: bigint; pool: string; amounts: [bigint, bigint]; logIndex: number }[] = []
   for (const e of parseEventLogs({ abi: npmEventsAbi, logs: logs.filter((l) => isAddressEqual(l.address, npm)) })) {
     if (e.eventName === 'DecreaseLiquidity') {
       const cur = freed.get(e.args.tokenId) ?? [0n, 0n]
@@ -119,17 +115,17 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
     const poolAddr = poolCollects.filter((p) => p.logIndex < e.logIndex).at(-1)?.pool
     const pool = poolAddr ? nameOf(poolAddr, registry) : undefined
     if (!pool) continue
-    const prev = collected.get(e.args.tokenId)
-    const cur = prev?.amounts ?? [0n, 0n]
-    collected.set(e.args.tokenId, { pool, amounts: [cur[0] + e.args.amount0, cur[1] + e.args.amount1], logIndex: prev?.logIndex ?? e.logIndex })
+    collected.push({ tokenId: e.args.tokenId, pool, amounts: [e.args.amount0, e.args.amount1], logIndex: e.logIndex })
   }
   const fees: FeeFact[] = []
-  for (const [tokenId, c] of collected) {
-    // packages/projector's splitCollect: the collect pays the freed principal first, never below zero.
-    const owed = freed.get(tokenId) ?? [0n, 0n]
+  // packages/projector's splitCollect: collects pay the freed principal first, never below zero. Each collect is its own
+  // fee (spec 012: one income event per Collect log); the principal still owed is taken in log order.
+  for (const c of collected.sort((a, b) => a.logIndex - b.logIndex)) {
+    const owed = freed.get(c.tokenId) ?? [0n, 0n]
     const f = [c.amounts[0] > owed[0] ? c.amounts[0] - owed[0] : 0n, c.amounts[1] > owed[1] ? c.amounts[1] - owed[1] : 0n] as const
+    freed.set(c.tokenId, [owed[0] > c.amounts[0] ? owed[0] - c.amounts[0] : 0n, owed[1] > c.amounts[1] ? owed[1] - c.amounts[1] : 0n])
     if (f[0] === 0n && f[1] === 0n) continue
-    fees.push({ tokenId: tokenId.toString(), pool: c.pool, fee0: f[0].toString(), fee1: f[1].toString(), logIndex: c.logIndex })
+    fees.push({ tokenId: c.tokenId.toString(), pool: c.pool, fee0: f[0].toString(), fee1: f[1].toString(), logIndex: c.logIndex })
   }
   const vaults = registry.entries.filter((x) => x.kind === 'vault')
   const vaultFlows: VaultFlow[] = []
@@ -161,7 +157,8 @@ export function needsFacts(op: StoredOp): boolean {
 export function keepPrices(next: OpFacts, prev: OpFacts | undefined): OpFacts {
   if (!prev || prev.txHash?.toLowerCase() !== next.txHash?.toLowerCase()) return next
   const fees = next.fees.map((f) => {
-    const old = prev.fees.find((o) => o.tokenId === f.tokenId)
+    // Old-layout facts had one fee per position: a price carries over only to a fee with the very same amounts.
+    const old = prev.fees.find((o) => o.tokenId === f.tokenId && (o.logIndex === undefined || o.logIndex === f.logIndex))
     return old?.usdc !== undefined && old.fee0 === f.fee0 && old.fee1 === f.fee1 ? { ...f, usdc: old.usdc } : f
   })
   return { ...next, fees, ...(prev.gasUsdc !== undefined && prev.gasWei === next.gasWei ? { gasUsdc: prev.gasUsdc } : {}) }
