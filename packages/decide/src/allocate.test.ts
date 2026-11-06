@@ -476,7 +476,8 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
   })
 
   test('spec 011 SCN-CAP-06: what is left under the entry minimum, or unreadable, waits as DECIDE_WAIT_BRIDGE_LIMIT', () => {
-    for (const limit of [{ kind: 'v3', perCall: 200n * USDC, amountLeft: 1n }, { kind: 'unknown' }, undefined]) {
+    // Per call under the entry minimum is the grant's limit too, not gas (Argon, review of #306).
+    for (const limit of [{ kind: 'v3', perCall: 200n * USDC, amountLeft: 1n }, { kind: 'v3', perCall: 1n, amountLeft: 10_000n * USDC }, { kind: 'unknown' }, undefined]) {
       const d = decide(withLimit(limit)(v6Obs(growthGap)), V6)
       expect(d.proposal?.kind).not.toBe('bridge_out')
       const w = (d.waiting ?? []).find((x) => x.code === 'DECIDE_WAIT_BRIDGE_LIMIT')

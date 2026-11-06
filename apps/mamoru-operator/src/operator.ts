@@ -1009,7 +1009,7 @@ export class Operator {
   /** otto/mamoru#340: per account, the last look for a deposit (watchDeposits): when, how far, and the one in flight. */
   private readonly depositLooks = new Map<string, DepositLook>()
   /** #149: usage counters read from the chain per account (readChainUsage), keyed by lower-case permission id. */
-  private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage>; budgets?: Map<string, number>; paused?: boolean; readAt?: number }>()
+  private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage>; budgets?: Map<string, number>; paused?: boolean; readAt?: number; readBlock?: bigint }>()
   /** Ops whose execTransaction went to the provider in this attempt: only then can a refusal be about a copy already out. */
   private readonly execTried = new Set<string>()
   /** Armed ops being sent again after a failed attempt: an earlier copy may have landed although its reply said no. */
@@ -2089,13 +2089,16 @@ export class Operator {
     // Taken before the read, so a slow or failing RPC is not asked again on every poll.
     // otto/mamoru#376: no `readAt` until this read succeeds. A V3 bridge grant's remaining total is judged only on a read
     // that is the latest attempt: while this one runs, or if it fails, the bridge waits (unknown) instead of using the old.
-    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: had?.grants === ids ? had.byGrant : new Map() })
+    const same = had?.grants === ids
+    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: same ? had.byGrant : new Map(), ...(same && had.budgets ? { budgets: had.budgets } : {}), ...(same && had.paused ? { paused: had.paused } : {}) })
     const readAt = Date.now()
-    const byGrant = await readChainUsage(this.client as never, acc.ctx.address as Address, acc.grants, this.cfg.registry)
+    // otto/mamoru#376: every counter at one block, so a burn is known to be in the read or not by its own block.
+    const readBlock = await this.client.getBlockNumber({ cacheTime: 0 })
+    const byGrant = await readChainUsage(this.client as never, acc.ctx.address as Address, acc.grants, this.cfg.registry, readBlock)
     const budgets = await this.readBudgets(acc)
     const paused = (await this.readPaused(acc)) === true
     if (!byGrant.size && !budgets?.size && !paused) return
-    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant, ...(budgets?.size ? { budgets } : {}), ...(paused ? { paused } : {}), readAt })
+    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant, ...(budgets?.size ? { budgets } : {}), ...(paused ? { paused } : {}), readAt, readBlock })
     const ledger = this.runners.get(acc.accountKey)?.engine.ledger
     for (const g of acc.grants) {
       const c = byGrant.get(g.permissionId.toLowerCase())
@@ -6268,13 +6271,19 @@ export class Operator {
     const g = acc.grants.find((x) => x.name === 'bridge-out')
     // The engine's own reviews keep the chain read fresh (not only /funding): a restart or an unvisited account would
     // otherwise wait forever. TTL-guarded inside; this review waits, the next one has the read.
-    if (g) void this.refreshChainUsage(acc).catch((e) => logErr(`[usage] ${acc.accountKey}:`, e))
-    const usage = this.chainUsage.get(acc.accountKey)
-    const burns = (this.cfg.bridgeMonad?.burns() ?? []).filter((b) => b.accountKey === acc.accountKey)
-    const limit = bridgeLeftOf({ grant: g?.grant, chain: g ? usage?.byGrant.get(g.permissionId.toLowerCase()) : undefined, chainReadAt: usage?.readAt, burns, now: Date.now(), maxAgeMs: BRIDGE_READ_MAX_AGE_MS })
-    // Expire the cached read so the next refresh rebuilds what is left from the chain.
-    if (limit.kind === 'unknown' && usage?.readAt !== undefined && burns.some((b) => b.state === 'failed' && Date.parse(b.updatedAt) > usage.readAt!)) usage.at = 0
-    return limit
+    try {
+      const burns = (this.cfg.bridgeMonad?.burns() ?? []).filter((b) => b.accountKey === acc.accountKey)
+      const had = this.chainUsage.get(acc.accountKey)
+      // A send that failed since the last read: expire it before asking, so this very review starts the re-read.
+      if (had?.readAt !== undefined && burns.some((b) => b.state === 'failed' && Date.parse(b.updatedAt) >= had.readAt!)) had.at = 0
+      if (g) void this.refreshChainUsage(acc).catch((e) => logErr(`[usage] ${acc.accountKey}:`, e))
+      const usage = this.chainUsage.get(acc.accountKey)
+      return bridgeLeftOf({ grant: g?.grant, chain: g ? usage?.byGrant.get(g.permissionId.toLowerCase()) : undefined, chainReadBlock: usage?.readBlock, chainReadAt: usage?.readAt, burns, now: Date.now(), maxAgeMs: BRIDGE_READ_MAX_AGE_MS })
+    } catch (e) {
+      // Fail closed on the bridge only: a bad journal row or a throwing read never stops the account's other reviews.
+      logErr(`[bridge-limit] ${acc.accountKey}:`, e)
+      return { kind: 'unknown' }
+    }
   }
 
   // ---- one authorization: MamoruActionPolicyV4 (otto/mamoru#293, spec 010) ----------------------------------

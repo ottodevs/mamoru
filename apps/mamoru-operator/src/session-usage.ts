@@ -14,8 +14,8 @@ const USAGE_LIMIT_ABI = parseAbi(['function usageLimitConfigs(bytes32 id, addres
 export type ChainUsage = { used: number; spentBps: number | null; cumulative?: { limit: bigint; used: bigint }[] }
 
 type Reader = {
-  readContract(args: { address: Address; abi: typeof USAGE_LIMIT_ABI; functionName: 'usageLimitConfigs'; args: readonly [Hex, Address, Address] }): Promise<readonly [bigint, bigint]>
-  getStorageAt(args: { address: Address; slot: Hex }): Promise<Hex | undefined>
+  readContract(args: { address: Address; abi: typeof USAGE_LIMIT_ABI; functionName: 'usageLimitConfigs'; args: readonly [Hex, Address, Address]; blockNumber?: bigint }): Promise<readonly [bigint, bigint]>
+  getStorageAt(args: { address: Address; slot: Hex; blockNumber?: bigint }): Promise<Hex | undefined>
 }
 
 /** Smart Sessions IdLib: a userOp policy's config id is keccak(account, permissionId). */
@@ -48,13 +48,15 @@ export function cumulativeLimitSlot(configId: Hex, multiplexer: Address, account
  * whose read fails, or whose limit on chain is not the one it was signed with, is left out (the caller falls back
  * on its own count).
  */
-export async function readChainUsage(client: Reader, account: Address, grants: readonly { permissionId: Hex; grant: SessionGrant }[], registry: Registry = baseRegistry): Promise<Map<string, ChainUsage>> {
+/** `blockNumber`: otto/mamoru#376, every counter read at that one block (absent: latest, as before). */
+export async function readChainUsage(client: Reader, account: Address, grants: readonly { permissionId: Hex; grant: SessionGrant }[], registry: Registry = baseRegistry, blockNumber?: bigint): Promise<Map<string, ChainUsage>> {
+  const at = blockNumber === undefined ? {} : { blockNumber }
   const multiplexer = address('SmartSession', registry)
   const out = new Map<string, ChainUsage>()
   await Promise.all(
     grants.map(async (g) => {
       try {
-        const [limit, used] = await client.readContract({ address: address('UsageLimitPolicy', registry), abi: USAGE_LIMIT_ABI, functionName: 'usageLimitConfigs', args: [userOpConfigId(account, g.permissionId), multiplexer, account] })
+        const [limit, used] = await client.readContract({ address: address('UsageLimitPolicy', registry), abi: USAGE_LIMIT_ABI, functionName: 'usageLimitConfigs', args: [userOpConfigId(account, g.permissionId), multiplexer, account], ...at })
         if (limit !== BigInt(g.grant.userOp.usageLimit)) return
         let spentBps: number | null = null
         const cumulative: { limit: bigint; used: bigint }[] = []
@@ -62,7 +64,7 @@ export async function readChainUsage(client: Reader, account: Address, grants: r
           for (const [ri, rule] of a.params.entries()) {
             if (rule.cumulativeLimit === undefined) continue
             const slot = cumulativeLimitSlot(actionConfigId(account, g.permissionId, a.targetAddress, a.selector), multiplexer, account, ri)
-            const [l, u] = await Promise.all([client.getStorageAt({ address: address('UniActionPolicy', registry), slot: toHex(slot, { size: 32 }) }), client.getStorageAt({ address: address('UniActionPolicy', registry), slot: toHex(slot + 1n, { size: 32 }) })])
+            const [l, u] = await Promise.all([client.getStorageAt({ address: address('UniActionPolicy', registry), slot: toHex(slot, { size: 32 }), ...at }), client.getStorageAt({ address: address('UniActionPolicy', registry), slot: toHex(slot + 1n, { size: 32 }), ...at })])
             if (!l || !u || hexToBigInt(l) !== rule.cumulativeLimit) return
             cumulative.push({ limit: rule.cumulativeLimit, used: hexToBigInt(u) })
             const bps = rule.cumulativeLimit === 0n ? 10_000 : Number((hexToBigInt(u) * 10_000n) / rule.cumulativeLimit)

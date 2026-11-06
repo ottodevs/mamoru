@@ -397,7 +397,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
         waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE', amount })
         continue
       }
-      if (bridgeLimit.kind === 'unknown' || (bridgeLimit.kind === 'v3' && bridgeLimit.amountLeft < entryMin)) {
+      if (bridgeLimit.kind === 'unknown' || (bridgeLimit.kind === 'v3' && (bridgeLimit.amountLeft < entryMin || bridgeLimit.perCall < entryMin))) {
         waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE_LIMIT', amount })
         continue
       }

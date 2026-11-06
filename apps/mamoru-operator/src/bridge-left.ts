@@ -11,8 +11,9 @@ import type { ChainUsage } from './session-usage.ts'
 export type BridgeLeftInput = {
   /** The account's bridge-out grant, as signed. */
   grant: SessionGrant | undefined
-  /** Its usage as the chain counted it, and when that read was taken (ms). */
+  /** Its usage as the chain counted it, the block it was read at, and when that read was started (ms). */
   chain: ChainUsage | undefined
+  chainReadBlock: bigint | undefined
   chainReadAt: number | undefined
   /** The account's burns in the operator's journal. */
   burns: readonly BridgeBurn[]
@@ -29,11 +30,9 @@ function amountRuleOf(grant: SessionGrant): { perCall: bigint; total: bigint } |
   return { perCall: r.ref, total: r.cumulativeLimit! }
 }
 
-const burnTime = (b: BridgeBurn) => Date.parse(b.burnedAt ?? b.updatedAt ?? b.at)
-
 export function bridgeLeftOf(input: BridgeLeftInput): BridgeLimit {
-  const { grant, chain, chainReadAt, burns, now, maxAgeMs } = input
-  if (!grant || !chain || chainReadAt === undefined || now - chainReadAt > maxAgeMs) return { kind: 'unknown' }
+  const { grant, chain, chainReadBlock, chainReadAt, burns, now, maxAgeMs } = input
+  if (!grant || !chain || chainReadBlock === undefined || chainReadAt === undefined || now - chainReadAt > maxAgeMs) return { kind: 'unknown' }
   const rule = amountRuleOf(grant)
   if (!rule) return { kind: 'unknown' }
   // The chain's limit must be the one the grant was signed with, or the read is not about this grant.
@@ -41,13 +40,14 @@ export function bridgeLeftOf(input: BridgeLeftInput): BridgeLimit {
   if (onChain.length !== 1) return { kind: 'unknown' }
   // A send that failed after the last read says the journal and the chain may disagree (a policy denial among the
   // causes): unknown until the chain is read again.
-  if (burns.some((b) => b.state === 'failed' && Date.parse(b.updatedAt) > chainReadAt)) return { kind: 'unknown' }
-  // The chain has counted every burn included before its read. Still to count: sends with no receipt yet, and burns
-  // included after the read. Failed (reverted, nothing burned) and dropped (never included) spent nothing.
+  if (burns.some((b) => b.state === 'failed' && Date.parse(b.updatedAt) >= chainReadAt)) return { kind: 'unknown' }
+  // The chain read is pinned to one block: it has counted every burn included at or before it. Still to count: sends
+  // with no receipt yet, and burns included after that block (or whose block is not known). Failed (reverted, nothing
+  // burned) and dropped (never included) spent nothing.
   let pending = 0n
   for (const b of burns) {
     if (b.state === 'sending') pending += BigInt(b.amount)
-    else if ((b.state === 'burned' || b.state === 'minted') && burnTime(b) > chainReadAt) pending += BigInt(b.amount)
+    else if ((b.state === 'burned' || b.state === 'minted') && (b.burnBlock === undefined || BigInt(b.burnBlock) > chainReadBlock)) pending += BigInt(b.amount)
   }
   const spent = onChain[0]!.used + pending
   const amountLeft = spent >= rule.total ? 0n : rule.total - spent
