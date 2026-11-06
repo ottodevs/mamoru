@@ -3068,10 +3068,10 @@ export class Operator {
       )
       const fit = (depth * INIT_DEPTH_FIT_BPS) / 10_000n
       if (want > fit) {
-        console.log(`[v4] ${live.safe} ${spec.pool}: daily budget ${want} above ${INIT_DEPTH_FIT_BPS / 100n}% of the pool's depth in its band (${depth}), signed at ${fit}`)
         // A band that cannot take even one unit of the budget token would be refused on chain (BadInit(11)) and take
         // the whole owner transaction with it: nothing is offered for signing, the owner tries again later.
         if (fit < INIT_DEPTH_MIN) throw new HttpError(503, 'POOL_DEPTH_TOO_THIN', `${poolLabel(spec.pool, this.cfg.registry)} is too thin right now to approve; try again in a few minutes`)
+        console.log(`[v4] ${live.safe} ${spec.pool}: daily budget ${want} above ${INIT_DEPTH_FIT_BPS / 100n}% of the pool's depth in its band (${depth}), signed at ${fit}`)
         budgets[spec.caps.budgetWindow] = fit
       }
     }
