@@ -16,6 +16,8 @@ export const queryKeys = {
   bridgeOut: (accountKey: string) => ['bridge-out', accountKey] as const,
   ethereumSibling: (accountKey: string) => ['ethereum-sibling', accountKey] as const,
   yieldLedger: (accountKey: string) => ['yield-ledger', accountKey] as const,
+  stats: ['stats'] as const,
+  valueSeries: (accountKey: string) => ['value-series', accountKey] as const,
   ops: (accountKey: string) => ['ops', accountKey] as const,
   withdrawAssets: (accountKey: string) => ['withdraw-assets', accountKey] as const,
 }
@@ -150,6 +152,18 @@ export function useYieldLedger(accountKey: string | undefined) {
     retry: false,
     refetchInterval: 60_000,
   })
+}
+
+/** Spec 013: the public Stats. The API caches it for minutes; a slow poll is enough. */
+export function useStats() {
+  const api = useApi()
+  return useQuery({ queryKey: queryKeys.stats, queryFn: () => api.stats(), retry: 1, refetchInterval: 5 * 60_000 })
+}
+
+/** Spec 013 STATS-R14: the Portfolio's Total value by day. No retry: a failure hides the chart. */
+export function useValueSeries(accountKey: string | undefined) {
+  const api = useApi()
+  return useQuery({ queryKey: queryKeys.valueSeries(accountKey ?? ''), queryFn: () => api.valueSeries(accountKey as string), enabled: accountKey !== undefined, retry: false, refetchInterval: 10 * 60_000 })
 }
 
 /** The account address on chains Mamoru does not run on (a transfer sent on the wrong network). Slow poll, no retry: a failure shows nothing. */

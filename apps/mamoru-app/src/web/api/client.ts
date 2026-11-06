@@ -24,11 +24,15 @@ import type {
   SignInChallenge,
   SignInRequest,
   SleeveView,
+  StatsView,
   TransferPlan,
   TransferRequest,
   WithdrawAsset,
   YieldLedgerView,
 } from '@mamoru/domain'
+
+/** `GET /api/accounts/:key/value-series` (src/api/accounts/value-series.ts). */
+export type ValueSeriesView = { asOf: string | null; points: { day: string; usd: number; partial?: true }[]; chains: number[] }
 
 // Every call goes to same-origin /api (FR-DSH-019). The SPA never reaches RPC, bundler or MultiBaas.
 export type ApiClient = {
@@ -53,6 +57,10 @@ export type ApiClient = {
   otherChains(accountKey: string): Promise<OtherChainsView>
   /** otto/mamoru#129: uncollected fees, collected, gas Mamoru paid and value vs hold, from the yield ledger. */
   yieldLedger(accountKey: string): Promise<YieldLedgerView>
+  /** Spec 013: the public Stats, aggregates only, no session needed. */
+  stats(): Promise<StatsView>
+  /** Spec 013 STATS-R14: the owner's total value by UTC day, every chain. */
+  valueSeries(accountKey: string): Promise<ValueSeriesView>
   ops(accountKey: string): Promise<{ ops: OpView[] }>
   activatePrepare(accountKey: string): Promise<OwnerTxToSign>
   activate(accountKey: string, sig: OwnerSignature): Promise<OpView>
@@ -144,6 +152,8 @@ export const httpClient: ApiClient = {
   funding: (k, opts) => request<FundingView>(acct(k, 'funding') + (opts?.fresh ? '?fresh=1' : '')),
   otherChains: (k) => request<OtherChainsView>(acct(k, 'other-chains')),
   yieldLedger: (k) => request<YieldLedgerView>(acct(k, 'yield')),
+  stats: () => request<StatsView>('/api/stats'),
+  valueSeries: (k) => request<ValueSeriesView>(acct(k, 'value-series')),
   // otto/mamoru#340: with the deposit rows (the operator leaves them out for apps that do not ask).
   ops: (k) => request<{ ops: OpView[] }>(acct(k, 'ops?deposits=1')),
   activatePrepare: (k) => post<OwnerTxToSign>(acct(k, 'activate/prepare')),

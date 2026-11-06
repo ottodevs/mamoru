@@ -5,6 +5,7 @@ import { poolsResponse } from './pools.ts'
 import { braisAfterMove } from './brais-after.ts'
 import { braisFlight, type FlightStage } from './transfer.ts'
 import { braisFunding, braisToday, withMonadOnlyPositions, withMonadPosition, withoutMoney, withStaleMonad, withStuckTransfer, withUnreadMonad, type BraisMoment } from './money.ts'
+import { fixtureStats } from './stats.ts'
 
 // Dev (VITE_FIXTURES=1) and tests only. Never imported by the production build.
 export const fixtureConfig: AppConfig = {
@@ -388,6 +389,16 @@ export const fixtureClient: ApiClient = {
         : [{ chainId: 1, name: 'Ethereum', status: 'not_observed' as const, observedAt: new Date().toISOString() }],
     }),
   // otto/mamoru#129: a few cents of uncollected fees, nothing collected yet (true of every live account on 15 Oct).
+  stats: () => delay(fixtureStats),
+  // Spec 013: a month of closes, deposits on three days and a slow rise from fees and vault yield.
+  valueSeries: () => {
+    const start = Date.UTC(2026, 9, 12)
+    const points = Array.from({ length: 26 }, (_, i) => {
+      const base = 1000 + (i >= 6 ? 400 : 0) + (i >= 13 ? 300 : 0) + (i >= 21 ? 800 : 0)
+      return { day: new Date(start + i * 864e5).toISOString().slice(0, 10), usd: Math.round((base * (1 + i * 0.0009) + (i % 4) * 0.6) * 100) / 100 }
+    })
+    return delay({ asOf: new Date().toISOString(), points, chains: [8453] })
+  },
   yieldLedger: () =>
     delay({
       asOf: new Date().toISOString(),
