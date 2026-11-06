@@ -124,6 +124,8 @@ const remoteCodeOf = (c: string | undefined): string => (c && /^[A-Z][A-Z0-9_]{0
 const FUNDING_FRESH_MS = 15_000
 /** #149: how long the on-chain usage counters of an account are taken as current (about 30 reads per account). */
 const CHAIN_USAGE_TTL_MS = 10 * 60_000
+/** otto/mamoru#376: the oldest chain read a V3 bridge-out's remaining total is judged on (one missed refresh, then unknown). */
+const BRIDGE_READ_MAX_AGE_MS = CHAIN_USAGE_TTL_MS + 5 * 60_000
 const FUNDING_STALE_MS = 60_000
 const FUNDING_FRESH_READ_MS = 2_000
 /**
@@ -6263,9 +6265,12 @@ export class Operator {
   private bridgeLimitFor(acc: AccountState): BridgeLimit {
     if (this.onV4(acc)) return { kind: 'none' }
     const g = acc.grants.find((x) => x.name === 'bridge-out')
+    // The engine's own reviews keep the chain read fresh (not only /funding): a restart or an unvisited account would
+    // otherwise wait forever. TTL-guarded inside; this review waits, the next one has the read.
+    if (g) void this.refreshChainUsage(acc).catch((e) => logErr(`[usage] ${acc.accountKey}:`, e))
     const usage = this.chainUsage.get(acc.accountKey)
     const burns = (this.cfg.bridgeMonad?.burns() ?? []).filter((b) => b.accountKey === acc.accountKey)
-    const limit = bridgeLeftOf({ grant: g?.grant, chain: g ? usage?.byGrant.get(g.permissionId.toLowerCase()) : undefined, chainReadAt: usage?.readAt, burns })
+    const limit = bridgeLeftOf({ grant: g?.grant, chain: g ? usage?.byGrant.get(g.permissionId.toLowerCase()) : undefined, chainReadAt: usage?.readAt, burns, now: Date.now(), maxAgeMs: BRIDGE_READ_MAX_AGE_MS })
     // Expire the cached read so the next refresh rebuilds what is left from the chain.
     if (limit.kind === 'unknown' && usage?.readAt !== undefined && burns.some((b) => b.state === 'failed' && Date.parse(b.updatedAt) > usage.readAt!)) usage.at = 0
     return limit

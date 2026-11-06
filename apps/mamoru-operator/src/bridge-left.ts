@@ -16,6 +16,9 @@ export type BridgeLeftInput = {
   chainReadAt: number | undefined
   /** The account's burns in the operator's journal. */
   burns: readonly BridgeBurn[]
+  /** Now (ms), and the oldest read still used: a refresh that keeps failing leaves an old read in place. */
+  now: number
+  maxAgeMs: number
 }
 
 /** The DepositForBurn amount rule: the one cumulative rule of a bridge-out grant (per-call cap as its ref). */
@@ -29,8 +32,8 @@ function amountRuleOf(grant: SessionGrant): { perCall: bigint; total: bigint } |
 const burnTime = (b: BridgeBurn) => Date.parse(b.burnedAt ?? b.updatedAt ?? b.at)
 
 export function bridgeLeftOf(input: BridgeLeftInput): BridgeLimit {
-  const { grant, chain, chainReadAt, burns } = input
-  if (!grant || !chain || chainReadAt === undefined) return { kind: 'unknown' }
+  const { grant, chain, chainReadAt, burns, now, maxAgeMs } = input
+  if (!grant || !chain || chainReadAt === undefined || now - chainReadAt > maxAgeMs) return { kind: 'unknown' }
   const rule = amountRuleOf(grant)
   if (!rule) return { kind: 'unknown' }
   // The chain's limit must be the one the grant was signed with, or the read is not about this grant.
