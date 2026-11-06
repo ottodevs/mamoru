@@ -1,0 +1,167 @@
+import { describe, expect, test } from 'bun:test'
+import type { StatsView } from '@mamoru/domain'
+import { memoryD1 } from './d1.ts'
+import { harness } from './helpers.ts'
+import { inFlightNow, rowExposure, statsInput } from '../../src/api/stats/queries.ts'
+import { guardStats } from '../../src/api/stats/privacy.ts'
+
+// Spec 013 amendment A1, task A1-D3: GET /api/stats v2 from D1 fixtures.
+
+const USDC = 1_000_000
+const NOW = new Date('2026-11-06T19:00:00.000Z')
+const READ = '2026-11-06T18:55:00.000Z'
+type Db = ReturnType<typeof memoryD1>
+const addr = (i: number) => `0x${i.toString(16).padStart(40, '0')}`
+
+function user(db: Db, id: string) {
+  db.raw.exec(`INSERT INTO users (user_id, email, created_at) VALUES ('${id}', '${id}@x.y', '2026-10-01T00:00:00.000Z')`)
+}
+function account(db: Db, key: string, userId: string, chain: number, address: string, env = 'prod', isTest = 0) {
+  db.raw.exec(
+    `INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at, env, is_test)
+     VALUES ('${key}', '${userId}', ${chain}, '${address}', '[]', 'cred-${key}', '0x1', '0x2', '1', 'v1', '2026-10-01T00:00:00.000Z', '${env}', ${isTest})`,
+  )
+}
+/** A latest row: idle (by token), one USDC/WETH position split 60/40, and a vault (the remainder of total). */
+function latest(db: Db, chain: number, key: string, o: { idle: number; lp: number; vault: number; fees?: number; tokens?: Record<string, number> | null; readAt?: string; block?: number }) {
+  const fees = o.fees ?? 0
+  const positions = o.lp > 0 ? [{ tokenId: '1', pool: 'pool:WETH/USDC/500', token0: 'WETH', token1: 'USDC', valueUsdc: String(o.lp), value0Usdc: String(o.lp * 0.4), value1Usdc: String(o.lp * 0.6), feesUsdc: String(fees), owedUsdc: '0' }] : []
+  const tokens = o.tokens === null ? 'NULL' : `'${JSON.stringify(Object.fromEntries(Object.entries(o.tokens ?? { USDC: o.idle }).map(([k, v]) => [k, String(v)])))}'`
+  db.raw.exec(
+    `INSERT INTO account_snapshot_latest (chain_id, address, account_key, env, block, read_at, deployed, idle_usdc, lp_usdc, fees_usdc, owed_usdc, total_usdc, positions_json, updated_at, tokens_json)
+     VALUES (${chain}, '${key}-${chain}', '${key}', 'prod', ${o.block ?? 100}, '${o.readAt ?? READ}', 1, ${o.idle}, ${o.lp}, ${fees}, 0, ${o.idle + o.lp + fees + o.vault}, '${JSON.stringify(positions)}', '${o.readAt ?? READ}', ${tokens})`,
+  )
+}
+function daily(db: Db, day: string, chain: number, key: string, o: { total: number; idle: number; lp: number; feesOpen?: number; feesClose?: number; collected?: number | null }) {
+  db.raw.exec(
+    `INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc, collected_usdc)
+     VALUES ('${day}', ${chain}, '${key}-${chain}', '${key}', 'prod', 1, 1, ${o.total}, ${o.total}, ${o.idle}, ${o.lp}, ${o.feesOpen ?? 0}, ${o.feesClose ?? 0}, ${o.collected ?? 'NULL'})`,
+  )
+}
+
+/** n owners, each with a Base account (idle 100, LP 200, vault 300) and the first three a Monad sleeve (idle 50). */
+function platform(n: number) {
+  const db = memoryD1()
+  for (let i = 1; i <= n; i++) {
+    user(db, `u${i}`)
+    account(db, `key-${i}`, `u${i}`, 8453, addr(i))
+    latest(db, 8453, `key-${i}`, { idle: 100 * USDC, lp: 200 * USDC, vault: 300 * USDC })
+    if (i <= 3) {
+      account(db, `mon-${i}`, `u${i}`, 143, addr(i))
+      latest(db, 143, `mon-${i}`, { idle: 50 * USDC, lp: 0, vault: 0 })
+    }
+  }
+  return db
+}
+
+describe('GET /api/stats v2', () => {
+  test('public, cacheable, and S1–S3, S7–S10 and the three distributions add up', async () => {
+    const h = harness(() => NOW, { statsCache: () => null })
+    h.env.DB = platform(5)
+    const res = await h.request('/api/stats')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toBe('public, max-age=60, s-maxage=300')
+    const v = (await res.json()) as StatsView
+    expect(v.snapshots.totalDeposits?.value).toBe(3150) // 5 × 600 + 3 × 50
+    expect(v.snapshots.moneyWorking?.value).toBe(2500)
+    expect(v.snapshots.idleCapital?.value).toBe(650)
+    expect(v.snapshots.totalAccounts?.value).toBe(5)
+    expect(v.snapshots.averageAccount?.value).toBe(630)
+    expect(v.snapshots.largestAccount?.value).toBe(650)
+    // Stable: idle USDC 650 + USDC legs 5 × 120 + vaults 1,500 = 2,750 of 3,150.
+    expect(v.snapshots.inStablecoins?.value).toBe(87.3)
+    expect(v.distributions.byToken).toEqual([{ key: 'USDC', usd: 2750, pct: 87.3 }, { key: 'WETH', usd: 400, pct: 12.7 }])
+    expect(v.distributions.byChain).toEqual([{ key: 'Base', usd: 3000, pct: 95.2 }, { key: 'Monad', usd: 150, pct: 4.8 }])
+    expect(v.distributions.byPlace).toEqual([{ key: 'Stable vaults', usd: 1500, pct: 47.6 }, { key: 'Volatile pairs', usd: 1000, pct: 31.7 }, { key: 'Idle', usd: 650, pct: 20.6 }])
+    expect(v.dataAsOf).toBe(READ)
+  })
+
+  test('S02: no account key, address, user id or owner count in the body', async () => {
+    const h = harness(() => NOW, { statsCache: () => null })
+    h.env.DB = platform(5)
+    const raw = await (await h.request('/api/stats')).text()
+    for (let i = 1; i <= 5; i++) for (const s of [`key-${i}`, `mon-${i}`, addr(i), `"u${i}"`]) expect(raw).not.toContain(s)
+    expect(raw).not.toMatch(/owners|not counted|NOT_COUNTED/i)
+  })
+
+  test('every figure counts every chain: a chain with accounts but no read hides the snapshots', async () => {
+    const db = platform(5)
+    db.raw.exec('DELETE FROM account_snapshot_latest WHERE chain_id = 143')
+    const v = guardStats(await statsInput(db, NOW))
+    expect(v.snapshots.totalDeposits).toBeUndefined()
+    expect(v.distributions.byChain).toBeUndefined()
+    expect(v.snapshots.totalAccounts?.value).toBe(5)
+  })
+
+  test('a funded row older than 1 h hides the snapshot figures; a row without the token split hides D1, D3 and S10 only', async () => {
+    const stale = platform(5)
+    stale.raw.exec(`UPDATE account_snapshot_latest SET read_at = '2026-11-06T17:00:00.000Z' WHERE account_key = 'key-1'`)
+    expect(guardStats(await statsInput(stale, NOW)).snapshots.totalDeposits).toBeUndefined()
+    const noSplit = platform(5)
+    noSplit.raw.exec(`UPDATE account_snapshot_latest SET tokens_json = NULL WHERE account_key = 'key-2'`)
+    const v = guardStats(await statsInput(noSplit, NOW))
+    expect(v.snapshots.totalDeposits?.value).toBe(3150)
+    expect(v.distributions.byToken).toBeUndefined()
+    expect(v.distributions.byPlace).toBeUndefined()
+    expect(v.snapshots.inStablecoins).toBeUndefined()
+  })
+
+  test('S17: two owners: nothing about their money is published', async () => {
+    const v = guardStats(await statsInput(platform(2), NOW))
+    expect(v.snapshots.totalDeposits).toBeUndefined()
+    expect(v.snapshots.largestAccount).toBeUndefined()
+    expect(v.distributions).toEqual({})
+  })
+
+  test('test accounts are in no figure', async () => {
+    const db = platform(5)
+    user(db, 'ut')
+    account(db, 'key-test', 'ut', 8453, addr(99), 'prod', 1)
+    latest(db, 8453, 'key-test', { idle: 9999 * USDC, lp: 0, vault: 0 })
+    const v = guardStats(await statsInput(db, NOW))
+    expect(v.snapshots.totalDeposits?.value).toBe(3150)
+    expect(v.snapshots.totalAccounts?.value).toBe(5)
+  })
+})
+
+describe('days: T1, T2, T3 and S6 from account_daily', () => {
+  test('a day counts once every chain is known; earned = accrued change + collected; APR over the average working capital', async () => {
+    const db = platform(5)
+    for (let d = 1; d <= 6; d++) {
+      const day = `2026-11-0${d}`
+      for (let i = 1; i <= 5; i++) daily(db, day, 8453, `key-${i}`, { total: 300 * USDC, idle: 100 * USDC, lp: 200 * USDC, feesOpen: 0, feesClose: 0.05 * USDC, collected: d % 2 ? 0.01 * USDC : null })
+      if (d >= 3) for (let i = 1; i <= 3; i++) daily(db, day, 143, `mon-${i}`, { total: 50 * USDC, idle: 50 * USDC, lp: 0 })
+    }
+    const v = guardStats(await statsInput(db, NOW))
+    expect(v.series.totalDeposits?.map((p) => [p.day, p.usd])).toEqual([['2026-11-03', 1650], ['2026-11-04', 1650], ['2026-11-05', 1650]])
+    expect(v.series.earnedPerDay?.at(-1)).toEqual({ day: '2026-11-06', usd: 0.25, collectedUsd: 0 })
+    expect(v.series.apr?.all.map((p) => p.day)).toEqual(['2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06'])
+    // 5 × 0.06 earned on 5 × 200 working: 0.03 % a day, 10.95 % a year.
+    expect(v.series.apr?.all[0]?.apr).toBe(11)
+    expect(v.snapshots.apr7d).toBeUndefined() // only 4 days with every chain known
+  })
+
+  test('vault money without vault yield in the ledger leaves the day incomplete', async () => {
+    const db = platform(5)
+    for (let i = 1; i <= 5; i++) daily(db, '2026-11-06', 8453, `key-${i}`, { total: 600 * USDC, idle: 100 * USDC, lp: 200 * USDC })
+    for (let i = 1; i <= 3; i++) daily(db, '2026-11-06', 143, `mon-${i}`, { total: 50 * USDC, idle: 50 * USDC, lp: 0 })
+    expect(guardStats(await statsInput(db, NOW)).series.apr).toBeUndefined()
+  })
+})
+
+describe('pure pieces', () => {
+  test('rowExposure splits fees by leg and puts the vault in USDC', () => {
+    const e = rowExposure({ account_key: 'k', chain_id: 8453, total_usdc: 610, idle_usdc: 0, lp_usdc: 100, fees_usdc: 10, owed_usdc: 0, read_at: READ, block: 1, tokens_json: null, positions_json: JSON.stringify([{ token0: 'WETH', token1: 'USDC', valueUsdc: '100', value0Usdc: '40', value1Usdc: '60', feesUsdc: '10', owedUsdc: '0' }]) })!
+    expect(Object.fromEntries(e.byToken)).toEqual({ WETH: 44, USDC: 566 })
+    expect(Object.fromEntries(e.byPlace)).toEqual({ 'Volatile pairs': 110, 'Stable vaults': 500 })
+  })
+  test('in flight: burned and not yet in the destination read counts once; a read with both subtracts once', () => {
+    const rows = new Map([['8453:b', { block: 150 }], ['143:s', { block: 900 }]])
+    const at = (c: number, k: string) => rows.get(`${c}:${k}`) as never
+    const burn = (state: string, burn_block: number | null, minted_block: number | null) => ({ id: 'x', direction: 'out', account_key: 'b', amount_usdc: 50, state, burn_block, minted_block })
+    expect(inFlightNow([burn('burned', 100, null)], at, () => 's').byAccount.get('b')).toBe(50)
+    expect(inFlightNow([burn('minted', 100, 800)], at, () => 's').byAccount.get('b')).toBeUndefined()
+    rows.set('8453:b', { block: 90 })
+    expect(inFlightNow([burn('minted', 100, 800)], at, () => 's').byAccount.get('b')).toBe(-50)
+  })
+})

@@ -19,7 +19,7 @@ export const PASSKEY_B: PasskeyOwner = {
   y: '0xbbdfe38eb01ecd82ffa5b6dc3d139f4c5f2bc579e8cb8ff24a317bf5f5fca859',
 }
 
-export function harness(now = () => new Date('2026-09-26T18:00:00Z'), opts: { env?: Partial<Env>; operatorFetch?: AppOptions['operatorFetch']; apyFetch?: AppOptions['apyFetch']; apyCache?: AppOptions['apyCache']; chainFetch?: AppOptions['chainFetch']; chainGate?: AppOptions['chainGate']; mattermostFetch?: AppOptions['mattermostFetch']; remoteRegistry?: AppOptions['remoteRegistry'] } = {}) {
+export function harness(now = () => new Date('2026-09-26T18:00:00Z'), opts: { env?: Partial<Env>; operatorFetch?: AppOptions['operatorFetch']; apyFetch?: AppOptions['apyFetch']; apyCache?: AppOptions['apyCache']; chainFetch?: AppOptions['chainFetch']; chainGate?: AppOptions['chainGate']; mattermostFetch?: AppOptions['mattermostFetch']; remoteRegistry?: AppOptions['remoteRegistry']; statsCache?: AppOptions['statsCache'] } = {}) {
   const db = memoryD1()
   const env: Env = { DB: db, MODE: 'production', CHAIN_ID: '8453', CORE_DRY_RUN: 'true', SESSION_SECRET: SECRET, ...opts.env }
   const app = createApp({
@@ -31,6 +31,7 @@ export function harness(now = () => new Date('2026-09-26T18:00:00Z'), opts: { en
     ...(opts.chainGate ? { chainGate: opts.chainGate } : {}),
     ...(opts.mattermostFetch ? { mattermostFetch: opts.mattermostFetch } : {}),
     ...(opts.remoteRegistry ? { remoteRegistry: opts.remoteRegistry } : {}),
+    ...(opts.statsCache ? { statsCache: opts.statsCache } : {}),
   })
   const request = (path: string, init: RequestInit & { cookie?: string } = {}) => {
     const headers = new Headers(init.headers)
