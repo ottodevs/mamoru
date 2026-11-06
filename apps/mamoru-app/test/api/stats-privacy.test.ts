@@ -80,9 +80,9 @@ describe('guardStats: k >= 3 on every published figure (STATS-R9)', () => {
   })
 
   test('every USD figure is rounded to whole dollars; partial keeps its reason', () => {
-    const v = guardStats(input({ tvl: [{ day: '2026-11-06', usd: 3927.5, owners: 12, reason: 'PARTIAL' }] }))
+    const v = guardStats(input({ tvl: [{ day: '2026-11-06', usd: 3927.5, owners: 12, reason: 'PARTIAL', dataAsOf: '2026-11-05T23:50:00.000Z' }] }))
     expect(v.tvlNow.usd).toBe(3874)
-    expect(v.tvl[0]).toEqual({ day: '2026-11-06', usd: 3928, owners: '10+', reason: 'PARTIAL' })
+    expect(v.tvl[0]).toEqual({ day: '2026-11-06', usd: 3928, owners: '10+', reason: 'PARTIAL', dataAsOf: '2026-11-05T23:50:00.000Z' })
     expect(v.earnedTotal.usd).toBe(1)
   })
 

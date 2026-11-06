@@ -8,7 +8,7 @@ export const MIN_OWNERS = 3
 
 /** A figure as the queries computed it: USD (not rounded) and the exact number of distinct owners behind it. */
 export type GuardFigure = { usd: number | null; owners: number; reason?: StatsReason; dataAsOf: string | null; stale?: true }
-export type GuardPoint = { day: string; usd: number | null; owners: number; reason?: StatsReason }
+export type GuardPoint = { day: string; usd: number | null; owners: number; reason?: StatsReason; dataAsOf?: string }
 
 export type GuardInput = {
   tvlNow: GuardFigure
@@ -45,10 +45,11 @@ function guardFigure(f: GuardFigure): StatsFigure {
 }
 
 function guardPoint(p: GuardPoint): StatsPoint {
-  if (p.usd === null) return { day: p.day, usd: null, reason: p.reason ?? 'NOT_COUNTED' }
+  const at = p.dataAsOf ? { dataAsOf: p.dataAsOf } : {}
+  if (p.usd === null) return { day: p.day, usd: null, reason: p.reason ?? 'NOT_COUNTED', ...at }
   const owners = ownersBand(p.owners)
-  if (!owners) return { day: p.day, usd: null, reason: 'TOO_FEW_ACCOUNTS' }
-  return { day: p.day, usd: dollars(p.usd), owners, ...(p.reason ? { reason: p.reason } : {}) }
+  if (!owners) return { day: p.day, usd: null, reason: 'TOO_FEW_ACCOUNTS', ...at }
+  return { day: p.day, usd: dollars(p.usd), owners, ...(p.reason ? { reason: p.reason } : {}), ...at }
 }
 
 const passes = (p: GuardPoint) => p.usd !== null && enoughOwners(p.owners)
