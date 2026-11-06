@@ -269,10 +269,21 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
   } catch {
     incomeKnown = false
   }
+  // Days before the ledger: the backfill's full-day vault yield (stats_vault_daily) is taken over ledger rows.
+  const vaultDaily = new Map<string, number>()
+  try {
+    for (const r of (await db.prepare('SELECT day, chain_id, account_key, usd FROM stats_vault_daily').all<{ day: string; chain_id: number; account_key: string; usd: number }>()).results) vaultDaily.set(`${r.day}:${r.chain_id}:${r.account_key}`, r.usd)
+  } catch {
+    // no backfill table: ledger rows only
+  }
   const firstByChain = new Map<number, string>()
   for (const r of daily) if (!firstByChain.has(r.chain_id)) firstByChain.set(r.chain_id, r.day)
-  // A day counts only once every chain that has accounts is known (A1: "since the first day every chain is known").
-  const allKnownFrom = [...chainsWithAccounts].every((c) => firstByChain.has(c)) ? [...firstByChain.values()].sort().at(-1)! : null
+  // A1: a day counts only if every chain is known that day. A chain is needed from the day its first account was
+  // created (before that it holds nothing); from then on it must have daily rows.
+  const createdByChain = new Map<number, string>()
+  for (const r of (await db.prepare(`SELECT chain_id, MIN(substr(created_at, 1, 10)) AS day FROM accounts WHERE env IN ('prod', 'beta') AND COALESCE(is_test, 0) = 0 GROUP BY chain_id`).all<{ chain_id: number; day: string }>()).results) createdByChain.set(r.chain_id, r.day)
+  const chainsKnownOn = (day: string, chains: readonly number[]) => chains.every((c) => (createdByChain.get(c) ?? '9999') > day || (firstByChain.get(c) ?? '9999') <= day)
+  const allKnownFrom = firstByChain.size ? [...firstByChain.values()].sort()[0]! : null
   const today = now.toISOString().slice(0, 10)
   type DayAcc = { earned: number; collected: number; capital: number; deposits: number; earners: Set<string>; workers: Set<string>; holders: Set<string>; complete: boolean }
   const perChainDays = (chain: number | null) => {
@@ -292,7 +303,9 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
       if (unpriced.has(k)) acc.complete = false
       // Vault money that day needs its yield in the ledger; without it the day's earnings are short.
       let vy = 0
-      if (vaultClose > FUNDED) {
+      const backfilled = vaultDaily.get(k)
+      if (backfilled !== undefined) vy = backfilled
+      else if (vaultClose > FUNDED) {
         const v = vaultYield.get(k)
         if (!incomeKnown || v === undefined || Number.isNaN(v)) acc.complete = false
         else vy = v
@@ -308,17 +321,21 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
     }
     return days
   }
-  const dayList = (days: Map<string, DayAcc>, from: string | null) => {
+  const dayList = (days: Map<string, DayAcc>, from: string | null, chains: readonly number[]) => {
     if (from === null) return []
     const out: (DayAcc & { day: string })[] = []
-    for (let day = from; day <= today; day = dayAfter(day)) out.push({ day, ...(days.get(day) ?? { earned: 0, collected: 0, capital: 0, deposits: 0, earners: new Set(), workers: new Set(), holders: new Set(), complete: false }) })
+    // Closed days only: today has no close yet (S1 and S4 are the figures for now).
+    for (let day = from; day < today; day = dayAfter(day)) {
+      const d = days.get(day) ?? { earned: 0, collected: 0, capital: 0, deposits: 0, earners: new Set<string>(), workers: new Set<string>(), holders: new Set<string>(), complete: false }
+      out.push({ day, ...d, complete: d.complete && chainsKnownOn(day, chains) })
+    }
     return out
   }
   const aprDays = (chain: number | null): GuardAprDay[] => {
     const from = chain === null ? allKnownFrom : firstByChain.get(chain) ?? null
-    return dayList(perChainDays(chain), from).map((d) => ({ day: d.day, earned: d.earned, capital: d.capital, owners: d.workers, complete: d.complete }))
+    return dayList(perChainDays(chain), from, chain === null ? [...chainsWithAccounts] : [chain]).map((d) => ({ day: d.day, earned: d.earned, capital: d.capital, owners: d.workers, complete: d.complete }))
   }
-  const allDays = dayList(perChainDays(null), allKnownFrom)
+  const allDays = dayList(perChainDays(null), allKnownFrom, [...chainsWithAccounts])
   const aprAll = aprDays(null)
   // S6: the 7-day figure of the last day, from the same series privacy.ts guards.
   const last7 = aprAll.slice(-7)
@@ -351,7 +368,6 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
       ...(chainsWithAccounts.has(MONAD) ? { monad: aprDays(MONAD) } : {}),
     },
     earnedPerDay: allDays.map((d): GuardEarnedDay => ({ day: d.day, usd: d.earned, collectedUsd: d.collected, owners: d.earners, complete: d.complete })),
-    // T3 is the value at each day's close: today has no close yet and is left out (S1 is the figure for now).
-    totalDeposits: allDays.filter((d) => d.day !== today).map((d): GuardDepositsDay => ({ day: d.day, usd: d.deposits, owners: d.holders, complete: d.complete })),
+    totalDeposits: allDays.map((d): GuardDepositsDay => ({ day: d.day, usd: d.deposits, owners: d.holders, complete: d.complete })),
   }
 }

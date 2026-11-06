@@ -134,18 +134,23 @@ describe('days: T1, T2, T3 and S6 from account_daily', () => {
     }
     const v = guardStats(await statsInput(db, NOW))
     expect(v.series.totalDeposits?.map((p) => [p.day, p.usd])).toEqual([['2026-11-03', 1650], ['2026-11-04', 1650], ['2026-11-05', 1650]])
-    expect(v.series.earnedPerDay?.at(-1)).toEqual({ day: '2026-11-06', usd: 0.25, collectedUsd: 0 })
-    expect(v.series.apr?.all.map((p) => p.day)).toEqual(['2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06'])
+    expect(v.series.earnedPerDay?.at(-1)).toEqual({ day: '2026-11-05', usd: 0.3, collectedUsd: 0.05 })
+    // Closed days only, from the first day every chain with accounts has rows (Monad from the 3rd here).
+    expect(v.series.apr?.all.map((p) => p.day)).toEqual(['2026-11-03', '2026-11-04', '2026-11-05'])
     // 5 × 0.06 earned on 5 × 200 working: 0.03 % a day, 10.95 % a year.
     expect(v.series.apr?.all[0]?.apr).toBe(11)
-    expect(v.snapshots.apr7d).toBeUndefined() // only 4 days with every chain known
+    expect(v.snapshots.apr7d).toBeUndefined() // only 3 closed days with every chain known
   })
 
   test('vault money without vault yield in the ledger leaves the day incomplete', async () => {
     const db = platform(5)
-    for (let i = 1; i <= 5; i++) daily(db, '2026-11-06', 8453, `key-${i}`, { total: 600 * USDC, idle: 100 * USDC, lp: 200 * USDC })
-    for (let i = 1; i <= 3; i++) daily(db, '2026-11-06', 143, `mon-${i}`, { total: 50 * USDC, idle: 50 * USDC, lp: 0 })
+    for (let i = 1; i <= 5; i++) daily(db, '2026-11-05', 8453, `key-${i}`, { total: 600 * USDC, idle: 100 * USDC, lp: 200 * USDC })
+    for (let i = 1; i <= 3; i++) daily(db, '2026-11-05', 143, `mon-${i}`, { total: 50 * USDC, idle: 50 * USDC, lp: 0 })
     expect(guardStats(await statsInput(db, NOW)).series.apr).toBeUndefined()
+    // The backfill's full-day vault yield completes the day (and is used instead of ledger rows).
+    for (let i = 1; i <= 5; i++) db.raw.exec(`INSERT INTO stats_vault_daily (day, chain_id, account_key, usd) VALUES ('2026-11-05', 8453, 'key-${i}', ${0.1 * USDC})`)
+    const v = guardStats(await statsInput(db, NOW))
+    expect(v.series.earnedPerDay).toEqual([{ day: '2026-11-05', usd: 0.5, collectedUsd: 0 }])
   })
 })
 
