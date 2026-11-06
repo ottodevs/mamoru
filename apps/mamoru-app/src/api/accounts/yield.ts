@@ -5,6 +5,7 @@
 import type { YieldLedgerView } from '@mamoru/domain'
 import type { Db } from '../env.ts'
 import { feeReadinessUsd } from '../yield-ledger.ts'
+import { loadEarned } from '../earned.ts'
 import { loadWorked } from './worked.ts'
 
 type LatestRow = { fees_usdc: number; total_usdc: number; read_at: string; positions_json: string; updated_at: string }
@@ -25,7 +26,21 @@ async function earnedDaily(db: Db, chainId: number, accountKey: string, receipts
     .bind(from, chainId, accountKey)
     .all<EarnedDayRow>()
   if (rows.results.length === 0) return null
-  const collectedBy = (day: string) => receipts.reduce((n, r) => (r.day <= day && r.collected_usdc != null ? n + BigInt(r.collected_usdc) : n), 0n)
+  // spec 012 HRV-R9: with the income ledger, collected is every income event before the day's end (fees, vault yield,
+  // history), the same rows the earned figure sums; without it (not migrated), the receipts as before.
+  let income: { t_s: number; usd: number }[] | null = null
+  try {
+    income = (await db.prepare('SELECT t_s, usd FROM yield_ledger_income WHERE chain_id = ? AND account_key = ? AND usd IS NOT NULL').bind(chainId, accountKey).all<{ t_s: number; usd: number }>()).results
+  } catch (e) {
+    if (!/no such table/i.test(e instanceof Error ? e.message : String(e))) throw e
+  }
+  const collectedBy = (day: string) => {
+    if (income?.length) {
+      const end = Date.parse(`${day}T00:00:00.000Z`) / 1000 + 86_400
+      return income.reduce((n, r) => (r.t_s < end ? n + BigInt(r.usd) : n), 0n)
+    }
+    return receipts.reduce((n, r) => (r.day <= day && r.collected_usdc != null ? n + BigInt(r.collected_usdc) : n), 0n)
+  }
   return rows.results.map((r) => ({ day: r.day, earnedUsd: (BigInt(r.fees_close_usdc) + collectedBy(r.day)).toString() }))
 }
 
@@ -59,7 +74,7 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     // an account_daily row for that day (an account stopped right after an op has none).
     db.prepare('SELECT day, collected_usdc, gas_paid_wei, updated_at FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<DailyRow>(),
   ])
-  const [earned, worked] = await Promise.all([earnedDaily(db, chainId, accountKey, daily.results, now.toISOString().slice(0, 10)), loadWorked(db, chainId, accountKey)])
+  const [earned, worked, ledger] = await Promise.all([earnedDaily(db, chainId, accountKey, daily.results, now.toISOString().slice(0, 10)), loadWorked(db, chainId, accountKey), loadEarned(db, chainId, accountKey)])
 
   let collected = 0n
   let anyCollected = false
@@ -96,11 +111,15 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
   const stale = latest !== null && daily.results.some((r) => r.updated_at > latest.updated_at)
   const valueVsHold = stale ? null : await openPositionsValueVsHold(db, chainId, accountKey, latest)
   const accrued = latest && !stale ? BigInt(latest.fees_usdc) : null
+  // spec 012 HRV-R9: the income ledger's figure, cut at the snapshot (earned.ts), never counts a collect twice, so it
+  // needs no `stale` withholding; without it (not migrated, no snapshot) the older fees-only figure stays.
+  const earnedSoFar = ledger ? ledger.totalUsd : accrued !== null ? (accrued + collected).toString() : null
   return {
-    asOf: stale ? null : (latest?.read_at ?? null),
+    asOf: ledger ? ledger.asOf : stale ? null : (latest?.read_at ?? null),
     accruedUsd: accrued !== null ? accrued.toString() : null,
     collectedUsd: anyCollected ? collected.toString() : null,
-    earnedSoFarUsd: accrued !== null ? (accrued + collected).toString() : null,
+    earnedSoFarUsd: earnedSoFar,
+    ...(ledger ? { earnedStatus: ledger.status, notCounted: ledger.notCounted, earned24hUsd: ledger.last24hUsd } : {}),
     gasPaidWei: anyGas ? gas.toString() : null,
     valueVsHoldUsd: valueVsHold !== null ? valueVsHold.toString() : null,
     feeAccruedUsd: anyFeeAccrued ? feeAccrued.toString() : null,
