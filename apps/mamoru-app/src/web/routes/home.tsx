@@ -76,6 +76,9 @@ export const homeCopy = {
     'no-value': 'a position has no USDC value yet',
   } as Record<NonNullable<AccountRate['gap']>, string>,
   earnedGap: 'not measured yet',
+  // spec 012 HRV-R10: the figure is real but leaves something out; proposed copy, needs Ot and Brais's OK.
+  earnedVaultNotCounted: 'vault yield not counted yet',
+  earnedPartNotCounted: 'some earnings not counted yet',
   add: 'Add capital',
   withdraw: 'Withdraw',
   stop: 'Stop allocation',
@@ -169,7 +172,7 @@ const pct = (v: number | null | undefined) => (v === null || v === undefined ? h
  * otto/mamoru#198: what the account has earned, under the balance as its gain (the Robinhood/Revolut pattern).
  * Not measured yet says so, never a guess.
  */
-function Earned({ usd: earned, daily }: { usd: string | null | undefined; daily?: { day: string; earnedUsd: string }[] | null }) {
+function Earned({ usd: earned, daily, notCounted }: { usd: string | null | undefined; daily?: { day: string; earnedUsd: string }[] | null; notCounted?: readonly string[] }) {
   const known = earned != null
   // otto/mamoru#234: the days the ledger closed, then where it stands now; today's close so far is the live figure.
   const today = new Date().toISOString().slice(0, 10)
@@ -184,6 +187,11 @@ function Earned({ usd: earned, daily }: { usd: string | null | undefined; daily?
       <Spark values={series} />
       <span className="earned-label">{homeCopy.earnedSoFar}</span>
       {known ? null : <span className="earned-why">{homeCopy.earnedGap}</span>}
+      {known && notCounted?.length ? (
+        <span className="earned-why" data-testid="earned-not-counted">
+          {notCounted.includes('vault-yield') ? homeCopy.earnedVaultNotCounted : homeCopy.earnedPartNotCounted}
+        </span>
+      ) : null}
     </p>
   )
 }
@@ -202,6 +210,7 @@ export function Balance({
   s,
   earnedSoFarUsd,
   earnedDaily = null,
+  earnedNotCounted,
   onAdd,
   onWithdraw,
   past = null,
@@ -214,6 +223,8 @@ export function Balance({
   s: Split | null
   earnedSoFarUsd?: string | null
   earnedDaily?: { day: string; earnedUsd: string }[] | null
+  /** spec 012 HRV-R10: what "earned so far" leaves out (YieldLedgerView.notCounted); a short line says so. */
+  earnedNotCounted?: readonly string[]
   onAdd: () => void
   onWithdraw: () => void
   /** otto/mamoru#208: set only while the live read fails; then it is what the balance shows, marked as past. */
@@ -262,7 +273,7 @@ export function Balance({
             {chain.positions === 'listed' ? homeCopy.chainReading : homeCopy.chainIdleOnly}
           </p>
         ) : null}
-        <Earned usd={earnedSoFarUsd} daily={earnedDaily} />
+        <Earned usd={earnedSoFarUsd} daily={earnedDaily} notCounted={earnedNotCounted} />
       </div>
       <div className="balance-acts">
         {/* otto/mamoru#208: the add dialog needs the live read (address, cap); off while only a past one shows. */}
@@ -1513,6 +1524,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         s={s}
         earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd}
         earnedDaily={yieldLedger.data?.earnedDaily}
+        earnedNotCounted={yieldLedger.data?.notCounted}
         onAdd={addMoney}
         onWithdraw={() => withdraw()}
         past={past}
