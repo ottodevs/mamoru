@@ -1013,8 +1013,8 @@ export class Engine {
     this.depositsAfter = obs.safeBlock.number > this.depositsAfter ? obs.safeBlock.number : this.depositsAfter
     const key = decision.proposal ? proposalKey(decision.proposal) : ''
     const backedOff = !!decision.proposal && this.backoff.some((b) => b.until > obs.block.timestamp && (b.premiseHash === decision.premiseHash || b.key === key))
-    const gated = !!decision.proposal && this.cfg.spendGate?.(decision.proposal) === false
-    const deduped = (!!decision.proposal && this.journal.lastDiscarded()?.premiseHash === decision.premiseHash) || backedOff || gated
+    // The spend gate is asked last: a proposal already deduped or backed off never reaches it.
+    const deduped = (!!decision.proposal && this.journal.lastDiscarded()?.premiseHash === decision.premiseHash) || backedOff || (!!decision.proposal && this.cfg.spendGate?.(decision.proposal) === false)
     const record = this.journal.recordDecision(decision, deduped ? 'REVIEW_DEDUPED' : undefined)
     if (!decision.proposal || deduped) return { kind: 'decided', observation: obs, record, op: null }
     const op = this.journal.propose(record, decision.proposal.grant)

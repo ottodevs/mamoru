@@ -1,6 +1,10 @@
 // otto/mamoru#376, spec 011 SCN-CAP-09: a spending-limit refusal holds every spending op of the account; one probe per
 // 6 h at most; a landed probe lifts it; exits, collects and redeems are never held.
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { toFunctionSelector } from 'viem'
+import { Operator } from '../src/operator.ts'
 import { SpendHold, SPEND_HOLD_PROBE_MS, isSpend, spendDenialOf } from '../src/window-hold.ts'
 
 const H = 3600_000
@@ -62,3 +66,48 @@ describe('SpendHold (SCN-CAP-09)', () => {
     expect(h.landed('a')).toBe(false)
   })
 })
+
+describe('the V4 refusals match the deployed contract (review of #315)', () => {
+  test('MamoruActionPolicyV4 declares the errors with the argument types the selectors are taken from', () => {
+    const src = readFileSync(join(import.meta.dir, '../../../contracts/action-policy/src/MamoruActionPolicyV4.sol'), 'utf8')
+    expect(src).toContain('error Cap24hExceeded(uint256 spent, uint256 value);')
+    expect(src).toContain('error Cap30Exceeded(uint256 spent, uint256 value);')
+    expect(src).toContain('error BudgetExceeded(address key, uint256 value);')
+    expect(spendDenialOf(toFunctionSelector('function Cap24hExceeded(uint256,uint256)'))).toBe('Cap24hExceeded')
+  })
+})
+
+describe('the operator follows spend ops across reviews (journal transitions)', () => {
+  type T = { opId: string; seq: number; to: string; detail?: string }
+  const watch = (Operator.prototype as unknown as { watchSpendHold: (acc: unknown, engine: unknown) => void }).watchSpendHold
+  function rig() {
+    const ops = new Map<string, { intent: { kind: string } }>([['s1', { intent: { kind: 'enter_mint' } }], ['h1', { intent: { kind: 'harvest' } }], ['s2', { intent: { kind: 'enter_swap' } }]])
+    const transitions: T[] = []
+    const journal = { transitions, op: (id: string) => ops.get(id) ?? (() => { throw new Error('no op') })() }
+    const self = { spendHold: new SpendHold(), spendHoldSeen: new Map(), spendHoldKey: () => 'a:g' }
+    const acc = { accountKey: 'a', grants: [] }
+    return { self, journal, transitions, run: () => watch.call(self, acc, { journal }) }
+  }
+
+  test('a refusal seen in one review holds; a confirmation of a later probe, seen in another review, lifts', () => {
+    const r = rig()
+    r.transitions.push({ opId: 's1', seq: 1, to: 'pending_reconciliation', detail: 'AA23 reverted 0x7689e277' })
+    r.run()
+    expect(r.self.spendHold.of('a:g')?.reason).toBe('Cap24hExceeded')
+    r.transitions.push({ opId: 's2', seq: 2, to: 'submitted' })
+    r.run()
+    expect(r.self.spendHold.of('a:g')).toBeDefined()
+    r.transitions.push({ opId: 's2', seq: 3, to: 'confirmed' })
+    r.run()
+    expect(r.self.spendHold.of('a:g')).toBeUndefined()
+  })
+
+  test('non-spend ops and unknown ops are ignored; each transition is read once', () => {
+    const r = rig()
+    r.transitions.push({ opId: 'h1', seq: 1, to: 'discarded', detail: '0x7689e277' }, { opId: 'gone', seq: 2, to: 'discarded', detail: '0x7689e277' })
+    r.run()
+    r.run()
+    expect(r.self.spendHold.of('a:g')).toBeUndefined()
+  })
+})
+

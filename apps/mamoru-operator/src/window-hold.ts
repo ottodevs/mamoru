@@ -39,17 +39,19 @@ export class SpendHold {
 
   constructor(private readonly probeMs = SPEND_HOLD_PROBE_MS) {}
 
-  /** Whether a proposal may go now. A held account lets one spend through per probe interval (the probe). */
+  /**
+   * Whether a proposal may go now. No state changes here: a held account lets spends through again once the probe
+   * interval since its last refusal has passed, and only a refusal the chain actually gives (`denied`) starts the next
+   * interval. A probe dropped before it reaches the chain (deduped, backed off, refused by preflight) costs nothing and
+   * is simply tried again.
+   */
   admit(key: string, p: Pick<Proposal, 'kind'>, now: number): boolean {
     if (!isSpend(p)) return true
     const h = this.held.get(key)
-    if (!h) return true
-    if (now - h.probedAt < this.probeMs) return false
-    h.probedAt = now
-    return true
+    return !h || now - h.probedAt >= this.probeMs
   }
 
-  /** A spend was refused for `reason`. True the first time (the caller logs it once per hold). */
+  /** A spend was refused for `reason` (the probe interval starts again). True the first time (logged once per hold). */
   denied(key: string, reason: string, now: number): boolean {
     const h = this.held.get(key)
     if (h) {
