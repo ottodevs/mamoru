@@ -4,6 +4,7 @@
 // Behind the `yield_ledger` ops flag (D1, set from /ops; apps/mamoru-app/src/worker.ts `scheduled`, off by default).
 import { metricsSignature } from '@mamoru/operator-auth'
 import type { Db } from './env.ts'
+import { writeIncome, type AccountVaultWire, type IncomeEventWire } from './income-ledger.ts'
 
 export type OperatorFetch = (input: string, init: RequestInit) => Promise<Response>
 
@@ -79,7 +80,7 @@ export type SnapshotWire = {
    * yield-receipts.ts), the last few days only, including accounts the snapshot did not read (stopped). Absent from
    * an operator older than this field.
    */
-  receipts?: { safe: string; days: DayReceiptWire[] }[]
+  receipts?: { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire }[]
 }
 
 export const SNAPSHOT_TIMEOUT_MS = 30_000
@@ -397,7 +398,20 @@ export async function pullYieldLedger(db: Db, operatorUrl: string, operatorSecre
   const positions = await writeYieldLedger(db, snapshot, now)
   await writeWorkedSamples(db, snapshot, now)
   await writeReceipts(db, snapshot, now)
+  await writeIncomeSafely(db, snapshot, now)
   return { accounts: accounts.written, positions: positions.written }
+}
+
+/**
+ * spec 012 HRV-R5: income events and vault samples (income-ledger.ts), after the receipts its day backfill reads. A
+ * failure (the tables not migrated yet) is logged and leaves every other table of the pull written.
+ */
+async function writeIncomeSafely(db: Db, snapshot: SnapshotWire, now: Date): Promise<void> {
+  try {
+    await writeIncome(db, snapshot, now, (chainId, address) => resolveAccount(db, chainId, address))
+  } catch (e) {
+    console.error('yield-ledger: income not written', e instanceof Error ? e.message : String(e))
+  }
 }
 
 /**
@@ -412,5 +426,6 @@ export async function pullWorkedSamples(db: Db, chainId: number, operatorUrl: st
   if (!snapshot || snapshot.chainId !== chainId) return null
   const samples = await writeWorkedSamples(db, snapshot, now)
   await writeReceipts(db, snapshot, now)
+  await writeIncomeSafely(db, snapshot, now)
   return samples
 }
