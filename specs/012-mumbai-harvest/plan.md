@@ -90,10 +90,12 @@ CREATE TABLE yield_ledger_vault_samples (
 
 - Fee events: one per Collect log in an engine op's receipt; source from the op (`harvest` intent → `harvest`;
   rerange, reduce, close → `re-range`). Insert-or-ignore on `event_id` (idempotent, no overwrite, no loss).
-- Vault events: at each snapshot, per account and vault, `usd = value − prev.value − netFlows(prev.t, t)`, flows from
-  the ERC-4626 events decoded in HT6 (013 B4 reuses that decoding). Mixed holdings (some shares not explained by engine ops): yield is computed on the explained shares only, and the
-  holding is `partial` (marker shown). First sample: one `backfill` row
-  `value − netDepositedFromEngineOps`, or `usd = null` with `explained = 0` when shares ≠ engine-op shares (±1 wei).
+- Vault events: at each snapshot, per account and vault, with `e` = shares explained by engine ops (from the ERC-4626
+  events decoded in HT6; 013 B4 reuses that decoding) and `pps` = assets per share:
+  `usd = e_prev × (pps − pps_prev)`, i.e. only the explained shares earn in the ledger; shares outside `e` never enter
+  any formula. `explained = 1` when `e` equals the holding (±1 wei), else 0 and the holding is `partial` (marker shown)
+  with the yield of its explained part still counted. First sample: one `backfill` row
+  `e × pps − netDepositedFromEngineOps` (0 explained shares → `usd = null`).
 - Accrued uncollected LP fees are a level, not an event: read from the latest snapshot (`account_snapshot_latest.fees_usdc`);
   its 24 h change from `account_worked_samples.fees_usd` (013 B5).
 - Definitions (one module, `apps/mamoru-app/src/api/earned.ts`, used by Portfolio and by 013):
@@ -109,9 +111,9 @@ CREATE TABLE yield_ledger_vault_samples (
     missing → not counted. Approximate by decision (Ot and Brais, 6 Nov).
   - **History replay (HT7):** at migration, every Collect already in `yield_ledger_account_receipts` /
     stored op facts is written as an income event (`harvest` or `re-range` from its op, block time from the receipt;
-    days without per-op detail → one `backfill` row per account and day with the day's collected total, only for days
-    that ended more than 48 h before the migration; a more recent Collect without per-op detail makes the 24 h figure
-    `partial` until it ages out, never silently dropped). After the
+    days without per-op detail → one `backfill` row per account and day with the day's collected total, **for every
+    day**, so total earned keeps every dollar. Backfill rows stay out of the 24 h figure; if such a day is within 48 h
+    of the migration, the 24 h figure is `partial` until it ages out). After the
     switch, each account's total earned ≥ its earned-so-far before it (scenario HRV-S22).
   - Any `usd = null` or `explained = 0` → `status: 'partial'` with the parts not counted.
 
