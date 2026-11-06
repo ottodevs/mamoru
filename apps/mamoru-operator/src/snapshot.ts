@@ -106,6 +106,63 @@ export type Snapshot = {
   safes: SafeSnapshot[]
   /** RPC requests this snapshot cost: one eth_blockNumber plus one eth_call per Multicall3 chunk. */
   calls: number
+  /** spec 013 STATS-E8: CCTP transfers between the account's Safes still in the journals (Base snapshot only). */
+  bridges?: BridgeWire[]
+}
+
+/**
+ * spec 013 plan §3.5: one CCTP transfer, so the Worker counts its USDC once across chains. `out` = Base → Monad burn
+ * (bridge-monad.ts journal), `home` = Monad → Base return (return-home.ts journal). `burnBlock` is on the source chain,
+ * `mintedBlock` on the destination: the Worker compares them with the blocks of the reads it stored. Strings: the wire
+ * is JSON. Failed, dropped and cancelled transfers moved nothing and are left out.
+ */
+export type BridgeWire = {
+  id: string
+  direction: 'out' | 'home'
+  accountKey: string
+  /** The Base Safe of the account. */
+  safe: string
+  amountUsdc: string
+  state: 'sending' | 'requested' | 'burned' | 'minted'
+  burnBlock?: string
+  burnAt?: string
+  mintedBlock?: string
+  mintedAt?: string
+}
+
+type BurnLike = { id: string; accountKey: string; account: string; amount: string; state: string; burnBlock?: string; burnedAt?: string; mintedBlock?: string; mintAt?: string }
+type ReturnLike = { id: string; accountKey: string; home: string; amount: string; state: string; burn?: { amount: string; block: number }; mintedBlock?: string; mintAt?: string }
+
+/** The journals' transfers as the snapshot wire carries them (pure). */
+export function bridgesWire(burns: readonly BurnLike[], returns: readonly ReturnLike[]): BridgeWire[] {
+  const out: BridgeWire[] = []
+  for (const b of burns) {
+    if (b.state !== 'sending' && b.state !== 'burned' && b.state !== 'minted') continue
+    out.push({
+      id: b.id, direction: 'out', accountKey: b.accountKey, safe: b.account.toLowerCase(), amountUsdc: b.amount, state: b.state,
+      ...(b.burnBlock ? { burnBlock: b.burnBlock } : {}), ...(b.burnedAt ? { burnAt: b.burnedAt } : {}),
+      ...(b.mintedBlock ? { mintedBlock: b.mintedBlock } : {}), ...(b.mintAt ? { mintedAt: b.mintAt } : {}),
+    })
+  }
+  for (const r of returns) {
+    if (r.state !== 'requested' && r.state !== 'burned' && r.state !== 'minted') continue
+    out.push({
+      id: r.id, direction: 'home', accountKey: r.accountKey, safe: r.home.toLowerCase(), amountUsdc: r.burn?.amount ?? r.amount, state: r.state,
+      ...(r.burn ? { burnBlock: String(r.burn.block) } : {}),
+      ...(r.mintedBlock ? { mintedBlock: r.mintedBlock } : {}), ...(r.mintAt ? { mintedAt: r.mintAt } : {}),
+    })
+  }
+  return out
+}
+
+/** Adds the journals' transfers to a snapshot; a journal that cannot be read leaves `bridges` out (the Worker then marks partial). */
+export function withBridges<S extends Snapshot>(snapshot: S, burns: () => readonly BurnLike[], returns: () => readonly ReturnLike[]): S {
+  try {
+    return { ...snapshot, bridges: bridgesWire(burns(), returns()) }
+  } catch (e) {
+    console.error('snapshot: bridge journals not read', e instanceof Error ? e.message : String(e))
+    return snapshot
+  }
 }
 
 /** The USDC pool of `registry` that prices `token` in USDC: the first one pairing it with USDC. */

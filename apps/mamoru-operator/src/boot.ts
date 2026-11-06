@@ -23,7 +23,7 @@ import { BridgeOut, ETHEREUM_CHAIN_ID, L1_BUNDLER_TIMEOUT_MS, L1_HANDLE_OPS_GAS,
 import { L1Bundler, paymasterFromEnv } from './paymaster.ts'
 import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, proveChain, startRpcProxy, trustedFromEnv, urlsFromEnv, wrongChainCount } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
-import { readSnapshot, SnapshotLoop, snapshotIntervalMs, type Snapshot } from './snapshot.ts'
+import { readSnapshot, SnapshotLoop, snapshotIntervalMs, withBridges, type Snapshot } from './snapshot.ts'
 import { MULTICALL3, multicall3Of } from '@mamoru/rpc'
 import { StateStore, loadOrCreateKey } from './state.ts'
 import { EntryStore, withHoldValue } from './yield-entries.ts'
@@ -791,7 +791,10 @@ export async function bootOperator(o: BootOptions) {
       blockTime: async (blockNumber: bigint) => (await snapshotClient.getBlock({ blockNumber })).timestamp,
       safeBlock: async () => (await snapshotClient.getBlock({ blockTag: 'safe' })).number,
     }
-    snapshot = new SnapshotLoop(withYieldLedger(o.stateDir, read, receipts), snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
+    const ledger = withYieldLedger(o.stateDir, read, receipts)
+    // spec 013 plan §3.5: the CCTP journals ride on the Base snapshot, so the Worker counts USDC in flight once.
+    const withJournals = async () => withBridges(await ledger(), () => bridgeMonad?.burns() ?? [], () => returnHome?.returns() ?? [])
+    snapshot = new SnapshotLoop(withJournals, snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
   }
   // otto/mamoru#343 phase B: Monad capital is measured for the worked APY like Base's, from the same readSnapshot over the
   // Monad registry. A plain loop: no hold-value baseline, no yield receipts (both are Base-bound). It does not follow the
