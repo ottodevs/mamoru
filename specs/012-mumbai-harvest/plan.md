@@ -98,7 +98,7 @@ CREATE TABLE yield_ledger_vault_samples (
   its 24 h change from `account_worked_samples.fees_usd` (013 B5).
 - Definitions (one module, `apps/mamoru-app/src/api/earned.ts`, used by Portfolio and by 013):
   - Cutoff: per account t_a = its latest fee sample (for a sum over accounts, 013 plan §3.2 bounds the t_a near one T).
-  - `total earned = Σ income(t_s ≤ t_a, all sources incl. backfill) + accrued at t_a` (a Collect after T is still in the
+  - `total earned = Σ income(t_s ≤ t_a, all sources incl. backfill) + accrued at t_a` (a Collect after t_a is still in the
     accrued level at t_a: never counted twice)
   - `earned 24h = Σ income in the window (source ≠ backfill) + (accrued at t_a − accrued at t_a − 24h)`, window
     (t_a − 24h, t_a] (013 plan §3.2). Fee events count at block time. A vault-yield
