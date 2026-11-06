@@ -8,7 +8,7 @@ import type { StatsView } from '@mamoru/domain'
 import type { AppEnv } from '../context.ts'
 import { apiError } from '../errors.ts'
 import { sha256 } from '../auth/webauthn.ts'
-import { guardStats } from './privacy.ts'
+import { guardStats, withoutStale } from './privacy.ts'
 import { statsInput } from './queries.ts'
 
 export type StatsCache = { match(key: string): Promise<Response | undefined>; put(key: string, res: Response): Promise<void> }
@@ -45,7 +45,7 @@ export function statsRoutes(cache: () => StatsCache | null = workersCache) {
     const age = cached ? (nowMs - Number(cached.headers.get('x-stats-built') ?? 0)) / 1000 : Infinity
     if (cached && age < STATS_TTL_S) {
       c.header('cache-control', CACHE_CONTROL)
-      return c.json((await cached.json()) as StatsView)
+      return c.json(withoutStale((await cached.json()) as StatsView, c.var.now()))
     }
     let view: StatsView
     try {
@@ -55,7 +55,7 @@ export function statsRoutes(cache: () => StatsCache | null = workersCache) {
       // A copy older than an hour holds figures A1 says to hide (stale): it is not served.
       if (cached && age <= 3600) {
         c.header('cache-control', 'no-store')
-        return c.json((await cached.json()) as StatsView)
+        return c.json(withoutStale((await cached.json()) as StatsView, c.var.now()))
       }
       return apiError(c, 503, 'Stats are not available right now. Try again in a minute.', 'STATS_UNAVAILABLE')
     }

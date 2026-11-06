@@ -40,8 +40,8 @@ export type StatsView = {
   series: {
     /** T1: daily APR and its 7-day figure, all chains and per chain. */
     apr?: { all: StatsAprPoint[]; base?: StatsAprPoint[]; monad?: StatsAprPoint[] }
-    /** T2: USD earned per day (cents), and the part collected that day. */
-    earnedPerDay?: { day: string; usd: number; collectedUsd: number }[]
+    /** T2: USD earned per day (cents), and the part collected that day (absent when fewer than 3 owners collected). */
+    earnedPerDay?: { day: string; usd: number; collectedUsd?: number }[]
     /** T3: S1 at each UTC day's close (whole dollars). */
     totalDeposits?: { day: string; usd: number }[]
   }

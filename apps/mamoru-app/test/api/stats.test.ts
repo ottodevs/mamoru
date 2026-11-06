@@ -160,13 +160,54 @@ describe('pure pieces', () => {
     expect(Object.fromEntries(e.byToken)).toEqual({ WETH: 44, USDC: 566 })
     expect(Object.fromEntries(e.byPlace)).toEqual({ 'Volatile pairs': 110, 'Stable vaults': 500 })
   })
-  test('in flight: burned and not yet in the destination read counts once; a read with both subtracts once', () => {
+  test('in flight: counted once on the destination chain; a transfer both reads hold is taken out once', () => {
     const rows = new Map([['8453:b', { block: 150 }], ['143:s', { block: 900 }]])
     const at = (c: number, k: string) => rows.get(`${c}:${k}`) as never
-    const burn = (state: string, burn_block: number | null, minted_block: number | null) => ({ id: 'x', direction: 'out', account_key: 'b', amount_usdc: 50, state, burn_block, minted_block })
-    expect(inFlightNow([burn('burned', 100, null)], at, () => 's').byAccount.get('b')).toBe(50)
-    expect(inFlightNow([burn('minted', 100, 800)], at, () => 's').byAccount.get('b')).toBeUndefined()
+    const t = (direction: string, state: string, burn_block: number | null, minted_block: number | null) => ({ id: 'x', direction, account_key: 'b', amount_usdc: 50, state, burn_block, minted_block })
+    expect(inFlightNow([t('out', 'burned', 100, null)], at, () => 's').moves).toEqual([{ baseKey: 'b', chainId: 143, amount: 50 }])
+    expect(inFlightNow([t('home', 'burned', 800, null)], at, () => 's').moves).toEqual([{ baseKey: 'b', chainId: 8453, amount: 50 }])
+    expect(inFlightNow([t('out', 'minted', 100, 800)], at, () => 's').moves).toEqual([])
     rows.set('8453:b', { block: 90 })
-    expect(inFlightNow([burn('minted', 100, 800)], at, () => 's').byAccount.get('b')).toBe(-50)
+    expect(inFlightNow([t('out', 'minted', 100, 800)], at, () => 's').moves).toEqual([{ baseKey: 'b', chainId: 143, amount: -50 }])
+  })
+
+})
+
+describe('review fixes', () => {
+  test('dust owners do not count: two $0.01 sleeves do not unmask a single Monad owner', async () => {
+    const db = memoryD1()
+    for (let i = 1; i <= 5; i++) {
+      user(db, `u${i}`)
+      account(db, `key-${i}`, `u${i}`, 8453, addr(i))
+      latest(db, 8453, `key-${i}`, { idle: 100 * USDC, lp: 200 * USDC, vault: 300 * USDC })
+      account(db, `mon-${i}`, `u${i}`, 143, addr(i))
+      latest(db, 143, `mon-${i}`, { idle: i === 1 ? 500 * USDC : i <= 3 ? 10_000 : 0, lp: 0, vault: 0 })
+    }
+    const v = guardStats(await statsInput(db, NOW))
+    expect(v.distributions.byChain).toBeUndefined() // Monad backed by one real owner: merged with Base, then a one-slice split
+    expect(v.snapshots.totalDeposits?.value).toBe(3500)
+  })
+
+  test('an eligible account without a latest read makes the snapshot figures incomplete', async () => {
+    const db = platform(5)
+    user(db, 'u9')
+    account(db, 'key-9', 'u9', 8453, addr(9))
+    expect(guardStats(await statsInput(db, NOW)).snapshots.totalDeposits).toBeUndefined()
+  })
+
+  test('earned figures are raw USDC from earned.ts: $1.50 of income and $0.30 accrued per account', async () => {
+    const db = platform(5)
+    db.raw.exec("UPDATE account_snapshot_latest SET fees_usdc = 300000, total_usdc = total_usdc + 300000")
+    for (const k of ['key-1', 'key-2', 'key-3', 'key-4', 'key-5']) db.raw.exec(`INSERT INTO yield_ledger_income (event_id, chain_id, account_key, env, source, t_s, from_s, usd, updated_at) VALUES ('0x${k}:1', 8453, '${k}', 'prod', 'harvest', ${Date.parse('2026-11-05T10:00:00Z') / 1000}, NULL, 1500000, '${READ}')`)
+    const v = guardStats(await statsInput(db, NOW))
+    expect(v.snapshots.totalEarned?.value).toBe(9.9) // 5 × (1.50 + 0.30) on Base + 3 × 0.30 accrued on Monad
+  })
+
+  test('the collected part of a day goes out only with 3 collectors', async () => {
+    const db = platform(5)
+    for (let i = 1; i <= 5; i++) daily(db, '2026-11-05', 8453, `key-${i}`, { total: 300 * USDC, idle: 100 * USDC, lp: 200 * USDC, feesClose: 0.05 * USDC, collected: i === 1 ? 412 * USDC : null })
+    for (let i = 1; i <= 3; i++) daily(db, '2026-11-05', 143, `mon-${i}`, { total: 50 * USDC, idle: 50 * USDC, lp: 0 })
+    const v = guardStats(await statsInput(db, NOW))
+    expect(v.series.earnedPerDay).toEqual([{ day: '2026-11-05', usd: 412.25 }])
   })
 })

@@ -19,13 +19,34 @@ export const STABLES = new Set(['USDC', 'USDT', 'USDbC', 'DAI', 'USDT0', 'AUSD']
 /** A balance above this is "funded" (S8) and an account row above it must be fresh. */
 const FUNDED = 1 * USD
 
-type Account = { account_key: string; user_id: string; chain_id: number }
+type Account = { account_key: string; user_id: string; chain_id: number; created_day: string }
 type Latest = { account_key: string; chain_id: number; total_usdc: number; idle_usdc: number; lp_usdc: number; fees_usdc: number; owed_usdc: number; read_at: string; block: number; positions_json: string; tokens_json: string | null }
 type Position = { pool?: string; token0?: string; token1?: string; valueUsdc?: string; value0Usdc?: string; value1Usdc?: string; feesUsdc?: string; owedUsdc?: string }
 type Bridge = { id: string; direction: string; account_key: string; amount_usdc: number; state: string; burn_block: number | null; minted_block: number | null }
 type Daily = { day: string; account_key: string; chain_id: number; total_close_usdc: number; idle_close_usdc: number; lp_close_usdc: number; fees_open_usdc: number; fees_close_usdc: number; collected_usdc: number | null }
 
-const ELIGIBLE = `SELECT account_key, user_id, chain_id FROM accounts WHERE env IN ('prod', 'beta') AND COALESCE(is_test, 0) = 0`
+/** A read older than this makes the snapshot figures incomplete (A1: stale reads hide the figure). */
+const STALE_READ_MS = 60 * 60 * 1000
+/** An owner backs an earned figure only with at least this much of it (one cent, raw USDC). */
+const EARNED_FLOOR = 10_000
+
+/** Raw-USDC amounts per owner behind one figure; owners() counts those at or above a floor. */
+class Contrib {
+  readonly byUser = new Map<string, number>()
+  add(user: string, v: number) {
+    if (v) this.byUser.set(user, (this.byUser.get(user) ?? 0) + v)
+  }
+  get total() {
+    let t = 0
+    for (const v of this.byUser.values()) t += v
+    return t
+  }
+  owners(floor: number): Set<string> {
+    return new Set([...this.byUser.entries()].filter(([, v]) => v >= floor).map(([u]) => u))
+  }
+}
+
+const ELIGIBLE = `SELECT account_key, user_id, chain_id, substr(created_at, 1, 10) AS created_day FROM accounts WHERE env IN ('prod', 'beta') AND COALESCE(is_test, 0) = 0`
 const dayOfS = (s: number) => new Date(s * 1000).toISOString().slice(0, 10)
 const dayAfter = (day: string) => new Date(Date.parse(`${day}T00:00:00.000Z`) + DAY_S * 1000).toISOString().slice(0, 10)
 const minIso = (xs: readonly string[]) => (xs.length ? [...xs].sort()[0]! : null)
@@ -34,14 +55,14 @@ const minIso = (xs: readonly string[]) => (xs.length ? [...xs].sort()[0]! : null
  * USDC in flight now between an account's Safes (plan §3.5), from the stored journals and the blocks of the stored
  * reads on each chain. `unplaced`: a transfer the rule cannot place (a read or a block missing).
  */
-export function inFlightNow(bridges: readonly Bridge[], latestOf: (chainId: number, accountKey: string) => Latest | undefined, sleeveOf: (baseKey: string) => string | undefined): { byAccount: Map<string, number>; unplaced: boolean } {
-  const byAccount = new Map<string, number>()
+export function inFlightNow(bridges: readonly Bridge[], latestOf: (chainId: number, accountKey: string) => Latest | undefined, sleeveOf: (baseKey: string) => string | undefined): { moves: { baseKey: string; chainId: number; amount: number }[]; unplaced: boolean } {
+  const moves: { baseKey: string; chainId: number; amount: number }[] = []
   let unplaced = false
   for (const b of bridges) {
     const sleeveKey = sleeveOf(b.account_key)
     const base = latestOf(BASE, b.account_key)
     const sleeve = sleeveKey ? latestOf(MONAD, sleeveKey) : undefined
-    const [src, dst] = b.direction === 'out' ? [base, sleeve] : [sleeve, base]
+    const [src, dst, dstChain] = b.direction === 'out' ? [base, sleeve, MONAD] : [sleeve, base, BASE]
     if (!src || !dst) {
       if (b.state !== 'minted') unplaced = true
       continue
@@ -52,10 +73,11 @@ export function inFlightNow(bridges: readonly Bridge[], latestOf: (chainId: numb
     }
     const inSource = b.burn_block === null ? b.state === 'sending' || b.state === 'requested' : src.block < b.burn_block
     const inDest = b.state === 'minted' && dst.block >= b.minted_block!
-    const delta = !inSource && !inDest ? b.amount_usdc : inSource && inDest ? -b.amount_usdc : 0
-    if (delta) byAccount.set(b.account_key, (byAccount.get(b.account_key) ?? 0) + delta)
+    // In neither read: add it once, on the destination chain. In both: the reads count it twice, take one out there.
+    const amount = !inSource && !inDest ? b.amount_usdc : inSource && inDest ? -b.amount_usdc : 0
+    if (amount) moves.push({ baseKey: b.account_key, chainId: dstChain, amount })
   }
-  return { byAccount, unplaced }
+  return { moves, unplaced }
 }
 
 /** One account row's value split by token, place and chain (raw USDC). Null when the row lacks the A1-D2 detail. */
@@ -68,7 +90,11 @@ export function rowExposure(r: Latest): { byToken: Map<string, number>; byPlace:
   }
   const byToken = new Map<string, number>()
   const byPlace = new Map<string, number>()
-  const add = (m: Map<string, number>, k: string, v: number) => v && m.set(k, (m.get(k) ?? 0) + v)
+  let bad = false
+  const add = (m: Map<string, number>, k: string, v: number) => {
+    if (!Number.isFinite(v)) bad = true
+    else if (v) m.set(k, (m.get(k) ?? 0) + v)
+  }
   // Idle, by token (operator `tokensUsdc`). A row with idle money and no split cannot be placed by token.
   if (r.idle_usdc > 0) {
     if (r.tokens_json === null) return null
@@ -78,7 +104,13 @@ export function rowExposure(r: Latest): { byToken: Map<string, number>; byPlace:
     } catch {
       return null
     }
-    for (const [t, v] of Object.entries(tokens)) add(byToken, t, Number(v))
+    let sum = 0
+    for (const [t, v] of Object.entries(tokens)) {
+      add(byToken, t, Number(v))
+      sum += Number(v)
+    }
+    // The split must add up to the row's idle balance (to a dollar), or it is not the same read.
+    if (!(Math.abs(sum - r.idle_usdc) <= USD)) return null
   }
   add(byPlace, 'Idle', r.idle_usdc)
   for (const p of positions) {
@@ -95,20 +127,25 @@ export function rowExposure(r: Latest): { byToken: Map<string, number>; byPlace:
     add(byPlace, STABLES.has(p.token0) && STABLES.has(p.token1) ? 'Stable pairs' : 'Volatile pairs', value + extra)
   }
   // Vaults are USDC vaults: what the row holds beyond idle, positions and their fees and owed amounts.
-  const vault = Math.max(0, r.total_usdc - r.idle_usdc - r.lp_usdc - r.fees_usdc - r.owed_usdc)
-  add(byToken, 'USDC', vault)
-  add(byPlace, 'Stable vaults', vault)
-  return { byToken, byPlace }
+  const vault = r.total_usdc - r.idle_usdc - r.lp_usdc - r.fees_usdc - r.owed_usdc
+  if (vault < -USD) return null
+  add(byToken, 'USDC', Math.max(0, vault))
+  add(byPlace, 'Stable vaults', Math.max(0, vault))
+  return bad ? null : { byToken, byPlace }
 }
 
 /** Accrued uncollected fees at a time: Σ fees_usd of the account's latest sample at or before it. Null without samples. */
 async function accruedAt(db: Db, chainId: number, accountKey: string, t: number): Promise<number | null> {
   try {
     const row = await db
-      .prepare('SELECT SUM(fees_usd) AS fees, COUNT(*) AS n, COUNT(fees_usd) AS priced FROM account_worked_samples WHERE chain_id = ?1 AND account_key = ?2 AND t_s = (SELECT MAX(t_s) FROM account_worked_samples WHERE chain_id = ?1 AND account_key = ?2 AND t_s <= ?3)')
+      .prepare(
+        `SELECT SUM(fees_usd) AS fees, COUNT(*) AS n, COUNT(CASE WHEN pool LIKE 'pool:%' THEN 1 END) AS lp, COUNT(CASE WHEN pool LIKE 'pool:%' AND fees_usd IS NOT NULL THEN 1 END) AS priced
+         FROM account_worked_samples WHERE chain_id = ?1 AND account_key = ?2 AND t_s = (SELECT MAX(t_s) FROM account_worked_samples WHERE chain_id = ?1 AND account_key = ?2 AND t_s <= ?3)`,
+      )
       .bind(chainId, accountKey, t)
-      .first<{ fees: number | null; n: number; priced: number }>()
-    if (!row || row.n === 0) return null
+      .first<{ fees: number | null; n: number; lp: number; priced: number }>()
+    // No sample, or a position row without its fees (written before the column, or unpriced): not known.
+    if (!row || row.n === 0 || row.priced < row.lp) return null
     return row.fees ?? 0
   } catch {
     return null
@@ -129,10 +166,9 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
     .prepare("SELECT account_key, chain_id, total_usdc, idle_usdc, lp_usdc, fees_usdc, owed_usdc, read_at, block, positions_json, tokens_json FROM account_snapshot_latest WHERE env IN ('prod', 'beta')")
     .all<Latest>()).results.filter((r) => userOfKey(r.chain_id, r.account_key) !== undefined)
   const latest = new Map(latestRows.map((r) => [`${r.chain_id}:${r.account_key}`, r]))
-  const chainsRead = new Set(latestRows.map((r) => r.chain_id))
-  // Every chain that has accounts must have been read, and every row that holds money must be fresh.
-  const allChains = [...chainsWithAccounts].every((c) => chainsRead.has(c))
-  const freshRows = latestRows.every((r) => r.total_usdc <= FUNDED || nowMs - Date.parse(r.read_at) <= 60 * 60 * 1000)
+  // Complete only if every eligible account (every chain) has a latest read and every read is at most 1 h old.
+  const everyAccountRead = accounts.every((a) => latest.has(`${a.chain_id}:${a.account_key}`))
+  const freshRows = latestRows.every((r) => nowMs - Date.parse(r.read_at) <= STALE_READ_MS)
   let bridges: Bridge[] = []
   let bridgesKnown = true
   try {
@@ -141,68 +177,50 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
     bridgesKnown = false
   }
   const flight = inFlightNow(bridges, (c, k) => latest.get(`${c}:${k}`), (k) => sleeveByUser.get(baseUserOf.get(k) ?? ''))
-  const snapshotComplete = allChains && freshRows && bridgesKnown && !flight.unplaced
-  const dataAsOf = minIso(latestRows.filter((r) => r.total_usdc > FUNDED).map((r) => r.read_at)) ?? minIso(latestRows.map((r) => r.read_at))
+  const snapshotComplete = latestRows.length > 0 && everyAccountRead && freshRows && bridgesKnown && !flight.unplaced
+  const dataAsOf = minIso(latestRows.map((r) => r.read_at))
 
-  const perUser = new Map<string, number>()
-  const s1Owners = new Set<string>()
-  const s2Owners = new Set<string>()
-  const s3Owners = new Set<string>()
-  let s1 = 0
-  let s2 = 0
-  let s3 = 0
-  const tokenUsd = new Map<string, number>()
-  const tokenOwners = new Map<string, Set<string>>()
-  const placeUsd = new Map<string, number>()
-  const placeOwners = new Map<string, Set<string>>()
-  const chainUsd = new Map<string, number>()
-  const chainOwners = new Map<string, Set<string>>()
+  // Contributions per owner; an owner backs a figure only with at least FUNDED in it (no dust owners, review P1).
+  const s1 = new Contrib()
+  const s2 = new Contrib()
+  const s3 = new Contrib()
+  const byToken = new Map<string, Contrib>()
+  const byPlace = new Map<string, Contrib>()
+  const byChain = new Map<string, Contrib>()
+  const into = (m: Map<string, Contrib>, k: string) => m.get(k) ?? m.set(k, new Contrib()).get(k)!
   let splitComplete = snapshotComplete
-  const addTo = (usd: Map<string, number>, owners: Map<string, Set<string>>, key: string, v: number, user: string) => {
-    if (v <= 0) return
-    usd.set(key, (usd.get(key) ?? 0) + v)
-    owners.set(key, (owners.get(key) ?? new Set()).add(user))
-  }
   for (const r of latestRows) {
     const user = userOfKey(r.chain_id, r.account_key)!
     const working = r.total_usdc - r.idle_usdc - r.fees_usdc - r.owed_usdc
-    s1 += r.total_usdc
-    s2 += Math.max(0, working)
-    s3 += r.idle_usdc
-    if (r.total_usdc > 0) s1Owners.add(user)
-    if (working > 0) s2Owners.add(user)
-    if (r.idle_usdc > 0) s3Owners.add(user)
-    perUser.set(user, (perUser.get(user) ?? 0) + r.total_usdc)
-    addTo(chainUsd, chainOwners, CHAIN_NAMES[r.chain_id] ?? String(r.chain_id), r.total_usdc, user)
+    s1.add(user, r.total_usdc)
+    s2.add(user, Math.max(0, working))
+    s3.add(user, r.idle_usdc)
+    into(byChain, CHAIN_NAMES[r.chain_id] ?? String(r.chain_id)).add(user, r.total_usdc)
     const e = rowExposure(r)
     if (!e) {
       splitComplete = false
       continue
     }
-    for (const [k, v] of e.byToken) addTo(tokenUsd, tokenOwners, k, v, user)
-    for (const [k, v] of e.byPlace) addTo(placeUsd, placeOwners, k, v, user)
+    for (const [k, v] of e.byToken) into(byToken, k).add(user, v)
+    for (const [k, v] of e.byPlace) into(byPlace, k).add(user, v)
   }
-  // USDC in flight: counted once, as USDC, idle, on the destination chain.
-  for (const [baseKey, amount] of flight.byAccount) {
-    const user = baseUserOf.get(baseKey)!
-    s1 += amount
-    perUser.set(user, (perUser.get(user) ?? 0) + amount)
-    if (amount > 0) {
-      s1Owners.add(user)
-      addTo(tokenUsd, tokenOwners, 'USDC', amount, user)
-      addTo(placeUsd, placeOwners, 'Idle', amount, user)
-      addTo(chainUsd, chainOwners, 'Monad', amount, user)
-    }
+  // USDC in flight: counted once, as idle USDC, on the destination chain (a double count is taken out the same way).
+  for (const m of flight.moves) {
+    const user = baseUserOf.get(m.baseKey)!
+    s1.add(user, m.amount)
+    s3.add(user, m.amount)
+    into(byToken, 'USDC').add(user, m.amount)
+    into(byPlace, 'Idle').add(user, m.amount)
+    into(byChain, CHAIN_NAMES[m.chainId]!).add(user, m.amount)
   }
-  const funded = [...perUser.entries()].filter(([, v]) => v > FUNDED)
+  const funded = [...s1.byUser.entries()].filter(([, v]) => v > FUNDED)
   const fundedOwners = new Set(funded.map(([u]) => u))
-  const stableUsd = [...tokenUsd.entries()].filter(([t]) => STABLES.has(t)).reduce((a, [, v]) => a + v, 0)
-  const stableOwners = new Set([...tokenOwners.entries()].filter(([t]) => STABLES.has(t)).flatMap(([, o]) => [...o]))
+  const stable = new Contrib()
+  for (const [t, c] of byToken) if (STABLES.has(t)) for (const [u, v] of c.byUser) stable.add(u, v)
   const fig = (value: number, owners: ReadonlySet<string>, complete: boolean, at: string | null = dataAsOf): GuardFigure => ({ value, owners, complete, dataAsOf: at })
   const totalAccounts = new Set(accounts.filter((a) => a.chain_id === BASE).map((a) => a.user_id))
-
-  const split = (usd: Map<string, number>, owners: Map<string, Set<string>>, complete: boolean): GuardSplit => ({
-    slices: [...usd.entries()].map(([key, v]): GuardSlice => ({ key, usd: v / USD, owners: owners.get(key) ?? new Set() })),
+  const split = (m: Map<string, Contrib>, complete: boolean): GuardSplit => ({
+    slices: [...m.entries()].map(([key, c]): GuardSlice => ({ key, usd: c.total / USD, owners: c.owners(FUNDED) })),
     complete,
     dataAsOf,
   })
@@ -210,10 +228,10 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
   // ---- Earned (S4, S5): spec 012's earned.ts per account and chain ----
   let total = 0
   let last24 = 0
-  let totalComplete = latestRows.length > 0
-  let dayComplete = latestRows.length > 0
-  const totalOwners = new Set<string>()
-  const dayOwners = new Set<string>()
+  let totalComplete = everyAccountRead && latestRows.length > 0
+  let dayComplete = totalComplete
+  const totalOwners = new Contrib()
+  const dayOwners = new Contrib()
   const earnedAt: string[] = []
   for (const a of accounts) {
     if (!latest.has(`${a.chain_id}:${a.account_key}`)) continue
@@ -227,7 +245,7 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
     const t = Number(e.totalUsd)
     let d = Number(e.last24hUsd)
     total += t
-    if (t !== 0) totalOwners.add(a.user_id)
+    totalOwners.add(a.user_id, t)
     if (e.status !== 'complete') totalComplete = false
     // earned.ts names the accrued change over the window as not counted until it reads fee samples; with them here
     // (spec 013 B5, account_worked_samples.fees_usd) the window is complete.
@@ -240,7 +258,7 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
     }
     if (missing.length) dayComplete = false
     last24 += d
-    if (d !== 0) dayOwners.add(a.user_id)
+    dayOwners.add(a.user_id, d)
   }
   const earnedAsOf = minIso(earnedAt)
   if (earnedAsOf && dataAsOf && Date.parse(dataAsOf) - Date.parse(earnedAsOf) > 15 * 60 * 1000) {
@@ -285,23 +303,25 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
   const chainsKnownOn = (day: string, chains: readonly number[]) => chains.every((c) => (createdByChain.get(c) ?? '9999') > day || (firstByChain.get(c) ?? '9999') <= day)
   const allKnownFrom = firstByChain.size ? [...firstByChain.values()].sort()[0]! : null
   const today = now.toISOString().slice(0, 10)
-  type DayAcc = { earned: number; collected: number; capital: number; deposits: number; earners: Set<string>; workers: Set<string>; holders: Set<string>; complete: boolean }
+  type DayAcc = { earned: Contrib; collected: Contrib; capital: Contrib; deposits: Contrib; rows: Set<string>; complete: boolean }
+  const newDay = (): DayAcc => ({ earned: new Contrib(), collected: new Contrib(), capital: new Contrib(), deposits: new Contrib(), rows: new Set(), complete: true })
   const perChainDays = (chain: number | null) => {
     const days = new Map<string, DayAcc>()
     const prevWorking = new Map<string, number>()
     for (const r of daily) {
       if (chain !== null && r.chain_id !== chain) continue
       const user = userOfKey(r.chain_id, r.account_key)!
-      const acc = days.get(r.day) ?? { earned: 0, collected: 0, capital: 0, deposits: 0, earners: new Set(), workers: new Set(), holders: new Set(), complete: true }
-      days.set(r.day, acc)
+      const acc = days.get(r.day) ?? days.set(r.day, newDay()).get(r.day)!
       const k = `${r.day}:${r.chain_id}:${r.account_key}`
+      acc.rows.add(`${r.chain_id}:${r.account_key}`)
       const working = r.total_close_usdc - r.idle_close_usdc - r.fees_close_usdc
       const vaultClose = working - r.lp_close_usdc
+      // The open of a day is the previous close (0 before the account's first row), as the chain script does.
       const prev = prevWorking.get(`${r.chain_id}:${r.account_key}`) ?? 0
       prevWorking.set(`${r.chain_id}:${r.account_key}`, working)
       const collected = r.collected_usdc ?? 0
       if (unpriced.has(k)) acc.complete = false
-      // Vault money that day needs its yield in the ledger; without it the day's earnings are short.
+      // Vault money that day needs its yield (backfilled for the past, the ledger after); without it the day is short.
       let vy = 0
       const backfilled = vaultDaily.get(k)
       if (backfilled !== undefined) vy = backfilled
@@ -310,30 +330,30 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
         if (!incomeKnown || v === undefined || Number.isNaN(v)) acc.complete = false
         else vy = v
       }
-      const earned = r.fees_close_usdc - r.fees_open_usdc + collected + vy
-      acc.earned += earned / USD
-      acc.collected += collected / USD
-      acc.capital += (prev + working) / 2 / USD
-      acc.deposits += r.total_close_usdc / USD
-      if (earned !== 0) acc.earners.add(user)
-      if (working > 0 || prev > 0) acc.workers.add(user)
-      if (r.total_close_usdc > 0) acc.holders.add(user)
+      acc.earned.add(user, r.fees_close_usdc - r.fees_open_usdc + collected + vy)
+      acc.collected.add(user, collected)
+      acc.capital.add(user, (prev + working) / 2)
+      acc.deposits.add(user, r.total_close_usdc)
     }
     return days
   }
+  // Every account that existed on a day, on a chain known that day, must have its row (no silent gaps, review P1).
+  const rowsComplete = (day: string, d: DayAcc, chains: readonly number[]) =>
+    accounts.every((a) => !chains.includes(a.chain_id) || a.created_day > day || (firstByChain.get(a.chain_id) ?? '9999') > day || d.rows.has(`${a.chain_id}:${a.account_key}`))
   const dayList = (days: Map<string, DayAcc>, from: string | null, chains: readonly number[]) => {
     if (from === null) return []
     const out: (DayAcc & { day: string })[] = []
     // Closed days only: today has no close yet (S1 and S4 are the figures for now).
     for (let day = from; day < today; day = dayAfter(day)) {
-      const d = days.get(day) ?? { earned: 0, collected: 0, capital: 0, deposits: 0, earners: new Set<string>(), workers: new Set<string>(), holders: new Set<string>(), complete: false }
-      out.push({ day, ...d, complete: d.complete && chainsKnownOn(day, chains) })
+      const d = days.get(day) ?? { ...newDay(), complete: false }
+      out.push({ day, ...d, complete: d.complete && chainsKnownOn(day, chains) && rowsComplete(day, d, chains) })
     }
     return out
   }
   const aprDays = (chain: number | null): GuardAprDay[] => {
     const from = chain === null ? allKnownFrom : firstByChain.get(chain) ?? null
-    return dayList(perChainDays(chain), from, chain === null ? [...chainsWithAccounts] : [chain]).map((d) => ({ day: d.day, earned: d.earned, capital: d.capital, owners: d.workers, complete: d.complete }))
+    // The APR's owners are those who earned (at least a cent) that day: the rate is their earnings over the capital.
+    return dayList(perChainDays(chain), from, chain === null ? [...chainsWithAccounts] : [chain]).map((d) => ({ day: d.day, earned: d.earned.total / USD, capital: d.capital.total / USD, owners: d.earned.owners(EARNED_FLOOR), complete: d.complete }))
   }
   const allDays = dayList(perChainDays(null), allKnownFrom, [...chainsWithAccounts])
   const aprAll = aprDays(null)
@@ -346,28 +366,29 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
   return {
     now,
     snapshots: {
-      totalDeposits: fig(s1 / USD, s1Owners, snapshotComplete),
-      moneyWorking: fig(s2 / USD, s2Owners, snapshotComplete),
-      idleCapital: fig(s3 / USD, s3Owners, snapshotComplete),
-      earned24h: fig(last24 / USD, dayOwners, dayComplete, earnedAsOf),
-      totalEarned: fig(total / USD, totalOwners, totalComplete, earnedAsOf),
+      totalDeposits: fig(s1.total / USD, s1.owners(FUNDED), snapshotComplete),
+      moneyWorking: fig(s2.total / USD, s2.owners(FUNDED), snapshotComplete),
+      idleCapital: fig(s3.total / USD, s3.owners(FUNDED), snapshotComplete),
+      earned24h: fig(last24 / USD, dayOwners.owners(EARNED_FLOOR), dayComplete, earnedAsOf),
+      totalEarned: fig(total / USD, totalOwners.owners(EARNED_FLOOR), totalComplete, earnedAsOf),
       apr7d: fig(s6, s6Owners, s6Complete),
-      totalAccounts: fig(totalAccounts.size, totalAccounts, true),
-      averageAccount: fig(funded.length ? s1 / USD / funded.length : Number.NaN, fundedOwners, snapshotComplete),
+      // A count from the accounts table, read now: its time is the request's.
+      totalAccounts: fig(totalAccounts.size, totalAccounts, true, now.toISOString()),
+      averageAccount: fig(funded.length ? s1.total / USD / funded.length : Number.NaN, fundedOwners, snapshotComplete),
       largestAccount: fig(funded.length ? Math.max(...funded.map(([, v]) => v)) / USD : Number.NaN, fundedOwners, snapshotComplete),
-      inStablecoins: fig(s1 > 0 ? (stableUsd / s1) * 100 : Number.NaN, stableOwners, splitComplete),
+      inStablecoins: fig(s1.total > 0 ? (stable.total / s1.total) * 100 : Number.NaN, stable.owners(FUNDED), splitComplete),
     },
     distributions: {
-      byToken: split(tokenUsd, tokenOwners, splitComplete),
-      byChain: split(chainUsd, chainOwners, snapshotComplete),
-      byPlace: split(placeUsd, placeOwners, splitComplete),
+      byToken: split(byToken, splitComplete),
+      byChain: split(byChain, snapshotComplete),
+      byPlace: split(byPlace, splitComplete),
     },
     apr: {
       all: aprAll,
       ...(chainsWithAccounts.has(BASE) ? { base: aprDays(BASE) } : {}),
       ...(chainsWithAccounts.has(MONAD) ? { monad: aprDays(MONAD) } : {}),
     },
-    earnedPerDay: allDays.map((d): GuardEarnedDay => ({ day: d.day, usd: d.earned, collectedUsd: d.collected, owners: d.earners, complete: d.complete })),
-    totalDeposits: allDays.map((d): GuardDepositsDay => ({ day: d.day, usd: d.deposits, owners: d.holders, complete: d.complete })),
+    earnedPerDay: allDays.map((d): GuardEarnedDay => ({ day: d.day, usd: d.earned.total / USD, collectedUsd: d.collected.total / USD, owners: d.earned.owners(EARNED_FLOOR), collectors: d.collected.owners(EARNED_FLOOR), complete: d.complete })),
+    totalDeposits: allDays.map((d): GuardDepositsDay => ({ day: d.day, usd: d.deposits.total / USD, owners: d.deposits.owners(FUNDED), complete: d.complete })),
   }
 }

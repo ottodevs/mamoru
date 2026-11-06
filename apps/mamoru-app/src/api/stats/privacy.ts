@@ -21,7 +21,8 @@ export type GuardFigure = { value: number; owners: ReadonlySet<string>; complete
 export type GuardSlice = { key: string; usd: number; owners: ReadonlySet<string> }
 export type GuardSplit = { slices: GuardSlice[]; complete: boolean; dataAsOf: string | null }
 export type GuardAprDay = { day: string; earned: number; capital: number; owners: ReadonlySet<string>; complete: boolean }
-export type GuardEarnedDay = { day: string; usd: number; collectedUsd: number; owners: ReadonlySet<string>; complete: boolean }
+/** `collectors`: owners behind `collectedUsd`; the collected part goes out only with 3 of them (review P0). */
+export type GuardEarnedDay = { day: string; usd: number; collectedUsd: number; owners: ReadonlySet<string>; collectors: ReadonlySet<string>; complete: boolean }
 export type GuardDepositsDay = { day: string; usd: number; owners: ReadonlySet<string>; complete: boolean }
 
 export type SnapshotKey = keyof StatsView['snapshots']
@@ -104,12 +105,27 @@ export function guardStats(input: GuardInput): StatsView {
   const all = guardApr(input.apr.all)
   const base = guardApr(input.apr.base)
   const monad = guardApr(input.apr.monad)
-  const earnedPerDay = validSuffix(input.earnedPerDay, (p) => p.complete && finite(p.usd) && finite(p.collectedUsd) && enoughOwners(p.owners.size)).map((p) => ({ day: p.day, usd: round(p.usd, 'cents'), collectedUsd: round(p.collectedUsd, 'cents') }))
+  const earnedPerDay = validSuffix(input.earnedPerDay, (p) => p.complete && finite(p.usd) && finite(p.collectedUsd) && enoughOwners(p.owners.size)).map((p) => ({
+    day: p.day,
+    usd: round(p.usd, 'cents'),
+    ...(enoughOwners(p.collectors.size) || p.collectedUsd === 0 ? { collectedUsd: round(p.collectedUsd, 'cents') } : {}),
+  }))
   const totalDeposits = validSuffix(input.totalDeposits, (p) => p.complete && finite(p.usd) && enoughOwners(p.owners.size)).map((p) => ({ day: p.day, usd: round(p.usd, 'dollars') }))
   const series: StatsView['series'] = {}
   if (all) series.apr = { all, ...(base ? { base } : {}), ...(monad ? { monad } : {}) }
   if (earnedPerDay.length) series.earnedPerDay = earnedPerDay
   if (totalDeposits.length) series.totalDeposits = totalDeposits
-  const times = [...Object.values(snapshots).map((f) => f.dataAsOf)].sort()
+  // The view's time is its oldest chain read; the accounts count is read at request time and does not set it.
+  const times = Object.entries(snapshots).filter(([k]) => k !== 'totalAccounts').map(([, f]) => f.dataAsOf).sort()
   return { dataAsOf: times[0] ?? null, snapshots, distributions, series }
+}
+
+/**
+ * A view as it may be served at `now`: snapshot figures whose data is older than STALE_MS are dropped, and if the
+ * view's own data is stale the distributions go too (review P1: a cached copy must not outlive its figures).
+ */
+export function withoutStale(view: StatsView, now: Date): StatsView {
+  const ok = (at: string | null) => at !== null && now.getTime() - Date.parse(at) <= STALE_MS
+  const snapshots = Object.fromEntries(Object.entries(view.snapshots).filter(([k, f]) => k === 'totalAccounts' || ok(f.dataAsOf))) as StatsView['snapshots']
+  return { ...view, snapshots, distributions: ok(view.dataAsOf) ? view.distributions : {} }
 }
