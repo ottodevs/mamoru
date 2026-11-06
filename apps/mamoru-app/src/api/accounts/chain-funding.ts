@@ -6,7 +6,6 @@ import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import type { AppEnv } from '../context.ts'
 import type { Db, Env, RateLimiter } from '../env.ts'
 import type { AccountRow } from './store.ts'
-import { accountCaps } from '../engine-settings.ts'
 import { MAX_PROVIDERS, providerUrls, type ChainFetch } from './other-chains.ts'
 
 // otto/mamoru#238: when the Worker cannot get funding from the operator, GET /funding answers with the balance read
@@ -420,18 +419,13 @@ async function allowed(limiter: RateLimiter | undefined, key: string): Promise<b
 }
 
 /**
- * The cap the operator would hold the account to, as far as the D1 says: its valid override (the reader the operator's
- * settings pull uses, engine-settings.ts), else the default. `known` false when the read failed: the default is then only
- * a placeholder and the app shows no cap.
+ * The cap shown when the operator does not answer: none (otto/mamoru#376, spec 011 CAP-R1). The cap that holds an
+ * account is the smaller of the engine settings (or its override) and the cap its owner signed, and the signed cap lives
+ * only in the operator. The D1 alone would show a cap the account may not have signed, so the chain read says the cap is
+ * unknown and the app shows no cap; `usdc` is only the placeholder the view type needs.
  */
-export async function capOf(db: Db, row: AccountRow, fallback: string): Promise<{ usdc: string; known: boolean }> {
-  try {
-    const override = (await accountCaps(db))[row.account_key.toLowerCase()]
-    // account_cap_overrides holds whole USDC; the view carries base units (6 decimals).
-    return { usdc: override === undefined ? fallback : (BigInt(override) * 1_000_000n).toString(), known: true }
-  } catch {
-    return { usdc: fallback, known: false }
-  }
+export function capUnknown(placeholder: string): { usdc: string; known: false } {
+  return { usdc: placeholder, known: false }
 }
 
 /**
@@ -465,7 +459,7 @@ export async function chainFundingResponse(c: Context<AppEnv>, row: AccountRow, 
     const ids = listed && listed.ids.length <= MAX_LISTED_POSITIONS ? listed.ids : []
     const usable = listed && listed.ids.length <= MAX_LISTED_POSITIONS ? listed : null
     const read = await readChain(deps.fetch, urls, registry, row.address, ids)
-    if (read) view = fundingFromRead(read, registry, row.address, await capOf(c.env.DB, row, deps.capUsdc), usable)
+    if (read) view = fundingFromRead(read, registry, row.address, capUnknown(deps.capUsdc), usable)
   } catch (e) {
     console.error('funding chain read failed', e instanceof Error ? e.name : 'unexpected error')
   }
