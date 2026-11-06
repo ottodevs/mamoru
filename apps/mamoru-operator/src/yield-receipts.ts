@@ -284,9 +284,10 @@ export function vaultWire(ops: readonly StoredOp[]): AccountVaultWire | undefine
     const t = Math.floor(Date.parse(f.at) / 1000)
     for (const v of f.vaultFlows ?? []) flows.push({ ...v, id: `${f.txHash.toLowerCase()}:${v.logIndex}`, t })
   }
-  if (!flows.length) return undefined
-  flows.sort((a, b) => a.t - b.t || a.logIndex - b.logIndex)
   const pending = ops.some(needsFacts)
+  // No flow read yet but receipts still due: say "unknown", not "none", or a vault held since before would count as unexplained-zero.
+  if (!flows.length) return pending ? { flows, explained: null } : undefined
+  flows.sort((a, b) => a.t - b.t || a.logIndex - b.logIndex)
   const explained: Record<string, bigint> = {}
   for (const v of flows) explained[v.vault] = (explained[v.vault] ?? 0n) + (v.kind === 'deposit' ? BigInt(v.shares) : -BigInt(v.shares))
   return { flows, explained: pending ? null : Object.fromEntries(Object.entries(explained).map(([k, n]) => [k, (n < 0n ? 0n : n).toString()])) }

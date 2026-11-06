@@ -127,7 +127,8 @@ describe('withReceipts', () => {
     expect(saves).toBe(1)
     expect(ops[0]!.facts).toMatchObject({ txHash: '0x01', gasWei: '4' })
     expect(ops[1]!.facts).toBeUndefined()
-    expect(out.receipts).toEqual([{ safe: SAFE, days: [{ day: '2026-10-22', gasWei: '4', collectedUsdc: '0', positions: [] }] }])
+    // eng-2 still waits for its receipt: the vault wire says the explained shares are unknown, not zero.
+    expect(out.receipts).toEqual([{ safe: SAFE, days: [{ day: '2026-10-22', gasWei: '4', collectedUsdc: '0', positions: [] }], vault: { flows: [], explained: null } }])
 
     await withReceipts(snapshot(), one(ops), readReceipt, async () => T, SAFE_BLOCK, tried)
     expect(reads).toEqual(['0x01', '0x02', '0x02'])
@@ -277,5 +278,6 @@ describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
     expect(vaultWire([w, d])).toMatchObject({ explained: { 'vault:gtUSDCp': '40' }, flows: [{ kind: 'deposit', id: '0xaa:1' }, { kind: 'withdraw', id: '0xbb:1' }] })
     expect(vaultWire([d, w, op('eng-3')])?.explained).toBeNull()
     expect(vaultWire([op('eng-4', { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [], v: FACTS_VERSION })])).toBeUndefined()
+    expect(vaultWire([op('eng-5')])).toEqual({ flows: [], explained: null })
   })
 })
