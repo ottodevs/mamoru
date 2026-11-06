@@ -1,7 +1,7 @@
 # Stats v2 on a D1 copy after the backfill, against the chain script (6 Nov 2026)
 
 What was run (read-only on prod): prod D1 exported to a local SQLite copy; the A1 migrations applied
-(`XXXX_income_events`, `XXXX_snapshot_tokens`, `XXXX_stats_facts`, `XXXX_stats_vault_daily`); the output of
+(`XXXX_income_events`, `XXXX_snapshot_tokens`, `XXXX_stats_facts`, `0027_stats_vault_daily`); the output of
 `apps/mamoru-operator/scripts/stats-backfill.ts` applied (45 Monad `account_daily` rows from 1 Nov, 8 `stats_vault_daily`
 rows); one live cron pull simulated on both chains with the A1-D2 operator reader (Base block 54019999, Monad block
 119981042); then `statsInput` + `guardStats` of `GET /api/stats` v2. Reference: `scripts/stats-figures.ts` (PR #326),

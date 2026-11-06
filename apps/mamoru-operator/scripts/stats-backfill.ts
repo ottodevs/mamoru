@@ -100,7 +100,7 @@ const sqlStr = (s: string) => `'${s.replace(/'/g, "''")}'`
 const today0 = Math.floor(Date.now() / 1000 / DAY) * DAY
 const lines: string[] = [
   `-- Stats backfill (spec 013 A1), generated ${new Date().toISOString()} by apps/mamoru-operator/scripts/stats-backfill.ts.`,
-  '-- Apply after the migrations XXXX_stats_vault_daily.sql and the A1 ones. Idempotent: INSERT OR IGNORE only.',
+  '-- Apply after the migrations 0027_stats_vault_daily.sql and the A1 ones. Idempotent: INSERT OR IGNORE only.',
 ]
 const counts = { daily: 0, vault: 0, failedDays: 0 }
 
