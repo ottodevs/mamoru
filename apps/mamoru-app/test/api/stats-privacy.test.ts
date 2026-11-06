@@ -1,118 +1,51 @@
 import { describe, expect, test } from 'bun:test'
-import { guardStats, ownersBand, type GuardInput } from '../../src/api/stats/privacy.ts'
+import { guardApr, guardSplit, guardStats, validSuffix, type GuardAprDay, type GuardInput } from '../../src/api/stats/privacy.ts'
 
-const AS_OF = '2026-11-06T16:50:00.000Z'
-const fig = (usd: number | null, owners: number) => ({ usd, owners, dataAsOf: AS_OF })
+// Spec 013 STATS-R9 with amendment A1: k >= 3 allow-if; withheld = absent; slices below k merged into "Other".
 
-function input(over: Partial<GuardInput> = {}): GuardInput {
-  return {
-    tvlNow: fig(3874.4, 9),
-    tvl: [{ day: '2026-11-05', usd: 350.6, owners: 2 }, { day: '2026-11-06', usd: 3927.8, owners: 3 }],
-    monadFrom: null,
-    volume: [{ day: '2026-11-06', usd: null, owners: 0, reason: 'NOT_COUNTED' }],
-    earned24h: { ...fig(0.3, 4), vaultYield: 'not_counted' },
-    earnedTotal: { ...fig(1.44, 9), since: '2026-10-12', vaultYield: 'not_counted' },
-    fundedAccounts: { count: 9, owners: 9, dataAsOf: AS_OF },
-    sources: { tvl: 'account_daily', volume: 'yield_ledger_ops', earned: 'yield_ledger_income' },
-    ...over,
-  }
-}
+const NOW = new Date('2026-11-06T19:00:00.000Z')
+const AS_OF = '2026-11-06T18:55:00.000Z'
+const users = (n: number) => new Set(Array.from({ length: n }, (_, i) => `u${i}`))
+const fig = (value: number, n: number, complete = true, at: string | null = AS_OF) => ({ value, owners: users(n), complete, dataAsOf: at })
+const empty = (): GuardInput => ({ now: NOW, snapshots: {}, distributions: {}, apr: { all: [] }, earnedPerDay: [], totalDeposits: [] })
 
-describe('guardStats: k >= 3 on every published figure (STATS-R9)', () => {
-  test('STATS-S03: a day backed by 2 owners is withheld, the next with 3 goes out as a band', () => {
-    const v = guardStats(input())
-    expect(v.tvl[0]).toEqual({ day: '2026-11-05', usd: null, reason: 'TOO_FEW_ACCOUNTS' })
-    expect(v.tvl[1]).toEqual({ day: '2026-11-06', usd: 3928, owners: '3+' })
+describe('figures', () => {
+  test('published only when complete, fresh, finite and backed by 3 owners; rounding per figure', () => {
+    const v = guardStats({ ...empty(), snapshots: {
+      totalDeposits: fig(4363.34, 15), earned24h: fig(0.984, 9), apr7d: fig(27.64, 12), totalAccounts: fig(65, 65),
+      moneyWorking: fig(100, 2), idleCapital: fig(100, 9, false), largestAccount: fig(1728.27, 15, true, '2026-11-06T17:00:00.000Z'), inStablecoins: fig(Number.NaN, 9),
+    } })
+    expect(v.snapshots).toEqual({
+      totalDeposits: { value: 4363, dataAsOf: AS_OF }, earned24h: { value: 0.98, dataAsOf: AS_OF }, apr7d: { value: 27.6, dataAsOf: AS_OF }, totalAccounts: { value: 65, dataAsOf: AS_OF },
+    })
+    expect(JSON.stringify(v)).not.toMatch(/not counted|NOT_COUNTED|owners/i)
   })
+})
 
-  test('G3: every headline scalar backed by 2 owners is null with TOO_FEW_ACCOUNTS', () => {
-    const v = guardStats(input({
-      tvlNow: fig(100, 2),
-      earned24h: { ...fig(1, 2), vaultYield: 'counted' },
-      earnedTotal: { ...fig(5, 2), since: '2026-10-12', vaultYield: 'counted' },
-      fundedAccounts: { count: 2, owners: 2, dataAsOf: AS_OF },
-    }))
-    expect(v.tvlNow).toEqual({ usd: null, reason: 'TOO_FEW_ACCOUNTS', dataAsOf: AS_OF })
-    expect(v.earned24h.usd).toBeNull()
-    expect(v.earned24h.reason).toBe('TOO_FEW_ACCOUNTS')
-    expect(v.earnedTotal.usd).toBeNull()
-    expect(v.earnedTotal.reason).toBe('TOO_FEW_ACCOUNTS')
-    expect(v.fundedAccounts).toEqual({ count: null, reason: 'TOO_FEW_ACCOUNTS', dataAsOf: AS_OF })
+describe('distributions (complementary rule)', () => {
+  const slice = (key: string, usd: number, n: number, offset = 0) => ({ key, usd, owners: new Set(Array.from({ length: n }, (_, i) => `u${i + offset}`)) })
+  test('small slices merge into Other when Other itself has 3 owners', () => {
+    const d = guardSplit({ complete: true, dataAsOf: AS_OF, slices: [slice('USDC', 3452.97, 15), slice('WETH', 740.2, 6), slice('cbBTC', 100, 1, 20), slice('USDT', 50, 1, 21), slice('WMON', 20.17, 1, 22)] }, NOW)
+    expect(d).toEqual([{ key: 'USDC', usd: 3453, pct: 79.1 }, { key: 'WETH', usd: 740, pct: 17 }, { key: 'Other', usd: 170, pct: 3.9 }])
   })
-
-  test('the chain split goes out whole or not at all (no complementary suppression)', () => {
-    const ok = guardStats(input({
-      tvl: [{ day: '2026-11-05', usd: 320, owners: 6 }, { day: '2026-11-06', usd: 3837, owners: 8 }],
-      chains: [
-        { chainId: 8453, tvl: [{ day: '2026-11-05', usd: 300, owners: 5 }, { day: '2026-11-06', usd: 3800, owners: 7 }] },
-        { chainId: 143, tvl: [{ day: '2026-11-05', usd: 20, owners: 3 }, { day: '2026-11-06', usd: 37, owners: 3 }] },
-      ],
-    }))
-    expect(ok.chains?.map((c) => c.chainId)).toEqual([8453, 143])
-    // Base 10 owners, Monad 2: publishing Base alone would reveal Monad as total minus Base.
-    const withheld = guardStats(input({
-      chains: [
-        { chainId: 8453, tvl: [{ day: '2026-11-06', usd: 3800, owners: 10 }] },
-        { chainId: 143, tvl: [{ day: '2026-11-06', usd: 37, owners: 2 }] },
-      ],
-    }))
-    expect(withheld.chains).toBeUndefined()
-    expect(JSON.stringify(withheld)).not.toContain('"chainId"')
+  test('one hidden slice (or an Other under 3 owners) withholds the whole split', () => {
+    expect(guardSplit({ complete: true, dataAsOf: AS_OF, slices: [slice('Base', 3972.86, 14), slice('Monad', 390.48, 2)] }, NOW)).toBeUndefined()
+    expect(guardSplit({ complete: true, dataAsOf: AS_OF, slices: [slice('A', 10, 5), slice('B', 1, 1, 9), slice('C', 1, 1, 9)] }, NOW)).toBeUndefined()
+    expect(guardSplit({ complete: false, dataAsOf: AS_OF, slices: [slice('A', 10, 5)] }, NOW)).toBeUndefined()
   })
+})
 
-  test('the split is withheld when a chain or a day is missing from it, or it does not add up to the total', () => {
-    const tvl = [{ day: '2026-11-05', usd: 320, owners: 6 }, { day: '2026-11-06', usd: 3837, owners: 8 }]
-    const base = { chainId: 8453, tvl: [{ day: '2026-11-05', usd: 300, owners: 5 }, { day: '2026-11-06', usd: 3800, owners: 7 }] }
-    const monad = { chainId: 143, tvl: [{ day: '2026-11-05', usd: 20, owners: 3 }, { day: '2026-11-06', usd: 37, owners: 3 }] }
-    // Monad dropped upstream: Base alone would reveal Monad as total − Base.
-    expect(guardStats(input({ tvl, chains: [base] })).chains).toBeUndefined()
-    // Monad missing a day after its first one.
-    expect(guardStats(input({ tvl, chains: [base, { chainId: 143, tvl: [monad.tvl[0]!] }] })).chains).toBeUndefined()
-    // A total day withheld while its chains would publish.
-    expect(guardStats(input({ tvl: [{ day: '2026-11-05', usd: 320, owners: 2 }, tvl[1]!], chains: [base, monad] })).chains).toBeUndefined()
-    expect(guardStats(input({ tvl, chains: [base, monad] })).chains).toHaveLength(2)
+describe('series', () => {
+  const day = (d: number, earned: number, capital: number, n = 5, complete = true): GuardAprDay => ({ day: `2026-11-${String(d).padStart(2, '0')}`, earned, capital, owners: users(n), complete })
+  test('the longest valid run ending at the last day; 7-day APR from 7-day sums once 7 days exist', () => {
+    const days = [day(1, 1, 100, 5, false), ...Array.from({ length: 8 }, (_, i) => day(i + 2, 0.1, 365))]
+    const a = guardApr(days)!
+    expect(a.map((p) => p.day)).toEqual(days.slice(1).map((d) => d.day))
+    expect(a[0]).toEqual({ day: '2026-11-02', apr: 10 })
+    expect(a[6]).toEqual({ day: '2026-11-08', apr: 10, apr7d: 10 })
   })
-
-  test('a non-finite amount or a malformed count is never published; it reads not counted', () => {
-    for (const usd of [NaN, Infinity, -Infinity, undefined as unknown as number]) {
-      const v = guardStats(input({ tvlNow: fig(usd, 9), tvl: [{ day: '2026-11-06', usd, owners: 9 }] }))
-      expect(v.tvlNow).toEqual({ usd: null, reason: 'NOT_COUNTED', dataAsOf: AS_OF })
-      expect(v.tvl[0]).toEqual({ day: '2026-11-06', usd: null, reason: 'NOT_COUNTED' })
-    }
-    for (const count of [2.5, -1, NaN]) expect(guardStats(input({ fundedAccounts: { count, owners: 9, dataAsOf: AS_OF } })).fundedAccounts).toEqual({ count: null, reason: 'NOT_COUNTED', dataAsOf: AS_OF })
-  })
-
-  test('fail closed on a malformed owner count: NaN, undefined, negative, fraction', () => {
-    for (const owners of [NaN, undefined as unknown as number, -5, 2.5, 3.5, Infinity]) {
-      const v = guardStats(input({
-        tvlNow: fig(100, owners),
-        tvl: [{ day: '2026-11-06', usd: 100, owners }],
-        fundedAccounts: { count: 4, owners, dataAsOf: AS_OF },
-        chains: [{ chainId: 8453, tvl: [{ day: '2026-11-06', usd: 100, owners }] }],
-      }))
-      expect(v.tvlNow.usd).toBeNull()
-      expect(v.tvl[0]!.usd).toBeNull()
-      expect(v.fundedAccounts.count).toBeNull()
-      expect(v.chains).toBeUndefined()
-    }
-  })
-
-  test('not counted keeps its reason (G4), never shown as too few or as 0', () => {
-    const v = guardStats(input())
-    expect(v.volume[0]).toEqual({ day: '2026-11-06', usd: null, reason: 'NOT_COUNTED' })
-  })
-
-  test('every USD figure is rounded to whole dollars; partial keeps its reason', () => {
-    const v = guardStats(input({ tvl: [{ day: '2026-11-06', usd: 3927.5, owners: 12, reason: 'PARTIAL', dataAsOf: '2026-11-05T23:50:00.000Z' }] }))
-    expect(v.tvlNow.usd).toBe(3874)
-    expect(v.tvl[0]).toEqual({ day: '2026-11-06', usd: 3928, owners: '10+', reason: 'PARTIAL', dataAsOf: '2026-11-05T23:50:00.000Z' })
-    expect(v.earnedTotal.usd).toBe(1)
-  })
-
-  test('owner counts leave only as bands, never exact', () => {
-    expect([2, 3, 9, 10, 24, 25, 49, 50, 500].map(ownersBand)).toEqual([undefined, '3+', '3+', '10+', '10+', '25+', '25+', '50+', '50+'])
-    const raw = JSON.stringify(guardStats(input()))
-    expect(raw).not.toContain('"owners":9')
-    expect(raw).not.toContain('"owners":3,')
+  test('a last day under 3 owners withholds the whole series', () => {
+    expect(guardApr([day(1, 1, 100), day(2, 1, 100, 2)])).toBeUndefined()
+    expect(validSuffix([1, 2, 3], (x) => x !== 2)).toEqual([3])
   })
 })

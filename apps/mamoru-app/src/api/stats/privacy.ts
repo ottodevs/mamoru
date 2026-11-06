@@ -1,109 +1,113 @@
-// Spec 013 STATS-R9: the k >= 3 owner guard. Pure. It is the only way a stats figure leaves the server: the route
-// builds a `GuardInput` (every figure with its exact owner count, which never leaves this module) and sends only
-// what `guardStats` returns. Below 3 distinct owners a figure becomes null with TOO_FEW_ACCOUNTS; owner counts behind
-// a figure go out as bands; every USD figure is rounded to whole dollars here (plan §3.7), so no caller can skip it.
-// Two things are public on purpose (owners' decisions, spec 013): the Funded accounts count is exact (STATS-R7b, the
-// "users" figure the pitch cites), and two readings can be subtracted (accepted risk, plan §3.7). Malformed input
-// (a non-finite amount, a non-integer count) is never published: it goes out as NOT_COUNTED.
-import type { StatsFigure, StatsOwnersBand, StatsPoint, StatsReason, StatsView } from '@mamoru/domain'
+// Spec 013 STATS-R9 with amendment A1: the k >= 3 owner guard, and the only way a stats figure leaves the server. The
+// queries build a GuardInput (every figure with the set of owners behind it and whether it is complete); the route
+// sends only what `guardStats` returns. A figure is published only if it is complete, finite, fresh (data at most 1 h
+// old) and backed by at least 3 distinct owners (allow-if: anything else withholds). Withheld means absent: A1 has no
+// "not counted" state. Distributions merge slices below k into "Other"; if that leaves "Other" itself below k (one
+// hidden slice, or a few tiny ones) the whole split is withheld, so a slice can never be read as total minus the rest.
+// Series keep their longest run of valid days ending at the last one. Accepted on purpose (owners' decisions): the
+// largest account's value (S9) and the accounts count (S7) are exact, and two readings can be subtracted (plan §3.7).
+import type { StatsAprPoint, StatsFigure, StatsSlice, StatsView } from '@mamoru/domain'
 
 export const MIN_OWNERS = 3
-
-/** A figure as the queries computed it: USD (not rounded) and the exact number of distinct owners behind it. */
-export type GuardFigure = { usd: number | null; owners: number; reason?: StatsReason; dataAsOf: string | null; stale?: true }
-export type GuardPoint = { day: string; usd: number | null; owners: number; reason?: StatsReason; dataAsOf?: string }
-
-export type GuardInput = {
-  tvlNow: GuardFigure
-  tvl: GuardPoint[]
-  monadFrom: string | null
-  volume: GuardPoint[]
-  earned24h: GuardFigure & { vaultYield: 'counted' | 'not_counted' }
-  earnedTotal: GuardFigure & { since: string; vaultYield: 'counted' | 'not_counted' }
-  /** `count` = funded accounts; `owners` = distinct owners behind them. */
-  fundedAccounts: { count: number | null; owners: number; reason?: StatsReason; dataAsOf: string | null }
-  chains?: { chainId: number; tvl: GuardPoint[] }[]
-  sources: StatsView['sources']
-}
+export const STALE_MS = 60 * 60 * 1000
 
 /** Allow-if: only a whole number of owners at or above k publishes. NaN, undefined, negatives and fractions withhold. */
 export const enoughOwners = (owners: unknown): owners is number => Number.isInteger(owners) && (owners as number) >= MIN_OWNERS
 
-export function ownersBand(owners: number): StatsOwnersBand | undefined {
-  if (!enoughOwners(owners)) return undefined
-  if (owners >= 50) return '50+'
-  if (owners >= 25) return '25+'
-  if (owners >= 10) return '10+'
-  return '3+'
+export type Rounding = 'dollars' | 'cents' | 'pct' | 'count'
+/** A figure as the queries computed it: plain number (USD, percent or count) with the owners behind it. */
+export type GuardFigure = { value: number; owners: ReadonlySet<string>; complete: boolean; dataAsOf: string | null }
+export type GuardSlice = { key: string; usd: number; owners: ReadonlySet<string> }
+export type GuardSplit = { slices: GuardSlice[]; complete: boolean; dataAsOf: string | null }
+export type GuardAprDay = { day: string; earned: number; capital: number; owners: ReadonlySet<string>; complete: boolean }
+export type GuardEarnedDay = { day: string; usd: number; collectedUsd: number; owners: ReadonlySet<string>; complete: boolean }
+export type GuardDepositsDay = { day: string; usd: number; owners: ReadonlySet<string>; complete: boolean }
+
+export type SnapshotKey = keyof StatsView['snapshots']
+export const ROUNDING: Record<SnapshotKey, Rounding> = {
+  totalDeposits: 'dollars', moneyWorking: 'dollars', idleCapital: 'dollars', earned24h: 'cents', totalEarned: 'cents',
+  apr7d: 'pct', totalAccounts: 'count', averageAccount: 'dollars', largestAccount: 'dollars', inStablecoins: 'pct',
 }
 
-const dollars = (usd: number) => Math.round(usd)
-const finite = (usd: number | null | undefined): usd is number => typeof usd === 'number' && Number.isFinite(usd)
-
-/** A figure with no value keeps its own reason (not counted is not "too few"); one with a value below k is withheld. */
-function guardFigure(f: GuardFigure): StatsFigure {
-  const base = { dataAsOf: f.dataAsOf, ...(f.stale ? { stale: true as const } : {}) }
-  if (f.usd === null) return { usd: null, reason: f.reason ?? 'NOT_COUNTED', ...base }
-  if (!finite(f.usd)) return { usd: null, reason: 'NOT_COUNTED', ...base }
-  if (!enoughOwners(f.owners)) return { usd: null, reason: 'TOO_FEW_ACCOUNTS', ...base }
-  return { usd: dollars(f.usd), ...(f.reason ? { reason: f.reason } : {}), ...base }
+export type GuardInput = {
+  now: Date
+  snapshots: Partial<Record<SnapshotKey, GuardFigure>>
+  distributions: Partial<Record<keyof StatsView['distributions'], GuardSplit>>
+  apr: { all: GuardAprDay[]; base?: GuardAprDay[]; monad?: GuardAprDay[] }
+  earnedPerDay: GuardEarnedDay[]
+  totalDeposits: GuardDepositsDay[]
 }
 
-function guardPoint(p: GuardPoint): StatsPoint {
-  const at = p.dataAsOf ? { dataAsOf: p.dataAsOf } : {}
-  if (p.usd === null) return { day: p.day, usd: null, reason: p.reason ?? 'NOT_COUNTED', ...at }
-  if (!finite(p.usd)) return { day: p.day, usd: null, reason: 'NOT_COUNTED', ...at }
-  const owners = ownersBand(p.owners)
-  if (!owners) return { day: p.day, usd: null, reason: 'TOO_FEW_ACCOUNTS', ...at }
-  return { day: p.day, usd: dollars(p.usd), owners, ...(p.reason ? { reason: p.reason } : {}), ...at }
+const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+export const round = (v: number, r: Rounding): number => (r === 'cents' ? Math.round(v * 100) / 100 : r === 'pct' ? Math.round(v * 10) / 10 : Math.round(v))
+const fresh = (dataAsOf: string | null, now: Date) => dataAsOf !== null && Number.isFinite(Date.parse(dataAsOf)) && now.getTime() - Date.parse(dataAsOf) <= STALE_MS
+
+export function guardFigure(f: GuardFigure | undefined, r: Rounding, now: Date): StatsFigure | undefined {
+  if (!f || !f.complete || !finite(f.value) || f.value < 0 || !enoughOwners(f.owners.size) || !fresh(f.dataAsOf, now)) return undefined
+  return { value: round(f.value, r), dataAsOf: f.dataAsOf! }
 }
 
-const passes = (p: GuardPoint) => finite(p.usd) && enoughOwners(p.owners)
-
-/**
- * The chain split may go out only if it is the whole split: every chain passes on every day, each chain covers every
- * total day from its first one on, the total passes on those days, and the chains add up to the total (so no chain is
- * missing from the set the caller passed). Otherwise total − published chains could reveal a withheld one.
- */
-function splitPublishable(chains: readonly { chainId: number; tvl: GuardPoint[] }[], total: readonly GuardPoint[]): boolean {
-  if (!chains.length || !chains.every((c) => c.tvl.length > 0 && c.tvl.every(passes))) return false
-  const byDay = new Map(total.map((p) => [p.day, p]))
-  for (const c of chains) {
-    const first = c.tvl.reduce((a, p) => (p.day < a ? p.day : a), c.tvl[0]!.day)
-    const days = new Set(c.tvl.map((p) => p.day))
-    for (const t of total) if (t.day >= first && !days.has(t.day)) return false
-    for (const p of c.tvl) if (!byDay.has(p.day)) return false
+export function guardSplit(s: GuardSplit | undefined, now: Date): StatsSlice[] | undefined {
+  if (!s || !s.complete || !fresh(s.dataAsOf, now)) return undefined
+  const slices = s.slices.filter((x) => finite(x.usd) && x.usd > 0)
+  if (!slices.length || s.slices.some((x) => !finite(x.usd) || x.usd < 0)) return undefined
+  const shown = slices.filter((x) => enoughOwners(x.owners.size))
+  const hidden = slices.filter((x) => !enoughOwners(x.owners.size))
+  const out = shown.map((x) => ({ key: x.key, usd: x.usd }))
+  if (hidden.length) {
+    const owners = new Set(hidden.flatMap((x) => [...x.owners]))
+    if (!enoughOwners(owners.size)) return undefined
+    out.push({ key: 'Other', usd: hidden.reduce((a, x) => a + x.usd, 0) })
   }
-  for (const t of total) {
-    const parts = chains.map((c) => c.tvl.find((p) => p.day === t.day)).filter((p): p is GuardPoint => p !== undefined)
-    if (!parts.length) continue
-    if (!passes(t)) return false
-    const sum = parts.reduce((a, p) => a + (p.usd as number), 0)
-    if (Math.abs(sum - (t.usd as number)) > 0.5) return false
-  }
-  return true
+  const total = out.reduce((a, x) => a + x.usd, 0)
+  return out.sort((a, b) => (a.key === 'Other' ? 1 : b.key === 'Other' ? -1 : b.usd - a.usd)).map((x) => ({ key: x.key, usd: round(x.usd, 'dollars'), pct: round((x.usd / total) * 100, 'pct') }))
+}
+
+/** The longest run of valid points that ends at the last point; nothing if the last point is not valid. */
+export function validSuffix<T>(points: readonly T[], ok: (p: T) => boolean): T[] {
+  let i = points.length
+  while (i > 0 && ok(points[i - 1]!)) i--
+  return points.slice(i)
+}
+
+const aprOk = (p: GuardAprDay) => p.complete && finite(p.earned) && finite(p.capital) && p.capital > 0 && enoughOwners(p.owners.size)
+
+/** Daily APR (percent) and, once 7 valid days exist, the 7-day figure from 7-day sums (capital-weighted, no compounding). */
+export function guardApr(days: readonly GuardAprDay[] | undefined): StatsAprPoint[] | undefined {
+  const run = validSuffix(days ?? [], aprOk)
+  if (!run.length) return undefined
+  return run.map((p, i) => {
+    const point: StatsAprPoint = { day: p.day, apr: round((p.earned / p.capital) * 365 * 100, 'pct') }
+    if (i >= 6) {
+      const w = run.slice(i - 6, i + 1)
+      const owners = new Set(w.flatMap((x) => [...x.owners]))
+      if (enoughOwners(owners.size)) point.apr7d = round((w.reduce((a, x) => a + x.earned, 0) / w.reduce((a, x) => a + x.capital, 0)) * 365 * 100, 'pct')
+    }
+    return point
+  })
 }
 
 export function guardStats(input: GuardInput): StatsView {
-  const f = input.fundedAccounts
-  const fundedAccounts: StatsView['fundedAccounts'] =
-    f.count === null ? { count: null, reason: f.reason ?? 'NOT_COUNTED', dataAsOf: f.dataAsOf }
-    : !Number.isInteger(f.count) || f.count < 0 ? { count: null, reason: 'NOT_COUNTED', dataAsOf: f.dataAsOf }
-    : !enoughOwners(f.owners) ? { count: null, reason: 'TOO_FEW_ACCOUNTS', dataAsOf: f.dataAsOf }
-    : { count: f.count, ...(f.reason ? { reason: f.reason } : {}), dataAsOf: f.dataAsOf }
-  // The chain split goes out whole or not at all: if any chain fails on any day, publishing the others would let
-  // the withheld chain be computed as total minus the published chains (complementary suppression).
-  const all = input.chains ?? []
-  const chains = splitPublishable(all, input.tvl) ? all.map((c) => ({ chainId: c.chainId, tvl: c.tvl.map(guardPoint) })) : undefined
-  return {
-    tvlNow: guardFigure(input.tvlNow),
-    tvl: input.tvl.map(guardPoint),
-    monadFrom: input.monadFrom,
-    volume: input.volume.map(guardPoint),
-    earned24h: { ...guardFigure(input.earned24h), vaultYield: input.earned24h.vaultYield },
-    earnedTotal: { ...guardFigure(input.earnedTotal), since: input.earnedTotal.since, vaultYield: input.earnedTotal.vaultYield },
-    fundedAccounts,
-    ...(chains ? { chains } : {}),
-    sources: input.sources,
+  const now = input.now
+  const snapshots: StatsView['snapshots'] = {}
+  for (const key of Object.keys(ROUNDING) as SnapshotKey[]) {
+    const f = guardFigure(input.snapshots[key], ROUNDING[key], now)
+    if (f) snapshots[key] = f
   }
+  const distributions: StatsView['distributions'] = {}
+  for (const key of ['byToken', 'byChain', 'byPlace'] as const) {
+    const d = guardSplit(input.distributions[key], now)
+    if (d) distributions[key] = d
+  }
+  const all = guardApr(input.apr.all)
+  const base = guardApr(input.apr.base)
+  const monad = guardApr(input.apr.monad)
+  const earnedPerDay = validSuffix(input.earnedPerDay, (p) => p.complete && finite(p.usd) && finite(p.collectedUsd) && enoughOwners(p.owners.size)).map((p) => ({ day: p.day, usd: round(p.usd, 'cents'), collectedUsd: round(p.collectedUsd, 'cents') }))
+  const totalDeposits = validSuffix(input.totalDeposits, (p) => p.complete && finite(p.usd) && enoughOwners(p.owners.size)).map((p) => ({ day: p.day, usd: round(p.usd, 'dollars') }))
+  const series: StatsView['series'] = {}
+  if (all) series.apr = { all, ...(base ? { base } : {}), ...(monad ? { monad } : {}) }
+  if (earnedPerDay.length) series.earnedPerDay = earnedPerDay
+  if (totalDeposits.length) series.totalDeposits = totalDeposits
+  const times = [...Object.values(snapshots).map((f) => f.dataAsOf)].sort()
+  return { dataAsOf: times[0] ?? null, snapshots, distributions, series }
 }
