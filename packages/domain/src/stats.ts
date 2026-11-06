@@ -27,7 +27,7 @@ export type StatsView = {
   earned24h: StatsFigure & { vaultYield: 'counted' | 'not_counted' }
   earnedTotal: StatsFigure & { since: string; vaultYield: 'counted' | 'not_counted' }
   fundedAccounts: { count: number | null; reason?: StatsReason; dataAsOf: string | null }
-  /** Per-chain TVL, present only when every point of that chain passes the guard. */
+  /** Per-chain TVL, all chains or none: present only when every chain passes the guard on every day and they add up to `tvl`. */
   chains?: { chainId: number; tvl: StatsPoint[] }[]
   sources: { tvl: string; volume: string; earned: string }
 }

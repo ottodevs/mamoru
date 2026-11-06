@@ -42,6 +42,7 @@ describe('guardStats: k >= 3 on every published figure (STATS-R9)', () => {
 
   test('the chain split goes out whole or not at all (no complementary suppression)', () => {
     const ok = guardStats(input({
+      tvl: [{ day: '2026-11-05', usd: 320, owners: 6 }, { day: '2026-11-06', usd: 3837, owners: 8 }],
       chains: [
         { chainId: 8453, tvl: [{ day: '2026-11-05', usd: 300, owners: 5 }, { day: '2026-11-06', usd: 3800, owners: 7 }] },
         { chainId: 143, tvl: [{ day: '2026-11-05', usd: 20, owners: 3 }, { day: '2026-11-06', usd: 37, owners: 3 }] },
@@ -57,6 +58,28 @@ describe('guardStats: k >= 3 on every published figure (STATS-R9)', () => {
     }))
     expect(withheld.chains).toBeUndefined()
     expect(JSON.stringify(withheld)).not.toContain('"chainId"')
+  })
+
+  test('the split is withheld when a chain or a day is missing from it, or it does not add up to the total', () => {
+    const tvl = [{ day: '2026-11-05', usd: 320, owners: 6 }, { day: '2026-11-06', usd: 3837, owners: 8 }]
+    const base = { chainId: 8453, tvl: [{ day: '2026-11-05', usd: 300, owners: 5 }, { day: '2026-11-06', usd: 3800, owners: 7 }] }
+    const monad = { chainId: 143, tvl: [{ day: '2026-11-05', usd: 20, owners: 3 }, { day: '2026-11-06', usd: 37, owners: 3 }] }
+    // Monad dropped upstream: Base alone would reveal Monad as total − Base.
+    expect(guardStats(input({ tvl, chains: [base] })).chains).toBeUndefined()
+    // Monad missing a day after its first one.
+    expect(guardStats(input({ tvl, chains: [base, { chainId: 143, tvl: [monad.tvl[0]!] }] })).chains).toBeUndefined()
+    // A total day withheld while its chains would publish.
+    expect(guardStats(input({ tvl: [{ day: '2026-11-05', usd: 320, owners: 2 }, tvl[1]!], chains: [base, monad] })).chains).toBeUndefined()
+    expect(guardStats(input({ tvl, chains: [base, monad] })).chains).toHaveLength(2)
+  })
+
+  test('a non-finite amount or a malformed count is never published; it reads not counted', () => {
+    for (const usd of [NaN, Infinity, -Infinity, undefined as unknown as number]) {
+      const v = guardStats(input({ tvlNow: fig(usd, 9), tvl: [{ day: '2026-11-06', usd, owners: 9 }] }))
+      expect(v.tvlNow).toEqual({ usd: null, reason: 'NOT_COUNTED', dataAsOf: AS_OF })
+      expect(v.tvl[0]).toEqual({ day: '2026-11-06', usd: null, reason: 'NOT_COUNTED' })
+    }
+    for (const count of [2.5, -1, NaN]) expect(guardStats(input({ fundedAccounts: { count, owners: 9, dataAsOf: AS_OF } })).fundedAccounts).toEqual({ count: null, reason: 'NOT_COUNTED', dataAsOf: AS_OF })
   })
 
   test('fail closed on a malformed owner count: NaN, undefined, negative, fraction', () => {
