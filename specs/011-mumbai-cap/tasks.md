@@ -6,7 +6,7 @@ human author, no model trailers. Must not, in every task: touch contracts or pol
 schema, secrets, deploy anything.
 
 Parallel groups: **A** (T-CAP-01, T-CAP-02, T-CAP-04) start at once. **B** (T-CAP-03) after T-CAP-02 merged.
-**C** (T-CAP-05, T-CAP-06) start at once. (T-CAP-07, UI codes for spending windows, was dropped by decision on 6 Nov: no UI message for those limits.)
+**C** (T-CAP-05, T-CAP-06) start at once. **T-CAP-07 branches from T-CAP-06's branch** (both edit `operator.ts`). It has no UI part (owners' decision, 6 Nov).
 **Ops** (T-CAP-08, T-CAP-09) after A and C are on beta.
 
 | Id | Reqs | Files (≤ 12) | Accepting scenario | Must not |
@@ -17,8 +17,9 @@ Parallel groups: **A** (T-CAP-01, T-CAP-02, T-CAP-04) start at once. **B** (T-CA
 | T-CAP-04 | R0 | none (ops): after T-CAP-01..03 merged, `git worktree unlock` + `remove` `.cell-wt/376-cap-e2e`, comment on #376 | — | `git worktree prune`; remove other worktrees |
 | T-CAP-05 | R6 | `apps/mamoru-app/src/web/lib/waiting-reason.ts` (+test), `apps/mamoru-app/src/web/routes/home.tsx` (idle line only), `docs/waiting.md` | SCN-CAP-08 | merge before Ot+Brais OK on copy; add rows, per-chain lines or paragraphs |
 | T-CAP-06 | R5 | `packages/decide/src/types.ts`, `packages/decide/src/allocate/index.ts` (+test), `apps/mamoru-operator/src/bridge-left.ts` (+test), `apps/mamoru-operator/src/operator.ts` (observation builder hunk + bridge revert → journal hunk) | SCN-CAP-06, SCN-CAP-07, SCN-CAP-12, SCN-CAP-13 | change grants or caps formulas; touch `packages/domain` beyond the code union |
+| T-CAP-07 | R2, R5 | `apps/mamoru-operator/src/operator.ts` (revert handler hunk), `apps/mamoru-operator/src/session-usage.ts` or a new `window-backoff.ts` (+test) | SCN-CAP-09 | add a UI message or a waiting code shown in the app; retry inside the window |
 | T-CAP-08 | R4 | none (ops, Ot): beta settings version cap 10000; D1 + `/metrics` read recorded in `results/settings-beta.md` | SCN-CAP-10 | write prod before the final cut |
 | T-CAP-09 | R3, R4 | none (ops): beta renewal, then at the final cut prod version + one real renewal and deposit > 1,000; evidence `results/prod-cap.md` | SCN-CAP-05, SCN-CAP-11 | force a renewal for users |
 
-Order of merge: T-CAP-01, T-CAP-02 → T-CAP-03 → T-CAP-06 → T-CAP-05. Operator redeploy once
-for T-CAP-06 (batched with 012 when ready).
+Order of merge: T-CAP-01, T-CAP-02 → T-CAP-03 → T-CAP-06 → T-CAP-07 → T-CAP-05. Operator redeploy once
+for T-CAP-06 + T-CAP-07 (batched with 012 when ready).

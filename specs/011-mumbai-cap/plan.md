@@ -109,12 +109,17 @@ per call ≤ 2,000 (20 % of 10k), total ≤ 5,000 per approval.
   revert spent nothing and stops counting (SCN-CAP-12b). A `POLICY_DENIED_AMOUNT` revert also means the journal and the
   chain disagree, so the grant goes to `bridgeLimit.kind = 'unknown'` (wait, `DECIDE_WAIT_BRIDGE_LIMIT`) until
   `bridge-left.ts` rebuilds the spent total from the chain: the Safe's CCTP `DepositForBurn` logs since the approval's
-  `validAfter`. Then `amountLeft` = total − that sum, and bridging resumes. Implemented in T-CAP-06.
+  `validAfter`. Then `amountLeft` = total − (that on-chain sum + every journal move broadcast but not yet in those logs),
+  and bridging resumes. Implemented in T-CAP-06.
+- A spending-window revert on an entry or swap (V4 `Cap24hExceeded`/`Cap30Exceeded`/`BudgetExceeded`, V3
+  `POLICY_DENIED_AMOUNT`): the operator backs off that op for that account until the window can have moved (24 h after
+  the first spend in the window, or 1 h for unknown windows), logging the reason once. No retry inside the window, no UI
+  message (owners' decision). T-CAP-07.
 - Fork e2e flakes on RPC: rerun once; record both.
 
 ## 9. Deploy notes
 
-No D1 migration. Order: operator (CAP-R5, T-CAP-06/07) → app Worker (CAP-R1, R6) → settings version (Ot). Operator
+No D1 migration. Order: operator (CAP-R5, T-CAP-06, T-CAP-07) → app Worker (CAP-R1, R6) → settings version (Ot). Operator
 redeploy by the coordinator only (`operator:deploy <sha>`), batched with 012 if both are ready. Beta first; prod at the
 final cut without soak (`deploy:prod <sha> --min-soak-hours=0 --hotfix="ethglobal-mumbai"`, PRD decision 5).
 

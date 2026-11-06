@@ -94,9 +94,11 @@ CREATE TABLE yield_ledger_vault_samples (
 - Accrued uncollected LP fees are a level, not an event: read from the latest snapshot (`account_snapshot_latest.fees_usdc`);
   its 24 h change from `account_worked_samples.fees_usd` (013 B5).
 - Definitions (one module, `apps/mamoru-app/src/api/earned.ts`, used by Portfolio and by 013):
-  - `total earned = Σ income(all sources incl. backfill) + accrued now`
-  - `earned 24h = Σ income in the window (source ≠ backfill) + (accrued at t1 − accrued at t1 − 24h)`, window
-    (t1 − 24h, t1], t1 = the account's latest fee sample (013 plan §3.2). Fee events count at block time. A vault-yield
+  - Cutoff T: for one account, its latest fee sample; for a sum over accounts (013), the oldest of their latest samples.
+  - `total earned = Σ income(t_s ≤ T, all sources incl. backfill) + accrued at T` (a Collect after T is still in the
+    accrued level at T: never counted twice)
+  - `earned 24h = Σ income in the window (source ≠ backfill) + (accrued at T − accrued at T − 24h)`, window
+    (T − 24h, T] (013 plan §3.2). Fee events count at block time. A vault-yield
     row covers an interval (prev sample, sample]: it is **prorated by the interval's overlap with the window**, so a
     48 h gap never puts 36 h-old yield in the 24 h figure. Accrued at a time = the nearest sample at or before it;
     missing → not counted. Approximate by decision (Ot and Brais, 6 Nov).

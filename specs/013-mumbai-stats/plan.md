@@ -45,10 +45,13 @@ it would be wrong; XX).
 One definition, one module: spec 012's `apps/mamoru-app/src/api/earned.ts` (012 plan "R5, R9: event ledger"), used by
 Portfolio and by `/api/stats`. Stats only sums it over accounts and applies the privacy guard; it defines nothing.
 
-- Total earned = Σ `yield_ledger_income.usd` (all sources, incl. `backfill`) + accrued uncollected LP fees now.
-- **Earned 24h, rolling**, per account the window ends at **t1 = its latest fee sample** (not request time):
-  Σ income with `t1 − 24h < t_s ≤ t1` and `source ≠ 'backfill'` (Collect events at block time, vault-yield rows at
-  sample time) + (accrued at t1 − accrued at t1 − 24h). A Collect after t1 is left for the next sample, so fees are never
+- **One cutoff T for every headline:** T = the oldest of the latest fee samples of the accounts that contribute (each
+  account's latest sample is fresh within the stale rule of §3.6, older ones are `partial`). All figures are "as of T".
+- Total earned = Σ `yield_ledger_income.usd` with `t_s ≤ T` (all sources, incl. `backfill`) + accrued at T. A Collect
+  after T is not yet counted (its fees are still in the accrued level at T): no double count.
+- **Earned 24h, rolling**, one window for all accounts, (T − 24h, T]:
+  Σ income with `T − 24h < t_s ≤ T` and `source ≠ 'backfill'` (Collect events at block time, vault-yield rows at
+  sample time) + (accrued at T − accrued at T − 24h). A Collect after T is left for the next sample, so fees are never
   counted both as accrued and as collected. **Approximate by decision** (Ot and Brais, 6 Nov 17:16Z): vault yield
   comes from share-value samples, and the (i) does not promise an exact figure.
 - Accrued at a time = the nearest `account_worked_samples` row at or before it; needs
@@ -92,7 +95,9 @@ guard is also the only way a figure reaches the repo (design D2).
 Base → Monad: the Base operator keeps the CCTP burns journal (`bridge-monad.ts`) and already has the single rule the
 engine and the money map use (`inFlightBurns`, otto/mamoru#269): a burn is in flight while not minted, or when it was
 minted at a Monad block after the block of the Monad read being valued. The Base snapshot wire adds
-`bridges?: { safe, accountKey, amountUsdc, state, mintedBlock? }[]` (unpruned burns). The Worker applies that rule
+`bridges?: { safe, accountKey, amountUsdc, state, burnBlock, burnAt, mintedBlock?, mintedAt? }[]` (unpruned burns).
+Each stored row carries its read `block`, so the Worker compares the Base read's block with `burnBlock` and the Monad
+read's block with `mintedBlock`. The Worker applies that rule
 against the `block` of the Monad sleeve's row it has stored, and adds the result to TVL now and to the day's close.
 This counts each USDC once: on the source side until the Monad read that includes the mint, then in the sleeve.
 Out-of-order reads: if an account's Base read is older than a burn and its Monad read is newer than that burn's mint,
