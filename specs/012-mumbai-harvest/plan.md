@@ -27,7 +27,9 @@ Spec: `spec.md`. Tasks: `tasks.md`. Scenarios: `scenarios.md`. Cross-spec order:
   (receipt). On any other confirmed engine op that spends that token (entry, re-range mint, swap): `−= min(harvested,
   amount spent)` — harvested tokens are consumed first, so the counter never exceeds what is still harvested and a
   later sale cannot reach principal. At each observation: `= min(harvested, balance)`.
-- `Observation.harvested?: Record<RegistryName, bigint>`.
+- `harvestedSince: Record<chainId, Record<token, number>>` (unix s when the counter went from 0 to > 0; cleared at 0)
+  is persisted in `state.ts` next to `harvested`, so it survives restarts.
+- `Observation.harvested?: Record<RegistryName, { amount: bigint; since: number }>`.
 - Decide: new `harvestSaleOf(obs, policy)` in `harvest/index.ts`. For each token with `harvested > 0`:
   `amount = min(harvested, balance)`; pool = a policy pool with that token, eligible (not `exitOnly`), first in policy
   order; grant `convertKey`; proposal kind `enter_swap` with `harvestSale: true`. If its value ≤ op cost x
@@ -89,7 +91,8 @@ CREATE TABLE yield_ledger_vault_samples (
 - Fee events: one per Collect log in an engine op's receipt; source from the op (`harvest` intent → `harvest`;
   rerange, reduce, close → `re-range`). Insert-or-ignore on `event_id` (idempotent, no overwrite, no loss).
 - Vault events: at each snapshot, per account and vault, `usd = value − prev.value − netFlows(prev.t, t)`, flows from
-  the ERC-4626 events decoded in HT6 (013 B4 reuses that decoding). First sample: one `backfill` row
+  the ERC-4626 events decoded in HT6 (013 B4 reuses that decoding). Mixed holdings (some shares not explained by engine ops): yield is computed on the explained shares only, and the
+  holding is `partial` (marker shown). First sample: one `backfill` row
   `value − netDepositedFromEngineOps`, or `usd = null` with `explained = 0` when shares ≠ engine-op shares (±1 wei).
 - Accrued uncollected LP fees are a level, not an event: read from the latest snapshot (`account_snapshot_latest.fees_usdc`);
   its 24 h change from `account_worked_samples.fees_usd` (013 B5).
@@ -100,19 +103,23 @@ CREATE TABLE yield_ledger_vault_samples (
   - `earned 24h = Σ income in the window (source ≠ backfill) + (accrued at T − accrued at T − 24h)`, window
     (T − 24h, T] (013 plan §3.2). Fee events count at block time. A vault-yield
     row covers an interval (prev sample, sample]: it is **prorated by the interval's overlap with the window**, so a
-    48 h gap never puts 36 h-old yield in the 24 h figure. Accrued at a time = the nearest sample at or before it;
+    48 h gap cannot put a whole interval in the figure. Inside an interval the split is an approximation (accepted by
+    the owners); any vault interval longer than 2 h that overlaps the window (samples run every 10 min) marks the
+    24 h figure `partial`. Accrued at a time = the nearest sample at or before it;
     missing → not counted. Approximate by decision (Ot and Brais, 6 Nov).
   - **History replay (HT7):** at migration, every Collect already in `yield_ledger_account_receipts` /
     stored op facts is written as an income event (`harvest` or `re-range` from its op, block time from the receipt;
-    days without per-op detail → one `backfill` row per account and day with the day's collected total). After the
+    days without per-op detail → one `backfill` row per account and day with the day's collected total, only for days
+    that ended more than 48 h before the migration; a more recent Collect without per-op detail makes the 24 h figure
+    `partial` until it ages out, never silently dropped). After the
     switch, each account's total earned ≥ its earned-so-far before it (scenario HRV-S22).
   - Any `usd = null` or `explained = 0` → `status: 'partial'` with the parts not counted.
 
 ### R7: room
 
 `Observation.budget?: { room: bigint }`: V4 only, min of `budgetLeft`'s four values less a 2 % margin; read failure →
-`room = 0n`. Decide: `reserve = LP value × 125 / 100`; a reinvestment op with value `v` goes only if
-`room − v ≥ reserve`, `reserve = LP value × 150 / 100`. Exit, rerange, harvest, reduce, redeem are never gated.
+`room = 0n`. Decide: `reserve = LP value × 150 / 100` (the only factor; see spec HRV-R7); a reinvestment op with value `v` goes only if
+`room − v ≥ reserve`. Exit, rerange, harvest, reduce, redeem are never gated.
 
 ### R10: marker
 
