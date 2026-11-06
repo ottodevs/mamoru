@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mamoru · Stats states (mockup)</title>
+<link rel="stylesheet" href="mock.css">
+<style>
+  .sheet { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2rem 2.5rem; margin-top: 1.5rem; }
+  .st h3 { font-family: var(--mono); font-weight: 400; font-size: .7rem; letter-spacing: .12em; text-transform: uppercase; color: var(--emerald); margin: 0 0 .7rem; }
+  .st .box { border-top: 1px solid var(--ink); padding-top: .9rem; min-height: 170px; position: relative; }
+  .st .kpi { padding: 0; border: 0; }
+  .sk { background: var(--wash); opacity: .55; height: 12px; margin: .55rem 0; }
+  .sk.big { height: 30px; width: 55%; }
+  .chart-sk { height: 92px; margin-top: .8rem; border-bottom: 1px solid var(--ink); background: repeating-linear-gradient(0deg, transparent 0 22px, rgba(217,210,195,.7) 22px 23px); }
+  .stale { color: var(--alert); }
+  .stale::before { content: "!"; display: inline-flex; width: 13px; height: 13px; border: 1px solid var(--alert); border-radius: 50%; align-items: center; justify-content: center; font-size: .6rem; margin-right: .35rem; }
+  .err p { margin: .4rem 0 1rem; font-size: 1.02rem; }
+  .tipdemo { position: relative; height: 120px; }
+  .tipdemo .tip { position: absolute; opacity: 1; transform: none; left: 0; top: 10px; background: var(--ink); color: var(--rice); padding: .5rem .65rem; font-family: var(--mono); font-size: .72rem; line-height: 1.45; }
+  .tipdemo .tip b { display: block; font-family: var(--serif); font-weight: 400; font-size: 1.05rem; }
+  @media (max-width: 640px) { .sheet { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <section class="intro" style="padding-bottom:.5rem">
+    <div>
+      <p class="kicker">Stats · states</p>
+      <h1 style="font-size:2rem">Every state a figure can be in</h1>
+      <p>Same rules for each figure on Stats and Portfolio. Nothing shows 0 for missing data.</p>
+    </div>
+  </section>
+
+  <div class="sheet">
+    <div class="st"><h3>Loading</h3><div class="box">
+      <div class="sk" style="width:40%"></div><div class="sk big"></div><div class="chart-sk"></div>
+      <div class="note mono" style="font-size:.7rem;color:var(--muted);margin-top:.5rem">Height reserved: no layout shift. No looping shimmer.</div>
+    </div></div>
+
+    <div class="st"><h3>Withheld (fewer than 3 accounts)</h3><div class="box kpi">
+      <div class="lab">Monad deposits</div>
+      <div class="val withheld">Fewer than 3 accounts: not shown</div>
+      <div class="note">Totals above still include it.</div>
+    </div></div>
+
+    <div class="st"><h3>Not counted</h3><div class="box kpi">
+      <div class="lab">Total volume, 25 Oct</div>
+      <div class="val withheld">Not counted</div>
+      <div class="note">No reading for that day. A gap in the chart, never $0.</div>
+    </div></div>
+
+    <div class="st"><h3>Partial (today so far)</h3><div class="box">
+      <div class="tipdemo"><div class="tip"><b>$3,874</b><span>6 Nov 2026 · so far · Base only</span></div></div>
+      <div class="note mono" style="font-size:.7rem;color:var(--muted)">Hollow marker on the line; hollow bar for volume.</div>
+    </div></div>
+
+    <div class="st"><h3>Stale (data older than 1 h)</h3><div class="box">
+      <div class="src" style="margin:0;border:0;padding:0"><span class="stale">Data as of 6 Nov 2026, 14:20 UTC · more than 1 h old</span></div>
+      <div class="note mono" style="font-size:.7rem;color:var(--muted);margin-top:.8rem">Figures stay visible; only the source line changes.</div>
+    </div></div>
+
+    <div class="st err"><h3>Error</h3><div class="box">
+      <p>Stats are not available right now.</p>
+      <button class="ghost">Try again</button>
+      <div class="note mono" style="font-size:.7rem;color:var(--muted);margin-top:.8rem">Retry is throttled (one per 10 s, rate-limited on the Worker).</div>
+    </div></div>
+  </div>
+</main>
+</body>
+</html>

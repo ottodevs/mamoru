@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mamoru · Stats (mockup)</title>
+<link rel="stylesheet" href="mock.css">
+<style>
+  html[data-session="in"] .out-only, html[data-session="out"] .in-only { display: none !important; }
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#"><img src="../../../apps/mamoru-app/public/mark-two-stones.png" alt=""><span>Mamoru</span></a>
+  <nav class="tabs" aria-label="Main">
+    <a href="portfolio.html">Portfolio</a>
+    <a href="stats.html" aria-current="page">Stats</a>
+  </nav>
+  <div class="right">
+    <a class="linkish out-only" href="#">Sign in</a>
+    <span class="who in-only">Signed in · <b>your account</b></span>
+  </div>
+</header>
+
+<main>
+  <section class="intro">
+    <div>
+      <p class="kicker">Stats</p>
+      <h1>Mamoru, in public</h1>
+      <p>Every Mamoru account added up, read from the chain. Aggregates only: no account or address is shown.</p>
+    </div>
+    <a class="cta out-only" href="portfolio.html">Start saving</a>
+  </section>
+
+  <section class="kpis" aria-label="Headline figures">
+    <div class="kpi">
+      <div class="lab">Total deposits <span class="info" tabindex="0" data-tip="Total value in Mamoru accounts, vault deposits included.">i</span></div>
+      <div class="val" data-count="3874">$3,874</div>
+      <div class="note"><span class="dot"></span>so far today</div>
+    </div>
+    <div class="kpi">
+      <div class="lab">Earned in the last 24h <span class="info" tabindex="0" data-tip="Fees and yield Mamoru accounts earned in the last 24 hours. Approximate: vault yield is read from share value.">i</span></div>
+      <div class="val" data-count="0.30">$0.30</div>
+      <div class="note">fees only · vault yield not counted yet</div>
+    </div>
+    <div class="kpi">
+      <div class="lab">Total earned <span class="info" tabindex="0" data-tip="All fees and yield earned by Mamoru accounts since launch.">i</span></div>
+      <div class="val" data-count="1.44">$1.44</div>
+      <div class="note">fees only · vault yield not counted yet</div>
+    </div>
+    <div class="kpi">
+      <div class="lab">Funded accounts <span class="info" tabindex="0" data-tip="Mamoru accounts holding more than $1 right now.">i</span></div>
+      <div class="val">9</div>
+      <div class="note">holding more than $1</div>
+    </div>
+  </section>
+
+  <div class="rangebar">
+    <div class="seg" role="group" aria-label="Range">
+      <button data-days="7" aria-pressed="false">1W</button>
+      <button data-days="30" aria-pressed="false">1M</button>
+      <button data-days="90" aria-pressed="false">3M</button>
+      <button data-days="0" aria-pressed="true">ALL</button>
+    </div>
+    <span class="utc">Daily close · UTC</span>
+  </div>
+
+  <section class="chart" id="tvl">
+    <header>
+      <h2>Total deposits</h2>
+      <div class="legendish">
+        <span><i class="sw-hollow"></i>today, so far</span>
+        <span><i class="sw-hatch"></i>not counted</span>
+        <span>Base only · Monad not tracked yet</span>
+      </div>
+    </header>
+    <div class="plot" style="height:280px"></div>
+    <p class="sr" id="tvl-sum">Total deposits rose from $65 on 18 Oct 2026 to $3,874 so far on 6 Nov 2026. 25 Oct is not counted.</p>
+  </section>
+
+  <section class="chart" id="vol">
+    <header>
+      <h2>Total volume <span class="info" tabindex="0" data-tip="Capital Mamoru's engine placed or moved: new liquidity positions plus vault deposits.">i</span></h2>
+      <span class="stamp">Example data</span>
+    </header>
+    <div class="plot" style="height:180px"></div>
+    <p class="sr">Daily volume bars, example data.</p>
+  </section>
+
+  <footer class="src">
+    <div><span class="ok"></span>From Mamoru's on-chain reads · data as of 6 Nov 2026, 16:50 UTC</div>
+    <div>Base only until Monad tracking starts · figures rounded to the dollar, cents under $100</div>
+  </footer>
+</main>
+
+<nav class="tabbar" aria-label="Main">
+  <a href="portfolio.html"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="8" cy="11" rx="5.5" ry="6.5"/><ellipse cx="14.5" cy="13" rx="3" ry="4"/></svg>Portfolio</a>
+  <a href="stats.html" aria-current="page"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 17V10M8 17V5M13 17V8M18 17V12"/></svg>Stats</a>
+</nav>
+
+<script type="module">
+  import { chart, rangeControl, countUp, session } from './mock.js'
+  session(); addEventListener('hashchange', session)
+  // Real aggregate daily closes from prod D1 (account_daily, env prod+beta, Base), 6 Nov 2026. Every day has ≥ 12 owners.
+  const real = [['10-18',65],['10-19',65],['10-20',70],['10-21',71],['10-22',70],['10-23',70],['10-24',70],['10-25',null],['10-26',70],['10-27',70],['10-28',70],['10-29',69],['10-30',69],['10-31',69],['11-01',67],['11-02',207],['11-03',201],['11-04',356],['11-05',351],['11-06',3874]]
+  const tvl = real.map(([d, v], i) => ({ d: '2026-' + d, v, partial: i === real.length - 1, baseOnly: true, reason: v == null ? 'Not counted' : undefined }))
+  // Example volume (no source until B4 ships): placed per day.
+  const ex = [0,0,5,1,0,0,0,null,0,0,0,0,0,0,0,140,10,150,0,3400]
+  const vol = ex.map((v, i) => ({ d: tvl[i].d, v, partial: i === ex.length - 1, reason: v == null ? 'Not counted' : undefined }))
+  const a = chart(document.getElementById('tvl'), tvl, { kind: 'line', height: 280, label: 'Total deposits, daily close, USD' })
+  const b = chart(document.getElementById('vol'), vol, { kind: 'bar', height: 180, label: 'Total volume, daily, USD (example data)' })
+  rangeControl(document.querySelector('.seg'), [a, b])
+  countUp()
+  if (location.hash.includes('tip')) setTimeout(() => a._show(16), 500)
+</script>
+</body>
+</html>

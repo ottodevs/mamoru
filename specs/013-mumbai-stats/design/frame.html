@@ -1,0 +1,7 @@
+<!doctype html><meta charset="utf-8"><title>frame</title>
+<style>html,body{margin:0;background:#fff}iframe{border:0;display:block}</style>
+<!-- Screenshot harness: renders a mockup at an exact CSS width (headless Chromium will not open a 390 px window). -->
+<script>
+const q = new URLSearchParams(location.search)
+document.write(`<iframe src="${q.get('src')}" width="${q.get('w')}" height="${q.get('h')}"></iframe>`)
+</script>
