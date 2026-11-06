@@ -1,33 +1,48 @@
-// Public Stats (spec 013): the one payload `GET /api/stats` returns. Aggregates only: no account key, address or
-// per-account row ever appears here. Every figure has passed the k >= 3 owner guard (`api/stats/privacy.ts`) before
-// it is cached or sent; a figure that did not pass is `null` with its reason.
+// Public Stats (spec 013 amendment A1): the one payload `GET /api/stats` returns. Aggregates only: no account key,
+// address, user id or per-account row ever appears here. A figure, slice set or series that is not complete, is stale
+// (data older than 1 h) or is backed by fewer than 3 owners is absent: the page hides that block. There is no
+// "not counted" state in the payload.
 
-/** Why a figure is not a number, or why it is not complete. */
-export type StatsReason = 'TOO_FEW_ACCOUNTS' | 'NOT_COUNTED' | 'PARTIAL'
+/** One snapshot figure. `value`: USD (whole dollars, or cents for earned), a percent (one decimal) or a count. */
+export type StatsFigure = { value: number; dataAsOf: string }
 
-/** Owner count of a point, sent only as a band, never exact. */
-export type StatsOwnersBand = '3+' | '10+' | '25+' | '50+'
+/** One slice of a distribution: USD (whole dollars) and its share of the whole, in percent (one decimal). */
+export type StatsSlice = { key: string; usd: number; pct: number }
 
-/** One headline figure, in whole USD. `dataAsOf` is the oldest chain read behind it (ISO), never the request time. */
-export type StatsFigure = { usd: number | null; reason?: StatsReason; dataAsOf: string | null; stale?: true }
-
-/**
- * One day of a series (`day` = UTC `YYYY-MM-DD`), in whole USD. `dataAsOf` = the oldest chain read behind the point
- * (ISO); it differs from the day's close when a value was carried forward or the day is still open.
- */
-export type StatsPoint = { day: string; usd: number | null; reason?: StatsReason; owners?: StatsOwnersBand; dataAsOf?: string }
+export type StatsAprPoint = { day: string; apr: number; apr7d?: number }
 
 export type StatsView = {
-  tvlNow: StatsFigure
-  /** Daily close, all history; the client slices 1W / 1M / 3M / ALL. */
-  tvl: StatsPoint[]
-  /** The day Monad tracking was deployed (a system date, never an owner's first activity). Earlier points are Base only. */
-  monadFrom: string | null
-  volume: StatsPoint[]
-  earned24h: StatsFigure & { vaultYield: 'counted' | 'not_counted' }
-  earnedTotal: StatsFigure & { since: string; vaultYield: 'counted' | 'not_counted' }
-  fundedAccounts: { count: number | null; reason?: StatsReason; dataAsOf: string | null }
-  /** Per-chain TVL, all chains or none: present only when every chain passes the guard on every day and they add up to `tvl`. */
-  chains?: { chainId: number; tvl: StatsPoint[] }[]
-  sources: { tvl: string; volume: string; earned: string }
+  /** The oldest chain read behind the published figures (ISO). */
+  dataAsOf: string | null
+  snapshots: {
+    /** S1: idle + positions + vaults + uncollected fees + USDC in flight, every chain. */
+    totalDeposits?: StatsFigure
+    /** S2: positions + vaults. */
+    moneyWorking?: StatsFigure
+    /** S3: Safe balances not placed. */
+    idleCapital?: StatsFigure
+    /** S4, S5: fees collected + fees accrued + vault yield, USD to the cent. */
+    earned24h?: StatsFigure
+    totalEarned?: StatsFigure
+    /** S6: capital-weighted APR over the last 7 days, percent. */
+    apr7d?: StatsFigure
+    /** S7: accounts created. */
+    totalAccounts?: StatsFigure
+    /** S8: S1 / accounts holding more than $1. */
+    averageAccount?: StatsFigure
+    /** S9: the largest account's value, the number only. */
+    largestAccount?: StatsFigure
+    /** S10: share of S1 in USD stablecoins, percent. */
+    inStablecoins?: StatsFigure
+  }
+  /** D1 by token, D2 by chain, D3 by place. Slices backed by < 3 owners are merged into "Other". */
+  distributions: { byToken?: StatsSlice[]; byChain?: StatsSlice[]; byPlace?: StatsSlice[] }
+  series: {
+    /** T1: daily APR and its 7-day figure, all chains and per chain. */
+    apr?: { all: StatsAprPoint[]; base?: StatsAprPoint[]; monad?: StatsAprPoint[] }
+    /** T2: USD earned per day (cents), and the part collected that day. */
+    earnedPerDay?: { day: string; usd: number; collectedUsd: number }[]
+    /** T3: S1 at each UTC day's close (whole dollars). */
+    totalDeposits?: { day: string; usd: number }[]
+  }
 }
