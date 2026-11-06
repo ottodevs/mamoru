@@ -6304,7 +6304,8 @@ export class Operator {
   private watchSpendHold(acc: AccountState, engine: Engine): void {
     const ts = engine.journal.transitions
     const seen = this.spendHoldSeen.get(acc.accountKey)
-    let from = seen && seen.journal === engine.journal && seen.at <= ts.length ? seen.at : 0
+    // An engine this watcher was not told about (seeded at construction) starts from its current end, never from 0.
+    let from = seen && seen.journal === engine.journal && seen.at <= ts.length ? seen.at : ts.length
     const key = this.spendHoldKey(acc)
     for (; from < ts.length; from++) {
       const t = ts[from]!
@@ -7869,6 +7870,8 @@ export class Operator {
             : {}),
       },
     )
+    // otto/mamoru#376: the spend hold reads only transitions made from here on (none replayed from a rebuilt journal).
+    this.spendHoldSeen.set(acc.accountKey, { journal: engine.journal, at: engine.journal.transitions.length })
     // The journal of a restarted engine is empty: the block of the last operation stored for the account stands in
     // for it, so the first review does not decide on a view from before that operation.
     engine.minObservationBlock = lastEngineBlock(acc.ops)

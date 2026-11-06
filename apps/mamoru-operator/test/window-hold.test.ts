@@ -84,7 +84,7 @@ describe('the operator follows spend ops across reviews (journal transitions)', 
     const ops = new Map<string, { intent: { kind: string } }>([['s1', { intent: { kind: 'enter_mint' } }], ['h1', { intent: { kind: 'harvest' } }], ['s2', { intent: { kind: 'enter_swap' } }]])
     const transitions: T[] = []
     const journal = { transitions, op: (id: string) => ops.get(id) ?? (() => { throw new Error('no op') })() }
-    const self = { spendHold: new SpendHold(), spendHoldSeen: new Map(), spendHoldKey: () => 'a:g' }
+    const self = { spendHold: new SpendHold(), spendHoldSeen: new Map<string, { journal: object; at: number }>([['a', { journal, at: 0 }]]), spendHoldKey: () => 'a:g' }
     const acc = { accountKey: 'a', grants: [] }
     return { self, journal, transitions, run: () => watch.call(self, acc, { journal }) }
   }
@@ -106,6 +106,14 @@ describe('the operator follows spend ops across reviews (journal transitions)', 
     const r = rig()
     r.transitions.push({ opId: 'h1', seq: 1, to: 'discarded', detail: '0x7689e277' }, { opId: 'gone', seq: 2, to: 'discarded', detail: '0x7689e277' })
     r.run()
+    r.run()
+    expect(r.self.spendHold.of('a:g')).toBeUndefined()
+  })
+
+  test('a journal the watcher was not seeded with (rebuilt with old transitions) is read from its end, never replayed', () => {
+    const r = rig()
+    r.self.spendHoldSeen.clear()
+    r.transitions.push({ opId: 's1', seq: 1, to: 'discarded', detail: '0x7689e277' })
     r.run()
     expect(r.self.spendHold.of('a:g')).toBeUndefined()
   })
