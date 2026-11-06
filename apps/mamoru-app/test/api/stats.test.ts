@@ -188,11 +188,22 @@ describe('review fixes', () => {
     expect(v.snapshots.totalDeposits?.value).toBe(3500)
   })
 
-  test('an eligible account without a latest read makes the snapshot figures incomplete', async () => {
+  test('an account the operator never read holds nothing; any stale read, even of $0, hides the snapshot figures', async () => {
     const db = platform(5)
     user(db, 'u9')
     account(db, 'key-9', 'u9', 8453, addr(9))
+    expect(guardStats(await statsInput(db, NOW)).snapshots.totalDeposits?.value).toBe(3150)
+    latest(db, 8453, 'key-9', { idle: 0, lp: 0, vault: 0, readAt: '2026-11-06T12:00:00.000Z' })
     expect(guardStats(await statsInput(db, NOW)).snapshots.totalDeposits).toBeUndefined()
+  })
+
+  test('a gap in an account\'s daily rows leaves that day incomplete', async () => {
+    const db = platform(5)
+    for (const day of ['2026-11-03', '2026-11-04', '2026-11-05']) {
+      for (let i = 1; i <= 5; i++) if (!(i === 2 && day === '2026-11-04')) daily(db, day, 8453, `key-${i}`, { total: 300 * USDC, idle: 100 * USDC, lp: 200 * USDC, feesClose: 0.05 * USDC })
+      for (let i = 1; i <= 3; i++) daily(db, day, 143, `mon-${i}`, { total: 50 * USDC, idle: 50 * USDC, lp: 0 })
+    }
+    expect(guardStats(await statsInput(db, NOW)).series.totalDeposits?.map((p) => p.day)).toEqual(['2026-11-05'])
   })
 
   test('earned figures are raw USDC from earned.ts: $1.50 of income and $0.30 accrued per account', async () => {

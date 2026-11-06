@@ -27,8 +27,11 @@ type Daily = { day: string; account_key: string; chain_id: number; total_close_u
 
 /** A read older than this makes the snapshot figures incomplete (A1: stale reads hide the figure). */
 const STALE_READ_MS = 60 * 60 * 1000
-/** An owner backs an earned figure only with at least this much of it (one cent, raw USDC). */
-const EARNED_FLOOR = 10_000
+/**
+ * An owner backs an earned figure with any positive earning (raw USDC). Unlike a balance, earnings cannot be faked
+ * with dust: they need a position that earns fees or vault yield. Balances need FUNDED.
+ */
+const EARNED_FLOOR = 1
 
 /** Raw-USDC amounts per owner behind one figure; owners() counts those at or above a floor. */
 class Contrib {
@@ -166,8 +169,10 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
     .prepare("SELECT account_key, chain_id, total_usdc, idle_usdc, lp_usdc, fees_usdc, owed_usdc, read_at, block, positions_json, tokens_json FROM account_snapshot_latest WHERE env IN ('prod', 'beta')")
     .all<Latest>()).results.filter((r) => userOfKey(r.chain_id, r.account_key) !== undefined)
   const latest = new Map(latestRows.map((r) => [`${r.chain_id}:${r.account_key}`, r]))
-  // Complete only if every eligible account (every chain) has a latest read and every read is at most 1 h old.
-  const everyAccountRead = accounts.every((a) => latest.has(`${a.chain_id}:${a.account_key}`))
+  // Complete only if every chain with accounts has reads and every read is at most 1 h old. An account the operator
+  // never read (created, never activated: no Safe it tracks) has no row and holds nothing it manages.
+  const chainsRead = new Set(latestRows.map((r) => r.chain_id))
+  const everyAccountRead = [...chainsWithAccounts].every((c) => chainsRead.has(c))
   const freshRows = latestRows.every((r) => nowMs - Date.parse(r.read_at) <= STALE_READ_MS)
   let bridges: Bridge[] = []
   let bridgesKnown = true
@@ -337,9 +342,20 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
     }
     return days
   }
-  // Every account that existed on a day, on a chain known that day, must have its row (no silent gaps, review P1).
+  // No silent gaps (review P1): an account the cron writes (it has daily rows) must have one on every day from its
+  // first row on, through its last row, or through today while its latest read still holds money.
+  const span = new Map<string, { first: string; last: string }>()
+  for (const r of daily) {
+    const k = `${r.chain_id}:${r.account_key}`
+    const x = span.get(k)
+    span.set(k, x ? { first: x.first < r.day ? x.first : r.day, last: x.last > r.day ? x.last : r.day } : { first: r.day, last: r.day })
+  }
   const rowsComplete = (day: string, d: DayAcc, chains: readonly number[]) =>
-    accounts.every((a) => !chains.includes(a.chain_id) || a.created_day > day || (firstByChain.get(a.chain_id) ?? '9999') > day || d.rows.has(`${a.chain_id}:${a.account_key}`))
+    [...span.entries()].every(([k, x]) => {
+      if (!chains.includes(Number(k.split(':')[0]))) return true
+      const live = (latest.get(k)?.total_usdc ?? 0) > FUNDED
+      return day < x.first || (day > x.last && !live) || d.rows.has(k)
+    })
   const dayList = (days: Map<string, DayAcc>, from: string | null, chains: readonly number[]) => {
     if (from === null) return []
     const out: (DayAcc & { day: string })[] = []
