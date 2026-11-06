@@ -30,6 +30,10 @@ describe('vaultYield (spec 012 HRV-R5): explained shares only, split at every fl
     expect(usd).toBe(9_990_000n)
   })
 
+  test('a share change no flow explains (a full withdrawal whose receipt is unread) → not counted, never 0', () => {
+    expect(vaultYield({ t: 0, shares: 100n * E18, value: 100_000_000n, explained: 100n * E18 }, { t: 20, shares: 0n, value: 0n, explained: null }, [])).toBeNull()
+  })
+
   test('unknown explained shares at the previous sample → not counted (null), never 0', () => {
     expect(vaultYield({ t: 0, shares: 1n, value: 1n, explained: null }, { t: 1, shares: 1n, value: 2n, explained: 1n }, [])).toBeNull()
   })
@@ -60,6 +64,21 @@ describe('writeIncome and writeDayBackfill', () => {
       { event_id: `vault-backfill:${CHAIN}:${KEY}:vault:gtUSDCp`, source: 'backfill', t_s: T0, from_s: null, usd: 1_000_000 },
       { event_id: `vault:${CHAIN}:${KEY}:vault:gtUSDCp:${T0 + 600}`, source: 'vault-yield', t_s: T0 + 600, from_s: T0, usd: 500_000 },
     ])
+  })
+
+  test('a vault left before any sample: income is what came out above what went in', async () => {
+    const flows = [flow('deposit', 100_000_000n, 100n * E18, T0 - 7200, 1), flow('withdraw', 101_000_000n, 100n * E18, T0 - 3600, 2)]
+    await writeIncome(db, snap(T0, [], [{ safe: SAFE, days: [], vault: { flows, explained: { 'vault:gtUSDCp': '0' } } }]), new Date(), resolve)
+    expect(income()).toEqual([{ event_id: `vault-backfill:${CHAIN}:${KEY}:vault:gtUSDCp`, source: 'backfill', t_s: T0, from_s: null, usd: 1_000_000 }])
+  })
+
+  test('rows not counted while a receipt was unread are measured again once every flow is known', async () => {
+    const dep = flow('deposit', 100_000_000n, 100n * E18, T0 - 3600)
+    await writeIncome(db, snap(T0, [{ shares: 100n * E18, value: 101_000_000n }], [{ safe: SAFE, days: [], vault: { flows: [], explained: null } }]), new Date(), resolve)
+    await writeIncome(db, snap(T0 + 600, [{ shares: 100n * E18, value: 101_500_000n }], [{ safe: SAFE, days: [], vault: { flows: [], explained: null } }]), new Date(), resolve)
+    expect(income().map((r) => r.usd)).toEqual([null, null])
+    await writeIncome(db, snap(T0 + 1200, [{ shares: 100n * E18, value: 102_000_000n }], [{ safe: SAFE, days: [], vault: { flows: [dep], explained: { 'vault:gtUSDCp': (100n * E18).toString() } } }]), new Date(), resolve)
+    expect(income().map((r) => [r.source, r.from_s, r.usd])).toEqual([['backfill', null, 1_000_000], ['vault-yield', T0, 500_000], ['vault-yield', T0 + 600, 500_000]])
   })
 
   test('explained shares unknown at the first sample → the backfill is not counted (null)', async () => {
@@ -112,6 +131,16 @@ describe('earned (spec 012 HRV-R9): income up to the snapshot plus accrued at it
   test('an unpriced fee or an unexplained vault makes the total partial, named, never 0 folded in silently', () => {
     expect(earnedFrom([row('0x1:1', 'harvest', tA - 10, null)], tA, 1n, false)).toMatchObject({ totalUsd: '1', status: 'partial', notCounted: ['fees'] })
     expect(earnedFrom([], tA, 1n, true)).toMatchObject({ status: 'partial', notCounted: ['vault-yield'] })
+  })
+
+  test('receipts holding more collected fees than the income rows (no pull since the migration) → partial, history', async () => {
+    const db = memoryD1()
+    db.raw.exec(
+      `INSERT INTO account_snapshot_latest (chain_id, address, account_key, env, block, read_at, deployed, idle_usdc, lp_usdc, fees_usdc, owed_usdc, total_usdc, positions_json, updated_at)
+       VALUES (${CHAIN}, '${SAFE}', '${KEY}', 'prod', 1, '${new Date(tA * 1000).toISOString()}', 1, 0, 0, 0, 0, 0, '[]', 'x')`,
+    )
+    db.raw.exec(`INSERT INTO yield_ledger_account_receipts (day, chain_id, address, account_key, env, gas_paid_wei, collected_usdc, digest, updated_at) VALUES ('2026-11-01', ${CHAIN}, '${SAFE}', '${KEY}', 'prod', '0', 100000000, 'x', 'x')`)
+    expect(await loadEarned(db, CHAIN, KEY)).toMatchObject({ totalUsd: '0', status: 'partial', notCounted: ['history'] })
   })
 
   test('loadEarned reads the cutoff from the latest snapshot and is null without one', async () => {

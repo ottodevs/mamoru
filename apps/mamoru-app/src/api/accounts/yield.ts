@@ -119,7 +119,7 @@ export async function loadYieldLedger(db: Db, chainId: number, accountKey: strin
     accruedUsd: accrued !== null ? accrued.toString() : null,
     collectedUsd: anyCollected ? collected.toString() : null,
     earnedSoFarUsd: earnedSoFar,
-    ...(ledger ? { earnedStatus: ledger.status, notCounted: ledger.notCounted, earned24hUsd: ledger.last24hUsd } : {}),
+    ...(ledger ? { earnedStatus: ledger.status, notCounted: ledger.notCounted, earned24hUsd: ledger.last24hUsd, earned24hNotCounted: ledger.last24hNotCounted } : {}),
     gasPaidWei: anyGas ? gas.toString() : null,
     valueVsHoldUsd: valueVsHold !== null ? valueVsHold.toString() : null,
     feeAccruedUsd: anyFeeAccrued ? feeAccrued.toString() : null,

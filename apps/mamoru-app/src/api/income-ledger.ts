@@ -29,10 +29,15 @@ export type VaultPoint = { t: number; shares: bigint; value: bigint; explained: 
  */
 export function vaultYield(prev: VaultPoint, now: VaultPoint, flows: readonly VaultFlowWire[]): bigint | null {
   if (prev.explained === null) return null
+  const inside = flows.filter((f) => f.t > prev.t && f.t <= now.t).sort((a, b) => a.t - b.t || a.logIndex - b.logIndex)
+  // The holding must move exactly as the flows say: a change no flow explains (a receipt not read yet, shares from
+  // outside) leaves the interval not counted (null) instead of measuring it against a missing price.
+  const moved = inside.reduce((n, f) => n + (f.kind === 'deposit' ? BigInt(f.shares) : -BigInt(f.shares)), 0n)
+  const gap = prev.shares + moved - now.shares
+  if (gap > 1n || gap < -1n) return null
   let e = prev.explained
   let pps = ppsOf(prev.value, prev.shares)
   let usd = 0n
-  const inside = flows.filter((f) => f.t > prev.t && f.t <= now.t).sort((a, b) => a.t - b.t || a.logIndex - b.logIndex)
   for (const f of inside) {
     const at = ppsOf(BigInt(f.assets), BigInt(f.shares))
     if (at !== null) {
@@ -45,6 +50,26 @@ export function vaultYield(prev: VaultPoint, now: VaultPoint, flows: readonly Va
   const end = ppsOf(now.value, now.shares)
   if (end !== null && pps !== null) usd += (e * (end - pps)) / ONE
   return usd
+}
+
+/** Shares a vault's own flows explain at time t (deposits − withdraws up to it), never below 0. */
+export function explainedAt(flows: readonly VaultFlowWire[], t: number): bigint {
+  const n = flows.filter((f) => f.t <= t).reduce((m, f) => m + (f.kind === 'deposit' ? BigInt(f.shares) : -BigInt(f.shares)), 0n)
+  return n < 0n ? 0n : n
+}
+
+/** What the flows put in up to t, net of what came out (assets). */
+const netIn = (flows: readonly VaultFlowWire[], t: number): bigint => flows.filter((f) => f.t <= t).reduce((n, f) => n + (f.kind === 'deposit' ? BigInt(f.assets) : -BigInt(f.assets)), 0n)
+
+/**
+ * A vault's first sample: the explained shares' value now minus what the flows put in (net of what came out). A vault
+ * left before any sample (0 shares now) earned what came out above what went in. Null when explained is unknown.
+ */
+export function firstVaultIncome(shares: bigint, value: bigint, e: bigint | null, flows: readonly VaultFlowWire[], t: number): bigint | null {
+  if (e === null) return null
+  if (shares === 0n) return flows.length ? -netIn(flows, t) : null
+  if (e === 0n) return null
+  return (e * ppsOf(value, shares)!) / ONE - netIn(flows, t)
 }
 
 /** Explained shares cover the whole holding, to the wei. */
@@ -97,38 +122,71 @@ export async function writeIncome(db: Db, snapshot: SnapshotWire & { receipts?: 
           .all<SampleRow>()
       ).results
       const held = new Map((safe.vaults ?? []).map((v) => [v.name, v]))
-      const names = new Set([...held.keys(), ...prevRows.filter((p) => BigInt(p.shares) > 0n).map((p) => p.vault)])
+      // Every flow of the account is on the wire (stored ops are kept whole); `explained` null: a receipt is unread.
+      const allFlows = r?.vault ? (r.vault.explained === null ? null : r.vault.flows) : []
+      const flowVaults = (allFlows ?? []).map((f) => f.vault)
+      const names = new Set([...held.keys(), ...prevRows.filter((p) => BigInt(p.shares) > 0n).map((p) => p.vault), ...flowVaults.filter((v) => !prevRows.some((p) => p.vault === v))])
       for (const vault of names) {
         const prev = prevRows.find((p) => p.vault === vault)
         if (prev && prev.t_s >= t) continue
         const cur = held.get(vault)
         const shares = BigInt(cur?.shares ?? '0')
         const value = BigInt(cur?.valueUsdc ?? '0')
-        // No vault wire at all: the operator has no flow and no receipt waiting, so nothing is explained.
-        const e = r?.vault ? (r.vault.explained === null ? null : BigInt(r.vault.explained[vault] ?? '0')) : 0n
+        const flows = (allFlows ?? r?.vault?.flows ?? []).filter((f) => f.vault === vault)
+        const e = allFlows === null ? null : explainedAt(flows, t)
         stmts.push(
           db
             .prepare('INSERT INTO yield_ledger_vault_samples (chain_id, account_key, vault, t_s, shares, value_usdc, explained_shares, explained) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING')
             .bind(chainId, account.accountKey, vault, t, shares.toString(), Number(value), e === null ? null : e.toString(), isExplained(shares, e) ? 1 : 0),
         )
         samples++
-        const flows = (r?.vault?.flows ?? []).filter((f) => f.vault === vault)
         if (prev) {
-          const usd = vaultYield({ t: prev.t_s, shares: BigInt(prev.shares), value: BigInt(prev.value_usdc), explained: prev.explained_shares === null ? null : BigInt(prev.explained_shares) }, { t, shares, value, explained: e }, flows)
+          const ePrev = allFlows === null ? (prev.explained_shares === null ? null : BigInt(prev.explained_shares)) : explainedAt(flows, prev.t_s)
+          const usd = vaultYield({ t: prev.t_s, shares: BigInt(prev.shares), value: BigInt(prev.value_usdc), explained: ePrev }, { t, shares, value, explained: e }, flows)
           stmts.push(db.prepare(UPSERT_EVENT).bind(`vault:${chainId}:${account.accountKey}:${vault}:${t}`, chainId, account.accountKey, account.env, 'vault-yield', t, prev.t_s, usd === null ? null : Number(usd), at))
-        } else if (shares > 0n) {
-          // First sample: what the explained shares are worth now minus what the flows put in (net of what came out).
-          const pps = ppsOf(value, shares)!
-          const net = flows.filter((f) => f.t <= t).reduce((n, f) => n + (f.kind === 'deposit' ? BigInt(f.assets) : -BigInt(f.assets)), 0n)
-          const usd = e === null || e === 0n ? null : (e * pps) / ONE - net
-          stmts.push(db.prepare(UPSERT_EVENT).bind(`vault-backfill:${chainId}:${account.accountKey}:${vault}`, chainId, account.accountKey, account.env, 'backfill', t, null, usd === null ? null : Number(usd), at))
+        } else {
+          const usd = firstVaultIncome(shares, value, e, flows, t)
+          if (shares > 0n || flows.length) stmts.push(db.prepare(UPSERT_EVENT).bind(`vault-backfill:${chainId}:${account.accountKey}:${vault}`, chainId, account.accountKey, account.env, 'backfill', t, null, usd === null ? null : Number(usd), at))
         }
       }
+      // Rows left not counted while a receipt was unread are measured again once every flow is known.
+      if (allFlows !== null && allFlows.length) stmts.push(...(await repairVaultRows(db, chainId, account.accountKey, allFlows, at)))
     }
     if (stmts.length) await db.batch(stmts)
   }
   await writeDayBackfill(db, chainId, at)
   return { events, samples }
+}
+
+/**
+ * Vault income rows stored as not counted (null) are measured again from the stored samples once every flow of the
+ * account is known: an interval from its two samples, a first sample from its own. Rows that stay unmeasurable stay null.
+ */
+async function repairVaultRows(db: Db, chainId: number, accountKey: string, flows: readonly VaultFlowWire[], at: string) {
+  const nulls = (
+    await db
+      .prepare("SELECT event_id, source, t_s, from_s FROM yield_ledger_income WHERE chain_id = ? AND account_key = ? AND usd IS NULL AND (event_id LIKE 'vault:%' OR event_id LIKE 'vault-backfill:%')")
+      .bind(chainId, accountKey)
+      .all<{ event_id: string; source: string; t_s: number; from_s: number | null }>()
+  ).results
+  const out = []
+  for (const row of nulls) {
+    const vault = row.event_id.startsWith('vault-backfill:') ? row.event_id.slice(`vault-backfill:${chainId}:${accountKey}:`.length) : row.event_id.slice(`vault:${chainId}:${accountKey}:`.length, row.event_id.lastIndexOf(':'))
+    const vf = flows.filter((f) => f.vault === vault)
+    const sample = (t: number) => db.prepare('SELECT shares, value_usdc FROM yield_ledger_vault_samples WHERE chain_id = ? AND account_key = ? AND vault = ? AND t_s = ?').bind(chainId, accountKey, vault, t).first<{ shares: string; value_usdc: number }>()
+    const nowS = await sample(row.t_s)
+    if (!nowS) continue
+    let usd: bigint | null
+    if (row.source === 'vault-yield' && row.from_s !== null) {
+      const prevS = await sample(row.from_s)
+      if (!prevS) continue
+      usd = vaultYield({ t: row.from_s, shares: BigInt(prevS.shares), value: BigInt(prevS.value_usdc), explained: explainedAt(vf, row.from_s) }, { t: row.t_s, shares: BigInt(nowS.shares), value: BigInt(nowS.value_usdc), explained: explainedAt(vf, row.t_s) }, vf)
+    } else {
+      usd = firstVaultIncome(BigInt(nowS.shares), BigInt(nowS.value_usdc), explainedAt(vf, row.t_s), vf, row.t_s)
+    }
+    if (usd !== null) out.push(db.prepare('UPDATE yield_ledger_income SET usd = ?, updated_at = ? WHERE event_id = ? AND usd IS NULL').bind(Number(usd), at, row.event_id))
+  }
+  return out
 }
 
 /**

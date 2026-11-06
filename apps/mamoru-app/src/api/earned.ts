@@ -29,8 +29,9 @@ const DAY = 86_400
 const LONG_INTERVAL_S = 2 * 3600
 
 /** Pure: the earned figures from the account's income rows, its accrued fees at t_a, and its vault holdings' state. */
-export function earnedFrom(rows: readonly IncomeRow[], tA: number, accrued: bigint, unexplainedVault: boolean): Omit<EarnedView, 'asOf'> {
+export function earnedFrom(rows: readonly IncomeRow[], tA: number, accrued: bigint, unexplainedVault: boolean, historyShort = false): Omit<EarnedView, 'asOf'> {
   const missing = new Set<NotCounted>()
+  if (historyShort) missing.add('history')
   const missing24 = new Set<NotCounted>(['accrued-24h'])
   if (unexplainedVault) missing.add('vault-yield')
   let total = accrued
@@ -88,7 +89,7 @@ export async function loadEarned(db: Db, chainId: number, accountKey: string): P
   const tA = Math.floor(Date.parse(latest.read_at) / 1000)
   if (!Number.isFinite(tA)) return null
   try {
-    const [rows, vaults] = await Promise.all([
+    const [rows, vaults, short] = await Promise.all([
       db.prepare('SELECT event_id, source, t_s, from_s, usd FROM yield_ledger_income WHERE chain_id = ? AND account_key = ? AND t_s <= ?').bind(chainId, accountKey, tA).all<IncomeRow>(),
       db
         .prepare(
@@ -97,9 +98,18 @@ export async function loadEarned(db: Db, chainId: number, accountKey: string): P
         )
         .bind(chainId, accountKey)
         .all<{ shares: string; explained: number }>(),
+      // The receipts know more collected fees than the income rows hold (no pull since the migration, or an income
+      // write that failed): the total is short and says so, never 'complete'.
+      db
+        .prepare(
+          `SELECT (SELECT COALESCE(SUM(collected_usdc), 0) FROM yield_ledger_account_receipts WHERE chain_id = ?1 AND account_key = ?2)
+                > (SELECT COALESCE(SUM(usd), 0) FROM yield_ledger_income WHERE chain_id = ?1 AND account_key = ?2 AND (source IN ('harvest', 're-range') OR event_id LIKE 'backfill:%')) + 1 AS short`,
+        )
+        .bind(chainId, accountKey)
+        .first<{ short: number }>(),
     ])
     const unexplained = vaults.results.some((v) => BigInt(v.shares) > 0n && v.explained !== 1)
-    return { asOf: latest.read_at, ...earnedFrom(rows.results, tA, BigInt(latest.fees_usdc), unexplained) }
+    return { asOf: latest.read_at, ...earnedFrom(rows.results, tA, BigInt(latest.fees_usdc), unexplained, short?.short === 1) }
   } catch (e) {
     if (/no such table/i.test(e instanceof Error ? e.message : String(e))) return null
     throw e
