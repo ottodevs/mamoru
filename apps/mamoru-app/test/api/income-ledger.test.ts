@@ -87,6 +87,9 @@ describe('writeIncome and writeDayBackfill', () => {
     const flows = [flow('deposit', 100_000_000n, 100n * E18, T0 - 7200, 1), flow('withdraw', 101_000_000n, 100n * E18, T0 - 3600, 2)]
     await writeIncome(db, snap(T0 + 600, [], [{ safe: SAFE, days: [], vault: { flows, explained: { 'vault:gtUSDCp': '0' } } }]), new Date(), resolve)
     expect(income().map((r) => [r.event_id.split(':')[0], r.usd])).toEqual([['vault-backfill', 1_000_000], ['vault-pending', 0]])
+    // A new unread period opens it again.
+    await writeIncome(db, snap(T0 + 1200, [], [{ safe: SAFE, days: [], vault: { flows: [], explained: null } }]), new Date(), resolve)
+    expect(income().find((r) => r.event_id.startsWith('vault-pending'))!.usd).toBeNull()
   })
 
   test('explained shares unknown at the first sample → the backfill is not counted (null)', async () => {

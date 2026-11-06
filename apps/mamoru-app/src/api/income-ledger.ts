@@ -154,7 +154,16 @@ export async function writeIncome(db: Db, snapshot: SnapshotWire & { receipts?: 
       // While a receipt is unread, a vault this pull cannot see (left before any sample) may have earned: one not-counted
       // row says so until the flows are known, then it is closed at 0 (the vaults themselves are counted above).
       const pending = `vault-pending:${chainId}:${account.accountKey}`
-      if (allFlows === null) stmts.push(db.prepare(UPSERT_EVENT).bind(pending, chainId, account.accountKey, account.env, 'backfill', t, null, null, at))
+      // Its own upsert: a row closed at 0 earlier opens again (usd back to null) for a new unread period.
+      if (allFlows === null)
+        stmts.push(
+          db
+            .prepare(
+              `INSERT INTO yield_ledger_income (event_id, chain_id, account_key, env, source, t_s, from_s, usd, updated_at) VALUES (?, ?, ?, ?, 'backfill', ?, NULL, NULL, ?)
+               ON CONFLICT(event_id) DO UPDATE SET usd = NULL, t_s = excluded.t_s, updated_at = excluded.updated_at`,
+            )
+            .bind(pending, chainId, account.accountKey, account.env, t, at),
+        )
       else stmts.push(db.prepare('UPDATE yield_ledger_income SET usd = 0, updated_at = ? WHERE event_id = ? AND usd IS NULL').bind(at, pending))
     }
     if (stmts.length) await db.batch(stmts)
