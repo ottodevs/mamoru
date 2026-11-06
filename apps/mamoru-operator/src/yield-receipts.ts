@@ -45,6 +45,11 @@ export type FeeFact = {
   usdc?: string
   /** spec 012 HRV-R5: the position manager's Collect log index: with the txHash it is the income event's id. */
   logIndex?: number
+  /**
+   * A piece of a fee the older layout read but never priced: it is never priced now (today's price would rewrite
+   * history), so its day stays not counted rather than retro-priced.
+   */
+  noLatePrice?: true
 }
 
 /** spec 012 HRV-R5: one ERC-4626 Deposit or Withdraw of this Safe's own shares, in a registry vault. */
@@ -152,25 +157,60 @@ export function needsFacts(op: StoredOp): boolean {
   return op.facts?.txHash?.toLowerCase() !== op.txHash.toLowerCase() || (op.facts.v ?? 1) < FACTS_VERSION
 }
 
+/** A receipt not found this many times over at least GIVE_UP_MS stops holding the account's vault state as unknown. */
+export const GIVE_UP_MISSES = 20
+export const GIVE_UP_MS = 24 * 3_600_000
+
+/** The op's receipt keeps failing (spec 012, #305 review): still retried, but no longer blocks `explained`; the account's vault yield is partial instead. */
+export function gaveUp(op: StoredOp): boolean {
+  const m = op.factsMisses
+  return !!m && m.count >= GIVE_UP_MISSES && Date.now() - m.first >= GIVE_UP_MS
+}
+
+/** An engine op on its way (no receipt read can exist yet): what it moves is not in any flow until it lands. */
+const inFlight = (op: StoredOp): boolean => op.opId.startsWith('eng-') && (op.state === 'proposed' || op.state === 'submitted') && !op.txHash
+
 /**
  * Facts read again for a newer layout keep what the old ones had priced: a price is frozen at the first snapshot after
  * the op, and today's would rewrite history.
  */
 export function keepPrices(next: OpFacts, prev: OpFacts | undefined): OpFacts {
   if (!prev || prev.txHash?.toLowerCase() !== next.txHash?.toLowerCase()) return next
-  // Old-layout facts had one fee per position: its frozen value goes whole to the position's first fee of the re-read
-  // and 0 to the others, so a split never reprices history (nor the yield fee's base) and the total stays the same.
-  const seen = new Set<string>()
-  const fees = next.fees.map((f) => {
-    const same = prev.fees.find((o) => o.logIndex !== undefined && o.tokenId === f.tokenId && o.logIndex === f.logIndex)
-    if (same?.usdc !== undefined && same.fee0 === f.fee0 && same.fee1 === f.fee1) return { ...f, usdc: same.usdc }
-    const legacy = prev.fees.find((o) => o.logIndex === undefined && o.tokenId === f.tokenId)
-    if (legacy?.usdc === undefined) return f
-    const first = !seen.has(f.tokenId)
-    seen.add(f.tokenId)
-    return { ...f, usdc: first ? legacy.usdc : '0' }
-  })
-  return { ...next, fees, ...(prev.gasUsdc !== undefined && prev.gasWei === next.gasWei ? { gasUsdc: prev.gasUsdc } : {}) }
+  const gas = prev.gasUsdc !== undefined && prev.gasWei === next.gasWei ? { gasUsdc: prev.gasUsdc } : {}
+  if ((prev.v ?? 1) >= FACTS_VERSION) {
+    // Same layout read again (a reorg check): a piece keeps its price only when it is the very same collect.
+    const fees = next.fees.map((f) => {
+      const same = prev.fees.find((o) => o.tokenId === f.tokenId && o.logIndex === f.logIndex && o.fee0 === f.fee0 && o.fee1 === f.fee1)
+      return same?.usdc !== undefined ? { ...f, usdc: same.usdc } : f
+    })
+    return { ...next, fees, ...gas }
+  }
+  // An older layout: its per-position totals stay authoritative (#305 review). The re-read only adds where each collect
+  // sits (log index): pieces are capped to the legacy amounts in log order, the remainder goes to the first piece, the
+  // frozen price goes whole to the first piece and 0 to the rest, a position the old read had no fee for gets none, and
+  // a legacy fee never priced is never priced now. Day totals, prices and the yield fee's base do not move.
+  const fees: FeeFact[] = []
+  for (const legacy of prev.fees) {
+    const pieces = next.fees.filter((f) => f.tokenId === legacy.tokenId).sort((a, b) => (a.logIndex ?? 0) - (b.logIndex ?? 0))
+    let r0 = BigInt(legacy.fee0)
+    let r1 = BigInt(legacy.fee1)
+    const out: FeeFact[] = []
+    for (const p of pieces) {
+      const c0 = BigInt(p.fee0) < r0 ? BigInt(p.fee0) : r0
+      const c1 = BigInt(p.fee1) < r1 ? BigInt(p.fee1) : r1
+      r0 -= c0
+      r1 -= c1
+      if (c0 === 0n && c1 === 0n) continue
+      out.push({ tokenId: legacy.tokenId, pool: legacy.pool, fee0: c0.toString(), fee1: c1.toString(), ...(p.logIndex !== undefined ? { logIndex: p.logIndex } : {}) })
+    }
+    if (!out.length) {
+      fees.push(legacy)
+      continue
+    }
+    out[0] = { ...out[0]!, fee0: (BigInt(out[0]!.fee0) + r0).toString(), fee1: (BigInt(out[0]!.fee1) + r1).toString() }
+    out.forEach((f, i) => fees.push(legacy.usdc !== undefined ? { ...f, usdc: i === 0 ? legacy.usdc : '0' } : { ...f, noLatePrice: true }))
+  }
+  return { ...next, fees, ...gas }
 }
 
 /** Sets `gasUsdc`, and `usdc` on every fee, when the snapshot can price them. Returns whether anything changed (the caller saves).
@@ -186,7 +226,7 @@ export function priceFees(facts: OpFacts, pools: Snapshot['pools'], registry: Re
     changed = true
   }
   for (const f of facts.fees) {
-    if (f.usdc !== undefined) continue
+    if (f.usdc !== undefined || f.noLatePrice) continue
     const state = pools[f.pool]
     if (!state) continue
     const e = registry.entries.find((x) => x.name === f.pool)
@@ -262,45 +302,55 @@ export const FACTS_PER_TICK = 20
 
 /** spec 012 HRV-R5: one fee income event; `id` = `<txHash>:<logIndex>`, `t` = block time (unix s). */
 export type IncomeEventWire = { id: string; t: number; source: 'harvest' | 're-range'; usdc?: string }
-export type VaultFlowWire = VaultFlow & { id: string; t: number }
+export type VaultFlowWire = VaultFlow & { id: string; t: number; block?: number }
 /**
  * spec 012 HRV-R5: every vault flow of the account and, per vault, the shares those flows explain (deposits − withdraws).
  * `explained` is null while any op of the account still waits for its receipt: until then the sum may be short.
  */
-export type AccountVaultWire = { flows: VaultFlowWire[]; explained: Record<string, string> | null }
+/** `incomplete`: a receipt was given up on (gaveUp), so `explained` may be short: the Worker counts the vault as partial. */
+export type AccountVaultWire = { flows: VaultFlowWire[]; explained: Record<string, string> | null; incomplete?: true }
 export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire }
 
 /** The fee events of stored ops with facts of the current layout; an op's step says whether it was a harvest. */
 export function incomeEvents(ops: readonly StoredOp[]): IncomeEventWire[] {
-  const out: IncomeEventWire[] = []
+  // One event per id: two stored ops can read the same transaction (an op stored without its userOp hash).
+  const out = new Map<string, IncomeEventWire & { block: number; logIndex: number }>()
   for (const op of ops) {
     const f = op.facts
     if (!f?.txHash || (f.v ?? 1) < FACTS_VERSION) continue
     const t = Math.floor(Date.parse(f.at) / 1000)
     for (const fee of f.fees) {
       if (fee.logIndex === undefined) continue
-      out.push({ id: `${f.txHash.toLowerCase()}:${fee.logIndex}`, t, source: op.step === 'harvest' ? 'harvest' : 're-range', ...(fee.usdc !== undefined ? { usdc: fee.usdc } : {}) })
+      const id = `${f.txHash.toLowerCase()}:${fee.logIndex}`
+      if (!out.has(id)) out.set(id, { id, t, source: op.step === 'harvest' ? 'harvest' : 're-range', ...(fee.usdc !== undefined ? { usdc: fee.usdc } : {}), block: Number(f.block ?? 0), logIndex: fee.logIndex })
     }
   }
-  return out.sort((a, b) => a.t - b.t || (a.id < b.id ? -1 : 1))
+  return [...out.values()].sort((a, b) => a.t - b.t || a.block - b.block || a.logIndex - b.logIndex).map(({ block: _b, logIndex: _l, ...e }) => e)
 }
 
 /** spec 012 HRV-R5: the account's vault flows, oldest first, and the shares they explain per vault. */
 export function vaultWire(ops: readonly StoredOp[]): AccountVaultWire | undefined {
-  const flows: VaultFlowWire[] = []
+  // One flow per id (two stored ops can read the same transaction), in chain order: block, then log index.
+  const byId = new Map<string, VaultFlowWire>()
   for (const op of ops) {
     const f = op.facts
     if (!f?.txHash || (f.v ?? 1) < FACTS_VERSION) continue
     const t = Math.floor(Date.parse(f.at) / 1000)
-    for (const v of f.vaultFlows ?? []) flows.push({ ...v, id: `${f.txHash.toLowerCase()}:${v.logIndex}`, t })
+    for (const v of f.vaultFlows ?? []) {
+      const id = `${f.txHash.toLowerCase()}:${v.logIndex}`
+      if (!byId.has(id)) byId.set(id, { ...v, id, t, block: Number(f.block ?? 0) })
+    }
   }
-  const pending = ops.some(needsFacts)
+  const flows = [...byId.values()]
+  // Unknown while a receipt is due (not given up on) or an engine op is on its way; a receipt given up on makes it partial.
+  const pending = ops.some((o) => (needsFacts(o) && !gaveUp(o)) || inFlight(o))
+  const incomplete = ops.some((o) => needsFacts(o) && gaveUp(o))
   // No flow read yet but receipts still due: say "unknown", not "none", or a vault held since before would count as unexplained-zero.
-  if (!flows.length) return pending ? { flows, explained: null } : undefined
-  flows.sort((a, b) => a.t - b.t || a.logIndex - b.logIndex)
+  if (!flows.length) return pending ? { flows, explained: null } : incomplete ? { flows, explained: {}, incomplete: true } : undefined
+  flows.sort((a, b) => a.t - b.t || (a.block ?? 0) - (b.block ?? 0) || a.logIndex - b.logIndex)
   const explained: Record<string, bigint> = {}
   for (const v of flows) explained[v.vault] = (explained[v.vault] ?? 0n) + (v.kind === 'deposit' ? BigInt(v.shares) : -BigInt(v.shares))
-  return { flows, explained: pending ? null : Object.fromEntries(Object.entries(explained).map(([k, n]) => [k, (n < 0n ? 0n : n).toString()])) }
+  return { flows, explained: pending ? null : Object.fromEntries(Object.entries(explained).map(([k, n]) => [k, (n < 0n ? 0n : n).toString()])), ...(incomplete && !pending ? { incomplete: true as const } : {}) }
 }
 
 /**
@@ -332,7 +382,12 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
     try {
       const txHash = op.txHash as Hex
       const r = await readReceipt(txHash)
-      if (!r || r.blockNumber > safe!) continue
+      if (!r) {
+        op.factsMisses = { count: (op.factsMisses?.count ?? 0) + 1, first: op.factsMisses?.first ?? Date.now() }
+        changed = true
+        continue
+      }
+      if (r.blockNumber > safe!) continue
       const t = times.get(r.blockNumber) ?? (await blockTime(r.blockNumber))
       times.set(r.blockNumber, t)
       const read: OpFacts = { txHash, ...factsFromLogs(r.logs, a.safe, t, op.opId.startsWith('eng-') ? op.userOpHash : undefined, registry), block: r.blockNumber.toString() }
@@ -340,6 +395,7 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
       const upgrade = op.facts?.txHash?.toLowerCase() === txHash.toLowerCase()
       const feeable = upgrade ? op.facts!.feeable === true : !!(op.feeScoped && source.feeScope?.(a.accountKey))
       op.facts = { ...keepPrices(read, op.facts), ...(feeable ? { feeable: true as const } : {}) }
+      delete op.factsMisses
       tried.delete(key)
       changed = true
     } catch (e) {

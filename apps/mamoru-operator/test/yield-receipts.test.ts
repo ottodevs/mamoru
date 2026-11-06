@@ -315,3 +315,45 @@ describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
     expect(vaultWire([op('eng-5')])).toEqual({ flows: [], explained: null })
   })
 })
+
+describe('#305 peer-gate fixes: history stays as it was, ids are unique, a lost receipt does not freeze the vault state', () => {
+  const v2 = (txHash: string, fees: OpFacts['fees'], vaultFlows?: OpFacts['vaultFlows']): OpFacts => ({ txHash, at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees, v: FACTS_VERSION, block: '7', ...(vaultFlows ? { vaultFlows } : {}) })
+
+  test('P1-1: a position the old read had no fee for gets none; pieces are capped to the legacy totals', () => {
+    const old: OpFacts = { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [{ tokenId: '7', pool: LIVE_POOL, fee0: '3', fee1: '0', usdc: '3' }] }
+    const next = keepPrices(v2('0xaa', [{ tokenId: '44', pool: LIVE_POOL, fee0: '5', fee1: '0', logIndex: 1 }, { tokenId: '7', pool: LIVE_POOL, fee0: '9', fee1: '0', logIndex: 4 }]), old)
+    expect(next.fees).toEqual([{ tokenId: '7', pool: LIVE_POOL, fee0: '3', fee1: '0', logIndex: 4, usdc: '3' }])
+  })
+
+  test('P1-1: a legacy fee never priced is never priced at today\'s snapshot', () => {
+    const old: OpFacts = { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [{ tokenId: '7', pool: LIVE_POOL, fee0: '3', fee1: '0' }] }
+    const next = keepPrices(v2('0xaa', [{ tokenId: '7', pool: LIVE_POOL, fee0: '3', fee1: '0', logIndex: 4 }]), old)
+    expect(next.fees[0]!.noLatePrice).toBe(true)
+    priceFees(next, { [LIVE_POOL]: { sqrtPriceX96: 2n ** 96n } } as never, baseRegistry)
+    expect(next.fees[0]!.usdc).toBeUndefined()
+  })
+
+  test('P1-2: two stored ops reading the same transaction give one event and one flow per id', () => {
+    const flows = [{ vault: 'vault:gtUSDCp', kind: 'deposit' as const, assets: '100', shares: '90', logIndex: 3 }]
+    const fees = [{ tokenId: '1', pool: LIVE_POOL, fee0: '1', fee1: '0', logIndex: 2, usdc: '1' }]
+    const a = op('eng-1', v2('0xaa', fees, flows))
+    const b = op('own-2', v2('0xaa', fees, flows))
+    expect(incomeEvents([a, b])).toHaveLength(1)
+    expect(vaultWire([a, b])).toMatchObject({ explained: { 'vault:gtUSDCp': '90' } })
+    expect(vaultWire([a, b])!.flows).toHaveLength(1)
+  })
+
+  test('P1-3: a receipt given up on (20 misses over a day) leaves the vault state known but incomplete, not unknown forever', () => {
+    const flows = [{ vault: 'vault:gtUSDCp', kind: 'deposit' as const, assets: '100', shares: '90', logIndex: 3 }]
+    const lost = { ...op('eng-9', undefined, '0xdead'), factsMisses: { count: 20, first: Date.now() - 25 * 3_600_000 } } as StoredOp
+    expect(vaultWire([op('eng-1', v2('0xaa', [], flows)), lost])).toMatchObject({ explained: { 'vault:gtUSDCp': '90' }, incomplete: true })
+    const young = { ...lost, factsMisses: { count: 20, first: Date.now() - 3_600_000 } } as StoredOp
+    expect(vaultWire([op('eng-1', v2('0xaa', [], flows)), young])?.explained).toBeNull()
+  })
+
+  test('an engine op on its way (no hash yet) holds the vault state unknown', () => {
+    const flows = [{ vault: 'vault:gtUSDCp', kind: 'deposit' as const, assets: '100', shares: '90', logIndex: 3 }]
+    const sending = { opId: 'eng-5', kind: 'enter', state: 'submitted', updatedAt: 'x' } as StoredOp
+    expect(vaultWire([op('eng-1', v2('0xaa', [], flows)), sending])?.explained).toBeNull()
+  })
+})
