@@ -2,8 +2,9 @@
 // queries build a GuardInput (every figure with the set of owners behind it and whether it is complete); the route
 // sends only what `guardStats` returns. A figure is published only if it is complete, finite, fresh (data at most 1 h
 // old) and backed by at least 3 distinct owners (allow-if: anything else withholds). Withheld means absent: A1 has no
-// "not counted" state. Distributions merge slices below k into "Other"; if that leaves "Other" itself below k (one
-// hidden slice, or a few tiny ones) the whole split is withheld, so a slice can never be read as total minus the rest.
+// "not counted" state. Distributions merge slices below k into "Other"; while "Other" is itself below k, the smallest
+// shown slice joins it (so a hidden slice can never be read as the total minus the rest); if no slice is left to join,
+// the whole split is withheld.
 // Series keep their longest run of valid days ending at the last one. Accepted on purpose (owners' decisions): the
 // largest account's value (S9) and the accounts count (S7) are exact, and two readings can be subtracted (plan §3.7).
 import type { StatsAprPoint, StatsFigure, StatsSlice, StatsView } from '@mamoru/domain'
@@ -51,14 +52,15 @@ export function guardSplit(s: GuardSplit | undefined, now: Date): StatsSlice[] |
   if (!s || !s.complete || !fresh(s.dataAsOf, now)) return undefined
   const slices = s.slices.filter((x) => finite(x.usd) && x.usd > 0)
   if (!slices.length || s.slices.some((x) => !finite(x.usd) || x.usd < 0)) return undefined
-  const shown = slices.filter((x) => enoughOwners(x.owners.size))
+  const shown = slices.filter((x) => enoughOwners(x.owners.size)).sort((a, b) => b.usd - a.usd)
   const hidden = slices.filter((x) => !enoughOwners(x.owners.size))
+  const ownersOf = (xs: readonly GuardSlice[]) => new Set(xs.flatMap((x) => [...x.owners])).size
+  while (hidden.length && !enoughOwners(ownersOf(hidden)) && shown.length) hidden.push(shown.pop()!)
+  if (hidden.length && !enoughOwners(ownersOf(hidden))) return undefined
   const out = shown.map((x) => ({ key: x.key, usd: x.usd }))
-  if (hidden.length) {
-    const owners = new Set(hidden.flatMap((x) => [...x.owners]))
-    if (!enoughOwners(owners.size)) return undefined
-    out.push({ key: 'Other', usd: hidden.reduce((a, x) => a + x.usd, 0) })
-  }
+  if (hidden.length) out.push({ key: 'Other', usd: hidden.reduce((a, x) => a + x.usd, 0) })
+  // Everything merged: a split of one slice says nothing; it is withheld.
+  if (!shown.length) return undefined
   const total = out.reduce((a, x) => a + x.usd, 0)
   return out.sort((a, b) => (a.key === 'Other' ? 1 : b.key === 'Other' ? -1 : b.usd - a.usd)).map((x) => ({ key: x.key, usd: round(x.usd, 'dollars'), pct: round((x.usd / total) * 100, 'pct') }))
 }

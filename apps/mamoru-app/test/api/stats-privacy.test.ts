@@ -28,9 +28,13 @@ describe('distributions (complementary rule)', () => {
     const d = guardSplit({ complete: true, dataAsOf: AS_OF, slices: [slice('USDC', 3452.97, 15), slice('WETH', 740.2, 6), slice('cbBTC', 100, 1, 20), slice('USDT', 50, 1, 21), slice('WMON', 20.17, 1, 22)] }, NOW)
     expect(d).toEqual([{ key: 'USDC', usd: 3453, pct: 79.1 }, { key: 'WETH', usd: 740, pct: 17 }, { key: 'Other', usd: 170, pct: 3.9 }])
   })
-  test('one hidden slice (or an Other under 3 owners) withholds the whole split', () => {
+  test('an Other under 3 owners takes the smallest shown slice; with none left the whole split is withheld', () => {
+    // Monad hidden alone would be Base's complement: Base joins it, and a split of one slice is withheld.
     expect(guardSplit({ complete: true, dataAsOf: AS_OF, slices: [slice('Base', 3972.86, 14), slice('Monad', 390.48, 2)] }, NOW)).toBeUndefined()
-    expect(guardSplit({ complete: true, dataAsOf: AS_OF, slices: [slice('A', 10, 5), slice('B', 1, 1, 9), slice('C', 1, 1, 9)] }, NOW)).toBeUndefined()
+    expect(guardSplit({ complete: true, dataAsOf: AS_OF, slices: [slice('Idle', 1468, 15), slice('Vaults', 1626, 7, 20), slice('Volatile', 1268, 12, 30), slice('Stable pairs', 0.4, 1, 50)] }, NOW)).toEqual([
+      { key: 'Vaults', usd: 1626, pct: 37.3 }, { key: 'Idle', usd: 1468, pct: 33.7 }, { key: 'Other', usd: 1268, pct: 29.1 },
+    ])
+    expect(guardSplit({ complete: true, dataAsOf: AS_OF, slices: [slice('B', 1, 1, 9), slice('C', 1, 1, 9)] }, NOW)).toBeUndefined()
     expect(guardSplit({ complete: false, dataAsOf: AS_OF, slices: [slice('A', 10, 5)] }, NOW)).toBeUndefined()
   })
 })
