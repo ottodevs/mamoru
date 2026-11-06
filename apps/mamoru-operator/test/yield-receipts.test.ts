@@ -260,6 +260,18 @@ describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
     expect(next.fees[0]).toEqual({ tokenId: '42', pool: LIVE_POOL, fee0: '5', fee1: '6', logIndex: 3, usdc: '11' })
   })
 
+  test('two collects of one position in one transaction are one event at the first log index, amounts summed', () => {
+    const f = factsFromLogs([userOp(SAFE, 1n), poolCollect(5n, 0n), npmCollect(42n, SAFE, 5n, 0n), poolCollect(6n, 0n), npmCollect(42n, SAFE, 6n, 0n)], SAFE, T)
+    expect(f.fees).toHaveLength(1)
+    expect(f.fees[0]).toMatchObject({ tokenId: '42', fee0: '11', fee1: '0' })
+    expect(f.fees[0]!.logIndex).toBeLessThan(idx - 1)
+  })
+
+  test('an account with no receipt day yet but receipts pending still reports its vault state as unknown', async () => {
+    const out = await withReceipts({ chainId: 8453, block: 10n, readAt: '2026-10-22T08:00:00.000Z', pools: {}, safes: [], calls: 1 }, { accounts: () => [{ accountKey: 'acct-2', safe: SAFE, ops: [op('eng-1', undefined, '0x01')] }], save: () => {} }, async () => null, async () => T, async () => 100n)
+    expect(out.receipts).toEqual([{ safe: SAFE, days: [], vault: { flows: [], explained: null } }])
+  })
+
   test('one income event per collect, id txHash:logIndex, source from the op step; old-layout facts give none', () => {
     const harvest = { ...op('eng-1', { txHash: '0xAA', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [{ tokenId: '1', pool: LIVE_POOL, fee0: '1', fee1: '0', logIndex: 4, usdc: '10' }, { tokenId: '2', pool: LIVE_POOL, fee0: '1', fee1: '0', logIndex: 9 }], v: FACTS_VERSION }), step: 'harvest' } as StoredOp
     const rerange = { ...op('eng-2', { txHash: '0xbb', at: '2026-10-22T01:00:00.000Z', gasWei: '1', fees: [{ tokenId: '3', pool: LIVE_POOL, fee0: '1', fee1: '0', logIndex: 2, usdc: '5' }], v: FACTS_VERSION }, '0xbb'), step: 'rerange' } as StoredOp
