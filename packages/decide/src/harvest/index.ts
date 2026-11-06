@@ -96,7 +96,7 @@ export type HarvestSale = { proposal: EnterSwapProposal | null; waits: { bucket:
  * pairs it. Worth no more than its op cost times the harvest factor (once the cost after 7 days) it waits and adds up;
  * on V4 it also waits while the spending room would not cover re-minting every position.
  */
-export function harvestSaleOf(obs: Observation, policy: PolicyVersion): HarvestSale {
+export function harvestSaleOf(obs: Observation, policy: PolicyVersion, still?: ReadonlySet<string>): HarvestSale {
   const waits: HarvestSale['waits'] = []
   if (!obs.harvested || !hasManageAny(policy)) return { proposal: null, waits }
   const savings = policy.savingsAsset
@@ -106,8 +106,16 @@ export function harvestSaleOf(obs: Observation, policy: PolicyVersion): HarvestS
     const amount = harvestedHeld(obs, token)
     if (amount === 0n) continue
     const at = policy.buckets.flatMap((b) => (b.exitOnly ? [] : b.pools.map((name) => ({ b, pool: obs.pools.find((x) => x.name === name) }))))
-    const hit = at.find((x) => x.pool && (x.pool.token0 === token || x.pool.token1 === token) && (x.pool.token0 === savings || x.pool.token1 === savings))
+    // Never through a pool the guards hold still (a fall freeze, a depeg): the token waits there, as an idle sale does.
+    const hit = at.find((x) => x.pool && !still?.has(x.pool.name) && (x.pool.token0 === token || x.pool.token1 === token) && (x.pool.token0 === savings || x.pool.token1 === savings))
     if (!hit?.pool) continue
+    // Only with a live session for the sale's grant: otherwise it would take the review from reduce and idle work and
+    // then be dropped by the gate, review after review. It waits for the renewal instead.
+    const grant = convertKey(policy, hit.pool.name)
+    if (!obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)) {
+      waits.push({ bucket: hit.b.id, code: 'DECIDE_WAIT_RENEWAL' })
+      continue
+    }
     const value = inSavings(hit.pool, token, amount, savings)
     const aged = obs.block.timestamp - BigInt(obs.harvested[token]!.since) >= HARVEST_SALE_AGE_SECONDS
     const factor = aged ? 10_000n : BigInt(policy.harvest.costFactorBps)
@@ -120,7 +128,7 @@ export function harvestSaleOf(obs: Observation, policy: PolicyVersion): HarvestS
       continue
     }
     const pool = hit.pool
-    return { proposal: { kind: 'enter_swap', grant: convertKey(policy, pool.name), pool: pool.name, tokenIn: token, tokenOut: savings, fee: pool.fee, amountIn: amount, harvestSale: true }, waits }
+    return { proposal: { kind: 'enter_swap', grant, pool: pool.name, tokenIn: token, tokenOut: savings, fee: pool.fee, amountIn: amount, harvestSale: true }, waits }
   }
   return { proposal: null, waits }
 }

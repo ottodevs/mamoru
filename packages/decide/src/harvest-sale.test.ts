@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV7, grantKey } from '@mamoru/policy'
 import { address, baseRegistry, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { canonicalJson, decide, HARVEST_SALE_AGE_SECONDS, inSavings, type Observation, type PoolObs, type PositionObs } from './index.ts'
+import { canonicalJson, decide, HARVEST_SALE_AGE_SECONDS, harvestSaleOf, inSavings, type Observation, type PoolObs, type PositionObs } from './index.ts'
 import { opCostInSavings } from './value.ts'
 
 // otto/mamoru#107, spec 012 HRV-R1, R2, R7: the sale of harvested volatile, on the live v7 policy.
@@ -107,6 +107,21 @@ describe('harvest sale (spec 012 HRV-R1)', () => {
     const fees = inRangePosition({ collectable0: COST * 100n, collectable1: 0n })
     const d = decide(obs({ balances: { USDC: 0n, cbBTC: harvested }, harvested: { cbBTC: { amount: harvested, since: Number(NOW) - 60 } }, positions: [fees] }), V7)
     expect(d.proposal?.kind).toBe('harvest')
+  })
+
+  test('never through a pool the guards hold still (fall freeze, depeg)', () => {
+    const harvested = btcWorth(COST * 10n)
+    const o = obs({ balances: { USDC: 0n, cbBTC: harvested }, harvested: { cbBTC: { amount: harvested, since: Number(NOW) - 60 } } })
+    expect(harvestSaleOf(o, V7).proposal).not.toBeNull()
+    expect(harvestSaleOf(o, V7, new Set([BTC_POOL])).proposal).toBeNull()
+  })
+
+  test('without a live session for its grant it waits for the renewal and never takes the review', () => {
+    const harvested = btcWorth(COST * 10n)
+    const sessions = obs().sessions.map((x) => (x.grant.startsWith('manage-any:pool:USDC/cbBTC') ? { ...x, active: false } : x))
+    const d = decide(obs({ sessions, balances: { USDC: 0n, cbBTC: harvested }, harvested: { cbBTC: { amount: harvested, since: Number(NOW) - 60 } } }), V7)
+    expect(d.proposal?.kind === 'enter_swap' && d.proposal.harvestSale).toBeFalsy()
+    expect(d.buckets).toContainEqual({ bucket: 'btc-usdc', code: 'DECIDE_WAIT_RENEWAL' })
   })
 
   test('without harvested volatile the decision is byte-identical to before', () => {

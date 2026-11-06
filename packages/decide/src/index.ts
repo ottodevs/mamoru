@@ -243,17 +243,18 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     const still = new Set([...(depegged ? [depegged.name] : []), ...policy.buckets.filter((b) => frozen.has(b.id) || stagedDrift[b.id] !== undefined).flatMap((b) => b.pools)])
     const merge = exit || reranges.length ? null : mergeOf(obs, policy, policyPools, still)
     if (merge) reranges.push(merge)
-    // otto/mamoru#107: the sale of harvested volatile goes right after the harvests, before reduce, idle sales and entries.
-    const sale = exit || reranges.length || harvests.length || !obs.harvested ? null : harvestSaleOf(obs, policy)
+    // A frozen bucket's idle token waits where it is: the guard never turns a pause into a sell-back.
+    const frozenPools = guards.filter((g) => frozen.has(g.bucket)).map((g) => g.pool)
+    if (depegged) frozenPools.push(depegged.name)
+    const keep = frozenPools.length ? new Set([...(pendingMint ?? []), ...frozenPools]) : pendingMint
+    // otto/mamoru#107: the sale of harvested volatile goes right after the harvests, before reduce, idle sales and entries,
+    // never through a pool the guards hold still.
+    const sale = exit || reranges.length || harvests.length || !obs.harvested ? null : harvestSaleOf(obs, policy, new Set([...frozenPools, ...policy.buckets.filter((b) => frozen.has(b.id)).flatMap((b) => b.pools)]))
     if (sale) for (const w of sale.waits) buckets.push(w)
     const sold = sale?.proposal ?? null
     const reduce = exit || reranges.length || harvests.length || sold ? null : reduceOf(obs, policy, policyPools, lab)
     // otto/mamoru#210: a vault that cannot pay out its excess yet says so on its bucket.
     if (reduce?.code === 'DECIDE_WAIT_VAULT_LIQUIDITY') buckets.push({ bucket: 'stables', code: reduce.code })
-    // A frozen bucket's idle token waits where it is: the guard never turns a pause into a sell-back.
-    const frozenPools = guards.filter((g) => frozen.has(g.bucket)).map((g) => g.pool)
-    if (depegged) frozenPools.push(depegged.name)
-    const keep = frozenPools.length ? new Set([...(pendingMint ?? []), ...frozenPools]) : pendingMint
     const idle = exit || reranges.length || harvests.length || sold || reduce?.proposal ? null : idleConvertOf(held, policy, policyPools, keep)
     // otto/mamoru#278: an open release (the home account wants savings back) is all this Safe does until it is sent.
     // Every pool of a frozen bucket, not only the guard's own, and the depegged one.
