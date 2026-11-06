@@ -7,10 +7,13 @@ Spec: `spec.md`. All paths relative to the repo root. Line numbers as of `ethglo
 Take the worktree diff as is:
 - `apps/mamoru-app/src/api/engine-settings.ts`: new `settingsCapOf(db, accountKey, env)`: newest canary naming the
   account, else newest environment-wide version of that `env`; `capBaseUnits(settings)` or `null`.
-- `apps/mamoru-app/src/api/accounts/chain-funding.ts` `capOf`: override → `settingsCapOf` → fallback.
+- `apps/mamoru-app/src/api/accounts/chain-funding.ts` `capOf`: override → `settingsCapOf` → fallback, **then
+  clipped to the account's signed cap** (the C in its stored grant/spec row) when known: shown cap =
+  `min(settings cap, signed C)`. Signed C unknown → `capKnown: false` and no number (never the settings cap alone), so
+  an account signed at 1,000 never sees 10,000 before it renews; `capRaise` carries the 10,000 offer.
 - `apps/mamoru-app/src/api/app.ts:40`: comment only, `LIVE_CAP_USDC` stays as the code default.
-- `apps/mamoru-app/test/api/chain-funding.test.ts`: 3 tests (env version, canary over env + override over both,
-  null cap → default).
+- `apps/mamoru-app/test/api/chain-funding.test.ts`: the worktree's 3 tests plus: signed 1,000 with settings 10,000
+  → 1,000 and `capRaise`; signed unknown → `capKnown: false`; rollback row → the version `resolveFor` picks.
 
 The rule must match the operator's `resolveFor` (`apps/mamoru-operator/src/engine-settings.ts`). If they disagree on a
 case (rollback rows, `rollback_of`), the operator wins and the test names the case.
@@ -21,9 +24,14 @@ case (rollback rows, `rollback_of`), the operator wins and the test names the ca
   `apps/mamoru-operator/scripts/depth-fixture.ts` (regenerates the fixture from Base). Pure, runs in `release:check`.
   Expected today: 10k places almost all; 100k leaves ~22,512 waiting on stables depth; Stop returns all but 6–7 bps.
 - `apps/mamoru-operator/test/e2e-depth.ts`: anvil fork of Base, operator booted with `MAMORU_DEPTH=30,500,5` and
-  `MAMORU_CAP_USDC`. Changes before running: default `MAMORU_POLICY` = `conservador-live-v7`; after settle, log one
-  summary line per waiting code (`waited code=… usdc=…`), plus every chain revert reason seen (`POLICY_DENIED_AMOUNT`,
-  `BudgetExceeded`, `Cap24hExceeded`, `Cap30Exceeded`); then Stop and check USDC back ≥ deposit − 0.1 %.
+  `MAMORU_CAP_USDC` **equal to the deposit** (C = 10,000 for the 10k run, C = 100,000 for the 100k run: the signed
+  cap a real renewed account would have, so the spending windows bind as in production). Changes before running:
+  default `MAMORU_POLICY` = `conservador-live-v7`; after settle, log one summary line per waiting code
+  (`waited code=… usdc=…`) and every chain revert reason seen (`POLICY_DENIED_AMOUNT`, `BudgetExceeded`,
+  `Cap24hExceeded`, `Cap30Exceeded`). Asserts: (a) placed + waiting + idle = deposit ± gas; (b) the expected window
+  wait computed from the policy's own window limits for C (helper reads them from `policies-v7.ts`): if required entries
+  + swaps exceed the window, a window code must be logged with at least that excess, else the run fails; (c) Stop
+  returns USDC ≥ deposit − 0.1 %.
   Add `"e2e:depth": "bun test/e2e-depth.ts"` to `apps/mamoru-operator/package.json`.
 - Opt-in, not CI (cold fork, up to 10 min). Runs: `DEPOSIT_USDC=10000` and `DEPOSIT_USDC=100000`, output to
   `specs/011-mumbai-cap/results/e2e-depth-{10k,100k}.log` with the fork block and sha.
@@ -37,25 +45,33 @@ not surface `capRaise` on the home screen, that is a defect for T-CAP-05, not a 
 
 ## 4. Settings (CAP-R4), ops, no code
 
-Ot, in landing `/ops` → Engine settings: new version, env `beta`, template of the active one, `capUsdc: 10000`,
+Ot, in landing `/ops` (no landing code change) → Engine settings: new version, env `beta`, template of the active one, `capUsdc: 10000`,
 depth unchanged (`30/500/5`), reason "ETHGlobal Mumbai: cap 10k (#376)". Read back:
 `wrangler d1 execute mamoru --remote --command "SELECT id, env, json_extract(settings_json,'$.capUsdc') cap, created_at FROM engine_settings_versions ORDER BY id DESC LIMIT 4"`
-and operator `/metrics` `capRefused` empty. Same in `prod` at the final cut (PRD §7, 07:00 IST).
+The row alone does not prove the cap is effective (rollback rows, canaries). The proof is the **resolved** value:
+operator `/metrics` per-account `settingsVersion` + `capUsdc` for a named beta account, and the app funding endpoint for
+the same account returning `capRaise.capUsdc` = 10,000 (before renewal) and `capUsdc` = 10,000 (after). `capRefused`
+empty. Same in `prod` at the final cut (PRD §7, 07:00 IST).
 
 ## 5. Bridge limit (CAP-R5)
 
-- `packages/decide/src/types.ts` `SessionObs`: add `amountLeft?: bigint` and `perCall?: bigint` (absent = no cap,
-  V4).
+- `packages/decide/src/types.ts` `SessionObs`: add `bridgeLimit: { kind: 'v3'; perCall: bigint; amountLeft: bigint }
+  | { kind: 'none' } | { kind: 'unknown' }`. **Fail closed:** `none` only for V4 policies (set from the policy family,
+  not from absence); `unknown` (journal read failed, policy variant not mapped) → no bridge proposal, waiting
+  `DECIDE_WAIT_BRIDGE_LIMIT`.
 - `packages/decide/src/allocate/index.ts:385-401`: `amount = min(gap, free, perCall, amountLeft)`. If
   `amountLeft < entryMin` → `waiting.push({ code: 'DECIDE_WAIT_BRIDGE_LIMIT' })` and no proposal. Add the code to
   the `Waiting` union (`:39`) and `types.ts:438`.
 - Operator fills both for the `bridge-out` grant of V3 accounts: `perCall` and `total` from
   `v4BudgetCaps(policy, signedCap)` (`operator.ts:7292` already does this for the remote spec), `amountLeft = total −
   sum of this approval's bridge-outs` from the bridge journal in `bridge-out.ts` (moves since the approval's
-  `validAfter`, state ≥ `burned`). Lives in a new helper `apps/mamoru-operator/src/bridge-left.ts` + one call site in
+  `validAfter`, **every move from `sending` on counts**: sending, sent, burned, minted, done, and any reverted or
+  unknown-outcome move counts as spent until its receipt proves otherwise; only moves recorded as never broadcast are
+  excluded). Lives in a new helper `apps/mamoru-operator/src/bridge-left.ts` + one call site in
   the observation builder of `operator.ts` (hot file: one small hunk).
-- The return leg (Monad → Base, `returnDue`) runs on the remote Safe's own grant; same clipping there if its policy has
-  a total (`policies-monad.ts`), else unchanged.
+- The return leg (Monad → Base, `askReturn`) only runs for V4 accounts today (`operator.ts:6371`, see 012), and V4 has
+  no bridge total: nothing to clip in 011. If 012 or later enables returns for V3, it must reuse `bridgeLimit` on the
+  remote grant (stated as a must in 012).
 - Read of live totals for `results/`: operator state `remote.spec.capUsdc` per active account (6 Nov: 500 USDC on 7 v7
   accounts with a sleeve).
 
@@ -66,17 +82,20 @@ waiting amount, linking to `docs/waiting.md#<anchor>` on GitHub:
 
 | Code | Phrase (EN) | Anchor |
 |---|---|---|
-| over cap / `DEPOSIT_OVER_CAP` | Above your cap | `above-cap` |
+| idle on Safe > shown cap (computed in the app from funding, no engine code) | Above your cap | `above-cap` |
 | `capRaise` present | Waiting for renewal | `renewal` |
 | `DECIDE_WAIT_DEPTH` | Waiting for pool depth | `depth` |
-| `Cap24hExceeded` / `POLICY_DENIED_AMOUNT` window | Daily limit reached | `daily-limit` |
+| `DECIDE_WAIT_DAILY_LIMIT` | Daily limit reached | `daily-limit` |
+| `DECIDE_WAIT_MONTHLY_LIMIT` | Monthly limit reached | `monthly-limit` |
 | `DECIDE_WAIT_BRIDGE_LIMIT` | Bridge limit reached | `bridge-limit` |
 | other codes | (no phrase, as today) | — |
 
 `docs/waiting.md`: one short paragraph per anchor. Mapping in a small pure module
 `apps/mamoru-app/src/web/lib/waiting-reason.ts` with a test. Nothing ships without the OK in the thread.
-Daily limit: the operator must surface it as a waiting code first: `DECIDE_WAIT_DAILY_LIMIT` when the last revert of
-an entry was a window/budget denial and the window has not moved (T-CAP-07).
+Window codes are produced by T-CAP-07 from the actual denial: V4 `Cap24hExceeded` → DAILY; V4 `Cap30Exceeded` or
+`BudgetExceeded` → MONTHLY; V3 `POLICY_DENIED_AMOUNT` → the window the v7 policy actually enforces for that call
+(read from `policies-v7.ts`; if it cannot be told apart, MONTHLY is never guessed: use DAILY only for a 24 h window and
+otherwise no phrase). Each code carries the waiting amount and clears when the window frees.
 
 ## 7. Sequences
 
@@ -88,8 +107,9 @@ per call ≤ 2,000 (20 % of 10k), total ≤ 5,000 per approval.
 
 - Settings rule mismatch app vs operator → app shows a cap the operator does not apply. Mitigation: one shared test
   table of cases (§1).
-- Journal under-counts a bridge-out → a send reverts `POLICY_DENIED_AMOUNT`; existing retry/backoff, and the next read
-  corrects `amountLeft`. Never over-asks after the first revert because the revert is recorded as spent-unknown → wait.
+- Journal under-counts a bridge-out → a send reverts `POLICY_DENIED_AMOUNT`. The revert is written to the journal as an
+  unknown-outcome move (counted as spent, SCN-CAP-12), so the next review sees less `amountLeft` and waits instead of
+  retrying. Implemented in T-CAP-06 (`bridge-left.ts` + the revert handler hunk).
 - Fork e2e flakes on RPC: rerun once; record both.
 
 ## 9. Deploy notes

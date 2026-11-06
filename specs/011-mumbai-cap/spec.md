@@ -43,20 +43,27 @@ reachable, and money above what can be placed sits idle without a reason the use
 - **CAP-R0** The `.cell-wt/376-cap-e2e` work is integrated whole as event work: new branch from `origin/main`, small
   commits, PR, review; the worktree is then removed and `#376` says why.
 - **CAP-R1** The app shows the cap that holds the account: operator funding first; without the operator, the account
-  override, else its active engine settings cap, else the code default. Never a fixed 100 when settings say otherwise.
+  override, else its active engine settings cap, else the code default, **clipped to the cap the account signed**
+  (signed C unknown → no number shown). Never a fixed 100 when settings say otherwise, never a cap the account has not
+  signed (that one is the renewal offer, `capRaise`).
 - **CAP-R2** A fork e2e with 10,000 and 100,000 USDC deposits, under the prod engine settings and the policy new
   accounts get, shows: what fits is placed per pool by depth, what does not fit waits with its code, and Stop returns
-  everything as USDC. The log states, per run, how much waited and for which reason, including the 24 h limit.
+  everything as USDC. Each run uses a signed cap equal to its deposit, so the spending windows bind as for a real
+  renewed account. The log states, per run, how much waited and for which reason, and the run fails if the window wait
+  that the policy limits predict is not logged.
 - **CAP-R3** An account whose signed cap is below the current cap sees the renewal (one approval) and, after it, the
   new cap in funding and in the app.
 - **CAP-R4** Ot writes an engine settings version with `capUsdc = 10000` (depth on) in beta, then in prod at the final
-  cut. Read back in D1 and in operator `/metrics` (no `capRefused`).
+  cut. Proven by the **resolved** cap for a named account (operator `/metrics` + app funding), not by the D1 row alone.
 - **CAP-R5** Bridge-out never asks for more than the grant allows: each send ≤ the per-call cap, and the sum stays
-  within what is left of the grant's total. When the total is used up the bucket waits with its own code instead of
-  retrying. V4 accounts have no such total (only `maxFee` ≤ 10 bps) and are unaffected. Circle's per-message limit
+  within what is left of the grant's total, counting every move from `sending` on (and reverted or unknown ones) as
+  spent. When the total is used up, or what is left cannot be read, the bucket waits with its own code instead of
+  retrying (fail closed). V4 accounts have no such total (only `maxFee` ≤ 10 bps) and are unaffected. Circle's per-message limit
   (10,000,000 USDC, Base and Monad) is above every amount here.
 - **CAP-R6** Money that is not placed says why in one short phrase on the existing idle line, linked to a public doc
-  section. Reasons: above the cap, pool depth, daily limit, waiting for renewal, bridge limit reached. English copy is
+  section. Reasons: above the cap, pool depth, daily limit, monthly limit, waiting for renewal, bridge limit reached.
+  Each reason has a producer (engine code or app computation, `plan.md` §6); a window is never labeled daily unless it
+  is the 24 h one. English copy is
   proposed in `plan.md` §6 and **needs Ot's and Brais's OK before merge**. No paragraphs, no per-chain rows.
 
 ## Edge cases
