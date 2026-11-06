@@ -4,6 +4,10 @@ Spec: `spec.md`. All paths relative to the repo root. Line numbers as of `ethglo
 
 ## 1. App cap read (CAP-R0, CAP-R1)
 
+**Decision (coordinator, 6 Nov, T-CAP-01):** the signed cap lives only in the operator (`signedCapUsdc`), not in the D1, so the
+app fallback (operator not answering) shows no cap number (`capKnown: false`); `settingsCapOf` is not brought in. The
+operator path keeps returning the signed cap and `capRaise`. What follows in this section describes the operator path.
+
 Take the worktree diff as is:
 - `apps/mamoru-app/src/api/engine-settings.ts`: new `settingsCapOf(db, accountKey, env)`: newest canary naming the
   account, else newest environment-wide version of that `env`; `capBaseUnits(settings)` or `null`.
