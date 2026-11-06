@@ -5,96 +5,113 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Mamoru · Portfolio (mockup)</title>
 <link rel="stylesheet" href="mock.css">
+<link rel="stylesheet" href="stats.css">
 <style>
-  .head { display: flex; align-items: flex-end; justify-content: space-between; gap: 2rem; padding: 1.5rem 0 1.2rem; border-bottom: 1px solid var(--ink); }
-  .head .big { font-size: 3.2rem; line-height: 1.05; margin-top: .5rem; }
-  .head .sub { margin-top: .4rem; font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+  .pf-top { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1.4rem 0 1.1rem; }
   .actions { display: flex; gap: .6rem; }
-  .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 2.5rem; }
-  .grid > .chart { border-top: 0; margin-top: 0; }
-  .earned { padding-top: 1.2rem; }
-  @media (max-width: 640px) { .earned { border-top: 1px solid var(--wash); margin-top: .8rem; } }
-  .earned .val { font-size: 2.4rem; margin: .6rem 0 .3rem; }
-  .earned dl { margin: 1.2rem 0 0; font-family: var(--mono); font-size: .74rem; color: var(--muted); display: grid; grid-template-columns: 1fr auto; row-gap: .5rem; border-top: 1px solid var(--wash); padding-top: .9rem; }
-  .earned dd { margin: 0; color: var(--ink); text-align: right; }
+  .pf { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 2.5rem; align-items: end; border-top: 1px solid var(--ink); padding: 1.8rem 0 1.6rem; border-bottom: 1px solid var(--wash); }
+  .pf .big { font-size: 4.4rem; line-height: 1; margin-top: .7rem; letter-spacing: -.025em; }
+  .pf .big .c { font-size: 2rem; color: var(--muted); letter-spacing: 0; }
+  .pf .asof { margin-top: .55rem; font-family: var(--mono); font-size: .7rem; color: var(--muted); }
+  .earned { margin-top: 1.9rem; }
+  .earned .row { display: flex; align-items: center; gap: .75rem; margin-top: .6rem; flex-wrap: wrap; }
+  .delta { display: inline-flex; align-items: center; gap: .45rem; padding: .42rem .8rem .42rem .6rem; border-radius: 999px; font-size: 1.5rem; line-height: 1; }
+  .delta svg { width: 14px; height: 14px; }
+  .delta.pos { color: #24503f; background: color-mix(in srgb, #2f5d50 11%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, #2f5d50 22%, transparent); }
+  .delta.neg { color: #8a2727; background: color-mix(in srgb, #9b2c2c 9%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, #9b2c2c 22%, transparent); }
+  .earned .since { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+  .spark { position: relative; }
+  .spark .rng { display: flex; justify-content: flex-end; gap: .9rem; margin-top: .5rem; }
+  .spark .rng button { all: unset; cursor: pointer; font-family: var(--mono); font-size: .68rem; letter-spacing: .08em; color: var(--stone); padding: .2rem 0; border-bottom: 1.5px solid transparent; }
+  .spark .rng button[aria-pressed="true"] { color: var(--ink); border-bottom-color: var(--emerald); }
   .rest { margin-top: 2.2rem; border: 1px dashed var(--wash); padding: 1.1rem 1.2rem; color: var(--muted); font-family: var(--mono); font-size: .74rem; line-height: 1.7; }
-  .example { position: absolute; top: .9rem; right: 24px; }
   @media (max-width: 640px) {
-    .head { flex-direction: column; align-items: stretch; gap: 1.1rem; }
-    .head .big { font-size: 2.6rem; }
+    .pf-top { flex-direction: column; align-items: stretch; padding: .9rem 0 1rem; }
+    .pf-top .stamp { align-self: flex-start; }
     .actions > * { flex: 1; }
-    .grid { grid-template-columns: 1fr; gap: .5rem; }
-    .example { position: static; display: inline-block; margin-bottom: .3rem; }
+    .pf { grid-template-columns: 1fr; gap: 1.2rem; padding-top: 1.3rem; }
+    .pf .big { font-size: 3.3rem; }
+    .earned { margin-top: 1.4rem; }
+    .delta { font-size: 1.3rem; }
   }
 </style>
 </head>
-<body data-session="in">
+<body>
 <header class="top">
   <a class="brand" href="#"><img src="../../../apps/mamoru-app/public/mark-two-stones.png" alt=""><span>Mamoru</span></a>
   <nav class="tabs" aria-label="Main">
     <a href="portfolio.html" aria-current="page">Portfolio</a>
-    <a href="stats.html#signed-in">Stats</a>
+    <a href="stats.html">Stats</a>
   </nav>
   <div class="right"><span class="who">Signed in · <b>your account</b></span></div>
 </header>
 
-<main style="position:relative">
-  <span class="stamp example">Example figures</span>
-  <section class="head">
-    <div>
-      <p class="kicker">Portfolio</p>
-      <div class="big" data-count="2500">$2,500</div>
-      <div class="sub">Total value · Base and Monad · as of 16:50 UTC</div>
-    </div>
+<main>
+  <div class="pf-top">
+    <span class="stamp">Example figures</span>
     <div class="actions">
       <a class="cta" href="#">Add capital</a>
       <a class="ghost" href="#">Withdraw</a>
     </div>
-  </section>
-
-  <div class="grid">
-    <section class="chart" id="value">
-      <header>
-        <h2>Total value</h2>
-        <div class="seg" role="group" aria-label="Range">
-          <button data-days="7" aria-pressed="false">1W</button>
-          <button data-days="30" aria-pressed="true">1M</button>
-          <button data-days="90" aria-pressed="false">3M</button>
-          <button data-days="0" aria-pressed="false">ALL</button>
-        </div>
-      </header>
-      <div class="plot" style="height:260px"></div>
-      <p class="utc" style="margin:.2rem 0 0">Daily close, today so far · UTC</p>
-    </section>
-
-    <aside class="earned">
-      <div class="lab kpi" style="padding:0;border:0"><div class="lab">Earned so far <span class="info" tabindex="0" data-tip="Fees from your liquidity positions plus your vault yield, since you started.">i</span></div></div>
-      <div class="val" data-count="18.42">$18.42</div>
-      <div class="note mono" style="font-size:.72rem;color:var(--muted)">since 12 Oct 2026</div>
-    </aside>
   </div>
 
-  <div class="rest">Existing Portfolio sections continue here unchanged (working capital, idle, history).<br>Spec 013 STATS-R17: no other change without Ot's and Brais's OK.</div>
+  <section class="pf" aria-label="Your account">
+    <div>
+      <div class="lab">Total value <i-tip>Everything your account holds on Base and Monad: positions, vault, uncollected fees and money not placed yet.</i-tip></div>
+      <div class="big" id="tv"></div>
+      <div class="asof">Base and Monad · as of 19:02 UTC</div>
+      <div class="earned">
+        <div class="lab">Total earned <i-tip>Fees and vault yield your account has earned since it started, every token valued in US dollars.</i-tip></div>
+        <div class="row"><span class="delta" id="delta"></span><span class="since" id="since"></span></div>
+      </div>
+    </div>
+    <div class="spark">
+      <div id="chart"></div>
+      <div class="rng" role="group" aria-label="Range"><button data-v="7">1W</button><button data-v="30" aria-pressed="true">1M</button><button data-v="0">All</button></div>
+    </div>
+  </section>
+
+  <div class="rest">Existing Portfolio sections continue here unchanged (working capital, idle, history).</div>
 </main>
 
 <nav class="tabbar" aria-label="Main">
   <a href="portfolio.html" aria-current="page"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="8" cy="11" rx="5.5" ry="6.5"/><ellipse cx="14.5" cy="13" rx="3" ry="4"/></svg>Portfolio</a>
-  <a href="stats.html#signed-in"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 17V10M8 17V5M13 17V8M18 17V12"/></svg>Stats</a>
+  <a href="stats.html"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 17V10M8 17V5M13 17V8M18 17V12"/></svg>Stats</a>
 </nav>
 
 <script type="module">
-  import { chart, rangeControl, countUp } from './mock.js'
-  // Example account: 1,000 deposited on 12 Oct, 1,500 more on 2 Nov, slow growth from fees and vault yield.
+  import { area, usd, dayLabel } from './charts.js'
+  // stats.css defines <i-tip>; register it here too.
+  await import('./itip.js')
+  // Example account (labelled): 1,000 on 12 Oct, then 400, 300 and 800 more, growth from fees and vault yield.
   const pts = []
   const start = Date.UTC(2026, 9, 12)
   for (let i = 0; i <= 25; i++) {
     const d = new Date(start + i * 864e5).toISOString().slice(0, 10)
-    const base = i < 21 ? 1000 : 2500
-    pts.push({ d, v: Math.round((base + i * 0.7 + (i % 3) * 0.4) * 100) / 100, partial: i === 25 })
+    const base = 1000 + (i >= 6 ? 400 : 0) + (i >= 13 ? 300 : 0) + (i >= 21 ? 800 : 0)
+    pts.push({ d, v: Math.round((base * (1 + i * 0.0009) + (i % 4) * 0.6) * 100) / 100 })
   }
-  const c = chart(document.getElementById('value'), pts, { kind: 'line', height: 260, label: 'Total value, daily close, USD (example)' })
-  rangeControl(document.querySelector('.seg'), [c])
-  countUp()
+  const value = pts.at(-1).v
+  const earned = location.hash.includes('neg') ? -3.12 : 18.42
+  document.getElementById('tv').innerHTML = `$${Math.floor(value).toLocaleString('en-US')}<span class="c">.${String(Math.round((value % 1) * 100)).padStart(2, '0')}</span>`
+  const up = '<svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M7 2.5 12 9.5H2z"/></svg>'
+  const down = '<svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M7 11.5 2 4.5h10z"/></svg>'
+  const d = document.getElementById('delta')
+  d.className = `delta ${earned >= 0 ? 'pos' : 'neg'}`
+  d.innerHTML = `${earned >= 0 ? up : down}${earned >= 0 ? '+' : '−'}${usd(Math.abs(earned))}`
+  document.getElementById('since').textContent = `since ${dayLabel(pts[0].d)}`
+  const tipAt = location.hash.includes('tip') ? -4 : null
+  let range = 30
+  const draw = () => {
+    const rows = range ? pts.slice(-range) : pts
+    area(document.getElementById('chart'), rows, { h: innerWidth < 640 ? 150 : 190, axes: false, label: 'Total value over time (example)', fmtTip: usd, when: (r) => dayLabel(r.d), showAt: tipAt })
+  }
+  document.querySelector('.rng').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return
+    for (const x of document.querySelectorAll('.rng button')) x.setAttribute('aria-pressed', String(x === b))
+    range = Number(b.dataset.v); draw()
+  })
+  draw()
 </script>
 </body>
 </html>

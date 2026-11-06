@@ -30,10 +30,10 @@
         <div class="lab" id="h-dep">Total deposits <i-tip>Value held in every Mamoru account, on every chain: positions, vaults, uncollected fees and money not placed yet.</i-tip></div>
         <div class="big" data-k="S1"></div>
       </div>
-      <dl class="pair">
-        <div><dt class="lab">Money working <i-tip>Capital placed in liquidity pools and lending vaults right now.</i-tip></dt><dd data-k="S2"></dd></div>
-        <div><dt class="lab">Idle capital <i-tip>Capital not placed yet: new deposits in progress, or waiting for pool depth or limits.</i-tip></dt><dd data-k="S3"></dd></div>
-      </dl>
+      <div class="working">
+        <div class="lab">Money working <i-tip>Share of all deposits placed in liquidity pools and lending vaults right now. The rest is idle: new deposits in progress, or waiting for pool depth or limits.</i-tip></div>
+        <div class="wv" data-k="S2p"></div>
+      </div>
     </div>
     <div class="alloc" id="alloc" role="img"></div>
     <ul class="alloc-keys" id="alloc-keys"></ul>
@@ -43,11 +43,24 @@
   <section class="earn" aria-label="Earnings">
     <div class="fig"><div class="lab">Earned in the last 24h <i-tip>Fees and vault yield earned in the last 24 hours, every token valued in US dollars.</i-tip></div><div class="val" data-k="S4"></div></div>
     <div class="fig"><div class="lab">Total earned <i-tip>All fees and vault yield earned since launch, every token valued in US dollars.</i-tip></div><div class="val" data-k="S5"></div></div>
-    <div class="fig"><div class="lab">Average APR, 7 days <i-tip>What the money working earned over the last 7 days, as a yearly rate, weighted by capital, before compounding.</i-tip></div><div class="val" data-k="S6"></div></div>
+    <div class="fig"><div class="lab">7-day APR <i-tip>What the money working earned over the last 7 days, as a yearly rate, weighted by capital, before compounding.</i-tip></div><div class="val" data-k="S6"></div></div>
   </section>
 
+
+
+
+  <section class="two">
+    <div class="block" aria-labelledby="h-tvl">
+      <header class="bh"><h2 id="h-tvl">Total deposits <i-tip>Value held in every account at each day's close, UTC.</i-tip></h2></header>
+      <div id="tvl"></div>
+    </div>
+    <div class="block" aria-labelledby="h-epd">
+      <header class="bh"><h2 id="h-epd">Earned per day <i-tip>Fees and vault yield earned each UTC day, in US dollars.</i-tip></h2></header>
+      <div class="plot" id="epd"></div>
+    </div>
+  </section>
   <!-- 3. Does the return hold? -->
-  <section class="block" aria-labelledby="h-apr">
+  <section class="block apr" aria-labelledby="h-apr">
     <header class="bh">
       <h2 id="h-apr">APR over time <i-tip>Each dot is one day: what a dollar working earned that day, as a yearly rate. The line is the 7-day average, which shows whether a rate holds.</i-tip></h2>
       <div class="ctl">
@@ -58,30 +71,6 @@
     <div class="plot" id="apr"></div>
     <p class="key"><span class="k-line"></span>7-day average <span class="k-dot"></span>daily</p>
   </section>
-
-  <section class="two">
-    <div class="block" aria-labelledby="h-epd">
-      <header class="bh"><h2 id="h-epd">Earned per day <i-tip>Fees and vault yield earned each UTC day, in US dollars.</i-tip></h2></header>
-      <div class="plot" id="epd"></div>
-    </div>
-    <div class="block" aria-labelledby="h-tvl">
-      <header class="bh"><h2 id="h-tvl">Total deposits <i-tip>Value held in every account at each day's close, UTC.</i-tip></h2></header>
-      <div class="plot" id="tvl"></div>
-    </div>
-  </section>
-
-  <!-- 4. What it holds -->
-  <section class="two holds">
-    <div class="block" aria-labelledby="h-tok">
-      <header class="bh"><h2 id="h-tok">By asset <i-tip>Exposure to each token: every pool position split into its two tokens at today's amounts; vaults hold USDC.</i-tip></h2><div class="side"><span class="lab">In stablecoins</span> <b data-k="S10"></b></div></header>
-      <ul class="bars" id="tok"></ul>
-    </div>
-    <div class="block" aria-labelledby="h-ch">
-      <header class="bh"><h2 id="h-ch">By chain <i-tip>Value held on each chain.</i-tip></h2></header>
-      <ul class="bars" id="ch"></ul>
-    </div>
-  </section>
-
   <!-- 5. Accounts -->
   <section class="accts" aria-label="Accounts">
     <div class="fig"><div class="lab">Total accounts <i-tip>Accounts created in Mamoru.</i-tip></div><div class="val" data-k="S7"></div></div>
@@ -89,6 +78,17 @@
     <div class="fig"><div class="lab">Largest account <i-tip>Value of the largest single account. No account is named.</i-tip></div><div class="val" data-k="S9"></div></div>
   </section>
 
+  <!-- 4. What it holds -->
+  <section class="two holds">
+    <div class="block" aria-labelledby="h-tok">
+      <header class="bh"><h2 id="h-tok">By asset <i-tip>Exposure to each token: every pool position split into its two tokens at today's amounts; vaults hold USDC.</i-tip></h2></header>
+      <div class="dist" id="tok"></div>
+    </div>
+    <div class="block" aria-labelledby="h-ch">
+      <header class="bh"><h2 id="h-ch">By chain <i-tip>Value held on each chain.</i-tip></h2></header>
+      <div class="dist" id="ch"></div>
+    </div>
+  </section>
   <p class="src" id="src"></p>
 </main>
 

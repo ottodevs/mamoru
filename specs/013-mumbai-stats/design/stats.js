@@ -1,5 +1,6 @@
 // Stats mockup (spec 013 amendment A1). Real aggregates from stats-data.js; nothing is invented.
 import D from './stats-data.js'
+import { area, donut } from './charts.js'
 
 const NS = 'http://www.w3.org/2000/svg'
 const usd = (v) => (v == null ? '—' : v >= 100 ? `$${Math.round(v).toLocaleString('en-US')}` : `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`)
@@ -7,33 +8,10 @@ const pct = (v, d = 1) => (v == null ? '—' : `${(v * 100).toFixed(d)}%`)
 const dayLabel = (d) => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' })
 const PLACE = { 'Stable vaults': '#2f5d50', 'Liquidity pools': '#7a9a8c', Idle: '#bdb39f' }
 
-// (i) element: the app's icon, opens on click, closes on Escape / outside click.
-customElements.define('i-tip', class extends HTMLElement {
-  connectedCallback() {
-    if (this._ready) return
-    this._ready = true
-    const text = this.textContent.trim()
-    this.textContent = ''
-    const b = document.createElement('button')
-    b.type = 'button'
-    b.setAttribute('aria-label', 'How this is computed')
-    b.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M8 7.3v4" stroke-linecap="round"/><circle cx="8" cy="4.6" r=".75" fill="currentColor" stroke="none"/></svg>'
-    const p = document.createElement('span')
-    p.className = 'panel'
-    p.setAttribute('role', 'tooltip')
-    p.textContent = text
-    this.append(b, p)
-    b.addEventListener('click', (e) => { e.stopPropagation(); this.toggleAttribute('open'); this.place() })
-    b.addEventListener('mouseenter', () => { this.setAttribute('open', ''); this.place() })
-    b.addEventListener('mouseleave', () => this.removeAttribute('open'))
-    document.addEventListener('click', () => this.removeAttribute('open'))
-    document.addEventListener('keydown', (e) => e.key === 'Escape' && this.removeAttribute('open'))
-  }
-  place() { this.classList.toggle('flip', this.getBoundingClientRect().left > innerWidth - 280) }
-})
+import './itip.js'
 
 // Figures
-const fig = { S1: usd(D.S1), S2: usd(D.S2), S3: usd(D.S3), S4: usd(D.S4), S5: usd(D.S5), S6: pct(D.S6), S7: D.S7.toLocaleString('en-US'), S8: usd(D.S8), S9: usd(D.S9), S10: pct(D.S10, 0) }
+const fig = { S1: usd(D.S1), S2: usd(D.S2), S2p: `${Math.round((D.S2 / D.S1) * 100)}%`, S3: usd(D.S3), S4: usd(D.S4), S5: usd(D.S5), S6: pct(D.S6), S7: D.S7.toLocaleString('en-US'), S8: usd(D.S8), S9: usd(D.S9), S10: pct(D.S10, 0) }
 for (const el of document.querySelectorAll('[data-k]')) el.textContent = fig[el.dataset.k]
 
 // Where the money is: one bar, three places
@@ -53,9 +31,13 @@ D.byPlace.sort((a, b) => ORDER.indexOf(a.k) - ORDER.indexOf(b.k)).forEach((p, i)
   keys.append(li)
 })
 
-// Distributions as ranked bars
+// Distributions: donuts (default) or ranked bars (#bars, for comparison)
+const BARS = location.hash.includes('bars')
 function bars(id, rows, note = {}) {
-  const ul = document.getElementById(id)
+  const host = document.getElementById(id)
+  const ul = document.createElement('ul')
+  ul.className = 'bars'
+  host.append(ul)
   const max = Math.max(...rows.map((r) => r.usd))
   rows.forEach((r, i) => {
     const li = document.createElement('li')
@@ -63,8 +45,14 @@ function bars(id, rows, note = {}) {
     ul.append(li)
   })
 }
-bars('tok', D.byToken, { Other: D.tokenOther.join(', ') })
-bars('ch', D.byChain)
+const tokRows = D.byToken.map((r) => ({ ...r, note: r.k === 'Other' ? D.tokenOther.join(', ') : undefined }))
+if (BARS) {
+  bars('tok', D.byToken, { Other: D.tokenOther.join(', ') })
+  bars('ch', D.byChain)
+} else {
+  donut(document.getElementById('tok'), tokRows, { centre: { value: pct(D.S10, 0), label: 'in stablecoins' } })
+  donut(document.getElementById('ch'), D.byChain, { centre: { value: usd(D.S1), label: 'on 2 chains' } })
+}
 
 // Charts
 function niceMax(v) {
@@ -79,9 +67,13 @@ function niceStep(raw) {
   return 10 * p
 }
 // Ticks on round steps (1, 2, 2.5, 5 × 10^n); the axis top is the first step at or above the data.
-function scale(vmax) {
-  const step = niceStep((vmax || 1) / 4)
-  const top = Math.ceil((vmax || 1) / step) * step
+function scale(vmax, n = 4) {
+  // The first round step (1, 2, 2.5, 5 x 10^n) whose top sits within 30 % of the data, with 3 to 6 intervals.
+  const v = vmax || 1
+  const p = 10 ** Math.floor(Math.log10(v / n))
+  const steps = [1, 2, 2.5, 5, 10, 20, 25, 50].map((m) => m * p)
+  const step = steps.find((s) => { const k = Math.ceil(v / s); return k >= 3 && k <= 6 && (k * s) / v <= 1.3 }) ?? steps.find((s) => Math.ceil(v / s) <= 6)
+  const top = Math.ceil(v / step) * step
   return { top, ticks: Array.from({ length: Math.round(top / step) + 1 }, (_, i) => i * step) }
 }
 
@@ -171,9 +163,8 @@ function draw() {
     series: [{ k: 'a', kind: 'dots' }, { k: 'm', kind: 'line' }],
     tip: (r) => `${when(r)}<b>${pct(r.m)} <span style="font-size:.75rem;opacity:.7">7-day average</span></b>${pct(r.a)} that day`,
   })
-  const rows = last(D.daily)
-  plot(document.getElementById('epd'), rows, { h: 200, label: 'Earned per day, USD', fmt: fmtUsd, series: [{ k: 'earned', kind: 'bars' }], tip: (r) => `${when(r)}<b>${usd(r.earned)}</b>` })
-  plot(document.getElementById('tvl'), rows, { h: 200, label: 'Total deposits at each day close, USD', fmt: fmtUsd, series: [{ k: 'tvl', kind: 'line' }], tip: (r) => `${when(r)}<b>${usd(r.tvl)}</b>` })
+  plot(document.getElementById('epd'), D.daily, { h: 220, label: 'Earned per day, USD', fmt: fmtUsd, series: [{ k: 'earned', kind: 'bars' }], tip: (r) => `<b>${usd(r.earned)}</b>${when(r)}` })
+  area(document.getElementById('tvl'), D.daily.map((r) => ({ d: r.d, v: r.tvl })), { h: 220, axes: true, label: 'Total deposits at each day close, USD', fmt: (v) => fmtUsd(v, true), fmtTip: usd, when: (r) => when(r) })
 }
 function seg(id, key, parse) {
   const g = document.getElementById(id)

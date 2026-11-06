@@ -87,3 +87,55 @@ i-tip.flip .panel { left: auto; right: -10px; }
   .bars li { grid-template-columns: 5.6rem 1fr 5.6rem; gap: .6rem; }
   i-tip .panel { width: 220px; }
 }
+
+/* v2: money working as a share */
+.working { text-align: right; }
+.working .lab { justify-content: flex-end; }
+.working .wv { margin-top: .5rem; font-size: 2.6rem; line-height: 1; letter-spacing: -.01em; }
+.working .wv em { font-style: italic; font-size: 1.1rem; color: var(--muted); letter-spacing: 0; }
+.apr { border-top: 1px solid var(--wash); margin-top: 1.2rem; }
+
+/* Area chart (shared with Portfolio) */
+.area-fill { animation: fade .6s .15s ease both; }
+.plot .end { animation: fade .3s .45s ease both; }
+.plot .pulse { transform-box: fill-box; transform-origin: center; animation: pulse 2.4s 1s ease-out infinite; }
+@keyframes pulse { 0% { transform: scale(.6); opacity: .28; } 70% { transform: scale(1.9); opacity: 0; } 100% { opacity: 0; } }
+.plot .tip { line-height: 1.35; }
+.plot .tip b { margin-bottom: .1rem; }
+
+/* Donuts */
+.dist { margin-top: 1.1rem; }
+.donut { display: grid; grid-template-columns: auto 1fr; gap: 2rem; align-items: center; }
+.donut .ring { position: relative; }
+.donut .ring svg { display: block; }
+.donut .seg-arc { animation: fade .5s ease both; }
+.donut .centre { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+.donut .centre b { font-weight: 400; font-size: 1.9rem; line-height: 1; }
+.donut .centre span { margin-top: .35rem; font-family: var(--mono); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.legend { list-style: none; margin: 0; padding: 0; display: grid; gap: .1rem; }
+.legend li { display: grid; grid-template-columns: 10px 1fr auto auto; column-gap: .7rem; align-items: baseline; padding: .55rem 0; border-bottom: 1px solid color-mix(in srgb, var(--wash) 70%, transparent); }
+.legend li:last-child { border-bottom: 0; }
+.legend .sw { width: 10px; height: 10px; border-radius: 2px; align-self: center; }
+.legend .n { font-size: 1rem; min-width: 0; }
+.legend .n small { display: block; font-family: var(--mono); font-size: .64rem; color: var(--muted); margin-top: .15rem; }
+.legend .p { font-family: var(--mono); font-size: .78rem; color: var(--muted); text-align: right; }
+.legend .v { font-size: 1rem; text-align: right; min-width: 4.2rem; }
+
+@media (max-width: 640px) {
+  .working { text-align: left; }
+  .working .lab { justify-content: flex-start; }
+  .working .wv { font-size: 2rem; }
+  .donut { grid-template-columns: 1fr; gap: 1rem; justify-items: center; }
+  .donut .legend { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) { .area-fill, .plot .end, .plot .pulse, .donut .seg-arc { animation: none; } }
+
+.fig .lab { display: block; line-height: 1.35; }
+.fig .lab i-tip { vertical-align: -4px; margin-left: .3rem; }
+@media (max-width: 640px) { .fig .lab { letter-spacing: .04em; font-size: .64rem; } }
+@media (max-width: 640px) {
+  .earn .fig:nth-child(1) { grid-column: 1 / -1; padding-left: 0; }
+  .earn .fig:nth-child(2) { border-left: 0; padding-left: 0; border-top: 1px solid var(--wash); }
+  .earn .fig:nth-child(3) { grid-column: auto; border-left: 1px solid var(--wash); padding-left: .9rem; border-top: 1px solid var(--wash); }
+  .fig .lab { letter-spacing: .08em; font-size: .68rem; }
+}
