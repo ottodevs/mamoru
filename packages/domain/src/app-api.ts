@@ -187,6 +187,8 @@ export type YieldLedgerView = {
   earnedStatus?: 'complete' | 'partial'
   notCounted?: ('fees' | 'vault-yield' | 'history' | 'accrued-24h')[]
   earned24hUsd?: string | null
+  // The 24 h figure's own gaps (it also misses the accrued change until fee samples exist): empty means complete.
+  earned24hNotCounted?: ('fees' | 'vault-yield' | 'history' | 'accrued-24h')[]
 }
 
 /** USDC base units x seconds that worked in each pool, per window, up to the ledger's latest snapshot (`asOf`). */
