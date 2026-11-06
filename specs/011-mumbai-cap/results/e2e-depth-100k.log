@@ -1,0 +1,15 @@
+# e2e:depth 100000 USDC, Base fork block 53995592, sha 1e2fbd86: FAILS at Start (activation simulation reverts). Bisected: 66,000 activates, 80,000 does not. See README.md.
+[e2e +0s] fork of Base at block 53995592, chain 8453, deposit 100,000 USDC, policy conservador-live-v5
+[e2e +1s] counterfactual Safe 0x6683C0Fd71058dcA62970d5D3d0f6680B107E3F0 funded with 100,000 USDC
+[operator] one authorization (V4) pinned: MamoruActionPolicyV4 0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8, offered per account by the one_auth_v4 flag
+[alert] v6 is configured but no operator of chain 143 is in MAMORU_PEER_OPERATORS: no v6 approval can be built
+[operator] chain 8453 live=true policy conservador-live-v5 relayer 0xcF71c045254BCb1B4663B75925864949c134C2F1 (0 wei) sha a771eb44 on http://127.0.0.1:38973
+[e2e +1s] ok  operator is live on chain 8453 with MAMORU_LIVE=1
+[e2e +6s] ok  before Start: 100,000 USDC, cap 100,000, no over-cap report
+[v4] 0x6683C0Fd71058dcA62970d5D3d0f6680B107E3F0 ~13334576 gas (estimated): 4 sessions now (generation 1), 5 in 2 later step(s)
+[v4] 0x6683C0Fd71058dcA62970d5D3d0f6680B107E3F0 ~13334576 gas (estimated): 4 sessions now (generation 1), 5 in 2 later step(s)
+[e2e +18s] activate to sign: Create your Safe 0x6683C0Fd71058dcA62970d5D3d0f6680B107E3F0 on Base | Convert 1.123175 USDC to at least 0.0005 ETH on Uniswap v3 USDC/WETH 0.05% + unwrap, kept in your Safe as its gas reserve | Let Mamoru's engine keep your 99998.87 USDC invested across Uniswap v3 USDC/USDT 0.01% 50%, USDC/cbBTC 0.05% 40%, WETH/USDC 0.30% 10% | Engine key 0x4dcA798d224a952affce74CF827678CB673d2a0d may swap USDC into those pools' tokens, open positions there, and take out, collect and close only the positions it opened, only near the market price, for 365 days: | In USDC/USDT 0.01%: swaps, new positions and withdrawals only within 0.10% of the 30- and 5-minute average price and within 0.40% of 1:1; swaps and new positions worth at most 250000.00 USDC a day and 500000.00 USDC in total on this approval | In USDC/cbBTC 0.05%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 80000.00 USDC a day and 400000.00 USDC in total on this approval | Each engine transaction pays at most 0.00052 ETH of network fee (at most 0.1 gwei per gas), from your Safe's ETH; these grants allow 39,000 transactions in all | Base limits how much one transaction can carry, so this approval takes 3 steps: after this one, 2 more for USDC/cbBTC 0.05% and WETH/USDC 0.30% (until then Mamoru does not act there with those permissions) | Whatever it collects, mints or swaps is paid to your Safe, never to anyone else. Cap 100000.00 USDC
+[owner] e2e-1793989494454 activate simulation reverts, retry 1: execTransaction: execution failed
+[owner] e2e-1793989494454 activate simulation reverts, retry 2: execTransaction: execution failed
+[owner] e2e-1793989494454 activate would revert, nothing sent: execTransaction: execution failed
+E2E FAILED: owner activate confirmed (undefined block undefined)
