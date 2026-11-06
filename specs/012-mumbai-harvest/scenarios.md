@@ -33,3 +33,4 @@ policy and account shape, live = read-only on prod data. Evidence in `specs/012-
 | HRV-S24 | R5 | unit (app) | vault interval 48 h with 4 USDC yield, window covers its last 24 h | earned 24h | counts 2 USDC (prorated), not 4 |
 | HRV-S21 | R1 R3 R9 | live | prod after release | pick one account that harvested | collect, sale and reinvest tx hashes; matching `yield_ledger_income` events; `/yield` figure includes them; recorded in `results/` |
 | HRV-S27 | R5 | unit (app) | holding of 1,000 shares, 999 explained, pps rises 1 % | vault event | `usd` = 999 × Δpps (external share earns nothing in the ledger); holding `partial` |
+| HRV-S28 | R5 | unit (app) | 100 explained shares at pps 1.00; engine redeems 50 at pps 1.01; next sample pps 1.02 | vault event | usd = 100 × 0.01 + 50 × 0.01 = 1.5 (not 2.0); a mid-interval deposit symmetric |

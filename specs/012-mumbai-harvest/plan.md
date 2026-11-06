@@ -92,8 +92,9 @@ CREATE TABLE yield_ledger_vault_samples (
   rerange, reduce, close → `re-range`). Insert-or-ignore on `event_id` (idempotent, no overwrite, no loss).
 - Vault events: at each snapshot, per account and vault, with `e` = shares explained by engine ops (from the ERC-4626
   events decoded in HT6; 013 B4 reuses that decoding) and `pps` = assets per share:
-  `usd = e_prev × (pps − pps_prev)`, i.e. only the explained shares earn in the ledger; shares outside `e` never enter
-  any formula. `explained = 1` when `e` equals the holding (±1 wei), else 0 and the holding is `partial` (marker shown)
+  the interval is split at every engine flow inside it (each ERC-4626 Deposit/Withdraw gives its own
+  `pps = assets / shares` at that block), and `usd = Σ_k e_k × (pps_k+1 − pps_k)` over the segments, `e_k` = explained
+  shares held during segment k. Only explained shares earn in the ledger; shares outside `e` never enter any formula. `explained = 1` when `e` equals the holding (±1 wei), else 0 and the holding is `partial` (marker shown)
   with the yield of its explained part still counted. First sample: one `backfill` row
   `e × pps − netDepositedFromEngineOps` (0 explained shares → `usd = null`).
 - Accrued uncollected LP fees are a level, not an event: read from the latest snapshot (`account_snapshot_latest.fees_usdc`);
