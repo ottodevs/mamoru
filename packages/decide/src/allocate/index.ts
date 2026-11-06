@@ -36,7 +36,7 @@ export type BucketValue = {
 }
 
 /** otto/mamoru#127, #128: savings a bucket is short of its target and holds back on purpose, and why. */
-export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY'; amount: bigint }
+export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY' | 'DECIDE_WAIT_BRIDGE_LIMIT'; amount: bigint }
 
 export type Allocation = {
   total: bigint
@@ -382,16 +382,28 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     /** The bucket of `displaced` (otto/mamoru#353: the capped run's local entry, when its bridge-out is not taken). */
     let displacedAt: number | null = null
     // A bridge needs a live bridge-out session; without one its share waits instead of taking the review.
-    const bridgeLive = obs.sessions.some((s) => s.grant === 'bridge-out' && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
+    const bridgeSession = obs.sessions.find((s) => s.grant === 'bridge-out' && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
+    const bridgeLive = bridgeSession !== undefined
+    // otto/mamoru#376 (spec 011 CAP-R5): never ask more than the grant allows. A V3 grant caps each call and the sum over
+    // its approval; when what is left cannot be read the share waits (fail closed).
+    const bridgeLimit = bridgeSession?.bridgeLimit ?? { kind: 'unknown' as const }
     for (const rb of policy.remoteBuckets ?? []) {
       if (unsafeDeposit || free === 0n) break
       const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
       const gap = target - (obs.remote?.value ?? 0n)
       if (gap < minEntry || gap * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
-      const amount = gap < free ? gap : free
+      let amount = gap < free ? gap : free
       if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n || !bridgeLive) {
         waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE', amount })
         continue
+      }
+      if (bridgeLimit.kind === 'unknown' || (bridgeLimit.kind === 'v3' && bridgeLimit.amountLeft < entryMin)) {
+        waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE_LIMIT', amount })
+        continue
+      }
+      if (bridgeLimit.kind === 'v3') {
+        if (bridgeLimit.perCall < amount) amount = bridgeLimit.perCall
+        if (bridgeLimit.amountLeft < amount) amount = bridgeLimit.amountLeft
       }
       if (amount < entryMin) {
         waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_GAS', amount })

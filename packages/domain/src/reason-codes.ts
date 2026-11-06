@@ -102,6 +102,8 @@ export const REASON_CODES = [
   'DECIDE_WAIT_BRIDGE',
   // otto/mamoru#210: the stables bucket's vault cannot pay out what it should give back right now (utilization near 100 %); retried each review.
   'DECIDE_WAIT_VAULT_LIQUIDITY',
+  // otto/mamoru#376 (spec 011 CAP-R5): a V3 bridge-out grant's total is used up, or what is left of it cannot be read; the remote bucket's share waits here.
+  'DECIDE_WAIT_BRIDGE_LIMIT',
   // otto/mamoru#215: savings go to the account's own sleeve on another chain (CCTP), for the bucket served there.
   'DECIDE_BRIDGE_OUT',
   // otto/mamoru#278: the home account asked this remote Safe to send savings back; it frees them and bridges them home, nothing else.

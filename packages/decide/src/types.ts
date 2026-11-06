@@ -174,7 +174,15 @@ export type SessionObs = {
   active: boolean
   /** otto/mamoru#149: userOps the grant has left before its usage limit. Absent: not known (no gate on it). */
   usesLeft?: number
+  /**
+   * otto/mamoru#376 (spec 011 CAP-R5): on the `bridge-out` session, what its grant still lets the engine bridge. `v3`: the
+   * signed per-call cap and what is left of the signed total; `none`: a V4 grant (no total, set from the policy family,
+   * never from absence); `unknown`: not readable now. Absent on a bridge-out session reads as `unknown` (fail closed).
+   */
+  bridgeLimit?: BridgeLimit
 }
+
+export type BridgeLimit = { kind: 'v3'; perCall: bigint; amountLeft: bigint } | { kind: 'none' } | { kind: 'unknown' }
 
 /** otto/mamoru#184: another Mamoru account's position, only what depth sizing needs. */
 export type PeerPositionObs = Pick<PositionObs, 'pool' | 'tickLower' | 'tickUpper' | 'liquidity'>
@@ -435,7 +443,7 @@ export type Decision = {
    * otto/mamoru#127, #128: savings held back on purpose, per bucket, with why. Outside the premise hash and the id
    * (the amounts move with every price). Absent when nothing waits.
    */
-  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY'; amount: bigint }[]
+  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY' | 'DECIDE_WAIT_BRIDGE_LIMIT'; amount: bigint }[]
   /**
    * otto/mamoru#278: a remote bucket's excess over its target and band, due home: the operator asks the remote Safe to
    * send it back. Outside the premise hash and the id, as `waiting`. Absent: nothing due (or the review was paused).

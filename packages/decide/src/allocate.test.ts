@@ -69,6 +69,10 @@ function apply(o: Observation, nextId: bigint, policy = V2): Observation {
   return { ...o, balances, positions: [...o.positions, pos] }
 }
 
+
+/** otto/mamoru#376: a V3 bridge-out grant with room to spare (the clip is tested on its own below). */
+const WIDE_BRIDGE = { kind: 'v3', perCall: 10n ** 15n, amountLeft: 10n ** 15n } as const
+
 describe('allocate (conservador-live-v2, target weights)', () => {
   test('a fresh 20 USDC account swaps into the stables pool first, with the per-pair grant', () => {
     const d = decide(obs({ balances: { USDC: 20n * USDC } }), V2)
@@ -385,7 +389,7 @@ describe('minimum entry by gas', () => {
 describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#213)', () => {
   const V6 = conservadorLiveV6
   const v6Obs = (over: Partial<Observation> = {}) =>
-    obs({ sessions: V6.session.grants.filter((g) => !g.perPosition).map((g, i) => ({ grant: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(2, '0').repeat(32)}` as const, validUntil: 10_000, active: true })), ...over })
+    obs({ sessions: V6.session.grants.filter((g) => !g.perPosition).map((g, i) => ({ grant: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(2, '0').repeat(32)}` as const, validUntil: 10_000, active: true, ...(grantKey(g) === 'bridge-out' ? { bridgeLimit: WIDE_BRIDGE } : {}) })), ...over })
 
   test('1,000 USDC on Base: stables to 50 %, WETH/USDC to 35 %, the Growth 15 % waits as USDC, nothing to cbBTC', () => {
     let o = v6Obs({ balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n } })
@@ -456,6 +460,35 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     expect(d.proposal).toMatchObject({ kind: 'bridge_out', grant: 'bridge-out', bucket: 'growth', chainId: 143, pool: 'pool:WMON/USDC/3000' })
     const amount = (d.proposal as { amount: bigint }).amount
     expect(amount > 140n * USDC && amount <= 150n * USDC).toBe(true)
+  })
+
+  // Spec 011 SCN-CAP-06 (otto/mamoru#376): the bridge never asks more than the grant allows.
+  const withLimit = (bridgeLimit: unknown) => (o: ReturnType<typeof v6Obs>) => ({ ...o, sessions: o.sessions.map((x) => (x.grant === 'bridge-out' ? { ...x, bridgeLimit } : x)) as typeof o.sessions })
+  const growthGap = { balances: { USDC: 2_700n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 0n, inFlight: 0n, ready: true } }
+
+  test('spec 011 SCN-CAP-06: a V3 grant clips the bridge to its per-call cap and to what is left of its total', () => {
+    // Gap ~405 (15 % of 2,700); per call 200, left 120: the bridge takes 120.
+    const d = decide(withLimit({ kind: 'v3', perCall: 200n * USDC, amountLeft: 120n * USDC })(v6Obs(growthGap)), V6)
+    expect(d.proposal).toMatchObject({ kind: 'bridge_out', bucket: 'growth', amount: 120n * USDC })
+    // Per call 200, plenty left: 200.
+    const p = decide(withLimit({ kind: 'v3', perCall: 200n * USDC, amountLeft: 10_000n * USDC })(v6Obs(growthGap)), V6)
+    expect(p.proposal).toMatchObject({ kind: 'bridge_out', amount: 200n * USDC })
+  })
+
+  test('spec 011 SCN-CAP-06: what is left under the entry minimum, or unreadable, waits as DECIDE_WAIT_BRIDGE_LIMIT', () => {
+    for (const limit of [{ kind: 'v3', perCall: 200n * USDC, amountLeft: 1n }, { kind: 'unknown' }, undefined]) {
+      const d = decide(withLimit(limit)(v6Obs(growthGap)), V6)
+      expect(d.proposal?.kind).not.toBe('bridge_out')
+      const w = (d.waiting ?? []).find((x) => x.code === 'DECIDE_WAIT_BRIDGE_LIMIT')
+      expect(w?.bucket).toBe('growth')
+    }
+  })
+
+  test('spec 011 SCN-CAP-06: a V4 grant (kind none) bridges min(gap, free) as before', () => {
+    const d = decide(withLimit({ kind: 'none' })(v6Obs(growthGap)), V6)
+    const amount = (d.proposal as { amount: bigint }).amount
+    expect(d.proposal?.kind).toBe('bridge_out')
+    expect(amount > 400n * USDC && amount <= 405n * USDC).toBe(true)
   })
 
   test('otto/mamoru#215: a bridge in flight counts as there and blocks a second one; the Base buckets still fill', () => {
