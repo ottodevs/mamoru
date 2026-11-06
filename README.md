@@ -1,5 +1,11 @@
 # Mamoru
 
+> **ETHGlobal Mumbai 2026 · Continuity track.** Mamoru started at ETHGlobal Tokyo and has run in production with real funds since. Everything built during Mumbai is the commit range [`ethglobal-mumbai-start...ethglobal-mumbai-submission`](https://github.com/ottodevs/mamoru/compare/ethglobal-mumbai-start...main) (5 Nov 21:00 IST to 7 Nov 09:00 IST).
+>
+> **Mumbai scope** (status per item in `ETHGLOBAL.md`): 1) deposit cap raised from 1,000 to 10,000 USDC per account, proven on a fork with 10k and 100k deposits; 2) full harvest: Uniswap fees sold to USDC and reinvested, vault yield counted as earned; 3) public [Stats](https://app.mamoru.lol/stats), no account needed.
+>
+> Before vs during, planning artifacts and AI use: [`ETHGLOBAL.md`](ETHGLOBAL.md) · Video: _TBD_ · Live: [app.mamoru.lol](https://app.mamoru.lol)
+
 Automated, non-custodial savings. You deposit USDC, Mamoru keeps it working in DeFi, and the yield it earns becomes stablecoins. Only you can take money out.
 
 - App: [app.mamoru.lol](https://app.mamoru.lol)
