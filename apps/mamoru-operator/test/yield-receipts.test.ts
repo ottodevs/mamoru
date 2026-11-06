@@ -4,7 +4,7 @@ import { address, baseRegistry, entryPointV07Abi, monadRegistry } from '@mamoru/
 import { livePool } from '../src/chain.ts'
 import type { StoredOp } from '../src/state.ts'
 import type { Snapshot } from '../src/snapshot.ts'
-import { dayReceipts, factsFromLogs, FACTS_PER_TICK, needsFacts, priceFees, withReceipts, type OpFacts } from '../src/yield-receipts.ts'
+import { dayReceipts, factsFromLogs, FACTS_PER_TICK, FACTS_VERSION, incomeEvents, keepPrices, needsFacts, priceFees, vaultWire, withReceipts, type OpFacts } from '../src/yield-receipts.ts'
 
 const SAFE = '0x1111111111111111111111111111111111111111' as Address
 const OTHER = '0x2222222222222222222222222222222222222222' as Address
@@ -39,12 +39,13 @@ describe('factsFromLogs (otto/mamoru#129)', () => {
     const f = factsFromLogs([userOp(SAFE, 7_000n), userOp(OTHER, 9_000n), poolCollect(5n, 6n), npmCollect(42n, SAFE, 5n, 6n)], SAFE, T)
     expect(f.gasWei).toBe('7000')
     expect(f.at).toBe(new Date(Number(T) * 1000).toISOString())
-    expect(f.fees).toEqual([{ tokenId: '42', pool: LIVE_POOL, fee0: '5', fee1: '6' }])
+    expect(f.fees).toEqual([{ tokenId: '42', pool: LIVE_POOL, fee0: '5', fee1: '6', logIndex: expect.any(Number) }])
+    expect(f.v).toBe(FACTS_VERSION)
   })
 
   test('a collect after a decrease in the same tx counts only what it paid above the freed principal', () => {
     const f = factsFromLogs([userOp(SAFE, 1n), decrease(7n, 100n, 200n), poolCollect(103n, 199n), npmCollect(7n, SAFE, 103n, 199n)], SAFE, T)
-    expect(f.fees).toEqual([{ tokenId: '7', pool: LIVE_POOL, fee0: '3', fee1: '0' }])
+    expect(f.fees).toEqual([{ tokenId: '7', pool: LIVE_POOL, fee0: '3', fee1: '0', logIndex: expect.any(Number) }])
   })
 
   test('with a userOpHash, only that userOp\'s gas and the logs it emitted count (a bundle of two ops of the same Safe)', () => {
@@ -102,7 +103,7 @@ describe('needsFacts', () => {
   })
 
   test('facts of another transaction are read again', () => {
-    expect(needsFacts(op('eng-1', { txHash: '0xAA', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [] }, '0xaa'))).toBe(false)
+    expect(needsFacts(op('eng-1', { txHash: '0xAA', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [], v: FACTS_VERSION }, '0xaa'))).toBe(false)
     expect(needsFacts(op('eng-1', { txHash: '0xbb', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [] }, '0xaa'))).toBe(true)
   })
 })
@@ -228,5 +229,53 @@ describe('feeable (otto/mamoru#371): facts taken while the account is in the yie
     expect((await run(undefined))?.feeable).toBeUndefined()
     // Out of scope when the op was recorded, in scope by the time its facts are read: never charged.
     expect((await run(true, false))?.feeable).toBeUndefined()
+  })
+})
+
+describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
+  const VAULT = address('vault:gtUSDCp', baseRegistry)
+  const vaultAbi = parseAbi([
+    'event Deposit(address indexed sender, address indexed owner, uint256 assets, uint256 shares)',
+    'event Withdraw(address indexed sender, address indexed receiver, address indexed owner, uint256 assets, uint256 shares)',
+  ])
+  const deposit = (owner: Address, assets: bigint, shares: bigint) =>
+    log(VAULT, encodeEventTopics({ abi: vaultAbi, eventName: 'Deposit', args: { sender: owner, owner } }) as Hex[], encodeAbiParameters([{ type: 'uint256' }, { type: 'uint256' }], [assets, shares]))
+  const withdraw = (owner: Address, assets: bigint, shares: bigint) =>
+    log(VAULT, encodeEventTopics({ abi: vaultAbi, eventName: 'Withdraw', args: { sender: owner, receiver: owner, owner } }) as Hex[], encodeAbiParameters([{ type: 'uint256' }, { type: 'uint256' }], [assets, shares]))
+
+  test('the Safe\'s own ERC-4626 Deposit and Withdraw are kept with their log index; another owner\'s are not', () => {
+    const f = factsFromLogs([userOp(SAFE, 1n), deposit(SAFE, 1_000_000n, 900_000n), deposit(OTHER, 5n, 5n), withdraw(SAFE, 500_000n, 440_000n)], SAFE, T)
+    expect(f.vaultFlows).toEqual([
+      { vault: 'vault:gtUSDCp', kind: 'deposit', assets: '1000000', shares: '900000', logIndex: expect.any(Number) },
+      { vault: 'vault:gtUSDCp', kind: 'withdraw', assets: '500000', shares: '440000', logIndex: expect.any(Number) },
+    ])
+  })
+
+  test('facts of an older layout are read again; the frozen prices and fee scope survive the re-read', () => {
+    const old: OpFacts = { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '7', gasUsdc: '3', fees: [{ tokenId: '42', pool: LIVE_POOL, fee0: '5', fee1: '6', usdc: '11' }], feeable: true }
+    expect(needsFacts(op('eng-1', old, '0xaa'))).toBe(true)
+    const next = keepPrices({ txHash: '0xaa', at: old.at, gasWei: '7', fees: [{ tokenId: '42', pool: LIVE_POOL, fee0: '5', fee1: '6', logIndex: 3 }], v: FACTS_VERSION }, old)
+    expect(next.gasUsdc).toBe('3')
+    expect(next.fees[0]).toEqual({ tokenId: '42', pool: LIVE_POOL, fee0: '5', fee1: '6', logIndex: 3, usdc: '11' })
+  })
+
+  test('one income event per collect, id txHash:logIndex, source from the op step; old-layout facts give none', () => {
+    const harvest = { ...op('eng-1', { txHash: '0xAA', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [{ tokenId: '1', pool: LIVE_POOL, fee0: '1', fee1: '0', logIndex: 4, usdc: '10' }, { tokenId: '2', pool: LIVE_POOL, fee0: '1', fee1: '0', logIndex: 9 }], v: FACTS_VERSION }), step: 'harvest' } as StoredOp
+    const rerange = { ...op('eng-2', { txHash: '0xbb', at: '2026-10-22T01:00:00.000Z', gasWei: '1', fees: [{ tokenId: '3', pool: LIVE_POOL, fee0: '1', fee1: '0', logIndex: 2, usdc: '5' }], v: FACTS_VERSION }, '0xbb'), step: 'rerange' } as StoredOp
+    const legacy = op('eng-3', { txHash: '0xcc', at: '2026-10-22T02:00:00.000Z', gasWei: '1', fees: [{ tokenId: '4', pool: LIVE_POOL, fee0: '1', fee1: '0', usdc: '7' }] }, '0xcc')
+    const t0 = Date.parse('2026-10-22T00:00:00.000Z') / 1000
+    expect(incomeEvents([rerange, harvest, legacy])).toEqual([
+      { id: '0xaa:4', t: t0, source: 'harvest', usdc: '10' },
+      { id: '0xaa:9', t: t0, source: 'harvest' },
+      { id: '0xbb:2', t: t0 + 3600, source: 're-range', usdc: '5' },
+    ])
+  })
+
+  test('explained shares are deposits minus withdraws per vault, and null while an op still waits for its receipt', () => {
+    const d = op('eng-1', { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [], v: FACTS_VERSION, vaultFlows: [{ vault: 'vault:gtUSDCp', kind: 'deposit', assets: '100', shares: '90', logIndex: 1 }] })
+    const w = op('own-2', { txHash: '0xbb', at: '2026-10-23T00:00:00.000Z', gasWei: '1', fees: [], v: FACTS_VERSION, vaultFlows: [{ vault: 'vault:gtUSDCp', kind: 'withdraw', assets: '60', shares: '50', logIndex: 1 }] }, '0xbb')
+    expect(vaultWire([w, d])).toMatchObject({ explained: { 'vault:gtUSDCp': '40' }, flows: [{ kind: 'deposit', id: '0xaa:1' }, { kind: 'withdraw', id: '0xbb:1' }] })
+    expect(vaultWire([d, w, op('eng-3')])?.explained).toBeNull()
+    expect(vaultWire([op('eng-4', { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [], v: FACTS_VERSION })])).toBeUndefined()
   })
 })
