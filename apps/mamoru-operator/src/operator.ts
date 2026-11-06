@@ -937,6 +937,8 @@ const ACTIVATION_GAS_BUDGET = 15_000_000n
  * between this read and that block, so the operator asks for less.
  */
 const INIT_DEPTH_FIT_BPS = 8_000n
+/** otto/mamoru#378: the smallest fitted perWindow offered: one unit of a 6-decimal stable (USDC, USDT). */
+const INIT_DEPTH_MIN = 1_000_000n
 /** A renewal revokes eight grants and enables eight in one transaction: its estimate may come closer to the cap. */
 const RENEW_GAS_BUDGET = 16_200_000n
 /** execTransaction, WebAuthn P-256 verify and MultiSend around the calls. */
@@ -3042,6 +3044,10 @@ export class Operator {
       const pool = address(spec.pool, this.cfg.registry)
       const c = await read<{ twapWindow: number; generation: bigint; perWindow: bigint; total: bigint }>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'configOf', args: [live.safe, pool] })
       if (c.twapWindow !== 0 && c.generation === generation) {
+        // Kept only while it is within what this cap signs: a configured budget above it (a lower cap since the first
+        // step) is never re-signed; the owner renews in full instead (a new generation, fitted again).
+        const total = budgets[spec.caps.budgetTotal]
+        if (c.perWindow > want || (total !== undefined && c.total > total)) throw new HttpError(409, 'POLICY_GENERATION_MOVED', "the approval on your Safe changed since the last step: renew it in full instead")
         budgets[spec.caps.budgetWindow] = c.perWindow
         budgets[spec.caps.budgetTotal] = c.total
         continue
@@ -3063,7 +3069,10 @@ export class Operator {
       const fit = (depth * INIT_DEPTH_FIT_BPS) / 10_000n
       if (want > fit) {
         console.log(`[v4] ${live.safe} ${spec.pool}: daily budget ${want} above ${INIT_DEPTH_FIT_BPS / 100n}% of the pool's depth in its band (${depth}), signed at ${fit}`)
-        budgets[spec.caps.budgetWindow] = fit > 0n ? fit : 1n
+        // A band that cannot take even one unit of the budget token would be refused on chain (BadInit(11)) and take
+        // the whole owner transaction with it: nothing is offered for signing, the owner tries again later.
+        if (fit < INIT_DEPTH_MIN) throw new HttpError(503, 'POOL_DEPTH_TOO_THIN', `${poolLabel(spec.pool, this.cfg.registry)} is too thin right now to approve; try again in a few minutes`)
+        budgets[spec.caps.budgetWindow] = fit
       }
     }
     if (this.depthFit.size >= 64) this.depthFit.clear()
