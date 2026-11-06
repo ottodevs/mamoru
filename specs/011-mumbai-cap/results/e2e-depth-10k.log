@@ -1,0 +1,83 @@
+# e2e:depth 10,000 USDC, Base fork block 53992857, branch sha a771eb44 + extension signing, 2026-11-06T18:25:07Z
+# DEPOSIT_USDC=10000 MAMORU_POLICY=conservador-live-v5 (default), C = 10,000
+[e2e +0s] fork of Base at block 53992857, chain 8453, deposit 10,000 USDC, policy conservador-live-v5
+[e2e +1s] counterfactual Safe 0x779b35843a225fF37a2F0A4C345352A5432ed992 funded with 10,000 USDC
+[operator] one authorization (V4) pinned: MamoruActionPolicyV4 0xCd278c96dC14d59ded497bE63c5c8E2De456f2d8, offered per account by the one_auth_v4 flag
+[alert] v6 is configured but no operator of chain 143 is in MAMORU_PEER_OPERATORS: no v6 approval can be built
+[operator] chain 8453 live=true policy conservador-live-v5 relayer 0x0d2684d33895743760a9d2d7409172CD0D362013 (0 wei) sha a771eb44 on http://127.0.0.1:33741
+[e2e +1s] ok  operator is live on chain 8453 with MAMORU_LIVE=1
+[e2e +6s] ok  before Start: 10,000 USDC, cap 10,000, no over-cap report
+[v4] 0x779b35843a225fF37a2F0A4C345352A5432ed992 ~13356707 gas (simulated): 3 sessions now (generation 1), 6 in 2 later step(s)
+[v4] 0x779b35843a225fF37a2F0A4C345352A5432ed992 ~13356662 gas (simulated): 3 sessions now (generation 1), 6 in 2 later step(s)
+[e2e +114s] activate to sign: Create your Safe 0x779b35843a225fF37a2F0A4C345352A5432ed992 on Base | Convert 1.122727 USDC to at least 0.0005 ETH on Uniswap v3 USDC/WETH 0.05% + unwrap, kept in your Safe as its gas reserve | Let Mamoru's engine keep your 9998.87 USDC invested across Uniswap v3 USDC/USDT 0.01% 50%, USDC/cbBTC 0.05% 40%, WETH/USDC 0.30% 10% | Engine key 0xBD8B6626FE3D05006Ce394e8AAE0328Ed651587A may swap USDC into those pools' tokens, open positions there, and take out, collect and close only the positions it opened, only near the market price, for 365 days: | In USDC/USDT 0.01%: swaps, new positions and withdrawals only within 0.10% of the 30- and 5-minute average price and within 0.40% of 1:1; swaps and new positions worth at most 25000.00 USDC a day and 50000.00 USDC in total on this approval | Each engine transaction pays at most 0.00052 ETH of network fee (at most 0.1 gwei per gas), from your Safe's ETH; these grants allow 36,000 transactions in all | Base limits how much one transaction can carry, so this approval takes 3 steps: after this one, 2 more for USDC/cbBTC 0.05% and WETH/USDC 0.30% (until then Mamoru does not act there with those permissions) | Whatever it collects, mints or swaps is paid to your Safe, never to anyone else. Cap 10000.00 USDC
+[owner] deploy 0x779b35843a225fF37a2F0A4C345352A5432ed992 tx 0x17dd78c54a430ed293bc719116e28b2820cdd35435c71a41ad3db78844d1f5cc success
+[owner] own-1-activate the batch buys the gas reserve: at least 500000000000000 wei into 0x779b35843a225fF37a2F0A4C345352A5432ed992
+[owner] own-1-activate tx 0x9fc857805fd77b96357441eba09f0d77a684ce60625c8fca3ba4a5340901bfa6 block 53992976 ok
+[engine e2e-1793988947394] loop started for 0x779b35843a225fF37a2F0A4C345352A5432ed992 every 2000ms
+[e2e +120s] ok  owner activate confirmed (0x9fc857805fd77b96357441eba09f0d77a684ce60625c8fca3ba4a5340901bfa6 block 53992976)
+[engine e2e-1793988947394] rpc head 53992976 not past activation block 53992976, waiting
+[e2e +121s] ok  engine active after Start of 10,000 USDC (tx 0x9fc857805fd77b96357441eba09f0d77a684ce60625c8fca3ba4a5340901bfa6)
+[v4] 0x779b35843a225fF37a2F0A4C345352A5432ed992 ~13626509 gas (simulated): 5 sessions now (generation 1), 1 in 1 later step(s)
+[e2e +166s] extension to sign: Finish Mamoru's approval on your Safe 0x779b35843a225fF37a2F0A4C345352A5432ed992: USDC/cbBTC 0.05% and WETH/USDC 0.30% | Engine key 0xBD8B6626FE3D05006Ce394e8AAE0328Ed651587A may, for the rest of this approval and within limits sized for deposits up to 10000.00 USDC: | In USDC/cbBTC 0.05%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 8000.00 USDC a day and 40000.00 USDC in total on this approval | In WETH/USDC 0.30%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 3000.00 USDC a day and 10000.00 USDC in total on this approval | Each engine transaction pays at most 0.00052 ETH of network fee (at most 0.1 gwei per gas), from your Safe's ETH; these grants allow 40,000 transactions in all | Base limits how much one transaction can carry, so this approval takes 2 steps: after this one, one more for WETH/USDC 0.30% (until then Mamoru does not act there with those permissions) | Nothing is moved now: your positions stay as they are | Whatever it collects, mints or swaps is paid to your Safe, never to anyone else
+[shadow] e2e-1793988947394 RISK_POOL_STATS_UNREAD pool:USDC/USDT/100 missing tvl,volume7d,volumeLastDay,volume28dAvg; RISK_POOL_STATS_UNREAD pool:USDC/cbBTC/500 missing tvl,volume7d; RISK_POOL_STATS_UNREAD pool:WETH/USDC/3000 missing tvl,volume7d; RISK_POOL_DEPTH_UNREAD pool:USDC/USDT/100 no usable curve; RISK_POOL_DEPTH_UNREAD pool:USDC/cbBTC/500 no usable curve; RISK_POOL_DEPTH_UNREAD pool:WETH/USDC/3000 no usable curve
+[bundler] 0x8ed6374b in 0x61fe38f275fcc8f72d5957248454db14059afeeb6b1d848ba4b0a28f068bf6a4 block 53993040 success=true
+[engine e2e-1793988947394] block 53992983 enter_swap DECIDE_ENTER -> op-1 confirmed EXEC_OK
+[owner] own-2-renew tx 0x5c7f9542f53194c629ef71eebe725d3cd5fa62b364082788118aaddde12da3d6 block 53993063 ok
+[engine e2e-1793988947394] loop stopped
+[engine e2e-1793988947394] loop started for 0x779b35843a225fF37a2F0A4C345352A5432ed992 every 2000ms
+[shadow] e2e-1793988947394 RISK_POOL_STATS_UNREAD pool:USDC/cbBTC/500 missing tvl,volume7d; RISK_POOL_STATS_UNREAD pool:WETH/USDC/3000 missing tvl,volume7d; RISK_POOL_DEPTH_UNREAD pool:USDC/USDT/100 no usable curve; RISK_POOL_DEPTH_UNREAD pool:USDC/cbBTC/500 no usable curve
+[bundler] 0x2dfceae6 in 0xcf1278e50a202337fdf6eea059eab864c262126900dd1b88e7c7905448e229c1 block 53993065 success=true
+[engine e2e-1793988947394] block 53993064 enter_swap DECIDE_ENTER -> op-1 confirmed EXEC_OK
+[v4] 0x779b35843a225fF37a2F0A4C345352A5432ed992 ~4912713 gas (simulated): 1 sessions now (generation 1), 0 in 0 later step(s)
+[e2e +218s] extension to sign: Finish Mamoru's approval on your Safe 0x779b35843a225fF37a2F0A4C345352A5432ed992: WETH/USDC 0.30% | Engine key 0xBD8B6626FE3D05006Ce394e8AAE0328Ed651587A may, for the rest of this approval and within limits sized for deposits up to 10000.00 USDC: | In WETH/USDC 0.30%: swaps, new positions and withdrawals only within 1.00% of the 30- and 5-minute average price; swaps and new positions worth at most 3000.00 USDC a day and 10000.00 USDC in total on this approval | Each engine transaction pays at most 0.00052 ETH of network fee (at most 0.1 gwei per gas), from your Safe's ETH; these grants allow 32,000 transactions in all | Nothing is moved now: your positions stay as they are | Whatever it collects, mints or swaps is paid to your Safe, never to anyone else
+[engine e2e-1793988947394] owner tx pending, review held
+[owner] own-3-renew tx 0x573e3a885599e01095187d284539ba933695eb0dc29657590b842b83228d2a99 block 53993075 ok
+[engine e2e-1793988947394] loop stopped
+[engine e2e-1793988947394] loop started for 0x779b35843a225fF37a2F0A4C345352A5432ed992 every 2000ms
+[e2e +219s] ok  every grant enabled (2 extension(s): 0x5c7f9542f53194c629ef71eebe725d3cd5fa62b364082788118aaddde12da3d6, 0x573e3a885599e01095187d284539ba933695eb0dc29657590b842b83228d2a99)
+[shadow] e2e-1793988947394 RISK_POOL_STATS_UNREAD pool:WETH/USDC/3000 missing tvl,volume7d; RISK_POOL_DEPTH_UNREAD pool:USDC/USDT/100 no usable curve; RISK_POOL_DEPTH_UNREAD pool:USDC/cbBTC/500 no usable curve
+[bundler] 0x31066c48 in 0x0ed5dad13f43ec31916718736958e3972c9a4fb2f4e510a9fbe5becd123717d8 block 53993076 success=true
+[engine e2e-1793988947394] block 53993075 enter_swap DECIDE_ENTER -> op-1 confirmed EXEC_OK
+[bundler] 0x46b7af11 in 0x5894350af58463b077772bda56dfd1580aedd0b937f5738124ddb449e84a3f58 block 53993082 success=true
+[engine e2e-1793988947394] block 53993080 enter_mint DECIDE_ENTER -> op-2 confirmed EXEC_OK
+[bundler] 0xef65caf8 in 0x410bd4f7bbac29bdc40ed450b167d0da71c824e3f6ad674d702e4edb0577d5db block 53993086 success=true
+[engine e2e-1793988947394] block 53993085 enter_swap DECIDE_ENTER -> op-3 confirmed EXEC_OK
+[shadow] e2e-1793988947394 RISK_POOL_DEPTH_UNREAD pool:USDC/USDT/100 no usable curve; RISK_POOL_DEPTH_UNREAD pool:USDC/cbBTC/500 no usable curve
+[bundler] 0x060cf26e in 0xc8dd914f1a27758bd2eb6c4378347751b593fb33b4a9b5890e6a4d08dca8153e block 53993091 success=true
+[engine e2e-1793988947394] block 53993090 enter_mint DECIDE_ENTER -> op-4 confirmed EXEC_OK
+[bundler] 0x1911da6b in 0x4538753c5c0ff3a023fda3c83984999c8829082a354ff7e5d30dd251c230bbdb block 53993096 success=true
+[engine e2e-1793988947394] block 53993095 enter_swap DECIDE_ENTER -> op-5 confirmed EXEC_OK
+[bundler] 0x87c80814 in 0x5d196a4d42177330f03c9c36c0ffff07a056ad8a1475d44392744c7d93b49114 block 53993101 success=true
+[engine e2e-1793988947394] block 53993099 enter_mint DECIDE_ENTER -> op-6 confirmed EXEC_OK
+[engine e2e-1793988947394] block 53993104 hold DECIDE_IN_RANGE
+[engine e2e-1793988947394] block 53993107 hold DECIDE_IN_RANGE
+[engine e2e-1793988947394] block 53993109 hold DECIDE_IN_RANGE
+[engine e2e-1793988947394] block 53993111 hold DECIDE_IN_RANGE
+[engine e2e-1793988947394] block 53993113 hold DECIDE_IN_RANGE
+[engine e2e-1793988947394] block 53993115 hold DECIDE_IN_RANGE
+[engine e2e-1793988947394] block 53993117 hold DECIDE_IN_RANGE
+[engine e2e-1793988947394] block 53993119 hold DECIDE_IN_RANGE
+[engine e2e-1793988947394] block 53993121 hold DECIDE_IN_RANGE
+[e2e +265s] settled after 8 engine ops: pool:USDC/USDT/100 4,995.9, pool:USDC/cbBTC/500 3,997.93, pool:WETH/USDC/3000 996.55; idle USDC 5.79; waiting none
+[e2e +265s] ok  3 positions open
+[e2e +265s] ok  whatever waits says why, with a typed code
+[e2e +265s] waited code=none usdc=0
+[e2e +265s] chain revert reasons seen: none
+[e2e +265s] ok  idle USDC 5.79 is explained by typed waits (0) within 1 % of the deposit
+[e2e +265s] placed 9,990.38 + idle 5.79 = 9,996.17 of 10,000; waiting 0 (part of idle)
+[e2e +265s] ok  (a) placed + idle accounts for the deposit within 0.5 % (off by 3.83)
+[e2e +265s] ok  (a) waiting 0 is part of idle 5.79
+[e2e +265s] window stables: needs 5,000 against 25,000 per day
+[e2e +265s] window btc-usdc: needs 4,000 against 8,000 per day
+[e2e +265s] window risk: needs 1,000 against 3,000 per day
+[e2e +265s] expected window excess: 0 USDC (zero when every bucket's target fits its BudgetWindow: then no window denial is expected and (b) checks that none is needed)
+[e2e +265s] ok  (b) required entries fit the policy windows: no window wait expected
+[engine e2e-1793988947394] owner tx pending, review held
+[e2e +267s] stop to sign: Revoke the engine's 9 session grant(s) | Close and burn position #6489450 (USDC/USDT 0.01%) | Close and burn position #6489449 (USDC/cbBTC 0.05%) | Close and burn position #6489451 (WETH/USDC 0.30%) | Swap 229143264781587368 WETH units to at least 505.38 USDC | Swap 2493050674 USDT units to at least 2477.25 USDC | Swap 2629095 cbBTC units to at least 1979.67 USDC | Everything stays in your Safe as USDC
+[owner] own-4-exit tx 0x91072a444b3436ea34b864973bac6fd9f4bedce3058e6bfc3ca28688a52ebaa3 block 53993125 ok
+[engine e2e-1793988947394] loop stopped
+[e2e +269s] ok  owner stop confirmed (0x91072a444b3436ea34b864973bac6fd9f4bedce3058e6bfc3ca28688a52ebaa3 block 53993125)
+[e2e +269s] ok  after stop: inactive, no positions, USDC 9,993.32
+[e2e +269s] ok  the Stop returned 9,993.32 USDC of 10,000 (c: within 0.1 %, gas reserve and costs included)
+[e2e +269s] ok  operator made 1222 RPC calls, 0 anvil_/evm_ methods
+[e2e +269s] RESULT PASS: start 0x9fc857805fd77b96357441eba09f0d77a684ce60625c8fca3ba4a5340901bfa6, 8 engine ops, stop 0x91072a444b3436ea34b864973bac6fd9f4bedce3058e6bfc3ca28688a52ebaa3
