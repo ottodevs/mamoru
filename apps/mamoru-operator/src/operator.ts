@@ -7808,8 +7808,8 @@ export class Operator {
         exitOptIn: () => this.inScope(acc, 'stables_lp_exit'),
         // otto/mamoru#107 (spec 012 HT5): harvested volatile not sold yet, from the stored ops at every review.
         // The clamp to the balance is stored (acc.harvestedCut), so a dip lowers it for good (coordinator, #318).
-        harvested: (balances) => {
-          const r = clampHarvested(harvestedOf(acc.ops, this.cfg.registry), balances, acc.harvestedCut)
+        harvested: (balances, block) => {
+          const r = clampHarvested(harvestedOf(acc.ops, this.cfg.registry, Number(block)), balances, acc.harvestedCut)
           if (JSON.stringify(r.cut) !== JSON.stringify(acc.harvestedCut ?? {})) {
             acc.harvestedCut = r.cut
             this.store.save()

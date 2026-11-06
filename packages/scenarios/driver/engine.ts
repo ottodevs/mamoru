@@ -451,7 +451,7 @@ export type EngineConfig = {
    * those balances again (`Observation.harvested`). Null: unknown (a harvest receipt not read yet), set as absent so
    * nothing is sold. Absent: none.
    */
-  harvested?: (balances: Observation['balances']) => Observation['harvested'] | null
+  harvested?: (balances: Observation['balances'], block: bigint) => Observation['harvested'] | null
 
   /**
    * otto/mamoru#215: the account's value on other chains for the policy's `remoteBuckets` (its sleeve there valued at the
@@ -980,7 +980,7 @@ export class Engine {
     const cap = await this.cfg.cap?.(obs.block.number)
     const weekAgo = obs.block.timestamp - 7n * 86_400n
     const recent = this.reranges.filter((r) => r.at > weekAgo)
-    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}), ...(this.cfg.exitOptIn?.() === true ? { exitOptIn: true } : {}), ...harvestedObs(this.cfg.harvested?.(obs.balances), obs.balances) }
+    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}), ...(this.cfg.exitOptIn?.() === true ? { exitOptIn: true } : {}), ...harvestedObs(this.cfg.harvested?.(obs.balances, obs.block.number), obs.balances) }
     if (this.outOfRangeSeed) {
       const seed = this.outOfRangeSeed
       this.outOfRangeSeed = undefined

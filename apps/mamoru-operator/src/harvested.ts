@@ -20,7 +20,8 @@ export type Harvested = Partial<Record<RegistryName, { amount: bigint; since: nu
 const SAVINGS = 'USDC'
 const MINTS = new Set(['enter_mint', 'increase_liquidity', 'rerange'])
 
-export function harvestedOf(ops: readonly StoredOp[], registry: Registry): Harvested | null {
+/** `atBlock`: only ops at or before the block the balances were read at count, so a harvest the read predates is not clamped away. */
+export function harvestedOf(ops: readonly StoredOp[], registry: Registry, atBlock?: number): Harvested | null {
   const tokensOf = (pool: string | undefined): string[] => {
     const e = pool ? registry.entries.find((x) => x.name === pool) : undefined
     return e?.token0 && e.token1 ? [e.token0, e.token1] : []
@@ -29,6 +30,8 @@ export function harvestedOf(ops: readonly StoredOp[], registry: Registry): Harve
   const confirmed = ops.filter((o) => (o.opId.startsWith('eng-') || o.opId.startsWith('own-')) && o.state === 'confirmed' && !(o.kind === 'migrate-v4' && o.migrateStep === 1))
   if (confirmed.some((o) => o.block === undefined)) return null
   confirmed.sort((a, b) => a.block! - b.block!)
+  const later = atBlock === undefined ? -1 : confirmed.findIndex((o) => o.block! > atBlock)
+  if (later >= 0) confirmed.length = later
   const out = new Map<string, { amount: bigint; since: number }>()
   for (const op of confirmed) {
     if (op.opId.startsWith('own-')) {
@@ -78,7 +81,8 @@ export function clampHarvested(derived: Harvested | null, balances: Partial<Reco
     const prior = stored[token]?.since === v.since ? BigInt(stored[token]!.cut) : 0n
     let amount = v.amount > prior ? v.amount - prior : 0n
     let taken = prior
-    const bal = balances[token] ?? 0n
+    // A token the read did not return is not a dip: no cut grows from a missing entry.
+    const bal = balances[token] ?? amount
     if (amount > bal) {
       taken += amount - bal
       amount = bal

@@ -67,3 +67,14 @@ describe('clampHarvested (coordinator, #318): min(harvested, balance) kept, so a
     expect(clampHarvested(null, { WETH: 100n }, cut)).toEqual({ harvested: null, cut })
   })
 })
+
+describe('round 3 (Opus): a stale read never cuts for good', () => {
+  test('ops after the balances\' block are left out, so a harvest the read predates is not clamped to 0', () => {
+    expect(harvestedOf([harvest(1, 5n), harvest(10, 10n)], baseRegistry, 5)).toEqual({ WETH: { amount: 5n, since: 1001 } })
+    expect(harvestedOf([harvest(10, 10n)], baseRegistry, 5)).toEqual({})
+  })
+  test('a token missing from the balances read grows no cut', () => {
+    expect(clampHarvested({ WETH: { amount: 10n, since: 1001 } }, {})).toEqual({ harvested: { WETH: { amount: 10n, since: 1001 } }, cut: {} })
+  })
+})
+
