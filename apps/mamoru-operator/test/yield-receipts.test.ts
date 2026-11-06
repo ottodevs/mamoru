@@ -270,6 +270,17 @@ describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
     expect(dayReceipts([op('eng-1', { ...g, txHash: '0xaa' })])[0]!.positions).toEqual([{ tokenId: '43', collected0: '11', collected1: '0' }])
   })
 
+  test('a collect before a decrease is all fee; principal counts only from the decrease that frees it', () => {
+    const f = factsFromLogs([userOp(SAFE, 1n), poolCollect(5n, 0n), npmCollect(44n, SAFE, 5n, 0n), decrease(44n, 5n, 0n), poolCollect(5n, 0n), npmCollect(44n, SAFE, 5n, 0n)], SAFE, T)
+    expect(f.fees).toEqual([{ tokenId: '44', pool: LIVE_POOL, fee0: '5', fee1: '0', logIndex: idx - 4 }])
+  })
+
+  test('a legacy fee split by the re-read keeps its frozen value whole on the first piece, 0 on the rest', () => {
+    const old: OpFacts = { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [{ tokenId: '43', pool: LIVE_POOL, fee0: '11', fee1: '0', usdc: '11' }] }
+    const next = keepPrices({ txHash: '0xaa', at: old.at, gasWei: '1', fees: [{ tokenId: '43', pool: LIVE_POOL, fee0: '5', fee1: '0', logIndex: 2 }, { tokenId: '43', pool: LIVE_POOL, fee0: '6', fee1: '0', logIndex: 4 }], v: FACTS_VERSION }, old)
+    expect(next.fees.map((x) => x.usdc)).toEqual(['11', '0'])
+  })
+
   test('an account with no receipt day yet but receipts pending still reports its vault state as unknown', async () => {
     const out = await withReceipts({ chainId: 8453, block: 10n, readAt: '2026-10-22T08:00:00.000Z', pools: {}, safes: [], calls: 1 }, { accounts: () => [{ accountKey: 'acct-2', safe: SAFE, ops: [op('eng-1', undefined, '0x01')] }], save: () => {} }, async () => null, async () => T, async () => 100n)
     expect(out.receipts).toEqual([{ safe: SAFE, days: [], vault: { flows: [], explained: null } }])
