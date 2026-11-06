@@ -110,6 +110,12 @@ export type ArmedActivation = {
 }
 
 export type AccountState = {
+  /**
+   * otto/mamoru#107 (spec 012 HRV-R1): per token, how much of the harvested-unsold derived from the ops a balance below
+   * it has already taken off (`cut`), for the accumulation that started at `since`. Stored, so a dip (the owner moving
+   * tokens out outside Mamoru) lowers the counter for good and principal sent back later is never sold (harvested.ts).
+   */
+  harvestedCut?: Record<string, { since: number; cut: string }>
   /** Spec 006: the cap (base units) the account's current grants were sized for, from its last confirmed activation or renewal. Absent: LIVE_CAP_USDC. */
   signedCapUsdc?: string
   accountKey: string

@@ -61,3 +61,30 @@ export function harvestedOf(ops: readonly StoredOp[], registry: Registry): Harve
   }
   return Object.fromEntries(out) as Harvested
 }
+
+export type HarvestedCut = Record<string, { since: number; cut: string }>
+
+/**
+ * The spec's rule made persistent: harvested = min(harvested, balance) at every observation, and what the clamp took off
+ * is kept (`cut`, per token and accumulation `since`). The counter is the ops-derived amount less that cut, never above
+ * the balance just read; a new accumulation (another `since`) starts with no cut. Returns the observation's value and the
+ * cut to store (the caller saves it when it changed).
+ */
+export function clampHarvested(derived: Harvested | null, balances: Partial<Record<RegistryName, bigint>>, stored: HarvestedCut = {}): { harvested: Harvested | null; cut: HarvestedCut } {
+  if (derived === null) return { harvested: null, cut: stored }
+  const out: Harvested = {}
+  const cut: HarvestedCut = {}
+  for (const [token, v] of Object.entries(derived) as [RegistryName, { amount: bigint; since: number }][]) {
+    const prior = stored[token]?.since === v.since ? BigInt(stored[token]!.cut) : 0n
+    let amount = v.amount > prior ? v.amount - prior : 0n
+    let taken = prior
+    const bal = balances[token] ?? 0n
+    if (amount > bal) {
+      taken += amount - bal
+      amount = bal
+    }
+    if (taken > 0n) cut[token] = { since: v.since, cut: taken.toString() }
+    if (amount > 0n) out[token] = { amount, since: v.since }
+  }
+  return { harvested: out, cut }
+}

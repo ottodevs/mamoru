@@ -446,11 +446,12 @@ export type EngineConfig = {
    */
   exitOptIn?: () => boolean
   /**
-   * otto/mamoru#107 (spec 012 HRV-R1): the harvested volatile not sold yet, per token, at every review; the engine
-   * clips it to the balances it just read (`Observation.harvested`). Null: unknown (a harvest receipt not read yet),
-   * set as absent so nothing is sold. Absent: none.
+   * otto/mamoru#107 (spec 012 HRV-R1): the harvested volatile not sold yet, per token, at every review, given the
+   * balances just read (the operator keeps what a dip took off; harvested.ts clampHarvested). The engine clips it to
+   * those balances again (`Observation.harvested`). Null: unknown (a harvest receipt not read yet), set as absent so
+   * nothing is sold. Absent: none.
    */
-  harvested?: () => Observation['harvested'] | null
+  harvested?: (balances: Observation['balances']) => Observation['harvested'] | null
 
   /**
    * otto/mamoru#215: the account's value on other chains for the policy's `remoteBuckets` (its sleeve there valued at the
@@ -979,7 +980,7 @@ export class Engine {
     const cap = await this.cfg.cap?.(obs.block.number)
     const weekAgo = obs.block.timestamp - 7n * 86_400n
     const recent = this.reranges.filter((r) => r.at > weekAgo)
-    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}), ...(this.cfg.exitOptIn?.() === true ? { exitOptIn: true } : {}), ...harvestedObs(this.cfg.harvested?.(), obs.balances) }
+    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}), ...(this.cfg.exitOptIn?.() === true ? { exitOptIn: true } : {}), ...harvestedObs(this.cfg.harvested?.(obs.balances), obs.balances) }
     if (this.outOfRangeSeed) {
       const seed = this.outOfRangeSeed
       this.outOfRangeSeed = undefined

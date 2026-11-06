@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { baseRegistry } from '@mamoru/registry'
-import { harvestedOf } from '../src/harvested.ts'
+import { clampHarvested, harvestedOf } from '../src/harvested.ts'
 import type { StoredOp } from '../src/state.ts'
 
 const POOL = 'pool:WETH/USDC/500'
@@ -43,5 +43,27 @@ describe('harvestedOf (spec 012 HT5, HRV-R1/R2, HRV-S21, S25)', () => {
 
   test('a confirmed op with no block recorded yet makes it unknown (null)', () => {
     expect(harvestedOf([harvest(1, 10n), { ...op(2, 'enter_swap', { tokenIn: 'WETH', amountIn: '10' }), block: undefined } as StoredOp], baseRegistry)).toBeNull()
+  })
+})
+
+describe('clampHarvested (coordinator, #318): min(harvested, balance) kept, so a dip lowers it for good', () => {
+  const derived = { WETH: { amount: 10n, since: 1001 } } as const
+  test('balance 100, harvested 10 → owner withdraws to 3 outside Mamoru → 3 → owner sends 100 back → sale ≤ 3', () => {
+    let r = clampHarvested(derived, { WETH: 100n })
+    expect(r.harvested).toEqual({ WETH: { amount: 10n, since: 1001 } })
+    r = clampHarvested(derived, { WETH: 3n }, r.cut)
+    expect(r.harvested).toEqual({ WETH: { amount: 3n, since: 1001 } })
+    expect(r.cut).toEqual({ WETH: { since: 1001, cut: '7' } })
+    r = clampHarvested(derived, { WETH: 100n }, r.cut)
+    expect(r.harvested).toEqual({ WETH: { amount: 3n, since: 1001 } })
+  })
+  test('a later harvest in the same accumulation adds on top of what is left; a new accumulation starts with no cut', () => {
+    const cut = { WETH: { since: 1001, cut: '7' } }
+    expect(clampHarvested({ WETH: { amount: 14n, since: 1001 } }, { WETH: 100n }, cut).harvested).toEqual({ WETH: { amount: 7n, since: 1001 } })
+    expect(clampHarvested({ WETH: { amount: 4n, since: 2002 } }, { WETH: 100n }, cut)).toEqual({ harvested: { WETH: { amount: 4n, since: 2002 } }, cut: {} })
+  })
+  test('unknown stays unknown and keeps the stored cut', () => {
+    const cut = { WETH: { since: 1001, cut: '7' } }
+    expect(clampHarvested(null, { WETH: 100n }, cut)).toEqual({ harvested: null, cut })
   })
 })

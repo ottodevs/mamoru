@@ -68,7 +68,7 @@ import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
 import { bridgeLeftOf } from './bridge-left.ts'
 import { SpendHold, SPEND_HOLD_PROBE_MS, isSpend, spendDenialOf } from './window-hold.ts'
-import { harvestedOf } from './harvested.ts'
+import { clampHarvested, harvestedOf } from './harvested.ts'
 import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
@@ -7807,7 +7807,15 @@ export class Operator {
         // otto/mamoru#210: v7's USDC/USDT is wound down only for an account in the `stables_lp_exit` scope (opt-in).
         exitOptIn: () => this.inScope(acc, 'stables_lp_exit'),
         // otto/mamoru#107 (spec 012 HT5): harvested volatile not sold yet, from the stored ops at every review.
-        harvested: () => harvestedOf(acc.ops, this.cfg.registry),
+        // The clamp to the balance is stored (acc.harvestedCut), so a dip lowers it for good (coordinator, #318).
+        harvested: (balances) => {
+          const r = clampHarvested(harvestedOf(acc.ops, this.cfg.registry), balances, acc.harvestedCut)
+          if (JSON.stringify(r.cut) !== JSON.stringify(acc.harvestedCut ?? {})) {
+            acc.harvestedCut = r.cut
+            this.store.save()
+          }
+          return r.harvested
+        },
         ...this.remoteOf(acc),
         bridgeLimit: () => this.bridgeLimitFor(acc),
         spendGate: (p) => this.spendHold.admit(this.spendHoldKey(acc), p, Date.now()),
