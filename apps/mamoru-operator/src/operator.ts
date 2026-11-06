@@ -2087,8 +2087,9 @@ export class Operator {
     const had = this.chainUsage.get(acc.accountKey)
     if (had && had.grants === ids && Date.now() - had.at < CHAIN_USAGE_TTL_MS) return
     // Taken before the read, so a slow or failing RPC is not asked again on every poll.
-    // `readAt` stays the time of the read `byGrant` came from (otto/mamoru#376: what is left of a bridge grant is judged against it).
-    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: had?.grants === ids ? had.byGrant : new Map(), ...(had?.grants === ids && had.readAt !== undefined ? { readAt: had.readAt } : {}) })
+    // otto/mamoru#376: no `readAt` until this read succeeds. A V3 bridge grant's remaining total is judged only on a read
+    // that is the latest attempt: while this one runs, or if it fails, the bridge waits (unknown) instead of using the old.
+    this.chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: had?.grants === ids ? had.byGrant : new Map() })
     const readAt = Date.now()
     const byGrant = await readChainUsage(this.client as never, acc.ctx.address as Address, acc.grants, this.cfg.registry)
     const budgets = await this.readBudgets(acc)
