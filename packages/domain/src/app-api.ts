@@ -182,6 +182,11 @@ export type YieldLedgerView = {
   // Brais, 2 Nov: the capital that worked in each pool over the last 24 h and 30 days, for the APY figures (idle
   // money does not count). Base LP positions only, as far as the ledger covers. Null until a snapshot exists.
   worked?: WorkedView | null
+  // spec 012 HRV-R9/R10: `earnedSoFarUsd` is the income ledger's figure (fees, vault yield, history) when the ledger has
+  // one; 'partial' names what it does not count yet, which the app marks. Absent: the older fees-only figure.
+  earnedStatus?: 'complete' | 'partial'
+  notCounted?: ('fees' | 'vault-yield' | 'history' | 'accrued-24h')[]
+  earned24hUsd?: string | null
 }
 
 /** USDC base units x seconds that worked in each pool, per window, up to the ledger's latest snapshot (`asOf`). */
