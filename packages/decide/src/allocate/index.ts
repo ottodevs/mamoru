@@ -36,7 +36,7 @@ export type BucketValue = {
 }
 
 /** otto/mamoru#127, #128: savings a bucket is short of its target and holds back on purpose, and why. */
-export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY' | 'DECIDE_WAIT_BRIDGE_LIMIT'; amount: bigint }
+export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY' | 'DECIDE_WAIT_BRIDGE_LIMIT' | 'DECIDE_WAIT_BUDGET' | 'DECIDE_WAIT_RENEWAL'; amount: bigint }
 
 export type Allocation = {
   total: bigint

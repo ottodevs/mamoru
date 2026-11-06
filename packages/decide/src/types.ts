@@ -37,6 +37,14 @@ export type Observation = {
     inFlight?: bigint
     /** The sleeve on the other chain exists and runs (deployed, activated): only then may savings be bridged to it. */
     ready?: boolean
+    /**
+     * otto/mamoru#107 (spec 012 HRV-R4): the sleeve Safe's own USDC its engine has not placed, raw savings units, and
+     * since when (unix s) it has been at or above the return threshold (absent: below it). Absent: not read.
+     */
+    idle?: bigint
+    idleSince?: number
+    /** otto/mamoru#107: block time (unix s) of the last return home from that chain, for the 24 h no-ping-pong hold. */
+    returnedAt?: number
   }
   /**
    * otto/mamoru#278: savings (raw units) the home account asked this remote Safe to send back to it on `chainId`, not
@@ -61,6 +69,18 @@ export type Observation = {
    * `stables_lp_exit` flag. Absent or false: those buckets are held, nothing of them is reduced.
    */
   exitOptIn?: boolean
+  /**
+   * otto/mamoru#107 (spec 012 HRV-R1, R2): volatile the engine's own harvests collected and has not sold yet, per token
+   * (raw units), never above the Safe's balance, and since when (unix s) it has been above 0. Only this is sold by a
+   * harvest sale; entries and idle sales see the balance without it. Absent: none, and the observation hashes as before.
+   */
+  harvested?: Partial<Record<RegistryName, { amount: bigint; since: number }>>
+  /**
+   * otto/mamoru#107 (spec 012 HRV-R7): MamoruActionPolicyV4's spending room on this chain (min of `budgetLeft`'s windows,
+   * less a margin), raw savings units; 0 when the read failed. `vaultRoom`: what the vault buckets may still take under
+   * the policy's vault ratio of C. Absent: not V4 (no read; the chain's own checks apply).
+   */
+  budget?: { room: bigint; vaultRoom?: bigint }
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
   lastRerangeAt?: bigint | null
   /**
@@ -288,6 +308,8 @@ export type EnterSwapProposal = {
   tokenOut: RegistryName
   fee: number
   amountIn: bigint
+  /** otto/mamoru#107: the sale of harvested volatile (spec 012 HRV-R1); the operator takes it off `harvested` when confirmed. */
+  harvestSale?: true
 }
 
 export type EnterMintProposal = {
@@ -443,7 +465,7 @@ export type Decision = {
    * otto/mamoru#127, #128: savings held back on purpose, per bucket, with why. Outside the premise hash and the id
    * (the amounts move with every price). Absent when nothing waits.
    */
-  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY' | 'DECIDE_WAIT_BRIDGE_LIMIT'; amount: bigint }[]
+  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY' | 'DECIDE_WAIT_BRIDGE_LIMIT' | 'DECIDE_WAIT_BUDGET' | 'DECIDE_WAIT_RENEWAL'; amount: bigint }[]
   /**
    * otto/mamoru#278: a remote bucket's excess over its target and band, due home: the operator asks the remote Safe to
    * send it back. Outside the premise hash and the id, as `waiting`. Absent: nothing due (or the review was paused).
