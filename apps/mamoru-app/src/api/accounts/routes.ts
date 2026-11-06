@@ -7,6 +7,7 @@ import { ACCOUNT_KEY } from '../onboarding/account.ts'
 import { buildDashboard, loadDashboardInput } from './dashboard.ts'
 import { ownedSleeve } from '../sleeves.ts'
 import { loadYieldLedger } from './yield.ts'
+import { loadValueSeries } from './value-series.ts'
 
 export const accounts = new Hono<AppEnv>()
 
@@ -39,4 +40,17 @@ accounts.get('/:accountKey/yield', async (c) => {
   if (!account) return accountNotFound(c)
   c.set('accountKey', account.account_key)
   return c.json(await loadYieldLedger(c.env.DB, account.chain_id, account.account_key))
+})
+
+// GET /api/accounts/:accountKey/value-series -> ValueSeriesView (spec 013 STATS-R14): the Portfolio's Total value
+// chart, every chain of the session's owner summed by day. Same ownership rule as the reads above.
+accounts.get('/:accountKey/value-series', async (c) => {
+  const session = await c.var.auth.current(c)
+  if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
+  const accountKey = c.req.param('accountKey')
+  if (!ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
+  const account = await ownedSleeve(c, session.userId, accountKey)
+  if (!account) return accountNotFound(c)
+  c.set('accountKey', account.account_key)
+  return c.json(await loadValueSeries(c.env.DB, session.userId, c.var.now()))
 })
