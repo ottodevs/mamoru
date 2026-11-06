@@ -445,6 +445,12 @@ export type EngineConfig = {
    * at every review (`Observation.exitOptIn`). Absent: never, those buckets are held.
    */
   exitOptIn?: () => boolean
+  /**
+   * otto/mamoru#107 (spec 012 HRV-R1): the harvested volatile not sold yet, per token, at every review; the engine
+   * clips it to the balances it just read (`Observation.harvested`). Null: unknown (a harvest receipt not read yet),
+   * set as absent so nothing is sold. Absent: none.
+   */
+  harvested?: () => Observation['harvested'] | null
 
   /**
    * otto/mamoru#215: the account's value on other chains for the policy's `remoteBuckets` (its sleeve there valued at the
@@ -973,7 +979,7 @@ export class Engine {
     const cap = await this.cfg.cap?.(obs.block.number)
     const weekAgo = obs.block.timestamp - 7n * 86_400n
     const recent = this.reranges.filter((r) => r.at > weekAgo)
-    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}), ...(this.cfg.exitOptIn?.() === true ? { exitOptIn: true } : {}) }
+    obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}), ...(this.cfg.exitOptIn?.() === true ? { exitOptIn: true } : {}), ...harvestedObs(this.cfg.harvested?.(), obs.balances) }
     if (this.outOfRangeSeed) {
       const seed = this.outOfRangeSeed
       this.outOfRangeSeed = undefined
@@ -2343,4 +2349,16 @@ export class Engine {
     for (const [t, v] of Object.entries(sim.deltas)) if (t !== pool.token0 && t !== pool.token1 && v !== 0n) return `${t} moved ${v} in a harvest`
     return null
   }
+}
+
+/** otto/mamoru#107: `harvested` never above the balance just read; empty or unknown: absent (the observation hashes as before). */
+function harvestedObs(h: Observation['harvested'] | null | undefined, balances: Observation['balances']): Pick<Observation, 'harvested'> {
+  if (!h) return {}
+  const out: NonNullable<Observation['harvested']> = {}
+  for (const [token, v] of Object.entries(h) as [keyof typeof balances, { amount: bigint; since: number }][]) {
+    const bal = balances[token] ?? 0n
+    const amount = v.amount < bal ? v.amount : bal
+    if (amount > 0n) out[token] = { amount, since: v.since }
+  }
+  return Object.keys(out).length ? { harvested: out } : {}
 }
