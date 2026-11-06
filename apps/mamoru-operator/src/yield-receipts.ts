@@ -24,6 +24,12 @@ import type { StoredOp } from './state.ts'
 import type { Snapshot } from './snapshot.ts'
 
 const poolCollectAbi = parseAbi(['event Collect(address indexed owner, address recipient, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount0, uint128 amount1)'])
+// spec 012 HRV-R5: the ERC-4626 flows of this Safe's own shares (owner = Safe), so vault yield is counted only on the
+// shares engine and owner ops explain (yield = shares × the change in assets per share between flows).
+const vaultEventsAbi = parseAbi([
+  'event Deposit(address indexed sender, address indexed owner, uint256 assets, uint256 shares)',
+  'event Withdraw(address indexed sender, address indexed receiver, address indexed owner, uint256 assets, uint256 shares)',
+])
 const npmEventsAbi = parseAbi([
   'event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)',
   'event DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
@@ -37,7 +43,15 @@ export type FeeFact = {
   fee1: string
   /** Raw USDC, set once by the first snapshot that prices the pool. */
   usdc?: string
+  /** spec 012 HRV-R5: the position manager's Collect log index: with the txHash it is the income event's id. */
+  logIndex?: number
 }
+
+/** spec 012 HRV-R5: one ERC-4626 Deposit or Withdraw of this Safe's own shares, in a registry vault. */
+export type VaultFlow = { vault: string; kind: 'deposit' | 'withdraw'; assets: string; shares: string; logIndex: number }
+
+/** The facts layout this reader writes. Facts of an older layout are read again (prices kept), so history gains the new fields. */
+export const FACTS_VERSION = 2
 
 export type OpFacts = {
   /** The transaction these facts were read from: a row whose txHash changed is read again. */
@@ -53,6 +67,12 @@ export type OpFacts = {
    * these facts were taken. Only such facts are the fee's base: yield collected while out of scope is never charged.
    */
   feeable?: true
+  /** FACTS_VERSION when read; absent on facts read before spec 012. */
+  v?: number
+  /** spec 012: the block the receipt was included in (decimal). */
+  block?: string
+  /** spec 012 HRV-R5: vault flows of this Safe in the op. Absent: none. */
+  vaultFlows?: VaultFlow[]
 }
 
 /**
@@ -71,7 +91,7 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
   if (userOpHash) {
     const i = opEvents.findIndex((e) => e.args.userOpHash.toLowerCase() === userOpHash.toLowerCase() && isAddressEqual(e.args.sender, safe))
     const own = opEvents[i]
-    if (!own) return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: '0', fees: [] }
+    if (!own) return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: '0', fees: [], v: FACTS_VERSION }
     gas = own.args.actualGasCost
     const from = i > 0 ? opEvents[i - 1]!.logIndex : -1
     logs = logs.filter((l) => l.logIndex !== null && l.logIndex > from && l.logIndex < own.logIndex)
@@ -84,7 +104,7 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
     .filter((e) => isAddressEqual(e.args.owner, npm))
     .map((e) => ({ logIndex: e.logIndex, pool: e.address }))
   const freed = new Map<bigint, [bigint, bigint]>()
-  const collected = new Map<bigint, { pool: string; amounts: [bigint, bigint] }>()
+  const collected = new Map<bigint, { pool: string; amounts: [bigint, bigint]; logIndex: number }>()
   for (const e of parseEventLogs({ abi: npmEventsAbi, logs: logs.filter((l) => isAddressEqual(l.address, npm)) })) {
     if (e.eventName === 'DecreaseLiquidity') {
       const cur = freed.get(e.args.tokenId) ?? [0n, 0n]
@@ -95,8 +115,9 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
     const poolAddr = poolCollects.filter((p) => p.logIndex < e.logIndex).at(-1)?.pool
     const pool = poolAddr ? nameOf(poolAddr, registry) : undefined
     if (!pool) continue
-    const cur = collected.get(e.args.tokenId)?.amounts ?? [0n, 0n]
-    collected.set(e.args.tokenId, { pool, amounts: [cur[0] + e.args.amount0, cur[1] + e.args.amount1] })
+    const prev = collected.get(e.args.tokenId)
+    const cur = prev?.amounts ?? [0n, 0n]
+    collected.set(e.args.tokenId, { pool, amounts: [cur[0] + e.args.amount0, cur[1] + e.args.amount1], logIndex: prev?.logIndex ?? e.logIndex })
   }
   const fees: FeeFact[] = []
   for (const [tokenId, c] of collected) {
@@ -104,9 +125,16 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
     const owed = freed.get(tokenId) ?? [0n, 0n]
     const f = [c.amounts[0] > owed[0] ? c.amounts[0] - owed[0] : 0n, c.amounts[1] > owed[1] ? c.amounts[1] - owed[1] : 0n] as const
     if (f[0] === 0n && f[1] === 0n) continue
-    fees.push({ tokenId: tokenId.toString(), pool: c.pool, fee0: f[0].toString(), fee1: f[1].toString() })
+    fees.push({ tokenId: tokenId.toString(), pool: c.pool, fee0: f[0].toString(), fee1: f[1].toString(), logIndex: c.logIndex })
   }
-  return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: gas.toString(), fees }
+  const vaults = registry.entries.filter((x) => x.kind === 'vault')
+  const vaultFlows: VaultFlow[] = []
+  for (const e of parseEventLogs({ abi: vaultEventsAbi, logs: logs.filter((l) => vaults.some((v) => isAddressEqual(l.address, v.address))) })) {
+    if (!isAddressEqual(e.args.owner, safe)) continue
+    const vault = vaults.find((v) => isAddressEqual(e.address, v.address))!.name
+    vaultFlows.push({ vault, kind: e.eventName === 'Deposit' ? 'deposit' : 'withdraw', assets: e.args.assets.toString(), shares: e.args.shares.toString(), logIndex: e.logIndex })
+  }
+  return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: gas.toString(), fees, v: FACTS_VERSION, ...(vaultFlows.length ? { vaultFlows } : {}) }
 }
 
 /**
@@ -118,7 +146,21 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
  * is never frozen and an account stopped mid-confirmation still gets its op counted.
  */
 export function needsFacts(op: StoredOp): boolean {
-  return (op.opId.startsWith('eng-') || op.opId.startsWith('own-')) && !!op.txHash && op.facts?.txHash?.toLowerCase() !== op.txHash.toLowerCase()
+  if (!(op.opId.startsWith('eng-') || op.opId.startsWith('own-')) || !op.txHash) return false
+  return op.facts?.txHash?.toLowerCase() !== op.txHash.toLowerCase() || (op.facts.v ?? 1) < FACTS_VERSION
+}
+
+/**
+ * Facts read again for a newer layout keep what the old ones had priced: a price is frozen at the first snapshot after
+ * the op, and today's would rewrite history. Fees are matched by token id (one collect per position per transaction).
+ */
+export function keepPrices(next: OpFacts, prev: OpFacts | undefined): OpFacts {
+  if (!prev || prev.txHash?.toLowerCase() !== next.txHash?.toLowerCase()) return next
+  const fees = next.fees.map((f) => {
+    const old = prev.fees.find((o) => o.tokenId === f.tokenId)
+    return old?.usdc !== undefined && old.fee0 === f.fee0 && old.fee1 === f.fee1 ? { ...f, usdc: old.usdc } : f
+  })
+  return { ...next, fees, ...(prev.gasUsdc !== undefined && prev.gasWei === next.gasWei ? { gasUsdc: prev.gasUsdc } : {}) }
 }
 
 /** Sets `gasUsdc`, and `usdc` on every fee, when the snapshot can price them. Returns whether anything changed (the caller saves).
@@ -208,7 +250,47 @@ export type SafeBlockReader = () => Promise<bigint>
 /** Receipts read per snapshot tick at most: a backfill of old ops spreads over a few ticks instead of one burst. */
 export const FACTS_PER_TICK = 20
 
-export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[] }
+/** spec 012 HRV-R5: one fee income event; `id` = `<txHash>:<logIndex>`, `t` = block time (unix s). */
+export type IncomeEventWire = { id: string; t: number; source: 'harvest' | 're-range'; usdc?: string }
+export type VaultFlowWire = VaultFlow & { id: string; t: number }
+/**
+ * spec 012 HRV-R5: every vault flow of the account and, per vault, the shares those flows explain (deposits − withdraws).
+ * `explained` is null while any op of the account still waits for its receipt: until then the sum may be short.
+ */
+export type AccountVaultWire = { flows: VaultFlowWire[]; explained: Record<string, string> | null }
+export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire }
+
+/** The fee events of stored ops with facts of the current layout; an op's step says whether it was a harvest. */
+export function incomeEvents(ops: readonly StoredOp[]): IncomeEventWire[] {
+  const out: IncomeEventWire[] = []
+  for (const op of ops) {
+    const f = op.facts
+    if (!f?.txHash || (f.v ?? 1) < FACTS_VERSION) continue
+    const t = Math.floor(Date.parse(f.at) / 1000)
+    for (const fee of f.fees) {
+      if (fee.logIndex === undefined) continue
+      out.push({ id: `${f.txHash.toLowerCase()}:${fee.logIndex}`, t, source: op.step === 'harvest' ? 'harvest' : 're-range', ...(fee.usdc !== undefined ? { usdc: fee.usdc } : {}) })
+    }
+  }
+  return out.sort((a, b) => a.t - b.t || (a.id < b.id ? -1 : 1))
+}
+
+/** spec 012 HRV-R5: the account's vault flows, oldest first, and the shares they explain per vault. */
+export function vaultWire(ops: readonly StoredOp[]): AccountVaultWire | undefined {
+  const flows: VaultFlowWire[] = []
+  for (const op of ops) {
+    const f = op.facts
+    if (!f?.txHash || (f.v ?? 1) < FACTS_VERSION) continue
+    const t = Math.floor(Date.parse(f.at) / 1000)
+    for (const v of f.vaultFlows ?? []) flows.push({ ...v, id: `${f.txHash.toLowerCase()}:${v.logIndex}`, t })
+  }
+  if (!flows.length) return undefined
+  flows.sort((a, b) => a.t - b.t || a.logIndex - b.logIndex)
+  const pending = ops.some(needsFacts)
+  const explained: Record<string, bigint> = {}
+  for (const v of flows) explained[v.vault] = (explained[v.vault] ?? 0n) + (v.kind === 'deposit' ? BigInt(v.shares) : -BigInt(v.shares))
+  return { flows, explained: pending ? null : Object.fromEntries(Object.entries(explained).map(([k, n]) => [k, (n < 0n ? 0n : n).toString()])) }
+}
 
 /**
  * Reads facts for up to FACTS_PER_TICK ops that need them, prices what the snapshot can, and adds `receipts` for
@@ -242,7 +324,11 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
       if (!r || r.blockNumber > safe!) continue
       const t = times.get(r.blockNumber) ?? (await blockTime(r.blockNumber))
       times.set(r.blockNumber, t)
-      op.facts = { txHash, ...factsFromLogs(r.logs, a.safe, t, op.opId.startsWith('eng-') ? op.userOpHash : undefined, registry), ...(op.feeScoped && source.feeScope?.(a.accountKey) ? { feeable: true as const } : {}) }
+      const read: OpFacts = { txHash, ...factsFromLogs(r.logs, a.safe, t, op.opId.startsWith('eng-') ? op.userOpHash : undefined, registry), block: r.blockNumber.toString() }
+      // A layout upgrade keeps the old fee scope too: it was decided when the facts were first taken (#371).
+      const upgrade = op.facts?.txHash?.toLowerCase() === txHash.toLowerCase()
+      const feeable = upgrade ? op.facts!.feeable === true : !!(op.feeScoped && source.feeScope?.(a.accountKey))
+      op.facts = { ...keepPrices(read, op.facts), ...(feeable ? { feeable: true as const } : {}) }
       tried.delete(key)
       changed = true
     } catch (e) {
@@ -251,6 +337,12 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
   }
   for (const a of accounts) for (const op of a.ops) if (op.facts && priceFees(op.facts, snapshot.pools, registry)) changed = true
   if (changed) source.save()
-  const receipts = accounts.map((a) => ({ safe: a.safe, days: dayReceipts(a.ops) })).filter((r) => r.days.length > 0)
+  const receipts = accounts
+    .map((a) => {
+      const events = incomeEvents(a.ops)
+      const vault = vaultWire(a.ops)
+      return { safe: a.safe, days: dayReceipts(a.ops), ...(events.length ? { events } : {}), ...(vault ? { vault } : {}) }
+    })
+    .filter((r) => r.days.length > 0)
   return { ...snapshot, receipts }
 }
