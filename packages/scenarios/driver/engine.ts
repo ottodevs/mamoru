@@ -460,6 +460,11 @@ export type EngineConfig = {
    */
   bridgeLimit?: () => BridgeLimit
   /**
+   * otto/mamoru#376 (spec 011 T-CAP-07): whether a proposal may run now. False: the review records it as deduped and
+   * sends nothing (a spending limit the chain refused has not had time to move). Absent: every proposal may run.
+   */
+  spendGate?: (p: Proposal) => boolean
+  /**
    * otto/mamoru#293: under MamoruActionPolicyV4 the bridge-out recipient is not in any session rule: V4 mints only to the
    * remote it registered and the guardian marked ready. The operator passes that address (read from V4) so the engine
    * checks the simulated burn against it. Absent under V4: no bridge-out is ever prepared.
@@ -1008,7 +1013,8 @@ export class Engine {
     this.depositsAfter = obs.safeBlock.number > this.depositsAfter ? obs.safeBlock.number : this.depositsAfter
     const key = decision.proposal ? proposalKey(decision.proposal) : ''
     const backedOff = !!decision.proposal && this.backoff.some((b) => b.until > obs.block.timestamp && (b.premiseHash === decision.premiseHash || b.key === key))
-    const deduped = (!!decision.proposal && this.journal.lastDiscarded()?.premiseHash === decision.premiseHash) || backedOff
+    const gated = !!decision.proposal && this.cfg.spendGate?.(decision.proposal) === false
+    const deduped = (!!decision.proposal && this.journal.lastDiscarded()?.premiseHash === decision.premiseHash) || backedOff || gated
     const record = this.journal.recordDecision(decision, deduped ? 'REVIEW_DEDUPED' : undefined)
     if (!decision.proposal || deduped) return { kind: 'decided', observation: obs, record, op: null }
     const op = this.journal.propose(record, decision.proposal.grant)

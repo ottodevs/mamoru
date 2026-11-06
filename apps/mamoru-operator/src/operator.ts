@@ -67,6 +67,7 @@ import { yieldFee, YIELD_FEE_BPS, YIELD_FEE_FROM } from './yield-fee.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
 import { bridgeLeftOf } from './bridge-left.ts'
+import { SpendHold, SPEND_HOLD_PROBE_MS, isSpend, spendDenialOf } from './window-hold.ts'
 import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
@@ -1009,6 +1010,8 @@ export class Operator {
   /** otto/mamoru#340: per account, the last look for a deposit (watchDeposits): when, how far, and the one in flight. */
   private readonly depositLooks = new Map<string, DepositLook>()
   /** #149: usage counters read from the chain per account (readChainUsage), keyed by lower-case permission id. */
+  /** otto/mamoru#376: accounts whose spends the chain refused for a spending limit (window-hold.ts). In memory: a restart probes once. */
+  private readonly spendHold = new SpendHold()
   private readonly chainUsage = new Map<string, { at: number; grants: string; byGrant: Map<string, ChainUsage>; budgets?: Map<string, number>; paused?: boolean; readAt?: number; readBlock?: bigint }>()
   /** Ops whose execTransaction went to the provider in this attempt: only then can a refusal be about a copy already out. */
   private readonly execTried = new Set<string>()
@@ -7767,6 +7770,7 @@ export class Operator {
         exitOptIn: () => this.inScope(acc, 'stables_lp_exit'),
         ...this.remoteOf(acc),
         bridgeLimit: () => this.bridgeLimitFor(acc),
+        spendGate: (p) => this.spendHold.admit(acc.accountKey, p, Date.now()),
         rerangeHistory: rerangeHistoryOf(acc.ops, Math.floor(Date.now() / 1000)),
         ...(outOfRangeSeedOf(acc.outOfRange) ? { outOfRangeSeed: outOfRangeSeedOf(acc.outOfRange)! } : {}),
         ...(heldHistorySeedOf(acc.heldHistory) ? { heldHistorySeed: heldHistorySeedOf(acc.heldHistory)! } : {}),
@@ -7940,6 +7944,13 @@ export class Operator {
             runner.rangeHolds = rangeHolds
             const o = r.op ? engine.journal.op(r.op.opId) : null
             const last = o ? engine.journal.transitions.filter((t) => t.opId === o.opId).at(-1) : null
+            // otto/mamoru#376 (spec 011 T-CAP-07): a spend the chain refused for a spending limit holds the account's
+            // spends (one probe per 6 h); one that lands lifts it. Logged once per hold, never shown in the app.
+            if (o && d.proposal && isSpend(d.proposal)) {
+              const denial = o.state === 'confirmed' ? null : spendDenialOf(last?.detail)
+              if (denial && this.spendHold.denied(acc.accountKey, denial, Date.now())) console.log(`[spend-hold] ${acc.accountKey}: ${denial}; spends held, one probe per ${SPEND_HOLD_PROBE_MS / 3600_000} h`)
+              if (o.state === 'confirmed' && this.spendHold.landed(acc.accountKey)) console.log(`[spend-hold] ${acc.accountKey}: a spend landed, hold lifted`)
+            }
             // `last.detail` is free text (unlike d.reason/o.state/o.stateCode, all closed enums): redact it.
             const prefix = `[engine ${acc.accountKey}] block ${d.observationRef.block} ${d.kind} ${d.reason}${o ? ` -> ${o.opId} ${o.state} ${o.stateCode}` : ''}`
             if (last?.detail) logErr(prefix, last.detail)
