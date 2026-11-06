@@ -80,13 +80,11 @@ export type SnapshotWire = {
    * yield-receipts.ts), the last few days only, including accounts the snapshot did not read (stopped). Absent from
    * an operator older than this field.
    */
-  receipts?: { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire; ops?: PlacedOpWire[] }[]
+  receipts?: { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire}[]
   /** Spec 013 plan §3.5: CCTP transfers between an account's Safes (Base operator only). Absent: journals not read. */
   bridges?: BridgeWire[]
 }
 
-/** Spec 013 B4: one op's capital placed (liquidity + vault deposits), priced at its own block. */
-export type PlacedOpWire = { id: string; t: number; placedUsdc?: string; priced: boolean }
 /** Spec 013 B8: one CCTP transfer from the operator's journals. */
 export type BridgeWire = {
   id: string
@@ -467,39 +465,15 @@ export async function pullWorkedSamples(db: Db, chainId: number, operatorUrl: st
 }
 
 /**
- * Spec 013 B5: capital placed per op (yield_ledger_ops) and the CCTP transfers of the journals (yield_ledger_bridges).
- * A price, once stored, is never cleared by a later unpriced delivery; a transfer only moves forward. A failure (the
- * tables not migrated yet) is logged and leaves every other table of the pull written.
+ * Spec 013 B5: the CCTP transfers of the journals (yield_ledger_bridges); a transfer only moves forward. A failure (the
+ * table not migrated yet) is logged and leaves every other table of the pull written.
  */
 async function writeStatsFactsSafely(db: Db, snapshot: SnapshotWire, now: Date): Promise<void> {
   try {
-    await writeOps(db, snapshot, now)
     await writeBridges(db, snapshot, now)
   } catch (e) {
     console.error('yield-ledger: stats facts not written', e instanceof Error ? e.message : String(e))
   }
-}
-
-export async function writeOps(db: Db, snapshot: SnapshotWire, now: Date): Promise<number> {
-  let written = 0
-  for (const r of snapshot.receipts ?? []) {
-    if (!r.ops?.length) continue
-    const account = await resolveAccount(db, snapshot.chainId, r.safe)
-    if (!account) continue
-    const statements = r.ops.map((o) =>
-      db
-        .prepare(
-          `INSERT INTO yield_ledger_ops (chain_id, op_id, account_key, env, t_s, placed_usdc, priced, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(chain_id, op_id) DO UPDATE SET env = excluded.env,
-             placed_usdc = COALESCE(yield_ledger_ops.placed_usdc, excluded.placed_usdc),
-             priced = MAX(yield_ledger_ops.priced, excluded.priced), updated_at = excluded.updated_at`,
-        )
-        .bind(snapshot.chainId, o.id.toLowerCase(), account.accountKey, account.env, o.t, o.priced && o.placedUsdc !== undefined ? Number(o.placedUsdc) : null, o.priced && o.placedUsdc !== undefined ? 1 : 0, now.toISOString()),
-    )
-    await db.batch(statements)
-    written += statements.length
-  }
-  return written
 }
 
 const BRIDGE_ORDER: Record<BridgeWire['state'], number> = { sending: 0, requested: 0, burned: 1, minted: 2 }

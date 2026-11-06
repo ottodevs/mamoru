@@ -12,7 +12,6 @@ import {
   writeAccountSnapshot,
   writeYieldLedger,
   writeBridges,
-  writeOps,
   writeWorkedSamples,
   type OperatorFetch,
   type PositionWire,
@@ -403,19 +402,8 @@ describe('pullWorkedSamples, spec 013 B1: Monad daily totals', () => {
   })
 })
 
-describe('spec 013 B5: stats facts (ops placed, accrued fees per sample, CCTP transfers)', () => {
+describe('spec 013 B5: stats facts (accrued fees per sample, CCTP transfers)', () => {
   const NOW = new Date('2026-11-06T18:00:00.000Z')
-  test('STATS-S07: an op is stored unpriced, gets its price once, and a later unpriced delivery never clears it', async () => {
-    const db = memoryD1()
-    seedAccount(db)
-    const rows = () => db.raw.query('SELECT op_id, account_key, t_s, placed_usdc, priced FROM yield_ledger_ops').all()
-    await writeOps(db, snapshot({ receipts: [{ safe: SAFE, days: [], ops: [{ id: '0xAA', t: 1_793_000_000, priced: false }] }] }), NOW)
-    expect(rows()).toEqual([{ op_id: '0xaa', account_key: ACCOUNT_KEY, t_s: 1_793_000_000, placed_usdc: null, priced: 0 }])
-    await writeOps(db, snapshot({ receipts: [{ safe: SAFE, days: [], ops: [{ id: '0xaa', t: 1_793_000_000, priced: true, placedUsdc: '1000000000' }] }] }), NOW)
-    await writeOps(db, snapshot({ receipts: [{ safe: SAFE, days: [], ops: [{ id: '0xaa', t: 1_793_000_000, priced: false }] }] }), NOW)
-    expect(rows()).toEqual([{ op_id: '0xaa', account_key: ACCOUNT_KEY, t_s: 1_793_000_000, placed_usdc: 1_000_000_000, priced: 1 }])
-  })
-
   test('worked samples carry the accrued fees of each pool row; vault and idle rows have none', async () => {
     const db = memoryD1()
     seedAccount(db)
