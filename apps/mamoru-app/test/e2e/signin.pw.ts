@@ -26,7 +26,7 @@ test('a returning owner signs back in with the passkey, with or without what the
   await page.goto('/')
   await expect(page.getByRole('heading', { name: 'Open your account' })).toBeVisible()
   await page.getByRole('button', { name: 'Sign in with passkey' }).click()
-  await expect(page.getByText('Total balance')).toBeVisible()
+  await expect(page.getByText('Total value')).toBeVisible()
   expect(await session()).toEqual(created)
 
   // A clean profile with the synced passkey: nothing remembered, the link on the first card leads in.
@@ -35,7 +35,7 @@ test('a returning owner signs back in with the passkey, with or without what the
   await page.goto('/')
   await page.getByRole('button', { name: 'I already have an account' }).click()
   await page.getByRole('button', { name: 'Sign in with passkey' }).click()
-  await expect(page.getByText('Total balance')).toBeVisible()
+  await expect(page.getByText('Total value')).toBeVisible()
   expect(await session()).toEqual(created)
 
   // A deep link with no session lands on the sign-in card, and a device without the passkey is told so.
@@ -71,6 +71,6 @@ test('an owner registers and signs in on a browser without getAuthenticatorData(
   await context.clearCookies()
   await page.goto('/')
   await page.getByRole('button', { name: 'Sign in with passkey' }).click()
-  await expect(page.getByText('Total balance')).toBeVisible()
+  await expect(page.getByText('Total value')).toBeVisible()
   expect(((await (await page.request.get('/api/session')).json()) as { accountKey?: string }).accountKey).toBe(created.accountKey)
 })

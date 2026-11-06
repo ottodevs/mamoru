@@ -389,16 +389,16 @@ describe('idle and working split', () => {
   })
 })
 
-// otto/mamoru#198: earned so far sits under the balance as its gain; not measured yet says so, never a guess.
-describe('earned so far with the balance', () => {
+// otto/mamoru#198, spec 013: Total earned sits under the total value as its gain; not measured yet says so, never a guess.
+describe('total earned with the value', () => {
   const s = split(fixtureFunding, null)
   test('a known figure is a gain in USDC', () => {
     const { text } = render(<Balance s={s} earnedSoFarUsd="42000" onAdd={() => {}} onWithdraw={() => {}} />)
-    expect(text).toContain('+0.04 USDC earned so far')
+    expect(text).toContain('Total earned +0.04 USDC')
   })
   test('no figure yet: n/a and why', () => {
     const { text } = render(<Balance s={s} earnedSoFarUsd={null} onAdd={() => {}} onWithdraw={() => {}} />)
-    expect(text).toContain('n/a earned so far not measured yet')
+    expect(text).toContain('Total earned n/a not measured yet')
     expect(text).not.toContain('+')
   })
 })

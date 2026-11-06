@@ -2,12 +2,15 @@ import type { ApyView, FundingView, WorkedView, Hex0x, MoneyInFlight, OpView, Ov
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { depositArrived, FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useEthereumSibling, useFreshFunding, useFunding, useOps, usePools, useSession, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
+import { depositArrived, FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useEthereumSibling, useFreshFunding, useFunding, useOps, usePools, useSession, useValueSeries, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
 import { WithdrawReview } from '../components/withdraw-review.tsx'
 import { TokenMark } from '../components/token-mark.tsx'
-import { Brand, Modal } from '../components/ui.tsx'
+import { Brand, InfoPopover, Modal } from '../components/ui.tsx'
+import { AreaChart, dayLabel } from '../components/charts.tsx'
+import { MainTabs, TabBar } from '../components/nav.tsx'
+import type { ValueSeriesView } from '../api/client.ts'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
@@ -29,7 +32,7 @@ import { OneApprovalStart } from '../components/one-approval.tsx'
 import { useOneApproval, type OneApproval } from '../lib/one-approval.ts'
 import { FeedbackDialog, feedbackCopy } from '../components/feedback-dialog.tsx'
 import { HowItWorks, howCopy } from '../components/how-it-works.tsx'
-import { Chevron, Fold, LiveSync, PullToRefresh, Spark, TweenPct, TweenUsd } from '../components/motion.tsx'
+import { Chevron, Fold, LiveSync, PullToRefresh, TweenPct, TweenUsd } from '../components/motion.tsx'
 import { useThrottledRefresh } from '../lib/refresh-throttle.ts'
 import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '../components/monad-consent.tsx'
 import { isVaultTarget } from '../lib/policies.ts'
@@ -38,7 +41,8 @@ import { moneyCopy, StuckNote, totalScopeNote, unreadChains } from '../component
 import { TransferRow } from '../components/transfer-row.tsx'
 
 export const homeCopy = {
-  total: 'Total balance',
+  total: 'Total value',
+  totalTip: 'Everything your account holds on Base and Monad: positions, vault, uncollected fees and money not placed yet.',
   // otto/mamoru#208: the live read failed (the operator unreachable, incident #205); the last snapshot stands in.
   pastReading: (ago: string) => `Last reading ${ago} ago`,
   pastTitle: 'Mamoru cannot read your account right now.',
@@ -54,7 +58,9 @@ export const homeCopy = {
   // for screen readers and the per-position table.
   monthly: 'Monthly rate',
   current: 'Current rate',
-  earnedSoFar: 'earned so far',
+  earnedSoFar: 'Total earned',
+  earnedTip: 'Fees and vault yield your account has earned since it started, every token valued in US dollars.',
+  since: (day: string) => `since ${day}`,
   monthlyWhat: '30-day avg',
   // Brais's label, literal (otto/mamoru#198, 23-oct). Brais, 2 Nov: the figure is the last 24 h of the capital that worked.
   currentWhat: '24h avg',
@@ -166,25 +172,59 @@ function plural(n: number, one: string, many: string) {
 const pct = (v: number | null | undefined) => (v === null || v === undefined ? homeCopy.na : `${v.toFixed(1)}%`)
 
 /**
- * otto/mamoru#198: what the account has earned, under the balance as its gain (the Robinhood/Revolut pattern).
- * Not measured yet says so, never a guess.
+ * otto/mamoru#198, spec 013: Total earned, under the total value as its gain: a pill, green up or red down by its sign
+ * (Ot and Brais, 6 Nov). Not measured yet says so, never a guess.
  */
-function Earned({ usd: earned, daily }: { usd: string | null | undefined; daily?: { day: string; earnedUsd: string }[] | null }) {
+function Earned({ usd: earned, since }: { usd: string | null | undefined; since?: string | null }) {
   const known = earned != null
-  // otto/mamoru#234: the days the ledger closed, then where it stands now; today's close so far is the live figure.
-  const today = new Date().toISOString().slice(0, 10)
-  const closed = (daily ?? []).filter((d) => d.day < today)
-  const series = known && closed.length ? [...closed.map((d) => Number(d.earnedUsd)), Number(earned)] : []
+  const n = known ? Number(earned) : 0
+  const up = n >= 0
   return (
-    <p className="earned" data-testid="earned-so-far">
-      <span className={`earned-value${known ? '' : ' rate-na'}`}>
-        {known ? <TweenUsd raw={earned} prefix="+" countUp /> : homeCopy.na}
-        {known ? <span className="earned-unit">USDC</span> : null}
+    <div className="pf-earned" data-testid="earned-so-far">
+      <span className="kicker text-[0.86rem]! font-bold tracking-[0.14em]! text-ink!">
+        {homeCopy.earnedSoFar} <InfoPopover label={`About "${homeCopy.earnedSoFar}"`}>{homeCopy.earnedTip}</InfoPopover>
       </span>
-      <Spark values={series} />
-      <span className="earned-label">{homeCopy.earnedSoFar}</span>
-      {known ? null : <span className="earned-why">{homeCopy.earnedGap}</span>}
-    </p>
+      <div className="row">
+        {known ? (
+          <span className={`pf-delta ${up ? 'pos' : 'neg'}`}>
+            <svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
+              <path d={up ? 'M7 2.5 12 9.5H2z' : 'M7 11.5 2 4.5h10z'} />
+            </svg>
+            <TweenUsd raw={String(Math.abs(n))} prefix={up ? '+' : '−'} countUp />
+            <span className="earned-unit">USDC</span>
+          </span>
+        ) : (
+          <span className="pf-delta na">{homeCopy.na}</span>
+        )}
+        {known && since ? <span className="pf-since">{homeCopy.since(dayLabel(since))}</span> : null}
+        {known ? null : <span className="earned-why">{homeCopy.earnedGap}</span>}
+      </div>
+    </div>
+  )
+}
+
+/** Spec 013: the owner's total value by day, schematic (no axes, no grid), value and day on hover or tap. */
+function ValueChart({ series }: { series: ValueSeriesView }) {
+  const [range, setRange] = useState(30)
+  const all = series.points.map((p) => ({ day: p.day, v: p.usd }))
+  const rows = range ? all.slice(-range) : all
+  if (rows.length < 2) return null
+  const fmt = (v: number) => `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  return (
+    <div className="pf-chart">
+      <AreaChart rows={rows} h={190} axes={false} label={homeCopy.total} fmtTip={fmt} />
+      <div className="rng" role="group" aria-label="Range">
+        {[
+          { v: 7, l: '1W' },
+          { v: 30, l: '1M' },
+          { v: 0, l: 'All' },
+        ].map((o) => (
+          <button key={o.l} type="button" aria-pressed={range === o.v} onClick={() => setRange(o.v)}>
+            {o.l}
+          </button>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -201,7 +241,7 @@ export function agoText(iso: string, now: number = Date.now()): string {
 export function Balance({
   s,
   earnedSoFarUsd,
-  earnedDaily = null,
+  valueSeries = null,
   onAdd,
   onWithdraw,
   past = null,
@@ -213,7 +253,8 @@ export function Balance({
 }: {
   s: Split | null
   earnedSoFarUsd?: string | null
-  earnedDaily?: { day: string; earnedUsd: string }[] | null
+  /** Spec 013: the owner's total value by day; the chart shows from two days. */
+  valueSeries?: ValueSeriesView | null
   onAdd: () => void
   onWithdraw: () => void
   /** otto/mamoru#208: set only while the live read fails; then it is what the balance shows, marked as past. */
@@ -231,40 +272,8 @@ export function Balance({
 }) {
   const shownPast = past
   return (
-    <section className="balance" aria-labelledby="total-title">
-      <div>
-        <p className="kicker text-[0.86rem]! font-bold tracking-[0.14em]! text-ink!" id="total-title">
-          {homeCopy.total}
-        </p>
-        <p className={`sum${shownPast ? ' past' : ''}`} data-testid="total">
-          {shownPast ? usd(shownPast.totalUsd) : s ? <TweenUsd raw={total ?? s.total} countUp /> : '0.00'}
-          <span className="unit">USDC</span>
-        </p>
-        {shownPast ? (
-          <p className="past-reading" data-testid="past-reading">
-            {homeCopy.pastReading(agoText(shownPast.readAt))}
-          </p>
-        ) : null}
-        {transfers.length ? (
-          <div className="mm-transfers" role="status" aria-live="polite">
-            {transfers.map((t) => (
-              <TransferRow key={t.id} flight={t} />
-            ))}
-          </div>
-        ) : null}
-        {scopeNote ? (
-          <p className="past-reading" data-testid="total-scope" role="status">
-            {scopeNote}
-          </p>
-        ) : null}
-        {chain ? (
-          <p className="past-reading" data-testid="chain-reading">
-            {chain.positions === 'listed' ? homeCopy.chainReading : homeCopy.chainIdleOnly}
-          </p>
-        ) : null}
-        <Earned usd={earnedSoFarUsd} daily={earnedDaily} />
-      </div>
-      <div className="balance-acts">
+    <section className="balance pf" aria-labelledby="total-title">
+      <div className="balance-acts pf-acts">
         {/* otto/mamoru#208: the add dialog needs the live read (address, cap); off while only a past one shows. */}
         <button type="button" className="act" onClick={onAdd} disabled={down || !!shownPast || !!chain}>
           {homeCopy.add}
@@ -274,6 +283,41 @@ export function Balance({
         <button type="button" className="act quiet" data-testid="withdraw-button" onClick={onWithdraw} disabled={!s || down || !!shownPast || !!chain}>
           {homeCopy.withdraw}
         </button>
+      </div>
+      <div className="pf-main">
+        <div>
+          <p className="kicker text-[0.86rem]! font-bold tracking-[0.14em]! text-ink!" id="total-title">
+            {homeCopy.total} <InfoPopover label={`About "${homeCopy.total}"`}>{homeCopy.totalTip}</InfoPopover>
+          </p>
+          <p className={`sum${shownPast ? ' past' : ''}`} data-testid="total">
+            {shownPast ? usd(shownPast.totalUsd) : s ? <TweenUsd raw={total ?? s.total} countUp /> : '0.00'}
+            <span className="unit">USDC</span>
+          </p>
+          {shownPast ? (
+            <p className="past-reading" data-testid="past-reading">
+              {homeCopy.pastReading(agoText(shownPast.readAt))}
+            </p>
+          ) : null}
+          {transfers.length ? (
+            <div className="mm-transfers" role="status" aria-live="polite">
+              {transfers.map((t) => (
+                <TransferRow key={t.id} flight={t} />
+              ))}
+            </div>
+          ) : null}
+          {scopeNote ? (
+            <p className="past-reading" data-testid="total-scope" role="status">
+              {scopeNote}
+            </p>
+          ) : null}
+          {chain ? (
+            <p className="past-reading" data-testid="chain-reading">
+              {chain.positions === 'listed' ? homeCopy.chainReading : homeCopy.chainIdleOnly}
+            </p>
+          ) : null}
+          <Earned usd={earnedSoFarUsd} since={valueSeries?.points[0]?.day ?? null} />
+        </div>
+        {valueSeries ? <ValueChart series={valueSeries} /> : null}
       </div>
     </section>
   )
@@ -1338,6 +1382,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const api = useApi()
   const ops = useOps(accountKey, true)
   const yieldLedger = useYieldLedger(accountKey)
+  const valueSeries = useValueSeries(accountKey)
   const opList = ops.data?.ops ?? []
   // An owner prepare that was never signed is not in flight; only armed or sent ops are. Keeps funding polling
   // fast (otto/mamoru#135) while one is on its way: an activation, renewal, transfer or stop.
@@ -1502,17 +1547,20 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   })
 
   return (
-    <main className="page home enter">
+    <main className="page home enter has-tab-bar">
       <title>Mamoru</title>
       <PullToRefresh onRefresh={() => manual.run({ note: false })} />
       <header className="mb-7 flex items-center justify-between gap-3">
-        <Brand />
+        <div className="nav-left">
+          <Brand />
+          <MainTabs />
+        </div>
         <LiveSync chain={fromChain} updatedAt={funding.dataUpdatedAt} intervalMs={fundingInterval(funding.data, inFlight, FUNDING_IDLE_MS)} fetching={funding.isFetching} down={liveDown} note={manual.note} onRefresh={() => void manual.run()} />
       </header>
       <Balance
         s={s}
         earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd}
-        earnedDaily={yieldLedger.data?.earnedDaily}
+        valueSeries={valueSeries.data ?? null}
         onAdd={addMoney}
         onWithdraw={() => withdraw()}
         past={past}
@@ -1634,6 +1682,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           ) : null}
         </>
       ) : null}
+      <TabBar />
     </main>
   )
 }

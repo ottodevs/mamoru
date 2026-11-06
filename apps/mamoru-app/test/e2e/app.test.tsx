@@ -87,7 +87,7 @@ describe('routes', () => {
   })
   test('account: Home with total, working capital, idle and history', async () => {
     const { text } = await renderRoute('/', fixtureSession, funded)
-    expect(text).toContain('Total balance')
+    expect(text).toContain('Total value')
     expect(text).toContain('Working capital')
     expect(text).toContain('1 position')
     expect(text).toContain('Idle capital 10.00 USDC waiting to be placed')
@@ -117,7 +117,7 @@ describe('routes', () => {
     expect(text).toContain('Monthly: DefiLlama')
     expect(text).toContain('24h avg: GeckoTerminal/DefiLlama')
     expect(html).toContain('aria-label="Rate sources"')
-    expect(text).toContain('earned so far')
+    expect(text).toContain('Total earned')
     expect(text).not.toContain('Saves automatically')
     expect(text).toContain('Balanced · USDC/cbBTC')
     expect(html).not.toContain('aria-label="Sources and method"')
@@ -280,7 +280,7 @@ describe('sign in', () => {
   })
   test('a session with an account goes straight to Home, whatever the link says', async () => {
     const { text } = await renderRoute('/?signin=true', fixtureSession, funded)
-    expect(text).toContain('Total balance')
+    expect(text).toContain('Total value')
     expect(text).not.toContain('Open your account')
   })
   test('the card says what went wrong in plain words', () => {
@@ -767,7 +767,7 @@ describe('funds by token and what Mamoru is doing', () => {
 
   test('Home says the money is being placed and lists each idle token when there is more than one', async () => {
     const { text, html } = await renderRoute('/', fixtureSession, midEntry)
-    expect(text).toContain('Total balance 5.00 USDC')
+    expect(text).toContain('Total value 5.00 USDC')
     expect(text).toContain('Idle capital 5.00 USDC being placed')
     expect(html).toContain('data-testid="idle-tokens"')
     expect(text).toContain('3.74 USDC')
