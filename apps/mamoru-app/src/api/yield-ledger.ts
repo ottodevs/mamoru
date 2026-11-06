@@ -326,7 +326,9 @@ export async function writeWorkedSamples(db: Db, snapshot: SnapshotWire, now: Da
       if (fees !== null) cur.fees = (cur.fees ?? 0) + fees
       by.set(pool, cur)
     }
-    for (const p of safe.positions) if (BigInt(p.liquidity) > 0n) add(p.pool, BigInt(p.valueUsdc), p.inRange, Number(p.feesUsdc))
+    // A missing or malformed feesUsdc (an older operator) is stored as NULL, never NaN (D1 refuses NaN).
+    const feesOf = (v: string | undefined) => (v !== undefined && Number.isFinite(Number(v)) ? Number(v) : null)
+    for (const p of safe.positions) if (BigInt(p.liquidity) > 0n) add(p.pool, BigInt(p.valueUsdc), p.inRange, feesOf(p.feesUsdc))
     for (const v of safe.vaults ?? []) add(v.name, BigInt(v.valueUsdc), true, null)
     const idle = Number(safe.idleUsdc)
     if (!by.size) by.set('idle', { inV: 0, outV: Number.isFinite(idle) ? idle : 0, fees: null })
@@ -476,7 +478,8 @@ async function writeStatsFactsSafely(db: Db, snapshot: SnapshotWire, now: Date):
   }
 }
 
-const BRIDGE_ORDER: Record<BridgeWire['state'], number> = { sending: 0, requested: 0, burned: 1, minted: 2 }
+// sending (out) and requested (home) never share an id; each direction's states are ranked so neither moves back.
+const BRIDGE_ORDER: Record<BridgeWire['state'], number> = { requested: 0, sending: 1, burned: 2, minted: 3 }
 
 export async function writeBridges(db: Db, snapshot: SnapshotWire, now: Date): Promise<number> {
   if (!snapshot.bridges?.length) return 0

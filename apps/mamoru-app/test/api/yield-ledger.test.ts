@@ -412,6 +412,12 @@ describe('spec 013 B5: stats facts (accrued fees per sample, CCTP transfers)', (
       { pool: 'pool:USDC/cbBTC/500', fees_usd: 1500 },
       { pool: 'vault:gtUSDCp', fees_usd: null },
     ])
+    // An older operator without feesUsdc: NULL, not NaN.
+    const db2 = memoryD1()
+    seedAccount(db2)
+    const old = position({ feesUsdc: undefined as unknown as string })
+    await writeWorkedSamples(db2, snapshot({ safes: [safe({ positions: [old] })] }), NOW)
+    expect(db2.raw.query('SELECT fees_usd FROM account_worked_samples').all()).toEqual([{ fees_usd: null }])
   })
 
   test('STATS-S16: transfers are stored under the Base account, only move forward, and keep blocks once known', async () => {
