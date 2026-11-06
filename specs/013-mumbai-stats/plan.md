@@ -42,19 +42,16 @@ it would be wrong; XX).
 
 ### 3.2 Earned
 
-- Total earned by day: LP from `account_daily` (Base and, from Day0-Monad, Monad); vault yield from 012's
-  `yield_ledger_income` (`source = 'vault-yield'`), checked against `yield_ledger_vault_daily`.
-- **Earned 24h, rolling**, ending at `dataAsOf`:
-  - LP accrued: Σ per account (accrued fees at its last sample ≤ now − accrued fees at its last sample ≤ now−24h).
-    Needs a fees column on the samples: `ALTER TABLE account_worked_samples ADD COLUMN fees_usd INTEGER` (per pool row,
-    from the snapshot's `positions[].feesUsdc`; null for vault and idle rows). 31-day retention is enough.
-  - LP collected: Σ `collected_usdc` of ops in `yield_ledger_ops` (§3.3) with `at` in (now−24h, now]. A position
-    closed or harvested in the window leaves accrued and enters collected: counted once.
-  - Vault yield: the last complete UTC day's `vault-yield` income, taken as the last 24 h. Why: ERC-4626 yield accrues
-    continuously through the share price, so one day's delta is the 24 h figure within rounding; a sample difference
-    would need deposits and redeems inside the window, which only 012's `net_deposited_usdc` tracks, per day (XX).
-    The (i) does not change; the source line says "vault yield: last full day".
-  - Any unpriced op or missing sample in the window → `partial`.
+One definition, one module: spec 012's `apps/mamoru-app/src/api/earned.ts` (012 plan "R5, R9: event ledger"), used by
+Portfolio and by `/api/stats`. Stats only sums it over accounts and applies the privacy guard; it defines nothing.
+
+- Total earned = Σ `yield_ledger_income.usd` (all sources, incl. `backfill`) + accrued uncollected LP fees now.
+- **Earned 24h, rolling**, ending at `dataAsOf` = Σ income with `t_s ≥ now − 24h` and `source ≠ 'backfill'` (Collect
+  events at block time, vault-yield rows at sample time) + (accrued now − accrued at now − 24h).
+- Accrued at a time = the nearest `account_worked_samples` row at or before it; needs
+  `ALTER TABLE account_worked_samples ADD COLUMN fees_usd INTEGER` (per pool row, from the snapshot's
+  `positions[].feesUsdc`; null for vault and idle rows; 31-day retention is enough). Owned by B5.
+- Any `usd = null`, `explained = 0` or missing sample in the window → `partial`, with the parts not counted.
 - Vault yield missing: "not counted" is a beta-only state (spec R18).
 
 ### 3.3 Per-op ledger: collected, placed, time
@@ -70,10 +67,10 @@ Add:
 - **Priced at the op's block:** the USDC leg is exact from the event amounts; the volatile leg at the pool's `slot0`
   read with `eth_call` at the op's `blockNumber`, then frozen. A read that fails (no archive state for an old block)
   leaves the op unpriced: never a later price.
-- Wire: `receipts[].ops?: { id, at, collectedUsdc?, placedUsdc?, priced: boolean }[]` for ops of the last 35 days.
+- Wire: `receipts[].ops?: { id, at, placedUsdc?, priced: boolean }[]` for ops of the last 35 days.
 - Worker: migration `migrations/d1/XXXX_ledger_ops.sql` creates
-  `yield_ledger_ops (chain_id, account_key, env, op_id, at, collected_usdc INTEGER, placed_usdc INTEGER, priced INTEGER,
-  updated_at, PRIMARY KEY (chain_id, op_id))` and the `fees_usd` column of §3.2. `writeReceipts` upserts ops.
+  `yield_ledger_ops (chain_id, account_key, env, op_id, at, placed_usdc INTEGER, priced INTEGER,
+  updated_at, PRIMARY KEY (chain_id, op_id))` (volume only; collected fees live in 012's `yield_ledger_income`) and the `fees_usd` column of §3.2. `writeReceipts` upserts ops.
 - Volume(day) = Σ `placed_usdc` of ops whose `at` falls in the day; **one unpriced op makes the day `partial` with
   value null**, never a short sum.
 - Backfill: facts carry `v: 2`; a stored op with older facts and a txHash is re-read once through the

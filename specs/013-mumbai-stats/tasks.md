@@ -35,7 +35,7 @@ Group B-b (B5 after B1 and B4, stacked on B1; B6 after B1, B2, B3, B5, B8; B7 af
 | Id | What | Files | Reqs | Accepts | Must not |
 |---|---|---|---|---|---|
 | B5 | Migration `XXXX_ledger_ops.sql` (`yield_ledger_ops`, `account_worked_samples.fees_usd`); `writeReceipts` upserts ops, `writeWorkedSamples` writes fees; the Worker stores `bridges` | `migrations/d1/XXXX_ledger_ops.sql`, `src/api/yield-ledger.ts`, test | R6, R7, E8 | STATS-S07, S16 | rewrite existing rows' other columns |
-| B6 | `GET /api/stats`: queries (plan §3–4), guard, cache, `STATS_READ_LIMIT`, 503 path | `src/api/stats/routes.ts`, `src/api/stats/queries.ts`, `src/api/app.ts` (one `route` line), `wrangler.jsonc`, `src/api/env.ts` (binding type), `test/api/stats.test.ts` | R2, R5–R10, R12, R13, R7b | STATS-S01..S06, S08, S16, S17, S18 | set `accountKey`; read the operator or RPC; return per-account rows |
+| B6 | `GET /api/stats` (**after 012 HT7**: earned comes from its `earned.ts`): queries (plan §3–4), guard, cache, `STATS_READ_LIMIT`, 503 path | `src/api/stats/routes.ts`, `src/api/stats/queries.ts`, `src/api/app.ts` (one `route` line), `wrangler.jsonc`, `src/api/env.ts` (binding type), `test/api/stats.test.ts` | R2, R5–R10, R12, R13, R7b | STATS-S01..S06, S08, S16, S17, S18 | set `accountKey`; read the operator or RPC; return per-account rows |
 | B7 | `GET /api/accounts/:key/value-series` with last-known-value alignment per chain (plan §5) | `src/api/accounts/value-series.ts`, `src/api/accounts/routes.ts`, test | R14 | STATS-S10, S19 | widen what another owner can read |
 
 B1 and B5 both edit `yield-ledger.ts`: B5 is stacked on B1's branch. B6 merges and deploys only after B1 and B5 (its
