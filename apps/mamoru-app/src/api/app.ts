@@ -23,11 +23,15 @@ import { sessionSleeves } from './sleeves.ts'
 import type { RemoteRegistry } from './remote.ts'
 import type { ApyCache, Fetcher } from './apy/source.ts'
 
+import { statsRoutes, type StatsCache } from './stats/routes.ts'
+
 export type AppOptions = {
   now?: () => Date
   operatorFetch?: OperatorFetch
   apyFetch?: Fetcher
   apyCache?: () => ApyCache | null
+  /** Spec 013: the cache `GET /api/stats` uses (default caches.default). */
+  statsCache?: () => StatsCache | null
   chainFetch?: ChainFetch
   chainGate?: ReadGate
   fundingGate?: FundingGate
@@ -98,6 +102,7 @@ export function createApp(options: AppOptions = {}) {
   app.route('/api/accounts', otherChainRoutes(chainFetch, options.chainGate))
   app.route('/api/pools', pools)
   app.route('/api/ens', ens)
+  app.route('/api/stats', statsRoutes(options.statsCache))
   app.route('/api/apy', apyRoutes(options.apyFetch ?? ((input, init) => fetch(input, init)), options.apyCache))
   app.route('/api', feedbackRoutes(options.mattermostFetch ?? ((input, init) => fetch(input, init))))
   // Spec 006 (otto/mamoru#147): the operator's signed pull of the active engine settings.

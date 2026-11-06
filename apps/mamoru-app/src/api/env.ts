@@ -47,6 +47,8 @@ export type Env = {
   FEEDBACK_LIMIT?: RateLimiter
   // otto/mamoru#255: reads of one account per client address (middleware/read-limit.ts). Absent in tests and local runs.
   ACCOUNT_READ_LIMIT?: RateLimiter
+  // Spec 013: reads of the public GET /api/stats per client address (stats/routes.ts). Absent in tests and local runs.
+  STATS_READ_LIMIT?: RateLimiter
   // Mattermost fan-out for feedback (feedback.ts). All secrets, all optional: unset, a row is still stored and
   // nothing is posted. MATTERMOST_BOT_TOKEN is never logged.
   MATTERMOST_URL?: string
