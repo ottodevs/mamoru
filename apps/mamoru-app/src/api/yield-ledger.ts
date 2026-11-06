@@ -80,7 +80,25 @@ export type SnapshotWire = {
    * yield-receipts.ts), the last few days only, including accounts the snapshot did not read (stopped). Absent from
    * an operator older than this field.
    */
-  receipts?: { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire }[]
+  receipts?: { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire; ops?: PlacedOpWire[] }[]
+  /** Spec 013 plan §3.5: CCTP transfers between an account's Safes (Base operator only). Absent: journals not read. */
+  bridges?: BridgeWire[]
+}
+
+/** Spec 013 B4: one op's capital placed (liquidity + vault deposits), priced at its own block. */
+export type PlacedOpWire = { id: string; t: number; placedUsdc?: string; priced: boolean }
+/** Spec 013 B8: one CCTP transfer from the operator's journals. */
+export type BridgeWire = {
+  id: string
+  direction: 'out' | 'home'
+  accountKey: string
+  safe: string
+  amountUsdc: string
+  state: 'sending' | 'requested' | 'burned' | 'minted'
+  burnBlock?: string
+  burnAt?: string
+  mintedBlock?: string
+  mintedAt?: string
 }
 
 export const SNAPSHOT_TIMEOUT_MS = 30_000
@@ -293,27 +311,39 @@ export async function writeWorkedSamples(db: Db, snapshot: SnapshotWire, now: Da
   let rows = 0
   const at = Date.parse(snapshot.readAt)
   if (!Number.isFinite(at)) return { accounts, rows }
-  const insert = 'INSERT INTO account_worked_samples (chain_id, account_key, read_at, t_s, pool, value_usd, in_range) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING'
+  // Spec 013 B5: with the accrued fees of each pool row. A Worker deployed before its migration writes without them.
+  let withFees = true
+  const insert = (fees: boolean) => fees
+    ? 'INSERT INTO account_worked_samples (chain_id, account_key, read_at, t_s, pool, value_usd, in_range, fees_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING'
+    : 'INSERT INTO account_worked_samples (chain_id, account_key, read_at, t_s, pool, value_usd, in_range) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING'
   for (const safe of snapshot.safes) {
     const account = await resolveAccount(db, snapshot.chainId, safe.safe)
     if (!account) continue
-    const by = new Map<string, { inV: number; outV: number }>()
-    const add = (pool: string, value: bigint, inRange: boolean) => {
+    const by = new Map<string, { inV: number; outV: number; fees: number | null }>()
+    const add = (pool: string, value: bigint, inRange: boolean, fees: number | null) => {
       if (value <= 0n) return
-      const cur = by.get(pool) ?? { inV: 0, outV: 0 }
+      const cur = by.get(pool) ?? { inV: 0, outV: 0, fees: null }
       if (inRange) cur.inV += Number(value)
       else cur.outV += Number(value)
+      if (fees !== null) cur.fees = (cur.fees ?? 0) + fees
       by.set(pool, cur)
     }
-    for (const p of safe.positions) if (BigInt(p.liquidity) > 0n) add(p.pool, BigInt(p.valueUsdc), p.inRange)
-    for (const v of safe.vaults ?? []) add(v.name, BigInt(v.valueUsdc), true)
+    for (const p of safe.positions) if (BigInt(p.liquidity) > 0n) add(p.pool, BigInt(p.valueUsdc), p.inRange, Number(p.feesUsdc))
+    for (const v of safe.vaults ?? []) add(v.name, BigInt(v.valueUsdc), true, null)
     const idle = Number(safe.idleUsdc)
-    if (!by.size) by.set('idle', { inV: 0, outV: Number.isFinite(idle) ? idle : 0 })
-    const statements = [...by].map(([pool, { inV, outV }]) =>
-      db.prepare(insert).bind(snapshot.chainId, account.accountKey, snapshot.readAt, Math.floor(at / 1000), pool, inV > 0 ? inV : outV, inV > 0 ? 1 : 0),
-    )
-    await db.batch(statements)
-    rows += statements.length
+    if (!by.size) by.set('idle', { inV: 0, outV: Number.isFinite(idle) ? idle : 0, fees: null })
+    const statements = (fees: boolean) => [...by].map(([pool, { inV, outV, fees: f }]) => {
+      const values = [snapshot.chainId, account.accountKey, snapshot.readAt, Math.floor(at / 1000), pool, inV > 0 ? inV : outV, inV > 0 ? 1 : 0]
+      return db.prepare(insert(fees)).bind(...(fees ? [...values, f] : values))
+    })
+    try {
+      await db.batch(statements(withFees))
+    } catch (e) {
+      if (!withFees || !/no such column|has no column/i.test(e instanceof Error ? e.message : String(e))) throw e
+      withFees = false
+      await db.batch(statements(false))
+    }
+    rows += by.size
     accounts++
   }
   await db.prepare('DELETE FROM account_worked_samples WHERE read_at < ?').bind(new Date(now.getTime() - WORKED_KEEP_MS).toISOString()).run()
@@ -399,6 +429,7 @@ export async function pullYieldLedger(db: Db, operatorUrl: string, operatorSecre
   await writeWorkedSamples(db, snapshot, now)
   await writeReceipts(db, snapshot, now)
   await writeIncomeSafely(db, snapshot, now)
+  await writeStatsFactsSafely(db, snapshot, now)
   return { accounts: accounts.written, positions: positions.written }
 }
 
@@ -431,5 +462,68 @@ export async function pullWorkedSamples(db: Db, chainId: number, operatorUrl: st
   const samples = await writeWorkedSamples(db, snapshot, now)
   await writeReceipts(db, snapshot, now)
   await writeIncomeSafely(db, snapshot, now)
+  await writeStatsFactsSafely(db, snapshot, now)
   return samples
+}
+
+/**
+ * Spec 013 B5: capital placed per op (yield_ledger_ops) and the CCTP transfers of the journals (yield_ledger_bridges).
+ * A price, once stored, is never cleared by a later unpriced delivery; a transfer only moves forward. A failure (the
+ * tables not migrated yet) is logged and leaves every other table of the pull written.
+ */
+async function writeStatsFactsSafely(db: Db, snapshot: SnapshotWire, now: Date): Promise<void> {
+  try {
+    await writeOps(db, snapshot, now)
+    await writeBridges(db, snapshot, now)
+  } catch (e) {
+    console.error('yield-ledger: stats facts not written', e instanceof Error ? e.message : String(e))
+  }
+}
+
+export async function writeOps(db: Db, snapshot: SnapshotWire, now: Date): Promise<number> {
+  let written = 0
+  for (const r of snapshot.receipts ?? []) {
+    if (!r.ops?.length) continue
+    const account = await resolveAccount(db, snapshot.chainId, r.safe)
+    if (!account) continue
+    const statements = r.ops.map((o) =>
+      db
+        .prepare(
+          `INSERT INTO yield_ledger_ops (chain_id, op_id, account_key, env, t_s, placed_usdc, priced, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(chain_id, op_id) DO UPDATE SET env = excluded.env,
+             placed_usdc = COALESCE(yield_ledger_ops.placed_usdc, excluded.placed_usdc),
+             priced = MAX(yield_ledger_ops.priced, excluded.priced), updated_at = excluded.updated_at`,
+        )
+        .bind(snapshot.chainId, o.id.toLowerCase(), account.accountKey, account.env, o.t, o.priced && o.placedUsdc !== undefined ? Number(o.placedUsdc) : null, o.priced && o.placedUsdc !== undefined ? 1 : 0, now.toISOString()),
+    )
+    await db.batch(statements)
+    written += statements.length
+  }
+  return written
+}
+
+const BRIDGE_ORDER: Record<BridgeWire['state'], number> = { sending: 0, requested: 0, burned: 1, minted: 2 }
+
+export async function writeBridges(db: Db, snapshot: SnapshotWire, now: Date): Promise<number> {
+  if (!snapshot.bridges?.length) return 0
+  let written = 0
+  for (const b of snapshot.bridges) {
+    // The Base Safe of the account names it; the journal's own key is the operator's, not necessarily this Worker's.
+    const account = await resolveAccount(db, snapshot.chainId, b.safe)
+    if (!account) continue
+    const prev = await db.prepare('SELECT state FROM yield_ledger_bridges WHERE id = ?').bind(b.id).first<{ state: BridgeWire['state'] }>()
+    if (prev && BRIDGE_ORDER[prev.state] > BRIDGE_ORDER[b.state]) continue
+    await db
+      .prepare(
+        `INSERT INTO yield_ledger_bridges (id, direction, account_key, env, amount_usdc, state, burn_block, burn_at, minted_block, minted_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET env = excluded.env, amount_usdc = excluded.amount_usdc, state = excluded.state,
+           burn_block = COALESCE(excluded.burn_block, yield_ledger_bridges.burn_block), burn_at = COALESCE(excluded.burn_at, yield_ledger_bridges.burn_at),
+           minted_block = COALESCE(excluded.minted_block, yield_ledger_bridges.minted_block), minted_at = COALESCE(excluded.minted_at, yield_ledger_bridges.minted_at),
+           updated_at = excluded.updated_at`,
+      )
+      .bind(b.id, b.direction, account.accountKey, account.env, Number(b.amountUsdc), b.state, b.burnBlock ? Number(b.burnBlock) : null, b.burnAt ?? null, b.mintedBlock ? Number(b.mintedBlock) : null, b.mintedAt ?? null, now.toISOString())
+      .run()
+    written++
+  }
+  return written
 }

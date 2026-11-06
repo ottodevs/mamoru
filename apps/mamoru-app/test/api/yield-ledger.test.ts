@@ -11,6 +11,9 @@ import {
   pullYieldLedger,
   writeAccountSnapshot,
   writeYieldLedger,
+  writeBridges,
+  writeOps,
+  writeWorkedSamples,
   type OperatorFetch,
   type PositionWire,
   type SafeWire,
@@ -397,5 +400,42 @@ describe('pullWorkedSamples, spec 013 B1: Monad daily totals', () => {
     // A Base pull afterwards keeps the Monad rows and adds its own under chain 8453.
     await pullYieldLedger(db, 'http://op', 'secret', fetcher(200, base), new Date())
     expect((db.raw.query('SELECT chain_id FROM account_daily ORDER BY chain_id').all() as { chain_id: number }[]).map((r) => r.chain_id)).toEqual([143, 8453])
+  })
+})
+
+describe('spec 013 B5: stats facts (ops placed, accrued fees per sample, CCTP transfers)', () => {
+  const NOW = new Date('2026-11-06T18:00:00.000Z')
+  test('STATS-S07: an op is stored unpriced, gets its price once, and a later unpriced delivery never clears it', async () => {
+    const db = memoryD1()
+    seedAccount(db)
+    const rows = () => db.raw.query('SELECT op_id, account_key, t_s, placed_usdc, priced FROM yield_ledger_ops').all()
+    await writeOps(db, snapshot({ receipts: [{ safe: SAFE, days: [], ops: [{ id: '0xAA', t: 1_793_000_000, priced: false }] }] }), NOW)
+    expect(rows()).toEqual([{ op_id: '0xaa', account_key: ACCOUNT_KEY, t_s: 1_793_000_000, placed_usdc: null, priced: 0 }])
+    await writeOps(db, snapshot({ receipts: [{ safe: SAFE, days: [], ops: [{ id: '0xaa', t: 1_793_000_000, priced: true, placedUsdc: '1000000000' }] }] }), NOW)
+    await writeOps(db, snapshot({ receipts: [{ safe: SAFE, days: [], ops: [{ id: '0xaa', t: 1_793_000_000, priced: false }] }] }), NOW)
+    expect(rows()).toEqual([{ op_id: '0xaa', account_key: ACCOUNT_KEY, t_s: 1_793_000_000, placed_usdc: 1_000_000_000, priced: 1 }])
+  })
+
+  test('worked samples carry the accrued fees of each pool row; vault and idle rows have none', async () => {
+    const db = memoryD1()
+    seedAccount(db)
+    await writeWorkedSamples(db, snapshot({ safes: [safe({ positions: [position({ feesUsdc: '1200' }), position({ tokenId: '43', feesUsdc: '300' })], vaults: [{ name: 'vault:gtUSDCp', shares: '1', valueUsdc: '5000000' }] })] }), NOW)
+    expect(db.raw.query('SELECT pool, fees_usd FROM account_worked_samples ORDER BY pool').all()).toEqual([
+      { pool: 'pool:USDC/cbBTC/500', fees_usd: 1500 },
+      { pool: 'vault:gtUSDCp', fees_usd: null },
+    ])
+  })
+
+  test('STATS-S16: transfers are stored under the Base account, only move forward, and keep blocks once known', async () => {
+    const db = memoryD1()
+    seedAccount(db)
+    const bridge = (state: 'sending' | 'burned' | 'minted', over = {}) => ({ id: '0xb1', direction: 'out' as const, accountKey: 'opkey', safe: SAFE.toLowerCase(), amountUsdc: '200000000', state, ...over })
+    const row = () => db.raw.query('SELECT account_key, state, burn_block, minted_block FROM yield_ledger_bridges').get()
+    await writeBridges(db, snapshot({ bridges: [bridge('burned', { burnBlock: '100' })] }), NOW)
+    expect(row()).toEqual({ account_key: ACCOUNT_KEY, state: 'burned', burn_block: 100, minted_block: null })
+    await writeBridges(db, snapshot({ bridges: [bridge('minted', { mintedBlock: '5000' })] }), NOW)
+    expect(row()).toEqual({ account_key: ACCOUNT_KEY, state: 'minted', burn_block: 100, minted_block: 5000 })
+    await writeBridges(db, snapshot({ bridges: [bridge('sending')] }), NOW) // a stale delivery never moves it back
+    expect(row()).toEqual({ account_key: ACCOUNT_KEY, state: 'minted', burn_block: 100, minted_block: 5000 })
   })
 })
