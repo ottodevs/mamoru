@@ -6,7 +6,7 @@ import { enterBucket, safeSavings } from './enter/index.ts'
 import { ehgBridge, ehgPreliminary, purgaIdentity, registryOf } from './gates/index.ts'
 import { fallFreezeOf } from './guard/index.ts'
 import { depeggedPool, depegExitOf } from './guard/depeg.ts'
-import { estimateFees, harvestOf } from './harvest/index.ts'
+import { estimateFees, harvestOf, harvestSaleOf, principalObs } from './harvest/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
 import { releaseOf } from './release/index.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, mergeOf, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
@@ -17,7 +17,7 @@ import { poolDepthShadowRisk } from './shadow-pool-depth.ts'
 
 export type * from './types.ts'
 export { capRoomOf, placedOf, withinCap } from './cap.ts'
-export { estimateFees } from './harvest/index.ts'
+export { estimateFees, harvestSaleOf, principalObs, reinvestFits, HARVEST_SALE_AGE_SECONDS, REINVEST_RESERVE_BPS } from './harvest/index.ts'
 export { safeSavings } from './enter/index.ts'
 export { amountsForLiquidity, bucketVaults, inSavings, poolTvlInSavings, vaultValue, volatileOf } from './value.ts'
 export { PACKAGING_STABLES_DAY_PCT, PACKAGING_TVL_DROP_PCT, PACKAGING_VOLUME_RULES, poolStatsShadowRisk } from './shadow-pool-stats.ts'
@@ -72,8 +72,11 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // otto/mamoru#212, #353: the cap limits only the new savings an entry places. Under target weights allocate takes the
   // room and reads everything else (total, targets, sales, returns) from the observation as it is; the fixed-weight
   // entries size from `entryObs`. Re-range, harvest, reduce, merges and idle sales read the observation as it is.
-  const entryObs = withinCap(obs, given)
-  const room = capRoomOf(obs, given)
+  // otto/mamoru#107 (spec 012 HRV-R1): entries and idle sales see the Safe without its harvested volatile, which only
+  // the harvest sale takes. Without `obs.harvested`, `held` is `obs` itself.
+  const held = principalObs(obs)
+  const entryObs = withinCap(held, given)
+  const room = capRoomOf(held, given)
   // Lab (#101 experiment 6): every step reads the scaled preferences; the decision still names the policy as given.
   const targets = weightTargets(obs, given)
   const policy: PolicyVersion = targets ? { ...given, buckets: targets } : given
@@ -154,7 +157,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // otto/mamoru#215: the local entry a bridge took the review from, used when the bridge cannot go.
   let displaced: Proposal | undefined
   if (policy.allocation === 'target-weights') {
-    const a = allocate(obs, policy, unsafeDeposit, frozen, room)
+    const a = allocate(held, policy, unsafeDeposit, frozen, room)
     // Only where the next step has a live session: without one it never goes and the token would wait for ever.
     // A mint after a re-range runs under manage-any, as below.
     const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
@@ -202,7 +205,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       continue
     }
     // The sale of idle volatile to pair it reads the savings actually held: the cap never makes it sell (otto/mamoru#353).
-    const convert = ratioConvertOf(obs, policy, b.preference, pool, safeSavings(obs, policy))
+    const convert = ratioConvertOf(held, policy, b.preference, pool, safeSavings(held, policy))
     const e = convert ? { code: 'DECIDE_CONVERT' as const, proposal: convert } : enterBucket(entryObs, policy, b.preference, pool)
     if (remint && e.proposal?.kind === 'enter_mint') e.proposal = { ...e.proposal, grant: anyKey(policy, 'manage-any', pool.name) }
     buckets.push({ bucket: b.id, code: e.code })
@@ -240,14 +243,18 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     const still = new Set([...(depegged ? [depegged.name] : []), ...policy.buckets.filter((b) => frozen.has(b.id) || stagedDrift[b.id] !== undefined).flatMap((b) => b.pools)])
     const merge = exit || reranges.length ? null : mergeOf(obs, policy, policyPools, still)
     if (merge) reranges.push(merge)
-    const reduce = exit || reranges.length || harvests.length ? null : reduceOf(obs, policy, policyPools, lab)
+    // otto/mamoru#107: the sale of harvested volatile goes right after the harvests, before reduce, idle sales and entries.
+    const sale = exit || reranges.length || harvests.length || !obs.harvested ? null : harvestSaleOf(obs, policy)
+    if (sale) for (const w of sale.waits) buckets.push(w)
+    const sold = sale?.proposal ?? null
+    const reduce = exit || reranges.length || harvests.length || sold ? null : reduceOf(obs, policy, policyPools, lab)
     // otto/mamoru#210: a vault that cannot pay out its excess yet says so on its bucket.
     if (reduce?.code === 'DECIDE_WAIT_VAULT_LIQUIDITY') buckets.push({ bucket: 'stables', code: reduce.code })
     // A frozen bucket's idle token waits where it is: the guard never turns a pause into a sell-back.
     const frozenPools = guards.filter((g) => frozen.has(g.bucket)).map((g) => g.pool)
     if (depegged) frozenPools.push(depegged.name)
     const keep = frozenPools.length ? new Set([...(pendingMint ?? []), ...frozenPools]) : pendingMint
-    const idle = exit || reranges.length || harvests.length || reduce?.proposal ? null : idleConvertOf(obs, policy, policyPools, keep)
+    const idle = exit || reranges.length || harvests.length || sold || reduce?.proposal ? null : idleConvertOf(held, policy, policyPools, keep)
     // otto/mamoru#278: an open release (the home account wants savings back) is all this Safe does until it is sent.
     // Every pool of a frozen bucket, not only the guard's own, and the depegged one.
     const release = releaseOf(obs, policy, policyPools, new Set([...frozenPools, ...policy.buckets.filter((b) => frozen.has(b.id)).flatMap((b) => b.pools)]))
@@ -256,8 +263,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       proposal = exit ?? release.proposal
       reason = exit ? PROPOSAL_CODE[exit.kind] : release.code
     } else {
-      proposal = exit ?? reranges[0] ?? harvests[0] ?? reduce?.proposal ?? idle ?? entries[0] ?? null
-      reason = proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()
+      proposal = exit ?? reranges[0] ?? harvests[0] ?? sold ?? reduce?.proposal ?? idle ?? entries[0] ?? null
+      reason = proposal === sold && sold ? 'DECIDE_HARVEST' : proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()
     }
   }
 
