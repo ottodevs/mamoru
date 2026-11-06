@@ -417,13 +417,17 @@ async function writeIncomeSafely(db: Db, snapshot: SnapshotWire, now: Date): Pro
 /**
  * otto/mamoru#343 phase B: one cron tick for a chain whose operator measures capital only for the worked APY (Monad):
  * pulls its /snapshot and stores the worked samples under the sleeve's account_key. otto/mamoru#358: and its receipts
- * (gas paid, fees collected by the Monad engine ops), under chain_id `chainId`. The yield ledger and the account
- * snapshot are Base-bound and stay on `pullYieldLedger`. Null when the operator answers nothing (loop off, 404, not
- * reachable) or answers for another chain than `chainId`.
+ * (gas paid, fees collected by the Monad engine ops), under chain_id `chainId`. Spec 013 B1: and the account snapshot
+ * and daily totals (account_snapshot_latest, account_daily) under the sleeve's account_key and chain_id, so Monad
+ * counts in Stats' TVL and in each owner's Total value from this deploy on (Day0-Monad; no backfill). That writer has
+ * no Base assumption: it stores the operator's own per-Safe totals, which the Monad operator values on the Monad
+ * registry. Only the hold-value yield ledger (writeYieldLedger) is Base-bound and stays on `pullYieldLedger`. Null
+ * when the operator answers nothing (loop off, 404, not reachable) or answers for another chain than `chainId`.
  */
 export async function pullWorkedSamples(db: Db, chainId: number, operatorUrl: string, operatorSecret: string, fetcher: OperatorFetch, now: Date): Promise<{ accounts: number; rows: number } | null> {
   const snapshot = await fetchSnapshot(operatorUrl, operatorSecret, fetcher)
   if (!snapshot || snapshot.chainId !== chainId) return null
+  await writeAccountSnapshot(db, snapshot, now)
   const samples = await writeWorkedSamples(db, snapshot, now)
   await writeReceipts(db, snapshot, now)
   await writeIncomeSafely(db, snapshot, now)

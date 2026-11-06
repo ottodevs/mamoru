@@ -379,3 +379,23 @@ describe('pullWorkedSamples (otto/mamoru#358): the Monad tick stores the Monad r
     expect(db.raw.query('SELECT chain_id, token_id, collected0, collected1 FROM yield_ledger_position_collected').all()).toEqual([{ chain_id: 143, token_id: 49417, collected0: '5', collected1: '6' }])
   })
 })
+
+describe('pullWorkedSamples, spec 013 B1: Monad daily totals', () => {
+  test('STATS-S04: a Monad snapshot writes account_snapshot_latest and account_daily under the sleeve, chain 143; Base rows untouched', async () => {
+    const db = memoryD1()
+    seedAccount(db)
+    db.raw.exec(
+      `INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at)
+       VALUES ('${ACCOUNT_KEY}-monad', 'u1', 143, '${SAFE.toLowerCase()}', '[]', 'cred', '0x1', '0x2', '1', 'v6', '2026-11-01T00:00:00.000Z')`,
+    )
+    const base = snapshot()
+    const monadSafe = { ...base.safes[0]!, idleUsdc: '7000000', lpUsdc: '30000000', feesUsdc: '10000', owedUsdc: '0', totalUsdc: '37010000' }
+    const monad = snapshot({ chainId: 143, safes: [monadSafe] })
+    await pullWorkedSamples(db, 143, 'http://op', 'secret', fetcher(200, monad), new Date())
+    expect(db.raw.query('SELECT chain_id, account_key, total_usdc FROM account_snapshot_latest').all()).toEqual([{ chain_id: 143, account_key: `${ACCOUNT_KEY}-monad`, total_usdc: 37010000 }])
+    expect(db.raw.query('SELECT chain_id, account_key, total_close_usdc FROM account_daily').all()).toEqual([{ chain_id: 143, account_key: `${ACCOUNT_KEY}-monad`, total_close_usdc: 37010000 }])
+    // A Base pull afterwards keeps the Monad rows and adds its own under chain 8453.
+    await pullYieldLedger(db, 'http://op', 'secret', fetcher(200, base), new Date())
+    expect((db.raw.query('SELECT chain_id FROM account_daily ORDER BY chain_id').all() as { chain_id: number }[]).map((r) => r.chain_id)).toEqual([143, 8453])
+  })
+})
