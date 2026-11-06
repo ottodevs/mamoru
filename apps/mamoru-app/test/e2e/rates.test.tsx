@@ -401,6 +401,19 @@ describe('total earned with the value', () => {
     expect(text).toContain('Total earned n/a not measured yet')
     expect(text).not.toContain('+')
   })
+  test('a loss is a red pill with a minus, a gain a green one, and the day the ledger starts', () => {
+    const gain = render(<Balance s={s} earnedSoFarUsd="42000" earnedSince="2026-10-12" onAdd={() => {}} onWithdraw={() => {}} />)
+    expect(gain.html).toContain('pf-delta pos')
+    expect(gain.text).toContain('+0.04 USDC since 12 Oct')
+    const loss = render(<Balance s={s} earnedSoFarUsd="-3120000" onAdd={() => {}} onWithdraw={() => {}} />)
+    expect(loss.html).toContain('pf-delta neg')
+    expect(loss.text).toContain('−3.12 USDC')
+    expect(loss.text).not.toContain('since')
+  })
+  test('the section is named by "Total value" alone, not the (i) text', () => {
+    const { html } = render(<Balance s={s} earnedSoFarUsd="42000" onAdd={() => {}} onWithdraw={() => {}} />)
+    expect(html).toContain('<span id="total-title">Total value</span>')
+  })
 })
 
 // otto/mamoru#198: the current rate is the account's, so its label is one line with no scope words.

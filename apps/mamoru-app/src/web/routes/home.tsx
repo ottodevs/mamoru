@@ -209,7 +209,8 @@ function ValueChart({ series }: { series: ValueSeriesView }) {
   const all = series.points.map((p) => ({ day: p.day, v: p.usd }))
   const rows = range ? all.slice(-range) : all
   if (rows.length < 2) return null
-  const fmt = (v: number) => `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  // Same unit as the total above it: USDC, two decimals.
+  const fmt = (v: number) => `${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`
   return (
     <div className="pf-chart">
       <AreaChart rows={rows} h={190} axes={false} label={homeCopy.total} fmtTip={fmt} />
@@ -241,6 +242,7 @@ export function agoText(iso: string, now: number = Date.now()): string {
 export function Balance({
   s,
   earnedSoFarUsd,
+  earnedSince = null,
   valueSeries = null,
   onAdd,
   onWithdraw,
@@ -253,6 +255,8 @@ export function Balance({
 }: {
   s: Split | null
   earnedSoFarUsd?: string | null
+  /** The first day the ledger counts earnings for (its earned series), shown as "since <day>"; none when unknown. */
+  earnedSince?: string | null
   /** Spec 013: the owner's total value by day; the chart shows from two days. */
   valueSeries?: ValueSeriesView | null
   onAdd: () => void
@@ -286,8 +290,8 @@ export function Balance({
       </div>
       <div className="pf-main">
         <div>
-          <p className="kicker text-[0.86rem]! font-bold tracking-[0.14em]! text-ink!" id="total-title">
-            {homeCopy.total} <InfoPopover label={`About "${homeCopy.total}"`}>{homeCopy.totalTip}</InfoPopover>
+          <p className="kicker text-[0.86rem]! font-bold tracking-[0.14em]! text-ink!">
+            <span id="total-title">{homeCopy.total}</span> <InfoPopover label={`About "${homeCopy.total}"`}>{homeCopy.totalTip}</InfoPopover>
           </p>
           <p className={`sum${shownPast ? ' past' : ''}`} data-testid="total">
             {shownPast ? usd(shownPast.totalUsd) : s ? <TweenUsd raw={total ?? s.total} countUp /> : '0.00'}
@@ -315,7 +319,7 @@ export function Balance({
               {chain.positions === 'listed' ? homeCopy.chainReading : homeCopy.chainIdleOnly}
             </p>
           ) : null}
-          <Earned usd={earnedSoFarUsd} since={valueSeries?.points[0]?.day ?? null} />
+          <Earned usd={earnedSoFarUsd} since={earnedSince} />
         </div>
         {valueSeries ? <ValueChart series={valueSeries} /> : null}
       </div>
@@ -1560,6 +1564,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       <Balance
         s={s}
         earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd}
+        earnedSince={yieldLedger.data?.earnedDaily?.[0]?.day ?? null}
         valueSeries={valueSeries.data ?? null}
         onAdd={addMoney}
         onWithdraw={() => withdraw()}
