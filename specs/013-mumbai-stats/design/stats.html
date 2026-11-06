@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mamoru · Stats (mockup)</title>
+<link rel="stylesheet" href="mock.css">
+<link rel="stylesheet" href="stats.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#"><img src="../../../apps/mamoru-app/public/mark-two-stones.png" alt=""><span>Mamoru</span></a>
+  <nav class="tabs" aria-label="Main">
+    <a href="portfolio.html">Portfolio</a>
+    <a href="stats.html" aria-current="page">Stats</a>
+  </nav>
+  <div class="right"><a class="linkish" href="#">Sign in</a></div>
+</header>
+
+<main class="stats">
+  <section class="head">
+    <h1>Stats</h1>
+    <p>Every Mamoru account, added up.</p>
+  </section>
+
+  <!-- 1. Where the money is -->
+  <section class="hero" aria-labelledby="h-dep">
+    <div class="hero-top">
+      <div>
+        <div class="lab" id="h-dep">Total deposits <i-tip>Value held in every Mamoru account, on every chain: positions, vaults, uncollected fees and money not placed yet.</i-tip></div>
+        <div class="big" data-k="S1"></div>
+      </div>
+      <div class="working">
+        <div class="lab">Money working <i-tip>Share of all deposits placed in liquidity pools and lending vaults right now. The rest is idle: new deposits in progress, or waiting for pool depth or limits.</i-tip></div>
+        <div class="wv" data-k="S2p"></div>
+      </div>
+    </div>
+    <div class="alloc" id="alloc" role="img"></div>
+    <ul class="alloc-keys" id="alloc-keys"></ul>
+  </section>
+
+  <!-- 2. What it earns -->
+  <section class="earn" aria-label="Earnings">
+    <div class="fig"><div class="lab">Earned in the last 24h <i-tip>Fees and vault yield earned in the last 24 hours, every token valued in US dollars.</i-tip></div><div class="val" data-k="S4"></div></div>
+    <div class="fig"><div class="lab">Total earned <i-tip>All fees and vault yield earned since launch, every token valued in US dollars.</i-tip></div><div class="val" data-k="S5"></div></div>
+    <div class="fig"><div class="lab">7-day APR <i-tip>What the money working earned over the last 7 days, as a yearly rate, weighted by capital, before compounding.</i-tip></div><div class="val" data-k="S6"></div></div>
+  </section>
+
+
+
+
+  <section class="two">
+    <div class="block" aria-labelledby="h-tvl">
+      <header class="bh"><h2 id="h-tvl">Total deposits <i-tip>Value held in every account at each day's close, UTC.</i-tip></h2></header>
+      <div id="tvl"></div>
+    </div>
+    <div class="block" aria-labelledby="h-epd">
+      <header class="bh"><h2 id="h-epd">Earned per day <i-tip>Fees and vault yield earned each UTC day, in US dollars.</i-tip></h2></header>
+      <div class="plot" id="epd"></div>
+    </div>
+  </section>
+  <!-- 3. Does the return hold? -->
+  <section class="block apr" aria-labelledby="h-apr">
+    <header class="bh">
+      <h2 id="h-apr">APR over time <i-tip>Each dot is one day: what a dollar working earned that day, as a yearly rate. The line is the 7-day average, which shows whether a rate holds.</i-tip></h2>
+      <div class="ctl">
+        <div class="seg" id="chain" role="group" aria-label="Chain"><button aria-pressed="true" data-v="all">All</button><button data-v="base">Base</button><button data-v="monad">Monad</button></div>
+        <div class="seg" id="range" role="group" aria-label="Range"><button data-v="7">1W</button><button data-v="30">1M</button><button aria-pressed="true" data-v="0">All</button></div>
+      </div>
+    </header>
+    <div class="plot" id="apr"></div>
+    <p class="key"><span class="k-line"></span>7-day average <span class="k-dot"></span>daily</p>
+  </section>
+  <!-- 5. Accounts -->
+  <section class="accts" aria-label="Accounts">
+    <div class="fig"><div class="lab">Total accounts <i-tip>Accounts created in Mamoru.</i-tip></div><div class="val" data-k="S7"></div></div>
+    <div class="fig"><div class="lab">Average account <i-tip>Average value of an account with funds.</i-tip></div><div class="val" data-k="S8"></div></div>
+    <div class="fig"><div class="lab">Largest account <i-tip>Value of the largest single account. No account is named.</i-tip></div><div class="val" data-k="S9"></div></div>
+  </section>
+
+  <!-- 4. What it holds -->
+  <section class="two holds">
+    <div class="block" aria-labelledby="h-tok">
+      <header class="bh"><h2 id="h-tok">By asset <i-tip>Exposure to each token: every pool position split into its two tokens at today's amounts; vaults hold USDC.</i-tip></h2></header>
+      <div class="dist" id="tok"></div>
+    </div>
+    <div class="block" aria-labelledby="h-ch">
+      <header class="bh"><h2 id="h-ch">By chain <i-tip>Value held on each chain.</i-tip></h2></header>
+      <div class="dist" id="ch"></div>
+    </div>
+  </section>
+  <p class="src" id="src"></p>
+</main>
+
+<nav class="tabbar" aria-label="Main">
+  <a href="portfolio.html"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="8" cy="11" rx="5.5" ry="6.5"/><ellipse cx="14.5" cy="13" rx="3" ry="4"/></svg>Portfolio</a>
+  <a href="stats.html" aria-current="page"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 17V10M8 17V5M13 17V8M18 17V12"/></svg>Stats</a>
+</nav>
+
+<script type="module" src="stats.js"></script>
+</body>
+</html>

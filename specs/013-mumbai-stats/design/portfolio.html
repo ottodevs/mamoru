@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mamoru · Portfolio (mockup)</title>
+<link rel="stylesheet" href="mock.css">
+<link rel="stylesheet" href="stats.css">
+<style>
+  .pf-top { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1.4rem 0 1.1rem; }
+  .actions { display: flex; gap: .6rem; }
+  .pf { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 2.5rem; align-items: end; border-top: 1px solid var(--ink); padding: 1.8rem 0 1.6rem; border-bottom: 1px solid var(--wash); }
+  .pf .big { font-size: 4.4rem; line-height: 1; margin-top: .7rem; letter-spacing: -.025em; }
+  .pf .big .c { font-size: 2rem; color: var(--muted); letter-spacing: 0; }
+  .pf .asof { margin-top: .55rem; font-family: var(--mono); font-size: .7rem; color: var(--muted); }
+  .earned { margin-top: 1.9rem; }
+  .earned .row { display: flex; align-items: center; gap: .75rem; margin-top: .6rem; flex-wrap: wrap; }
+  .delta { display: inline-flex; align-items: center; gap: .45rem; padding: .42rem .8rem .42rem .6rem; border-radius: 999px; font-size: 1.5rem; line-height: 1; }
+  .delta svg { width: 14px; height: 14px; }
+  .delta.pos { color: #24503f; background: color-mix(in srgb, #2f5d50 11%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, #2f5d50 22%, transparent); }
+  .delta.neg { color: #8a2727; background: color-mix(in srgb, #9b2c2c 9%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, #9b2c2c 22%, transparent); }
+  .earned .since { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+  .spark { position: relative; }
+  .spark .rng { display: flex; justify-content: flex-end; gap: .9rem; margin-top: .5rem; }
+  .spark .rng button { all: unset; cursor: pointer; font-family: var(--mono); font-size: .68rem; letter-spacing: .08em; color: var(--stone); padding: .2rem 0; border-bottom: 1.5px solid transparent; }
+  .spark .rng button[aria-pressed="true"] { color: var(--ink); border-bottom-color: var(--emerald); }
+  .rest { margin-top: 2.2rem; border: 1px dashed var(--wash); padding: 1.1rem 1.2rem; color: var(--muted); font-family: var(--mono); font-size: .74rem; line-height: 1.7; }
+  @media (max-width: 640px) {
+    .pf-top { flex-direction: column; align-items: stretch; padding: .9rem 0 1rem; }
+    .pf-top .stamp { align-self: flex-start; }
+    .actions > * { flex: 1; }
+    .pf { grid-template-columns: 1fr; gap: 1.2rem; padding-top: 1.3rem; }
+    .pf .big { font-size: 3.3rem; }
+    .earned { margin-top: 1.4rem; }
+    .delta { font-size: 1.3rem; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#"><img src="../../../apps/mamoru-app/public/mark-two-stones.png" alt=""><span>Mamoru</span></a>
+  <nav class="tabs" aria-label="Main">
+    <a href="portfolio.html" aria-current="page">Portfolio</a>
+    <a href="stats.html">Stats</a>
+  </nav>
+  <div class="right"><span class="who">Signed in · <b>your account</b></span></div>
+</header>
+
+<main>
+  <div class="pf-top">
+    <span class="stamp">Example figures</span>
+    <div class="actions">
+      <a class="cta" href="#">Add capital</a>
+      <a class="ghost" href="#">Withdraw</a>
+    </div>
+  </div>
+
+  <section class="pf" aria-label="Your account">
+    <div>
+      <div class="lab">Total value <i-tip>Everything your account holds on Base and Monad: positions, vault, uncollected fees and money not placed yet.</i-tip></div>
+      <div class="big" id="tv"></div>
+      <div class="asof">Base and Monad · as of 19:02 UTC</div>
+      <div class="earned">
+        <div class="lab">Total earned <i-tip>Fees and vault yield your account has earned since it started, every token valued in US dollars.</i-tip></div>
+        <div class="row"><span class="delta" id="delta"></span><span class="since" id="since"></span></div>
+      </div>
+    </div>
+    <div class="spark">
+      <div id="chart"></div>
+      <div class="rng" role="group" aria-label="Range"><button data-v="7">1W</button><button data-v="30" aria-pressed="true">1M</button><button data-v="0">All</button></div>
+    </div>
+  </section>
+
+  <div class="rest">Existing Portfolio sections continue here unchanged (working capital, idle, history).</div>
+</main>
+
+<nav class="tabbar" aria-label="Main">
+  <a href="portfolio.html" aria-current="page"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="8" cy="11" rx="5.5" ry="6.5"/><ellipse cx="14.5" cy="13" rx="3" ry="4"/></svg>Portfolio</a>
+  <a href="stats.html"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 17V10M8 17V5M13 17V8M18 17V12"/></svg>Stats</a>
+</nav>
+
+<script type="module">
+  import { area, usd, dayLabel } from './charts.js'
+  // stats.css defines <i-tip>; register it here too.
+  await import('./itip.js')
+  // Example account (labelled): 1,000 on 12 Oct, then 400, 300 and 800 more, growth from fees and vault yield.
+  const pts = []
+  const start = Date.UTC(2026, 9, 12)
+  for (let i = 0; i <= 25; i++) {
+    const d = new Date(start + i * 864e5).toISOString().slice(0, 10)
+    const base = 1000 + (i >= 6 ? 400 : 0) + (i >= 13 ? 300 : 0) + (i >= 21 ? 800 : 0)
+    pts.push({ d, v: Math.round((base * (1 + i * 0.0009) + (i % 4) * 0.6) * 100) / 100 })
+  }
+  const value = pts.at(-1).v
+  const earned = location.hash.includes('neg') ? -3.12 : 18.42
+  document.getElementById('tv').innerHTML = `$${Math.floor(value).toLocaleString('en-US')}<span class="c">.${String(Math.round((value % 1) * 100)).padStart(2, '0')}</span>`
+  const up = '<svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M7 2.5 12 9.5H2z"/></svg>'
+  const down = '<svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true"><path d="M7 11.5 2 4.5h10z"/></svg>'
+  const d = document.getElementById('delta')
+  d.className = `delta ${earned >= 0 ? 'pos' : 'neg'}`
+  d.innerHTML = `${earned >= 0 ? up : down}${earned >= 0 ? '+' : '−'}${usd(Math.abs(earned))}`
+  document.getElementById('since').textContent = `since ${dayLabel(pts[0].d)}`
+  const tipAt = location.hash.includes('tip') ? -4 : null
+  let range = 30
+  const draw = () => {
+    const rows = range ? pts.slice(-range) : pts
+    area(document.getElementById('chart'), rows, { h: innerWidth < 640 ? 150 : 190, axes: false, label: 'Total value over time (example)', fmtTip: usd, when: (r) => dayLabel(r.d), showAt: tipAt })
+  }
+  document.querySelector('.rng').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return
+    for (const x of document.querySelectorAll('.rng button')) x.setAttribute('aria-pressed', String(x === b))
+    range = Number(b.dataset.v); draw()
+  })
+  draw()
+</script>
+</body>
+</html>
