@@ -5,7 +5,7 @@ target only), prod depth settings `30,500,5`, signed cap C equal to the deposit.
 
 | Deposit | Start | Placed (USDC/USDT · USDC/cbBTC · WETH/USDC) | Waiting | Stop returned | Log |
 |---|---|---|---|---|---|
-| 10,000 | ok, 2 extension approvals | 4,996 · ≈3,998 · ≈996 = 9,990 | none | 9,993.32 (99.93 %) | `e2e-depth-10k.log` |
+| 10,000 | ok, 2 extension approvals | 4,996 · 3,998 · 997 = 9,990 | none | 9,993.32 (99.93 %) | `e2e-depth-10k.log` |
 | 30,000 | ok | 14,993 · 11,902 · 2,990 | none | 29,982.23 (99.94 %) | `e2e-depth-30k.log` |
 | 60,000 | ok | 29,986 · 23,855 · 5,981 | none | 59,965.58 (99.94 %) | `e2e-depth-60k.log` |
 | 100,000 | **refused**: the activation simulation reverts (`execTransaction: execution failed`), nothing sent | — | — | — | `e2e-depth-100k.log` |
