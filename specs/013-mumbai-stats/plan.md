@@ -46,8 +46,11 @@ One definition, one module: spec 012's `apps/mamoru-app/src/api/earned.ts` (012 
 Portfolio and by `/api/stats`. Stats only sums it over accounts and applies the privacy guard; it defines nothing.
 
 - Total earned = Σ `yield_ledger_income.usd` (all sources, incl. `backfill`) + accrued uncollected LP fees now.
-- **Earned 24h, rolling**, ending at `dataAsOf` = Σ income with `t_s ≥ now − 24h` and `source ≠ 'backfill'` (Collect
-  events at block time, vault-yield rows at sample time) + (accrued now − accrued at now − 24h).
+- **Earned 24h, rolling**, per account the window ends at **t1 = its latest fee sample** (not request time):
+  Σ income with `t1 − 24h < t_s ≤ t1` and `source ≠ 'backfill'` (Collect events at block time, vault-yield rows at
+  sample time) + (accrued at t1 − accrued at t1 − 24h). A Collect after t1 is left for the next sample, so fees are never
+  counted both as accrued and as collected. **Approximate by decision** (Ot and Brais, 6 Nov 17:16Z): vault yield
+  comes from share-value samples, and the (i) does not promise an exact figure.
 - Accrued at a time = the nearest `account_worked_samples` row at or before it; needs
   `ALTER TABLE account_worked_samples ADD COLUMN fees_usd INTEGER` (per pool row, from the snapshot's
   `positions[].feesUsdc`; null for vault and idle rows; 31-day retention is enough). Owned by B5.
@@ -92,6 +95,9 @@ minted at a Monad block after the block of the Monad read being valued. The Base
 `bridges?: { safe, accountKey, amountUsdc, state, mintedBlock? }[]` (unpruned burns). The Worker applies that rule
 against the `block` of the Monad sleeve's row it has stored, and adds the result to TVL now and to the day's close.
 This counts each USDC once: on the source side until the Monad read that includes the mint, then in the sleeve.
+Out-of-order reads: if an account's Base read is older than a burn and its Monad read is newer than that burn's mint,
+the same USDC is in both reads; the Worker subtracts it once. Any case the rule cannot place (missing block, unknown
+state) makes TVL now and the day's point `partial` instead of guessing.
 
 Monad → Base (return home, `return-home.ts`): if its journal exposes the same fields, the same rule against the Base
 row's block; otherwise any open return makes TVL now and that day's point `partial`. B8 decides which by reading the
@@ -106,7 +112,8 @@ code, and says so in its PR.
 
 Two public readings (two days, or now and the last close) can be subtracted. If one of three owners alone deposits in
 between, the difference is that deposit. Any public TVL has this; Ot accepted public aggregates (PRD §5.3). Mitigation
-only: whole-dollar rounding of every published figure, owner counts in bands. No further guard.
+only: whole-dollar rounding of every published figure, owner counts in bands. No further guard. Product decision, not
+an open finding: reviewers flag it, Ot and Brais accepted it for the hackathon.
 
 ## 4. API: `GET /api/stats`
 
@@ -124,7 +131,8 @@ type Point = { day: string; usd: number | null; reason?: Reason; owners?: '3+' |
 type StatsView = {
   tvlNow: Figure
   tvl: Point[]                   // daily
-  monadFrom: string | null       // Day0-Monad; earlier points are "Base only"
+  monadFrom: string | null       // the day Monad tracking was deployed (B1 release), a system date, never the first
+                                 // day of any owner's activity; earlier points are "Base only"
   volume: Point[]                // daily
   earned24h: Figure & { vaultYield: 'counted' | 'not_counted' }
   earnedTotal: Figure & { since: string; vaultYield: 'counted' | 'not_counted' }

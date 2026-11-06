@@ -61,10 +61,9 @@ reachable, and money above what can be placed sits idle without a reason the use
   retrying (fail closed). V4 accounts have no such total (only `maxFee` ≤ 10 bps) and are unaffected. Circle's per-message limit
   (10,000,000 USDC, Base and Monad) is above every amount here.
 - **CAP-R6** Money that is not placed says why in one short phrase on the existing idle line, linked to a public doc
-  section. Reasons: above the cap, pool depth, daily limit, monthly limit, waiting for renewal, bridge limit reached.
-  Each reason has a producer (engine code or app computation, `plan.md` §6); a window is never labeled daily unless it
-  is the 24 h one. English copy is
-  proposed in `plan.md` §6 and **needs Ot's and Brais's OK before merge**. No paragraphs, no per-chain rows.
+  section, **only for two reasons: pool depth and pending renewal** (Ot and Brais, 6 Nov). Spending windows, the V3
+  bridge limit and money above the cap have no UI message; they are logged by the operator. No paragraphs, no
+  per-chain rows.
 
 ## Edge cases
 

@@ -89,8 +89,9 @@ of design.md §4. Every figure goes through the k ≥ 3 guard (R9) last.
 
 ## Edge cases
 
-- **E1.** An account missing from a day's read: carried forward from its last close ≤ 2 days, point `partial`
-  (tooltip: "some accounts carried from their last reading"). Older than 2 days: not counted, point `partial`.
+- **E1.** An account missing from a day's read: carried forward from its last close for as long as the account is
+  active and was not stopped or withdrawn, point `partial` (tooltip: "some accounts carried from their last reading").
+  An account is only dropped from TVL by a recorded stop or withdrawal, never by a missing read.
   Never a fake dip.
 - **E2.** `collected_usdc` or vault yield unpriced: that day's earned is `partial`, and so is Total earned.
 - **E3.** A per-chain split with < 3 owners: withheld; the totals still count that chain.

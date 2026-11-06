@@ -30,7 +30,7 @@ case (rollback rows, `rollback_of`), the operator wins and the test names the ca
   (`waited code=… usdc=…`) and every chain revert reason seen (`POLICY_DENIED_AMOUNT`, `BudgetExceeded`,
   `Cap24hExceeded`, `Cap30Exceeded`). Asserts: (a) placed + waiting + idle = deposit ± gas; (b) the expected window
   wait computed from the policy's own window limits for C (helper reads them from `policies-v7.ts`): if required entries
-  + swaps exceed the window, a window code must be logged with at least that excess, else the run fails; (c) Stop
+  + swaps exceed the window, the window denial (revert reason in the log, decoded by 012 HT5 or as raw selector) must be logged with at least that excess waiting, else the run fails; (c) Stop
   returns USDC ≥ deposit − 0.1 %.
   Add `"e2e:depth": "bun test/e2e-depth.ts"` to `apps/mamoru-operator/package.json`.
 - Opt-in, not CI (cold fork, up to 10 min). Runs: `DEPOSIT_USDC=10000` and `DEPOSIT_USDC=100000`, output to
@@ -77,27 +77,23 @@ empty. Same in `prod` at the final cut (PRD §7, 07:00 IST).
 - Read of live totals for `results/`: operator state `remote.spec.capUsdc` per active account (6 Nov: 500 USDC on 7 v7
   accounts with a sleeve).
 
-## 6. Waiting reason copy (CAP-R6), proposal for OK
+## 6. Waiting reason copy (CAP-R6)
+
+Decision (Ot and Brais, 6 Nov 17:16Z): the UI names only two reasons. Spending windows, the V3 bridge limit and
+"above the cap" get **no UI message** (the limits go away soon); they stay in the operator log only.
 
 On the one idle line of `apps/mamoru-app/src/web/routes/home.tsx`, after the amount, one phrase for the largest
 waiting amount, linking to `docs/waiting.md#<anchor>` on GitHub:
 
-| Code | Phrase (EN) | Anchor |
+| Source | Phrase (EN) | Anchor |
 |---|---|---|
-| account total (placed + idle, all chains) > shown cap; amount = the excess (computed in the app from funding, no engine code) | Above your cap | `above-cap` |
 | `capRaise` present | Waiting for renewal | `renewal` |
 | `DECIDE_WAIT_DEPTH` | Waiting for pool depth | `depth` |
-| `DECIDE_WAIT_DAILY_LIMIT` | Daily limit reached | `daily-limit` |
-| `DECIDE_WAIT_MONTHLY_LIMIT` | Monthly limit reached | `monthly-limit` |
-| `DECIDE_WAIT_BRIDGE_LIMIT` | Bridge limit reached | `bridge-limit` |
-| other codes | (no phrase, as today) | — |
+| any other code | (no phrase, as today) | — |
 
 `docs/waiting.md`: one short paragraph per anchor. Mapping in a small pure module
-`apps/mamoru-app/src/web/lib/waiting-reason.ts` with a test. Nothing ships without the OK in the thread.
-Window codes are produced by T-CAP-07 from the actual denial: V4 `Cap24hExceeded` → DAILY; V4 `Cap30Exceeded` or
-`BudgetExceeded` → MONTHLY; V3 `POLICY_DENIED_AMOUNT` → the window the v7 policy actually enforces for that call
-(read from `policies-v7.ts`; if it cannot be told apart, MONTHLY is never guessed: use DAILY only for a 24 h window and
-otherwise no phrase). Each code carries the waiting amount and clears when the window frees.
+`apps/mamoru-app/src/web/lib/waiting-reason.ts` with a test. Phrases approved in principle; final wording shown in
+the PR for OK.
 
 ## 7. Sequences
 

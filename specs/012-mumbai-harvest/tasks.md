@@ -8,10 +8,10 @@ change. No deploy from a task.
 
 ## Branches
 
-- **HT1** branches from 011 T-CAP-07's branch (it edits `packages/decide/src/types.ts`); `packages/domain` too.
-- **HT2** branches from HT1. **HT3** branches from HT2. (`types.ts`/`allocate/index.ts`: T-CAP-06 → T-CAP-07 → HT1 → HT2 → HT3.)
+- **HT1** branches from 011 T-CAP-06's branch (it edits `packages/decide/src/types.ts`); `packages/domain` too.
+- **HT2** branches from HT1. **HT3** branches from HT2. (`types.ts`/`allocate/index.ts`: T-CAP-06 → HT1 → HT2 → HT3.)
 - **HT4** (tests on decide) branches from HT3.
-- **HT5** (`operator.ts`) branches from the last 011 operator branch (T-CAP-07), after HT1 merges into it.
+- **HT5** (`operator.ts`) branches from the 011 operator branch (T-CAP-06), after HT1 merges into it.
 - **HT6** (`yield-receipts.ts`, `state.ts`) from `origin/main`; 013 B4 branches from HT6.
 - **HT7** (`yield-ledger.ts`, migration, earned module) from HT6; 013 B1 branches from HT7, 013 B5 from B1.
 - **HT8** (UI marker) from HT7. **HT9** (V3 Monad check) from `origin/main`, read-only first. **HT10** last.
