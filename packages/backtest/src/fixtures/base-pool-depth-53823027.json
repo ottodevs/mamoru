@@ -1,0 +1,29 @@
+{
+  "chainId": 8453,
+  "block": 53823027,
+  "timestamp": 1793954981,
+  "twapWindowSeconds": 1800,
+  "pools": {
+    "pool:USDC/USDT/100": {
+      "sqrtPriceX96": "79274975853888383261919677307",
+      "tick": 11,
+      "liquidity": "290120557574676",
+      "twapTick": 11,
+      "twapLiquidity": "268275037586690"
+    },
+    "pool:USDC/cbBTC/500": {
+      "sqrtPriceX96": "2881102400179236310725941060",
+      "tick": -66287,
+      "liquidity": "2158689139971",
+      "twapTick": -66283,
+      "twapLiquidity": "2169480352774"
+    },
+    "pool:WETH/USDC/3000": {
+      "sqrtPriceX96": "3738054693614112963493507",
+      "tick": -199241,
+      "liquidity": "31632643976827898963",
+      "twapTick": -199241,
+      "twapLiquidity": "31630621302639089203"
+    }
+  }
+}
