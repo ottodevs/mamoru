@@ -1,5 +1,5 @@
 // Income as events (spec 012 HRV-R5, R9; otto/mamoru#107), written by the same cron pull as the yield ledger
-// (yield-ledger.ts) into yield_ledger_income and yield_ledger_vault_samples (migrations/d1/XXXX_income_events.sql).
+// (yield-ledger.ts) into yield_ledger_income and yield_ledger_vault_samples (migrations/d1/0024_income_events.sql).
 // earned.ts reads them for "earned so far" and for Stats. Three kinds of rows:
 // - fee events, one per Uniswap Collect, from the operator's receipt facts (`receipts[].events`): never overwritten,
 //   a later pull only fills a usd that was not priced yet;

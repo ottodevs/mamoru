@@ -65,7 +65,7 @@ bucket skip.
 
 ### R5, R9: event ledger
 
-Migration `XXXX_income_events.sql` (coordinator numbers it):
+Migration `0024_income_events.sql` (coordinator numbers it):
 
 ```sql
 CREATE TABLE yield_ledger_income (
