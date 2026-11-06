@@ -168,10 +168,6 @@ export type YieldLedgerView = {
   accruedUsd: string | null // uncollected fees right now, USDC base units (yield only, never owed principal)
   collectedUsd: string | null // lifetime fees collected (harvest, close), USDC base units; null until any receipt exists
   earnedSoFarUsd: string | null // accruedUsd + collectedUsd, USDC base units: the figure "earned so far" shows
-  // otto/mamoru#107 (spec 012 HRV-R10): 'partial' when a part of earned could not be counted (`notCounted` names which),
-  // so the figure above is a floor and the app marks it. Absent from older Workers: read as 'complete'.
-  earnedStatus?: 'complete' | 'partial'
-  notCounted?: ('vault-yield' | 'accrued-24h')[]
   gasPaidWei: string | null // lifetime gas Mamoru paid for this account's ops, wei; shown separately, never subtracted from earnedSoFarUsd
   valueVsHoldUsd: string | null // today's (position value + accrued) minus the hold baseline, summed over positions, USDC base units; can be negative
   feeAccruedUsd: string | null // #108 readiness: 10% of collectedUsd, stored, never charged by anything that reads this
@@ -187,7 +183,8 @@ export type YieldLedgerView = {
   // money does not count). Base LP positions only, as far as the ledger covers. Null until a snapshot exists.
   worked?: WorkedView | null
   // spec 012 HRV-R9/R10: `earnedSoFarUsd` is the income ledger's figure (fees, vault yield, history) when the ledger has
-  // one; 'partial' names what it does not count yet, which the app marks. Absent: the older fees-only figure.
+  // one; 'partial' names what it does not count yet (the figure is then a floor), which the app marks. Absent from
+  // older Workers: the fees-only figure, read as 'complete'.
   earnedStatus?: 'complete' | 'partial'
   notCounted?: ('fees' | 'vault-yield' | 'history' | 'accrued-24h')[]
   earned24hUsd?: string | null
