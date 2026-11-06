@@ -22,6 +22,7 @@ import { startEnginePort, startForkProxy } from '../../../packages/scenarios/pro
 import { Lab } from '../../../packages/scenarios/fixtures/lab.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { bootOperator } from '../src/boot.ts'
+import { DEFAULT_SPONSOR, SPONSOR_BOUNDS, type SponsorPolicy } from '../src/sponsorship.ts'
 import { signedCall, warmPrepare } from './e2e-client.ts'
 import { catchUpClock, forkUpstreamArgs, fundUsdc } from './fork-funding.ts'
 
@@ -116,6 +117,9 @@ try {
   const secret = randomBytes(32).toString('hex')
   const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: POLICY, depth: '30,500,5', capUsdc: CAP_WHOLE })
   stopOperator = () => op.stop()
+  // anvil quotes a gas price ~100x Base's: the extension renewal below is over the default daily sponsorship there; on
+  // Base it costs ~1e-4 ETH. Raised to the top of SPONSOR_BOUNDS, as e2e-rerange and e2e-v4 do.
+  ;(op.operator.cfg as { sponsor?: SponsorPolicy }).sponsor = { ...DEFAULT_SPONSOR, weiPerDay: SPONSOR_BOUNDS.weiPerDay[1] }
   check(op.operator.cfg.live, 'operator is live on chain 8453 with MAMORU_LIVE=1')
   await lab.setBalance(op.operator.relayer.address, 10n ** 18n)
 
@@ -171,6 +175,24 @@ try {
   await warmPrepare(op.operator, () => op.operator.prepareActivate(ctx))
   const activate = await ownerAction('activate')
   check((await funding()).active, `engine active after Start of ${usd(DEPOSIT)} USDC (tx ${activate.txHash})`)
+  // A multi-pool activation leaves the manage-any/convert-any pairs of the lower-preference pools out to fit Base's 2^24
+  // per-tx gas cap (fitActivation); the app offers the rest as one more approval (renew → planExtend). A real owner
+  // signs it from the home screen; without it the engine holds SESSION_MISSING after the first entry (as e2e-rerange).
+  const extensions: string[] = []
+  for (let i = 0; i < 4 && (await funding()).approval?.missing; i++) {
+    const p = await op.operator.prepareRenew(ctx)
+    log(`extension to sign: ${p.summary.join(' | ')}`)
+    const r = await op.operator.submit(ctx, 'renew', browserSign(p))
+    const until = Date.now() + 180_000
+    for (;;) {
+      const o = (await ops()).find((x) => x.opId === r.opId)
+      if (o?.state === 'failed') throw new Error(`E2E FAILED: the extension failed ${o.code}`)
+      if (o?.state === 'confirmed') { extensions.push(o.txHash!); break }
+      if (Date.now() > until) throw new Error(`E2E FAILED: the extension still ${o?.state}`)
+      await Bun.sleep(1_000)
+    }
+  }
+  check(!(await funding()).approval?.missing, `every grant enabled (${extensions.length} extension(s)${extensions.length ? `: ${extensions.join(', ')}` : ''})`)
 
   // --- the engine places until it waits ---------------------------------------------
   // Settled: no engine op in flight, at least one entry confirmed, and the last review either waits or has nothing left.
