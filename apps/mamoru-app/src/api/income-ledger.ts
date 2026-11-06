@@ -151,6 +151,11 @@ export async function writeIncome(db: Db, snapshot: SnapshotWire & { receipts?: 
       }
       // Rows left not counted while a receipt was unread are measured again once every flow is known.
       if (allFlows !== null && allFlows.length) stmts.push(...(await repairVaultRows(db, chainId, account.accountKey, allFlows, at)))
+      // While a receipt is unread, a vault this pull cannot see (left before any sample) may have earned: one not-counted
+      // row says so until the flows are known, then it is closed at 0 (the vaults themselves are counted above).
+      const pending = `vault-pending:${chainId}:${account.accountKey}`
+      if (allFlows === null) stmts.push(db.prepare(UPSERT_EVENT).bind(pending, chainId, account.accountKey, account.env, 'backfill', t, null, null, at))
+      else stmts.push(db.prepare('UPDATE yield_ledger_income SET usd = 0, updated_at = ? WHERE event_id = ? AND usd IS NULL').bind(at, pending))
     }
     if (stmts.length) await db.batch(stmts)
   }
