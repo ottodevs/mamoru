@@ -362,9 +362,15 @@ describe('idle USDC on the sleeve comes home (otto/mamoru#107, spec 012 HRV-R4)'
     const held = decide(at({ remote }), V7)
     expect(held.proposal?.kind).not.toBe('bridge_out')
     expect((held.waiting ?? []).some((w) => w.bucket === 'growth' && w.code === 'DECIDE_WAIT_BRIDGE')).toBe(true)
-    // The sleeve placed everything it had: the hold lifts.
-    expect(decide(at({ remote: { ...remote, idle: 0n } }), V7).proposal?.kind).toBe('bridge_out')
-    // A day later it lifts anyway.
-    expect(decide(at({ remote: { ...remote, returnedAt: Number(NOW) - 25 * 3_600 } }), V7).proposal?.kind).toBe('bridge_out')
+    // A return empties the sleeve's idle: that alone never lifts the hold.
+    expect(decide(at({ remote: { ...remote, idle: 0n } }), V7).proposal?.kind).not.toBe('bridge_out')
+    // A day later it lifts.
+    expect(decide(at({ remote: { ...remote, idle: 0n, returnedAt: Number(NOW) - 25 * 3_600 } }), V7).proposal?.kind).toBe('bridge_out')
+  })
+
+  test('never both ways in one review: idle due home holds the bridge out, and a bridge out asks nothing back', () => {
+    const d = decide(at({ remote: { value: 40n * USDC, inFlight: 0n, ready: true, idle: 30n * USDC, idleSince: Number(NOW) - 7 * 3_600 } }), V7)
+    expect(d.returnDue?.amount).toBe(30n * USDC)
+    expect(d.proposal?.kind).not.toBe('bridge_out')
   })
 })

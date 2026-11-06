@@ -15,6 +15,13 @@ export const RETURN_DWELL_SECONDS = 6n * 3_600n
 /** otto/mamoru#107 (spec 012 HRV-R4): after a return home, nothing is bridged back to that chain for this long. */
 export const RETURN_HOLD_SECONDS = 24n * 3_600n
 
+/** otto/mamoru#107: the sleeve's idle USDC due home: at or above the threshold for the dwell period. 0 when not. */
+function idleDue(obs: Observation, threshold: bigint): bigint {
+  const idle = obs.remote?.idle ?? 0n
+  const since = obs.remote?.idleSince
+  return idle >= threshold && since !== undefined && obs.block.timestamp - BigInt(since) >= RETURN_DWELL_SECONDS ? idle : 0n
+}
+
 /** Default smallest entry when the policy sets none: 0.10 of a 6-decimal savings asset. */
 export const DEFAULT_MIN_ENTRY = 100_000n
 /** otto/mamoru#195: the userOps an entry costs, a swap and a mint, for the gas floor of `minEntryGasMultiple`. */
@@ -409,10 +416,11 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       const gap = target - (obs.remote?.value ?? 0n)
       if (gap < minEntry || gap * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
       let amount = gap < free ? gap : free
-      // otto/mamoru#107 (spec 012 HRV-R4): no ping-pong. For 24 h after money came home from that chain nothing goes back,
-      // unless its sleeve placed everything it had (its idle USDC under the threshold).
+      // otto/mamoru#107 (spec 012 HRV-R4): no ping-pong. For 24 h after money came home from that chain nothing goes back
+      // (a return itself empties the sleeve's idle, so its idle is no sign the sleeve placed anything), and nothing goes
+      // while its idle USDC is due home.
       const returned = obs.remote?.returnedAt
-      if (returned !== undefined && obs.block.timestamp - BigInt(returned) < RETURN_HOLD_SECONDS && !(obs.remote?.idle !== undefined && obs.remote.idle < entryMin)) {
+      if ((returned !== undefined && obs.block.timestamp - BigInt(returned) < RETURN_HOLD_SECONDS) || idleDue(obs, entryMin) > 0n) {
         waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE', amount })
         continue
       }
@@ -444,17 +452,16 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     // at least what an entry must be worth (the same ceiling both ways), is due home: the operator asks the remote Safe
     // for the excess. Never while anything is in flight either way, or with the sleeve not ready.
     let returnDue: { bucket: string; chainId: ChainId; amount: bigint } | undefined
-    for (const rb of policy.remoteBuckets ?? []) {
+    // Never both ways in one review: a bridge out decided above wins and nothing is asked back.
+    if (proposal?.kind !== 'bridge_out') for (const rb of policy.remoteBuckets ?? []) {
       if (!obs.remote?.ready || (obs.remote.inFlight ?? 0n) > 0n || total === 0n) break
       const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
       const excess = obs.remote.value - target
       const over = excess >= entryMin && excess * 10_000n > target * BigInt(policy.rebalanceBandBps ?? 0) ? excess : 0n
       // otto/mamoru#107 (spec 012 HRV-R4): also the sleeve's own idle USDC, once it has sat at or above the threshold for
       // the dwell period (its engine could not place it), even with the sleeve under its target: no veto between chains.
-      const idle = obs.remote.idle ?? 0n
-      const since = obs.remote.idleSince
-      const idleDue = idle >= entryMin && since !== undefined && obs.block.timestamp - BigInt(since) >= RETURN_DWELL_SECONDS ? idle : 0n
-      const amount = over > idleDue ? over : idleDue
+      const idle = idleDue(obs, entryMin)
+      const amount = over > idle ? over : idle
       if (amount === 0n) continue
       returnDue = { bucket: rb.id, chainId: rb.chainId, amount }
     }
