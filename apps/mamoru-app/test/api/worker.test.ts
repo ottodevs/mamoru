@@ -121,7 +121,7 @@ describe('runYieldLedger: Monad worked samples (otto/mamoru#343 phase B)', () =>
   }
   const samples = (db: ReturnType<typeof memoryD1>) => db.raw.query('SELECT chain_id, account_key, pool, value_usd FROM account_worked_samples').all()
 
-  test('the Monad pull writes samples under the sleeve\'s account_key and nothing else', async () => {
+  test('the Monad pull writes samples and (spec 013 B1) the snapshot and daily totals under the sleeve; no Base-bound hold ledger', async () => {
     const db = memoryD1()
     seedSleeve(db)
     turnOn(db)
@@ -133,7 +133,9 @@ describe('runYieldLedger: Monad worked samples (otto/mamoru#343 phase B)', () =>
     })
     expect(urls).toEqual(['http://operator/snapshot', 'http://monad-op/snapshot'])
     expect(samples(db)).toEqual([{ chain_id: 143, account_key: MKEY, pool: 'pool:WMON/USDC/3000', value_usd: 3_000_000 }])
-    for (const t of ['yield_ledger_position_daily', 'account_snapshot_latest']) expect(db.raw.query(`SELECT count(*) AS n FROM ${t}`).get()).toEqual({ n: 0 })
+    expect(db.raw.query('SELECT count(*) AS n FROM yield_ledger_position_daily').get()).toEqual({ n: 0 })
+    expect(db.raw.query('SELECT chain_id, account_key FROM account_snapshot_latest').all()).toEqual([{ chain_id: 143, account_key: MKEY }])
+    expect(db.raw.query('SELECT chain_id, account_key FROM account_daily').all()).toEqual([{ chain_id: 143, account_key: MKEY }])
   })
   test('404 (its loop is off) is skipped quietly; flag off or no URL never calls it', async () => {
     const db = memoryD1()
