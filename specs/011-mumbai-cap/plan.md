@@ -109,10 +109,11 @@ per call ≤ 2,000 (20 % of 10k), total ≤ 5,000 per approval.
 
 - Settings rule mismatch app vs operator → app shows a cap the operator does not apply. Mitigation: one shared test
   table of cases (§1).
-- Journal under-counts a bridge-out → a send reverts `POLICY_DENIED_AMOUNT`. The revert is written to the journal as an
-  unknown-outcome move only while it has no receipt (counted as spent, SCN-CAP-12); once the receipt shows the revert,
-  it is marked never-spent and stops counting, so the next review sees less `amountLeft` and waits instead of
-  retrying. Implemented in T-CAP-06 (`bridge-left.ts` + the revert handler hunk).
+- A bridge-out with no receipt yet is an unknown-outcome move and counts as spent (SCN-CAP-12a). A receipt-proven
+  revert spent nothing and stops counting (SCN-CAP-12b). A `POLICY_DENIED_AMOUNT` revert also means the journal and the
+  chain disagree, so the grant goes to `bridgeLimit.kind = 'unknown'` (wait, `DECIDE_WAIT_BRIDGE_LIMIT`) until
+  `bridge-left.ts` rebuilds the spent total from the chain: the Safe's CCTP `DepositForBurn` logs since the approval's
+  `validAfter`. Then `amountLeft` = total − that sum, and bridging resumes. Implemented in T-CAP-06.
 - Fork e2e flakes on RPC: rerun once; record both.
 
 ## 9. Deploy notes
