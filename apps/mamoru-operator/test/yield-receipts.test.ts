@@ -363,4 +363,18 @@ describe('spec 013 STATS-R6: capital placed, priced at the op\'s own block (B4)'
     expect(saved).toBe(1)
     expect(out.receipts[0]!.ops).toEqual([{ id: '0xaa', t: Math.floor(Date.parse(f.at) / 1000), priced: true, placedUsdc: expected(5n, 0n) }])
   })
+
+  test('ops the node cannot price go to the back: newer ops still get priced within the per-tick budget', async () => {
+    const fresh = () => new Date().toISOString()
+    const ops = Array.from({ length: FACTS_PER_TICK + 3 }, (_, i) => op(`eng-${i}`, { txHash: `0x${(i + 1).toString(16).padStart(2, '0')}` as Hex, at: fresh(), gasWei: '1', fees: [], v: FACTS_VERSION, block: String(i + 1), placed: [{ tokenId: String(i), pool: LIVE_POOL, amount0: '5', amount1: '0', logIndex: 1 }] }, `0x${(i + 1).toString(16).padStart(2, '0')}` as Hex))
+    const old = new Set(Array.from({ length: FACTS_PER_TICK }, (_, i) => BigInt(i + 1))) // the first FACTS_PER_TICK blocks are pruned
+    const priceAt = async (_pool: string, block: bigint) => (old.has(block) ? null : SQRT)
+    const tried = new Map<string, number>()
+    const source = { accounts: () => [{ accountKey: 'acct-9', safe: SAFE, ops }], save: () => {} }
+    const snap = { chainId: 8453, block: 100n, readAt: fresh(), pools: {}, safes: [], calls: 1 }
+    await withReceipts(snap, source, async () => null, async () => T, async () => 100n, tried, baseRegistry, priceAt)
+    await withReceipts(snap, source, async () => null, async () => T, async () => 100n, tried, baseRegistry, priceAt)
+    expect(ops.slice(FACTS_PER_TICK).every((o) => o.facts!.placed![0]!.usdc !== undefined)).toBe(true)
+    expect(ops.slice(0, FACTS_PER_TICK).every((o) => o.facts!.placed![0]!.usdc === undefined)).toBe(true)
+  })
 })

@@ -428,17 +428,20 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
   }
   for (const a of accounts) for (const op of a.ops) if (op.facts && priceFees(op.facts, snapshot.pools, registry)) changed = true
   // spec 013: placed liquidity priced at its own block. Bounded like the receipt reads: at most FACTS_PER_TICK slot0
-  // reads a tick, so a backfill of old ops spreads over ticks.
+  // reads a tick, least recently tried first (the same `tried` map), so ops whose block the node cannot serve go to the
+  // back instead of starving newer ones. Only pools this chain's registry can price count against the budget.
   if (priceAt) {
+    const pricable = (p: PlacedFact) => p.usdc === undefined && registry.entries.some((x) => x.name === p.pool && (x.token0 === 'USDC' || x.token1 === 'USDC'))
+    const candidates = accounts
+      .flatMap((a) => a.ops.filter((op) => op.facts?.block !== undefined && op.facts.placed?.some(pricable)).map((op) => ({ op, key: `price:${a.accountKey}:${op.opId}` })))
+      .sort((x, y) => (tried.get(x.key) ?? -1) - (tried.get(y.key) ?? -1))
     let reads = 0
-    for (const a of accounts) {
-      for (const op of a.ops) {
-        if (reads >= FACTS_PER_TICK) break
-        const f = op.facts
-        if (!f?.placed?.some((p) => p.usdc === undefined)) continue
-        reads += f.placed.filter((p) => p.usdc === undefined).length
-        if (await pricePlaced(f, priceAt, registry)) changed = true
-      }
+    for (const { op, key } of candidates) {
+      if (reads >= FACTS_PER_TICK) break
+      reads += op.facts!.placed!.filter(pricable).length
+      tried.set(key, Date.now())
+      if (await pricePlaced(op.facts!, priceAt, registry)) changed = true
+      if (!op.facts!.placed!.some(pricable)) tried.delete(key)
     }
   }
   if (changed) source.save()
