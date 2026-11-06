@@ -78,4 +78,12 @@ describe('bridgeLeftOf (spec 011 SCN-CAP-07, SCN-CAP-12)', () => {
     const f = { ...burn(10n * USDC, 'failed', before), updatedAt: new Date(READ_AT).toISOString() } as BridgeBurn
     expect(bridgeLeftOf({ grant, chain: chain(0n), chainReadBlock: READ_BLOCK, chainReadAt: READ_AT, now: READ_AT, maxAgeMs: AGE, burns: [f] })).toEqual({ kind: 'unknown' })
   })
+
+  test('an included send that reverted was charged at validation: pending until a read at or after its block has it', () => {
+    const f = (block: string) => ({ ...burn(100n * USDC, 'failed', before), failedBlock: block }) as BridgeBurn
+    // Included after the pinned read (lagging node): still to count.
+    expect(bridgeLeftOf({ grant, chain: chain(300n * USDC), chainReadBlock: READ_BLOCK, chainReadAt: READ_AT, now: READ_AT, maxAgeMs: AGE, burns: [f('151')] })).toMatchObject({ kind: 'v3', amountLeft: 100n * USDC })
+    // Included at or before it: the chain counted it, nothing to add.
+    expect(bridgeLeftOf({ grant, chain: chain(300n * USDC), chainReadBlock: READ_BLOCK, chainReadAt: READ_AT, now: READ_AT + 1, maxAgeMs: AGE, burns: [{ ...f('150'), updatedAt: after } as BridgeBurn] })).toMatchObject({ kind: 'v3', amountLeft: 200n * USDC })
+  })
 })

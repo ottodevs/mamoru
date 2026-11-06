@@ -6275,7 +6275,7 @@ export class Operator {
       const burns = (this.cfg.bridgeMonad?.burns() ?? []).filter((b) => b.accountKey === acc.accountKey)
       const had = this.chainUsage.get(acc.accountKey)
       // A send that failed since the last read: expire it before asking, so this very review starts the re-read.
-      if (had?.readAt !== undefined && burns.some((b) => b.state === 'failed' && Date.parse(b.updatedAt) >= had.readAt!)) had.at = 0
+      if (had?.readAt !== undefined && burns.some((b) => b.state === 'failed' && (b.failedBlock === undefined ? Date.parse(b.updatedAt) >= had.readAt! : had.readBlock === undefined || BigInt(b.failedBlock) > had.readBlock))) had.at = 0
       if (g) void this.refreshChainUsage(acc).catch((e) => logErr(`[usage] ${acc.accountKey}:`, e))
       const usage = this.chainUsage.get(acc.accountKey)
       return bridgeLeftOf({ grant: g?.grant, chain: g ? usage?.byGrant.get(g.permissionId.toLowerCase()) : undefined, chainReadBlock: usage?.readBlock, chainReadAt: usage?.readAt, burns, now: Date.now(), maxAgeMs: BRIDGE_READ_MAX_AGE_MS })

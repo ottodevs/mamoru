@@ -99,6 +99,11 @@ export type BridgeBurn = {
   scanFrom?: string
   txHash?: Hex
   burnBlock?: string
+  /**
+   * otto/mamoru#376: the Base block a failed burn's userOp was included in (its execution reverted, nothing burned, but
+   * session policies count at validation, so the grant's cumulative total was charged there).
+   */
+  failedBlock?: string
   burnedAt?: string
   /** cctpMessageKey of the MessageSent the burn emitted: the attested message must have the same. */
   messageKey?: Hex
@@ -998,7 +1003,7 @@ export class MonadBridge {
     const txHash = ev.transactionHash!
     if (BigInt(b.scanFrom ?? b.fromBlock) !== blockNumber) this.update(b, { scanFrom: blockNumber.toString() })
     if (!ev.args.sender || !isAddressEqual(ev.args.sender, b.account) || ev.args.nonce !== BigInt(b.nonce)) throw new Error(`UserOperationEvent of ${ev.args.sender} nonce ${ev.args.nonce} for this burn's hash`)
-    if (!ev.args.success) return void this.update(b, { state: 'failed', txHash, note: 'the userOp reverted: nothing burned' })
+    if (!ev.args.success) return void this.update(b, { state: 'failed', txHash, failedBlock: blockNumber.toString(), note: 'the userOp reverted: nothing burned' })
     const receipt = await this.base.getTransactionReceipt({ hash: txHash })
     const burn = burnOf(userOpLogs(receipt.logs, ev.logIndex!, this.baseRegistryOf), b, this.baseRegistryOf)
     if (!burn) {

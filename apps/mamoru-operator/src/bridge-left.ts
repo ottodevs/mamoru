@@ -40,14 +40,17 @@ export function bridgeLeftOf(input: BridgeLeftInput): BridgeLimit {
   if (onChain.length !== 1) return { kind: 'unknown' }
   // A send that failed after the last read says the journal and the chain may disagree (a policy denial among the
   // causes): unknown until the chain is read again.
-  if (burns.some((b) => b.state === 'failed' && Date.parse(b.updatedAt) >= chainReadAt)) return { kind: 'unknown' }
-  // The chain read is pinned to one block: it has counted every burn included at or before it. Still to count: sends
-  // with no receipt yet, and burns included after that block (or whose block is not known). Failed (reverted, nothing
-  // burned) and dropped (never included) spent nothing.
+  // A failure with no inclusion block on record, since the read started: the journal and the chain may disagree.
+  if (burns.some((b) => b.state === 'failed' && b.failedBlock === undefined && Date.parse(b.updatedAt) >= chainReadAt)) return { kind: 'unknown' }
+  // The chain read is pinned to one block: it has counted every userOp included at or before it. Still to count: sends
+  // with no receipt yet, and userOps included after that block (or whose block is not known). An included userOp that
+  // reverted ('failed') burned nothing but was charged at validation, so it counts like a burn until the read has it.
+  // Dropped (never included) spent nothing.
   let pending = 0n
   for (const b of burns) {
+    const block = b.state === 'failed' ? b.failedBlock : b.burnBlock
     if (b.state === 'sending') pending += BigInt(b.amount)
-    else if ((b.state === 'burned' || b.state === 'minted') && (b.burnBlock === undefined || BigInt(b.burnBlock) > chainReadBlock)) pending += BigInt(b.amount)
+    else if ((b.state === 'burned' || b.state === 'minted' || (b.state === 'failed' && b.failedBlock !== undefined)) && (block === undefined || BigInt(block) > chainReadBlock)) pending += BigInt(b.amount)
   }
   const spent = onChain[0]!.used + pending
   const amountLeft = spent >= rule.total ? 0n : rule.total - spent
