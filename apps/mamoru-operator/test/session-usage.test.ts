@@ -30,7 +30,7 @@ describe('usage counters read from the chain (#149)', () => {
   test('uses and the share of the swap total, as the chain counts them', async () => {
     const total = swap.params[rule]!.cumulativeLimit!
     const u = await readChainUsage(chain({ used: 7n, spent: (total * 81n) / 100n }), ACCOUNT, [{ permissionId: PID, grant }])
-    expect(u.get(PID.toLowerCase())).toEqual({ used: 7, spentBps: 8_100 })
+    expect(u.get(PID.toLowerCase())).toEqual({ used: 7, spentBps: 8_100, cumulative: [{ limit: total, used: (total * 81n) / 100n }] })
   })
 
   test('a read whose limits are not the signed ones is not used', async () => {

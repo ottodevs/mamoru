@@ -7,7 +7,11 @@ import type { SessionGrant } from '@mamoru/policy'
 
 const USAGE_LIMIT_ABI = parseAbi(['function usageLimitConfigs(bytes32 id, address multiplexer, address account) view returns (uint128 limit, uint128 used)'])
 
-export type ChainUsage = { used: number; spentBps: number | null }
+/**
+ * `cumulative`: otto/mamoru#376, every cumulative rule of the grant as the chain holds it (limit as signed, used so far),
+ * in rule order. Absent when the grant has none or a rule's read failed.
+ */
+export type ChainUsage = { used: number; spentBps: number | null; cumulative?: { limit: bigint; used: bigint }[] }
 
 type Reader = {
   readContract(args: { address: Address; abi: typeof USAGE_LIMIT_ABI; functionName: 'usageLimitConfigs'; args: readonly [Hex, Address, Address] }): Promise<readonly [bigint, bigint]>
@@ -53,17 +57,19 @@ export async function readChainUsage(client: Reader, account: Address, grants: r
         const [limit, used] = await client.readContract({ address: address('UsageLimitPolicy', registry), abi: USAGE_LIMIT_ABI, functionName: 'usageLimitConfigs', args: [userOpConfigId(account, g.permissionId), multiplexer, account] })
         if (limit !== BigInt(g.grant.userOp.usageLimit)) return
         let spentBps: number | null = null
+        const cumulative: { limit: bigint; used: bigint }[] = []
         for (const a of g.grant.actions) {
           for (const [ri, rule] of a.params.entries()) {
             if (rule.cumulativeLimit === undefined) continue
             const slot = cumulativeLimitSlot(actionConfigId(account, g.permissionId, a.targetAddress, a.selector), multiplexer, account, ri)
             const [l, u] = await Promise.all([client.getStorageAt({ address: address('UniActionPolicy', registry), slot: toHex(slot, { size: 32 }) }), client.getStorageAt({ address: address('UniActionPolicy', registry), slot: toHex(slot + 1n, { size: 32 }) })])
             if (!l || !u || hexToBigInt(l) !== rule.cumulativeLimit) return
+            cumulative.push({ limit: rule.cumulativeLimit, used: hexToBigInt(u) })
             const bps = rule.cumulativeLimit === 0n ? 10_000 : Number((hexToBigInt(u) * 10_000n) / rule.cumulativeLimit)
             spentBps = Math.max(spentBps ?? 0, bps)
           }
         }
-        out.set(g.permissionId.toLowerCase(), { used: Number(used), spentBps })
+        out.set(g.permissionId.toLowerCase(), { used: Number(used), spentBps, ...(cumulative.length ? { cumulative } : {}) })
       } catch {
         // Unread: the caller keeps its own count for this grant.
       }
