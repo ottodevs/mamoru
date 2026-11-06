@@ -60,6 +60,9 @@ export type PositionSnapshot = {
   collectable1: bigint
   /** Principal of the position in raw USDC at the pool price. */
   valueUsdc: bigint
+  /** Spec 013 A1-D2: each leg of `valueUsdc` (amount0, amount1 at the same price); they add up to it. Always set by readSnapshot; optional for older fixtures. */
+  value0Usdc?: bigint
+  value1Usdc?: bigint
   /** Accrued fees in raw USDC at the pool price. */
   feesUsdc: bigint
   /** Owed amounts in raw USDC at the pool price. */
@@ -85,6 +88,8 @@ export type SafeSnapshot = {
   positions: PositionSnapshot[]
   /** Tokens held outside positions, in raw USDC. ETH (gas) is left out. */
   idleUsdc: bigint
+  /** Spec 013 A1-D2: `idleUsdc` per token (the same prices); the values add up to it. Zero balances left out. */
+  tokensUsdc?: Record<string, bigint>
   lpUsdc: bigint
   /** Accrued fees of all positions: yield not yet collected. */
   feesUsdc: bigint
@@ -175,6 +180,11 @@ function tokenUsdc(token: string, amount: bigint, pools: Record<string, PoolStat
   const pool = pricingPool(token, registry)
   if (!pool || !pools[pool]) throw new Error(`snapshot: no USDC pool prices ${token}`)
   return inUsdc(pool, token, amount, pools[pool]!.sqrtPriceX96, registry)
+}
+
+/** Spec 013 A1-D2: each idle token's balance in raw USDC at the snapshot's pool prices; zero balances left out. */
+export function idleByToken(tokens: Record<string, bigint>, pools: Record<string, PoolState>, registry: Registry): Record<string, bigint> {
+  return Object.fromEntries(Object.entries(tokens).filter(([, amt]) => amt > 0n).map(([name, amt]) => [name, tokenUsdc(name, amt, pools, registry)]))
 }
 
 /**
@@ -307,11 +317,14 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
         collectable0: f.collectable0,
         collectable1: f.collectable1,
         valueUsdc: usdc(amount0, amount1),
+        value0Usdc: inUsdc(r.pool, e.token0!, amount0, ps.sqrtPriceX96, registry),
+        value1Usdc: inUsdc(r.pool, e.token1!, amount1, ps.sqrtPriceX96, registry),
         feesUsdc: usdc(f.accrued0, f.accrued1),
         owedUsdc: usdc(r.owed0, r.owed1),
       })
     }
-    const idleUsdc = Object.entries(tokens).reduce((n, [name, amt]) => n + tokenUsdc(name, amt, pools, registry), 0n)
+    const tokensUsdc = idleByToken(tokens, pools, registry)
+    const idleUsdc = Object.values(tokensUsdc).reduce((n, v) => n + v, 0n)
     const lpUsdc = positions.reduce((n, p) => n + p.valueUsdc, 0n)
     const feesUsdc = positions.reduce((n, p) => n + p.feesUsdc, 0n)
     const owedUsdc = positions.reduce((n, p) => n + p.owedUsdc, 0n)
@@ -329,6 +342,7 @@ export async function readSnapshot(client: PublicClient, multicall3: Address, ch
       tokens,
       positions,
       idleUsdc,
+      tokensUsdc,
       lpUsdc,
       feesUsdc,
       owedUsdc,
