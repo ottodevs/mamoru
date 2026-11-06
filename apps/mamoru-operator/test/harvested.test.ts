@@ -35,7 +35,13 @@ describe('harvestedOf (spec 012 HT5, HRV-R1/R2, HRV-S21, S25)', () => {
     expect(harvestedOf([harvest(1, 10n), op(2, 'harvest')], baseRegistry)).toBeNull()
   })
 
-  test('owner ops and unconfirmed ops do not count', () => {
-    expect(harvestedOf([{ ...harvest(1, 10n), state: 'submitted' } as StoredOp, { ...harvest(2, 5n), opId: 'own-2' } as StoredOp], baseRegistry)).toEqual({})
+  test('an unconfirmed op does not count; any confirmed owner op (a withdrawal) clears everything before it', () => {
+    expect(harvestedOf([{ ...harvest(1, 10n), state: 'submitted' } as StoredOp], baseRegistry)).toEqual({})
+    const withdraw = { opId: 'own-2', kind: 'transfer', state: 'confirmed', updatedAt: at(2), block: 2 } as StoredOp
+    expect(harvestedOf([harvest(1, 10n), withdraw, harvest(3, 4n)], baseRegistry)).toEqual({ WETH: { amount: 4n, since: 1003 } })
+  })
+
+  test('a confirmed op with no block recorded yet makes it unknown (null)', () => {
+    expect(harvestedOf([harvest(1, 10n), { ...op(2, 'enter_swap', { tokenIn: 'WETH', amountIn: '10' }), block: undefined } as StoredOp], baseRegistry)).toBeNull()
   })
 })

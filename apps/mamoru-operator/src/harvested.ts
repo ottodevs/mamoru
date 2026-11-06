@@ -4,10 +4,14 @@
 //
 // Walking the confirmed ops in block order:
 // - a harvest adds the non-savings side of each fee its receipt collected (yield-receipts.ts facts), from that op's time;
-// - a swap that spends the token takes its amount off, harvested first (a harvest sale, or any other swap of it);
+// - any engine op that spends the token by `tokenIn`/`amountIn` (a harvest sale is an enter_swap; any other swap too)
+//   takes its amount off, harvested first;
 // - an op that mints or adds liquidity in a pool with the token (an entry, an increase, a re-range) may have used it in
 //   amounts no stored field gives: the token's harvested-unsold goes to 0, so a later sale can never reach principal.
-// A confirmed harvest whose receipt is not read yet makes the whole result unknown (null): no sale until it is.
+// - any owner op (a Stop, a withdrawal, a renewal) clears everything: what it moved out is not in a stored field, and
+//   only the owner's signature can move tokens out of the Safe besides the engine's own ops.
+// A confirmed harvest whose receipt is not read yet, or a confirmed op whose block is not recorded yet, makes the whole
+// result unknown (null): no sale until it is. An operator serves one chain, so `ops` are all of this chain.
 import type { Registry, RegistryName } from '@mamoru/registry'
 import type { StoredOp } from './state.ts'
 
@@ -21,9 +25,16 @@ export function harvestedOf(ops: readonly StoredOp[], registry: Registry): Harve
     const e = pool ? registry.entries.find((x) => x.name === pool) : undefined
     return e?.token0 && e.token1 ? [e.token0, e.token1] : []
   }
-  const confirmed = ops.filter((o) => o.opId.startsWith('eng-') && o.state === 'confirmed' && o.block !== undefined).sort((a, b) => a.block! - b.block!)
+  // migrate-v4 step 1 acts on the account's Safe on another chain and is confirmed without a block here: not this Safe.
+  const confirmed = ops.filter((o) => (o.opId.startsWith('eng-') || o.opId.startsWith('own-')) && o.state === 'confirmed' && !(o.kind === 'migrate-v4' && o.migrateStep === 1))
+  if (confirmed.some((o) => o.block === undefined)) return null
+  confirmed.sort((a, b) => a.block! - b.block!)
   const out = new Map<string, { amount: bigint; since: number }>()
   for (const op of confirmed) {
+    if (op.opId.startsWith('own-')) {
+      out.clear()
+      continue
+    }
     if (op.step === 'harvest') {
       if (!op.facts) return null
       const t = Math.floor(Date.parse(op.facts.at) / 1000)
@@ -37,7 +48,7 @@ export function harvestedOf(ops: readonly StoredOp[], registry: Registry): Harve
       }
       continue
     }
-    if (op.step === 'enter_swap' && op.tokenIn && op.amountIn) {
+    if (op.tokenIn && op.amountIn) {
       const cur = out.get(op.tokenIn)
       if (cur) {
         const left = cur.amount - BigInt(op.amountIn)
