@@ -11,8 +11,11 @@ export type StatsOwnersBand = '3+' | '10+' | '25+' | '50+'
 /** One headline figure, in whole USD. `dataAsOf` is the oldest chain read behind it (ISO), never the request time. */
 export type StatsFigure = { usd: number | null; reason?: StatsReason; dataAsOf: string | null; stale?: true }
 
-/** One day of a series (`day` = UTC `YYYY-MM-DD`), in whole USD. */
-export type StatsPoint = { day: string; usd: number | null; reason?: StatsReason; owners?: StatsOwnersBand }
+/**
+ * One day of a series (`day` = UTC `YYYY-MM-DD`), in whole USD. `dataAsOf` = the oldest chain read behind the point
+ * (ISO); it differs from the day's close when a value was carried forward or the day is still open.
+ */
+export type StatsPoint = { day: string; usd: number | null; reason?: StatsReason; owners?: StatsOwnersBand; dataAsOf?: string }
 
 export type StatsView = {
   tvlNow: StatsFigure
