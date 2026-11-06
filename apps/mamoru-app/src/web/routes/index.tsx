@@ -1,6 +1,7 @@
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
 import { useSession } from '../api/queries.ts'
+import { MainTabs, TabBar } from '../components/nav.tsx'
 import { Brand } from '../components/ui.tsx'
 import { ChainProvider } from '../lib/chain.tsx'
 import { knownCredentials } from '../lib/signin.ts'
@@ -46,10 +47,11 @@ export function IndexPage() {
     void navigate({ to: '/', search: {}, replace: true })
   }
   return (
-    <main className="page">
+    <main className="page has-tab-bar">
       <title>Mamoru</title>
-      <header className="mb-7">
+      <header className="mb-7 nav-left">
         <Brand />
+        <MainTabs />
       </header>
       {session.isError ? (
         <p className="err">
@@ -60,6 +62,7 @@ export function IndexPage() {
         </p>
       ) : null}
       {cards ? signin ? <SignIn onDone={signedIn} onCreate={() => setChoice('create')} /> : <Onboarding onSignIn={() => setChoice('signin')} /> : null}
+      <TabBar />
     </main>
   )
 }

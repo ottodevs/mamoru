@@ -2,8 +2,9 @@ import { createRootRoute, createRoute, createRouter, lazyRouteComponent, redirec
 import { AddMoneyPage } from './routes/add-money.tsx'
 import { IndexPage } from './routes/index.tsx'
 import { NotFound, RootLayout } from './routes/root.tsx'
+import { StatsPage } from './routes/stats.tsx'
 
-// Client-only routes. "/" is onboarding or Home; "/add" waits for the first deposit; "/lab" replays recorded fork runs.
+// Client-only routes. "/" is onboarding or Home (the Portfolio); "/stats" is the public Stats (spec 013); "/add" waits for the first deposit; "/lab" replays recorded fork runs.
 export function buildRouter(history?: RouterHistory) {
   const rootRoute = createRootRoute({ component: RootLayout, notFoundComponent: NotFound })
   const home = () => {
@@ -13,6 +14,7 @@ export function buildRouter(history?: RouterHistory) {
     // ?signin=true opens on the returning-owner card: a deep link that found no session lands here.
     createRoute({ getParentRoute: () => rootRoute, path: '/', component: IndexPage, validateSearch: (s: Record<string, unknown>): { signin?: true } => (s.signin ? { signin: true } : {}) }),
     createRoute({ getParentRoute: () => rootRoute, path: '/add', component: AddMoneyPage }),
+    createRoute({ getParentRoute: () => rootRoute, path: '/stats', component: StatsPage }),
     createRoute({ getParentRoute: () => rootRoute, path: '/lab', component: lazyRouteComponent(() => import('./lab/page.tsx'), 'LabPage') }),
     createRoute({ getParentRoute: () => rootRoute, path: '/onboarding', beforeLoad: home }),
     createRoute({ getParentRoute: () => rootRoute, path: '/dashboard', beforeLoad: home }),
