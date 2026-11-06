@@ -43,7 +43,11 @@ export type FeeFact = {
   fee1: string
   /** Raw USDC, set once by the first snapshot that prices the pool. */
   usdc?: string
-  /** spec 012 HRV-R5: the position manager's Collect log index: with the txHash it is the income event's id. */
+  /**
+   * spec 012 HRV-R5: the position manager's first Collect log index for this position in the transaction: with the
+   * txHash it is the income event's id. Collects of one position in one transaction are one event (their amounts
+   * summed, the freed principal taken once), so no amount is lost or split across ids.
+   */
   logIndex?: number
 }
 
@@ -344,6 +348,7 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
       const vault = vaultWire(a.ops)
       return { safe: a.safe, days: dayReceipts(a.ops), ...(events.length ? { events } : {}), ...(vault ? { vault } : {}) }
     })
-    .filter((r) => r.days.length > 0)
+    // An account with no day yet still goes out when its vault state is unknown: "pending" must reach the Worker, not "none".
+    .filter((r) => r.days.length > 0 || r.vault !== undefined || r.events !== undefined)
   return { ...snapshot, receipts }
 }
