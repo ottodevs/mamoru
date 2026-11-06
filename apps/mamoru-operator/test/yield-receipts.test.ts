@@ -4,7 +4,8 @@ import { address, baseRegistry, entryPointV07Abi, monadRegistry } from '@mamoru/
 import { livePool } from '../src/chain.ts'
 import type { StoredOp } from '../src/state.ts'
 import type { Snapshot } from '../src/snapshot.ts'
-import { dayReceipts, factsFromLogs, FACTS_PER_TICK, FACTS_VERSION, incomeEvents, keepPrices, needsFacts, priceFees, vaultWire, withReceipts, type OpFacts } from '../src/yield-receipts.ts'
+import { dayReceipts, factsFromLogs, FACTS_PER_TICK, FACTS_VERSION, incomeEvents, keepPrices, needsFacts, placedOps, priceFees, pricePlaced, vaultWire, withReceipts, type OpFacts } from '../src/yield-receipts.ts'
+import { inUsdc } from '../src/chain.ts'
 
 const SAFE = '0x1111111111111111111111111111111111111111' as Address
 const OTHER = '0x2222222222222222222222222222222222222222' as Address
@@ -305,5 +306,61 @@ describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
     expect(vaultWire([d, w, op('eng-3')])?.explained).toBeNull()
     expect(vaultWire([op('eng-4', { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [], v: FACTS_VERSION })])).toBeUndefined()
     expect(vaultWire([op('eng-5')])).toEqual({ flows: [], explained: null })
+  })
+})
+
+describe('spec 013 STATS-R6: capital placed, priced at the op\'s own block (B4)', () => {
+  const mintAbi = parseAbi(['event Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)'])
+  const incAbi = parseAbi(['event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)'])
+  const poolMint = (owner: Address, a0: bigint, a1: bigint) =>
+    log(POOL, encodeEventTopics({ abi: mintAbi, eventName: 'Mint', args: { owner, tickLower: -10, tickUpper: 10 } }) as Hex[], encodeAbiParameters([{ type: 'address' }, { type: 'uint128' }, { type: 'uint256' }, { type: 'uint256' }], [NPM, 1n, a0, a1]))
+  const increase = (tokenId: bigint, a0: bigint, a1: bigint) =>
+    log(NPM, encodeEventTopics({ abi: incAbi, eventName: 'IncreaseLiquidity', args: { tokenId } }) as Hex[], encodeAbiParameters([{ type: 'uint128' }, { type: 'uint256' }, { type: 'uint256' }], [1n, a0, a1]))
+  const SQRT = 2n ** 96n * 3n // a fixed price for the test
+  const e = baseRegistry.entries.find((x) => x.name === LIVE_POOL)!
+  const expected = (a0: bigint, a1: bigint) => (inUsdc(LIVE_POOL, e.token0!, a0, SQRT, baseRegistry) + inUsdc(LIVE_POOL, e.token1!, a1, SQRT, baseRegistry)).toString()
+
+  test('IncreaseLiquidity after the pool\'s Mint (owner = manager) is placed liquidity, named by that pool', () => {
+    const f = factsFromLogs([userOp(SAFE, 1n), poolMint(NPM, 10n, 20n), increase(9n, 10n, 20n)], SAFE, T)
+    expect(f.placed).toEqual([{ tokenId: '9', pool: LIVE_POOL, amount0: '10', amount1: '20', logIndex: idx - 1 }])
+    expect(f.v).toBe(3)
+    expect(factsFromLogs([userOp(SAFE, 1n), poolCollect(1n, 0n), npmCollect(1n, SAFE, 1n, 0n)], SAFE, T).placed).toBeUndefined()
+  })
+
+  test('priced once at the op\'s block; a failed read leaves it unpriced, never a later price', async () => {
+    const f: OpFacts = { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [], v: FACTS_VERSION, block: '123', placed: [{ tokenId: '9', pool: LIVE_POOL, amount0: '1000000', amount1: '1000000', logIndex: 3 }] }
+    const asked: bigint[] = []
+    expect(await pricePlaced(f, async () => { throw new Error('missing trie node') })).toBe(false)
+    expect(f.placed![0]!.usdc).toBeUndefined()
+    expect(await pricePlaced(f, async (_pool, block) => (asked.push(block), SQRT))).toBe(true)
+    expect(asked).toEqual([123n])
+    expect(f.placed![0]!.usdc).toBe(expected(1_000_000n, 1_000_000n))
+    expect(await pricePlaced(f, async () => SQRT * 2n)).toBe(false) // frozen
+    // A re-read of the same log keeps the price taken at its block.
+    const again = keepPrices({ ...f, placed: [{ tokenId: '9', pool: LIVE_POOL, amount0: '1000000', amount1: '1000000', logIndex: 3 }] }, f)
+    expect(again.placed![0]!.usdc).toBe(f.placed![0]!.usdc)
+  })
+
+  test('placedOps: liquidity + vault deposit assets per op; an unpriced op says so and carries no sum; old ops left out', () => {
+    const now = Date.parse('2026-11-06T00:00:00.000Z')
+    const facts = (txHash: Hex, at: string, over: Partial<OpFacts>): OpFacts => ({ txHash, at, gasWei: '1', fees: [], v: FACTS_VERSION, block: '1', ...over })
+    const ops = [
+      op('eng-1', facts('0xa1', '2026-11-05T10:00:00.000Z', { placed: [{ tokenId: '1', pool: LIVE_POOL, amount0: '1', amount1: '1', logIndex: 1, usdc: '700' }], vaultFlows: [{ vault: 'vault:gtUSDCp', kind: 'deposit', assets: '300', shares: '290', logIndex: 2 }, { vault: 'vault:gtUSDCp', kind: 'withdraw', assets: '50', shares: '49', logIndex: 3 }] }), '0xa1'),
+      op('eng-2', facts('0xa2', '2026-11-05T11:00:00.000Z', { placed: [{ tokenId: '2', pool: LIVE_POOL, amount0: '1', amount1: '1', logIndex: 1 }] }), '0xa2'),
+      op('eng-3', facts('0xa3', '2026-09-01T00:00:00.000Z', { placed: [{ tokenId: '3', pool: LIVE_POOL, amount0: '1', amount1: '1', logIndex: 1, usdc: '9' }] }), '0xa3'),
+      op('eng-4', facts('0xa4', '2026-11-05T12:00:00.000Z', {}), '0xa4'),
+    ]
+    expect(placedOps(ops, now)).toEqual([
+      { id: '0xa1', t: Date.parse('2026-11-05T10:00:00.000Z') / 1000, priced: true, placedUsdc: '1000' },
+      { id: '0xa2', t: Date.parse('2026-11-05T11:00:00.000Z') / 1000, priced: false },
+    ])
+  })
+
+  test('withReceipts prices placed liquidity through the block reader and sends the ops on the wire', async () => {
+    const f: OpFacts = { txHash: '0xaa', at: new Date().toISOString(), gasWei: '1', fees: [], v: FACTS_VERSION, block: '77', placed: [{ tokenId: '9', pool: LIVE_POOL, amount0: '5', amount1: '0', logIndex: 3 }] }
+    let saved = 0
+    const out = await withReceipts({ chainId: 8453, block: 100n, readAt: new Date().toISOString(), pools: {}, safes: [], calls: 1 }, { accounts: () => [{ accountKey: 'acct-9', safe: SAFE, ops: [op('eng-1', f, '0xaa')] }], save: () => { saved++ } }, async () => null, async () => T, async () => 100n, new Map(), baseRegistry, async () => SQRT)
+    expect(saved).toBe(1)
+    expect(out.receipts[0]!.ops).toEqual([{ id: '0xaa', t: Math.floor(Date.parse(f.at) / 1000), priced: true, placedUsdc: expected(5n, 0n) }])
   })
 })

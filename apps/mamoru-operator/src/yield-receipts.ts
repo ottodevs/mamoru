@@ -34,6 +34,10 @@ const npmEventsAbi = parseAbi([
   'event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)',
   'event DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
 ])
+// spec 013 STATS-R6: liquidity the engine placed. The pool emits Mint right before the manager's IncreaseLiquidity
+// (mint and increase alike), so the nearest earlier pool Mint owned by the manager names the pool.
+const npmIncreaseAbi = parseAbi(['event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)'])
+const poolMintAbi = parseAbi(['event Mint(address sender, address indexed owner, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount, uint256 amount0, uint256 amount1)'])
 
 export type FeeFact = {
   tokenId: string
@@ -50,8 +54,14 @@ export type FeeFact = {
 /** spec 012 HRV-R5: one ERC-4626 Deposit or Withdraw of this Safe's own shares, in a registry vault. */
 export type VaultFlow = { vault: string; kind: 'deposit' | 'withdraw'; assets: string; shares: string; logIndex: number }
 
+/**
+ * spec 013 STATS-R6: liquidity this Safe's op added to a position (mint or increase). `usdc` is priced at the op's own
+ * block (the pool's slot0 read at that block), set once; never at a later price. Absent while unpriced.
+ */
+export type PlacedFact = { tokenId: string; pool: string; amount0: string; amount1: string; logIndex: number; usdc?: string }
+
 /** The facts layout this reader writes. Facts of an older layout are read again (prices kept), so history gains the new fields. */
-export const FACTS_VERSION = 2
+export const FACTS_VERSION = 3
 
 export type OpFacts = {
   /** The transaction these facts were read from: a row whose txHash changed is read again. */
@@ -73,6 +83,8 @@ export type OpFacts = {
   block?: string
   /** spec 012 HRV-R5: vault flows of this Safe in the op. Absent: none. */
   vaultFlows?: VaultFlow[]
+  /** spec 013 (layout 3): liquidity placed by the op. Absent: none. */
+  placed?: PlacedFact[]
 }
 
 /**
@@ -132,7 +144,74 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
     const vault = vaults.find((v) => isAddressEqual(e.address, v.address))!.name
     vaultFlows.push({ vault, kind: e.eventName === 'Deposit' ? 'deposit' : 'withdraw', assets: e.args.assets.toString(), shares: e.args.shares.toString(), logIndex: e.logIndex })
   }
-  return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: gas.toString(), fees, v: FACTS_VERSION, ...(vaultFlows.length ? { vaultFlows } : {}) }
+  // Liquidity placed: only in transactions this Safe's op sent (the logs are already cut to its userOp above), and the
+  // position's NFT goes to the Safe, so every IncreaseLiquidity here is the Safe's.
+  const poolMints = parseEventLogs({ abi: poolMintAbi, logs: logs.filter((l) => !isAddressEqual(l.address, npm)) })
+    .filter((e) => isAddressEqual(e.args.owner, npm))
+    .map((e) => ({ logIndex: e.logIndex, pool: e.address }))
+  const placed: PlacedFact[] = []
+  for (const e of parseEventLogs({ abi: npmIncreaseAbi, logs: logs.filter((l) => isAddressEqual(l.address, npm)) })) {
+    const poolAddr = poolMints.filter((p) => p.logIndex < e.logIndex).at(-1)?.pool
+    const pool = poolAddr ? nameOf(poolAddr, registry) : undefined
+    if (!pool || (e.args.amount0 === 0n && e.args.amount1 === 0n)) continue
+    placed.push({ tokenId: e.args.tokenId.toString(), pool, amount0: e.args.amount0.toString(), amount1: e.args.amount1.toString(), logIndex: e.logIndex })
+  }
+  return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: gas.toString(), fees, v: FACTS_VERSION, ...(vaultFlows.length ? { vaultFlows } : {}), ...(placed.length ? { placed } : {}) }
+}
+
+/** The pool's sqrtPriceX96 at a block (slot0 read at that block). Throws or returns null when the node has no state for it. */
+export type PoolPriceAt = (pool: string, block: bigint) => Promise<bigint | null>
+
+/**
+ * spec 013 STATS-R6: prices each placed fact at the op's own block, once. A pool without a USDC side, a missing block,
+ * or a read that fails (no archive state for an old block) leaves it unpriced: never a later price.
+ */
+export async function pricePlaced(facts: OpFacts, priceAt: PoolPriceAt, registry: Registry = baseRegistry): Promise<boolean> {
+  if (!facts.placed?.length || facts.block === undefined) return false
+  let changed = false
+  for (const p of facts.placed) {
+    if (p.usdc !== undefined) continue
+    const e = registry.entries.find((x) => x.name === p.pool)
+    if (!e?.token0 || !e.token1 || (e.token0 !== 'USDC' && e.token1 !== 'USDC')) continue
+    let sqrt: bigint | null = null
+    try {
+      sqrt = await priceAt(p.pool, BigInt(facts.block))
+    } catch (err) {
+      console.error(`yield-receipts: ${p.pool} slot0 at ${facts.block} not read`, err instanceof Error ? err.message : String(err))
+    }
+    if (!sqrt) continue
+    p.usdc = (inUsdc(p.pool, e.token0, BigInt(p.amount0), sqrt, registry) + inUsdc(p.pool, e.token1, BigInt(p.amount1), sqrt, registry)).toString()
+    changed = true
+  }
+  return changed
+}
+
+/** spec 013 STATS-R6: one op's capital placed (liquidity added + vault deposits), for the daily volume. */
+export type PlacedOpWire = { id: string; t: number; placedUsdc?: string; priced: boolean }
+
+/** How far back `placedOps` goes: the Worker keeps what it has stored; this only bounds the wire. */
+export const PLACED_WIRE_DAYS = 35
+
+/**
+ * Ops of the last PLACED_WIRE_DAYS that placed capital. Vault deposits count their assets (registry vaults are USDC
+ * vaults, so assets are raw USDC). `priced` is false while any placed position of the op has no price: the Worker then
+ * marks that day's volume partial instead of summing it short.
+ */
+export function placedOps(ops: readonly StoredOp[], now: number = Date.now()): PlacedOpWire[] {
+  const from = Math.floor(now / 1000) - PLACED_WIRE_DAYS * 86_400
+  const out: PlacedOpWire[] = []
+  for (const op of ops) {
+    const f = op.facts
+    if (!f?.txHash || (f.v ?? 1) < FACTS_VERSION) continue
+    const t = Math.floor(Date.parse(f.at) / 1000)
+    if (t < from) continue
+    const deposits = (f.vaultFlows ?? []).filter((v) => v.kind === 'deposit')
+    if (!f.placed?.length && !deposits.length) continue
+    const priced = (f.placed ?? []).every((p) => p.usdc !== undefined)
+    const sum = (f.placed ?? []).reduce((a, p) => a + BigInt(p.usdc ?? '0'), 0n) + deposits.reduce((a, v) => a + BigInt(v.assets), 0n)
+    out.push({ id: f.txHash.toLowerCase(), t, priced, ...(priced ? { placedUsdc: sum.toString() } : {}) })
+  }
+  return out.sort((a, b) => a.t - b.t || (a.id < b.id ? -1 : 1))
 }
 
 /**
@@ -166,7 +245,12 @@ export function keepPrices(next: OpFacts, prev: OpFacts | undefined): OpFacts {
     seen.add(f.tokenId)
     return { ...f, usdc: first ? legacy.usdc : '0' }
   })
-  return { ...next, fees, ...(prev.gasUsdc !== undefined && prev.gasWei === next.gasWei ? { gasUsdc: prev.gasUsdc } : {}) }
+  // Placed liquidity keeps a price taken at its own block (the same log, the same amounts).
+  const placed = next.placed?.map((p) => {
+    const same = prev.placed?.find((o) => o.logIndex === p.logIndex && o.amount0 === p.amount0 && o.amount1 === p.amount1)
+    return same?.usdc !== undefined ? { ...p, usdc: same.usdc } : p
+  })
+  return { ...next, fees, ...(placed ? { placed } : {}), ...(prev.gasUsdc !== undefined && prev.gasWei === next.gasWei ? { gasUsdc: prev.gasUsdc } : {}) }
 }
 
 /** Sets `gasUsdc`, and `usdc` on every fee, when the snapshot can price them. Returns whether anything changed (the caller saves).
@@ -264,7 +348,7 @@ export type VaultFlowWire = VaultFlow & { id: string; t: number }
  * `explained` is null while any op of the account still waits for its receipt: until then the sum may be short.
  */
 export type AccountVaultWire = { flows: VaultFlowWire[]; explained: Record<string, string> | null }
-export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire }
+export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire; ops?: PlacedOpWire[] }
 
 /** The fee events of stored ops with facts of the current layout; an op's step says whether it was a harvest. */
 export function incomeEvents(ops: readonly StoredOp[]): IncomeEventWire[] {
@@ -307,7 +391,7 @@ export function vaultWire(ops: readonly StoredOp[]): AccountVaultWire | undefine
  * least recently tried first (`tried`, kept by the caller across ticks), so receipts that keep failing go to the
  * back instead of using every tick. Nothing here throws into the snapshot loop.
  */
-export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, readReceipt: ReceiptReader, blockTime: BlockTimeReader, safeBlock: SafeBlockReader, tried: Map<string, number> = new Map(), registry: Registry = baseRegistry): Promise<Snapshot & { receipts: AccountReceiptsWire[] }> {
+export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, readReceipt: ReceiptReader, blockTime: BlockTimeReader, safeBlock: SafeBlockReader, tried: Map<string, number> = new Map(), registry: Registry = baseRegistry, priceAt?: PoolPriceAt): Promise<Snapshot & { receipts: AccountReceiptsWire[] }> {
   const accounts = source.accounts()
   const due = accounts
     .flatMap((a) => a.ops.filter(needsFacts).map((op) => ({ a, op, key: `${a.accountKey}:${op.opId}` })))
@@ -343,14 +427,29 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
     }
   }
   for (const a of accounts) for (const op of a.ops) if (op.facts && priceFees(op.facts, snapshot.pools, registry)) changed = true
+  // spec 013: placed liquidity priced at its own block. Bounded like the receipt reads: at most FACTS_PER_TICK slot0
+  // reads a tick, so a backfill of old ops spreads over ticks.
+  if (priceAt) {
+    let reads = 0
+    for (const a of accounts) {
+      for (const op of a.ops) {
+        if (reads >= FACTS_PER_TICK) break
+        const f = op.facts
+        if (!f?.placed?.some((p) => p.usdc === undefined)) continue
+        reads += f.placed.filter((p) => p.usdc === undefined).length
+        if (await pricePlaced(f, priceAt, registry)) changed = true
+      }
+    }
+  }
   if (changed) source.save()
   const receipts = accounts
     .map((a) => {
       const events = incomeEvents(a.ops)
       const vault = vaultWire(a.ops)
-      return { safe: a.safe, days: dayReceipts(a.ops), ...(events.length ? { events } : {}), ...(vault ? { vault } : {}) }
+      const placed = placedOps(a.ops)
+      return { safe: a.safe, days: dayReceipts(a.ops), ...(events.length ? { events } : {}), ...(vault ? { vault } : {}), ...(placed.length ? { ops: placed } : {}) }
     })
     // An account with no day yet still goes out when its vault state is unknown: "pending" must reach the Worker, not "none".
-    .filter((r) => r.days.length > 0 || r.vault !== undefined || r.events !== undefined)
+    .filter((r) => r.days.length > 0 || r.vault !== undefined || r.events !== undefined || r.ops !== undefined)
   return { ...snapshot, receipts }
 }
