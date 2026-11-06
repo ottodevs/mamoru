@@ -57,6 +57,10 @@ function monadWorld(opts: { writes?: boolean } = {}) {
     if (functionName === 'isModuleInstalled') return chain.smartSession
     if (functionName === 'isPermissionEnabled') return !chain.notEnabled.has(String(args[0]).toLowerCase())
     if (functionName === 'nonce') return 0n
+    // otto/mamoru#378: the depth an Init's perWindow is fitted under; deep enough that no budget is lowered here.
+    if (functionName === 'liquidity') return 10n ** 30n
+    if (functionName === 'tickSpacing') return 1
+    if (functionName === 'ticks') return [0n, 0n, 0n, 0n, 0n, 0n, 0, false]
     throw new Error(`unexpected read ${functionName}`)
   }
   const client = {

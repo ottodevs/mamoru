@@ -174,6 +174,10 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
       }
       if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC', baseRegistry).toLowerCase() ? chain.usdc : 0n
       if (functionName === 'isPermissionEnabled') return enabled(args?.[0])
+      // otto/mamoru#378: the depth an Init's perWindow is fitted under; deep enough that no budget is lowered here.
+      if (functionName === 'liquidity') return 10n ** 30n
+      if (functionName === 'tickSpacing') return 1
+      if (functionName === 'ticks') return [0n, 0n, 0n, 0n, 0n, 0n, 0, false]
       throw new Error(`unexpected read ${functionName}`)
     },
     request: async ({ method, params }: { method?: string; params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {

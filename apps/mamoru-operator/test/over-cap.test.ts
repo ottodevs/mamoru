@@ -109,6 +109,10 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
         if (knobs.grantsEnabled === null) return knobs.enabled.has(String(args?.[0]).toLowerCase())
         return knobs.grantsEnabled && (blockNumber === undefined || blockNumber >= knobs.enabledFromBlock)
       }
+      // otto/mamoru#378: the depth an Init's perWindow is fitted under; deep enough that no budget is lowered here.
+      if (functionName === 'liquidity') return 10n ** 30n
+      if (functionName === 'tickSpacing') return 1
+      if (functionName === 'ticks') return [0n, 0n, 0n, 0n, 0n, 0n, 0, false]
       throw new Error(`unexpected read ${functionName}`)
     },
     request: async ({ method, params }: { method?: string; params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {

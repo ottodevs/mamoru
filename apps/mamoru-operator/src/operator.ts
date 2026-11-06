@@ -6,7 +6,7 @@ import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, m
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, senderNotEoa, SIM_CALL_GAS, simulateCalls, SharedGuardReads, type SimCall, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LAB_POLICIES, POLICIES, sleeveEnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, registryPoolsKey, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, POLICIES, sleeveEnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, budgetIn1, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, registryPoolsKey, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -43,6 +43,7 @@ import { peerAnnounce, readinessMismatch, stepReady, userOpOutcome, type Announc
 import { draftUserOp, permissionIdOf, revocationCalls, sessionNonceKey, signSessionUserOp, toSmartSession, userOpHash, v4DeploymentOf, v4PoliciesFor, type V4Deployment } from '@mamoru/account/sessions'
 import { minOut, sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { twapTickAt } from '@mamoru/uniswap-v3/twap'
+import { policyDepthIn } from '@mamoru/uniswap-v3/policy-depth'
 import { SELF_RESERVE_DEADLINE_SECONDS, SELF_RESERVE_PROBE_USDC, SELF_RESERVE_TWAP_SECONDS, reserveExpired, selfReserveConfirmed, selfReservePlan, usdcForWeiAtTick } from './self-reserve.ts'
 import { Engine, engineGas, isTransportError, thrownSummary, v4EngineGas, type BridgeSigning, type EngineConfig, type EngineSession, type HeldHistory } from '@mamoru/scenarios/driver/engine.ts'
 import type { EngineSettingsSource } from './engine-settings.ts'
@@ -741,6 +742,13 @@ const PASSKEY_VERIFY_GAS = 300_000n
 /** Safe StorageAccessible: delegatecall `targetContract` with `calldataPayload`, then revert with (success, returndata). */
 const storageAccessibleAbi = parseAbi(['function simulateAndRevert(address targetContract, bytes calldataPayload)'])
 
+const depthPoolAbi = parseAbi([
+  'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, uint8, bool)',
+  'function liquidity() view returns (uint128)',
+  'function tickSpacing() view returns (int24)',
+  'function ticks(int24 tick) view returns (uint128 liquidityGross, int128 liquidityNet, uint256, uint256, int56, uint160, uint32, bool)',
+])
+
 const v4PolicyAbi = parseAbi([
   'function generationOf(address account) view returns (uint64)',
   'struct Config { uint32 twapWindow; uint32 twapShortWindow; uint24 bandTicks; uint64 generation; bool budgetIn1; uint32 budgetWindow; int24 anchorTick; uint24 anchorBand; uint128 perWindow; uint128 total; bytes32 initHash; }',
@@ -923,6 +931,12 @@ const LEGACY_POLICY = 'conservador-live-v1'
 /** Base's per-tx gas cap is 2^24 (EIP-7825). Budget the activation well under it: the relayer adds a margin on top of its estimate. */
 export const BASE_TX_GAS_CAP = 16_777_216n
 const ACTIVATION_GAS_BUDGET = 15_000_000n
+/**
+ * otto/mamoru#378: the share of a pool's on-chain depth a new Init's `perWindow` may take. MamoruActionPolicy refuses an
+ * Init whose `perWindow` is above the depth it reads in the enabling transaction (BadInit(11)); the depth can shrink
+ * between this read and that block, so the operator asks for less.
+ */
+const INIT_DEPTH_FIT_BPS = 8_000n
 /** A renewal revokes eight grants and enables eight in one transaction: its estimate may come closer to the cap. */
 const RENEW_GAS_BUDGET = 16_200_000n
 /** execTransaction, WebAuthn P-256 verify and MultiSend around the calls. */
@@ -1955,6 +1969,8 @@ export class Operator {
   }
 
   private readonly v4Sized = new Map<string, PolicyVersion>()
+  /** otto/mamoru#378: depthFitBudgets by (Safe, block, cap, generation, policy); a handful of prepares at a time. */
+  private readonly depthFit = new Map<string, Record<string, bigint>>()
 
   /**
    * Spec 007 T7: a v4 account's engine policy with its own budgets (W_p, T_p at the cap it signed: the same values its
@@ -2870,6 +2886,7 @@ export class Operator {
     // Spec 007 T7 (P1 1): a v4 policy's grants go out with MamoruActionPolicy (and its per-pool Init) and
     // MamoruGasPolicy, bound to the deployed addresses the policy config names; never without them.
     const v4 = isV4(policy) ? await this.v4Context(acc, live, policy, r.block, mode) : null
+    const v4Budgets = v4 ? await this.depthFitBudgets(live, policy, cap, v4.d, v4.generation, r.block) : undefined
     const block = await this.client.getBlock({ blockNumber: r.block })
     const t = Number(block.timestamp)
     const allKeys = policy.session.grants.filter((g) => !g.perPosition).map(grantKey)
@@ -2895,7 +2912,7 @@ export class Operator {
     const batchOf = (grants: SessionGrant[]) =>
       activationBatch(live, grants, acc.revoked, {
         trust: !acc.trusted,
-        ...(v4 ? { policiesFor: v4PoliciesFor(grants, v4.d, v4.generation, v4BudgetCaps(policy, cap), v4.admitByPool, this.cfg.registry), attest: v4.attest, reattest: v4.reattest, attestData: v4.attestData } : {}),
+        ...(v4 ? { policiesFor: v4PoliciesFor(grants, v4.d, v4.generation, v4Budgets!, v4.admitByPool, this.cfg.registry), attest: v4.attest, reattest: v4.reattest, attestData: v4.attestData } : {}),
         ...(reserve ? { reserve } : {}),
       })
     // A first approval takes as many grants as fit the gas cap. A renewal takes exactly the ones the account has
@@ -2917,7 +2934,7 @@ export class Operator {
       return { name: keys[i]!, grant: g, permissionId: batch.permissionIds[i]!, ...(admit.length ? { admit } : {}) }
     })
     // What this transaction admits (a pool whose sessions all come in a later step is admitted there).
-    return { sessionKey, caps, stored, batch, ...(newKey ? { newKey } : {}), ...(v4 ? { v4: { generation: v4.generation, admitted: stored.reduce((n, g) => n + (g.admit?.length ?? 0), 0) } } : {}) }
+    return { sessionKey, caps, stored, batch, ...(v4Budgets ? { v4Budgets } : {}), ...(newKey ? { newKey } : {}), ...(v4 ? { v4: { generation: v4.generation, admitted: stored.reduce((n, g) => n + (g.admit?.length ?? 0), 0) } } : {}) }
   }
 
   /**
@@ -3005,6 +3022,55 @@ export class Operator {
   }
 
   /** The account's generation at the action policy contract it runs on now, when that is another one than `d`'s; else 0. */
+  /**
+   * otto/mamoru#378: the per-pool budgets (W_p, T_p) a v4 approval's Inits carry, at the cap it signs, with each pool's
+   * `perWindow` under what MamoruActionPolicy's depth check (LeftClaw M-5, `_depthIn`) reads now, by INIT_DEPTH_FIT_BPS.
+   * At ~80k USDC and up the cap formula asks the USDC/USDT pool for more than its 10-tick band holds and the whole owner
+   * transaction reverts (BadInit(11) inside GS013). A pool already configured at this generation (an extension or a
+   * later step of the same approval) keeps the values it has on chain: its Init must hash the same (ConfigMismatch).
+   * Read once per (Safe, block, cap, generation): fitV4 builds several candidates at the same block.
+   */
+  private async depthFitBudgets(live: LiveAccount, policy: PolicyVersion, cap: bigint, d: V4Deployment, generation: bigint, block: bigint): Promise<Record<string, bigint>> {
+    const key = `${live.safe} ${block} ${cap} ${generation} ${policy.policyId}@${policy.version}`
+    const hit = this.depthFit.get(key)
+    if (hit) return hit
+    const budgets: Record<string, bigint> = { ...v4BudgetCaps(policy, cap) }
+    const read = <T,>(args: Parameters<PublicClient['readContract']>[0]) => this.client.readContract({ ...args, blockNumber: block } as never) as Promise<T>
+    for (const spec of v4PoolsOn(policy.sourceChainId).filter((v) => policy.buckets.some((b) => b.pools.includes(v.pool)))) {
+      const want = budgets[spec.caps.budgetWindow]
+      if (want === undefined) continue
+      const pool = address(spec.pool, this.cfg.registry)
+      const c = await read<{ twapWindow: number; generation: bigint; perWindow: bigint; total: bigint }>({ address: d.actionPolicy, abi: v4PolicyAbi, functionName: 'configOf', args: [live.safe, pool] })
+      if (c.twapWindow !== 0 && c.generation === generation) {
+        budgets[spec.caps.budgetWindow] = c.perWindow
+        budgets[spec.caps.budgetTotal] = c.total
+        continue
+      }
+      const [sqrtPriceX96, tick] = await read<readonly [bigint, number]>({ address: pool, abi: depthPoolAbi, functionName: 'slot0' })
+      const depth = await policyDepthIn(
+        {
+          sqrtPriceX96,
+          tick,
+          liquidity: await read<bigint>({ address: pool, abi: depthPoolAbi, functionName: 'liquidity' }),
+          tickSpacing: await read<number>({ address: pool, abi: depthPoolAbi, functionName: 'tickSpacing' }),
+          liquidityNet: async (t) => (await read<readonly [bigint, bigint]>({ address: pool, abi: depthPoolAbi, functionName: 'ticks', args: [t] }))[1],
+        },
+        address(spec.token0, this.cfg.registry),
+        address(spec.token1, this.cfg.registry),
+        spec.bandTicks,
+        budgetIn1(spec),
+      )
+      const fit = (depth * INIT_DEPTH_FIT_BPS) / 10_000n
+      if (want > fit) {
+        console.log(`[v4] ${live.safe} ${spec.pool}: daily budget ${want} above ${INIT_DEPTH_FIT_BPS / 100n}% of the pool's depth in its band (${depth}), signed at ${fit}`)
+        budgets[spec.caps.budgetWindow] = fit > 0n ? fit : 1n
+      }
+    }
+    if (this.depthFit.size >= 64) this.depthFit.clear()
+    this.depthFit.set(key, budgets)
+    return budgets
+  }
+
   private async priorGeneration(acc: AccountState, safe: Address, d: V4Deployment, read: <T>(args: Parameters<PublicClient['readContract']>[0]) => Promise<T>): Promise<bigint> {
     let cur: PolicyVersion
     try {
@@ -3133,7 +3199,7 @@ export class Operator {
         ...(target?.buckets.some((b) => b.vaults?.length) ? [`Stable (${(target.buckets.find((b) => b.vaults?.length)!.preference / 100).toFixed(0)}%) is now USDC lent through ${target.buckets.flatMap((b) => b.vaults ?? []).map((v) => vaultLabel(v, this.cfg.registry)).join(', then ')}; nothing new goes into USDC/USDT, and positions you hold there stay as they are until you ask Mamoru to move them`] : []),
         ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),
         `Engine key ${f.sessionKey} may keep doing the same kinds of actions for ${Math.round(policy.session.validitySeconds / 86_400)} more days, within new limits counted from zero, sized for deposits up to ${fmtUsdc(cap)} USDC (your cap):`,
-        ...this.v4Lines(f.stored, policy, cap),
+        ...this.v4Lines(f.stored, policy, cap, f.v4Budgets),
         ...capChange(signed, cap),
         ...(f.v4?.admitted ? [`Your ${f.v4.admitted} open position${f.v4.admitted === 1 ? '' : 's'} stay under Mamoru's management`] : []),
         'The approval it replaces is revoked in the same transaction',
@@ -3184,7 +3250,7 @@ export class Operator {
       const summary = [
         `Finish Mamoru's approval on your Safe ${live.safe}: ${this.poolsOf(f.stored.map((g) => g.name))}`,
         `Engine key ${f.sessionKey} may, for the rest of this approval and within limits sized for deposits up to ${fmtUsdc(cap)} USDC:`,
-        ...this.v4Lines(f.stored, policy, cap),
+        ...this.v4Lines(f.stored, policy, cap, f.v4Budgets),
         ...(f.v4?.admitted ? [`Your ${f.v4.admitted} open position${f.v4.admitted === 1 ? '' : 's'} there stay under Mamoru's management`] : []),
         ...this.stepLines(f.steps, f.rest),
         ...this.capNotice(acc, cap),
@@ -3270,8 +3336,8 @@ export class Operator {
    * the gas cap per engine transaction with what that allows in all. Short on purpose: the unified approval dialog
    * (PR #80) shows every line.
    */
-  private v4Lines(stored: StoredGrant[], policy: PolicyVersion, cap: bigint): string[] {
-    const budgets = v4BudgetCaps(policy, cap)
+  private v4Lines(stored: StoredGrant[], policy: PolicyVersion, cap: bigint, fitted?: Record<string, bigint>): string[] {
+    const budgets = fitted ?? v4BudgetCaps(policy, cap)
     const pools = [...new Set(stored.map((g) => g.grant.pool).filter((x): x is NonNullable<typeof x> => !!x))]
     const lines = pools.map((pool) => {
       const spec = v4PoolOf(pool, policy.sourceChainId)
@@ -3847,7 +3913,7 @@ export class Operator {
           : `Let Mamoru's engine keep your deposit (up to ${fmtUsdc(cap)} USDC) invested across Uniswap v3 ${pools.join(', ')} as soon as it arrives`,
         ...this.remoteLines(policy, remote),
         `Engine key ${f.sessionKey} may swap USDC into those pools' tokens, open positions there, and take out, collect and close only the positions it opened, only near the market price, for ${days} days:`,
-        ...this.v4Lines(f.stored, policy, cap),
+        ...this.v4Lines(f.stored, policy, cap, f.v4Budgets),
         ...this.stepLines(f.steps, f.rest),
         `Whatever it collects, mints or swaps is paid to your Safe, never to anyone else. Cap ${fmtUsdc(cap)} USDC`,
       ]
