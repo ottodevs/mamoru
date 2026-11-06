@@ -18,7 +18,8 @@ Tasks that edit the same file stack in this order, across specs and within one: 
 |---|---|
 | `packages/decide/src/types.ts`, `packages/decide/src/allocate/index.ts` | 011 T-CAP-06 → 012 HT1 → 012 HT2 → 012 HT3 |
 | `apps/mamoru-operator/src/operator.ts` | 011 (T-CAP-06 operator part) → 012 HT5. 013 does not touch it |
-| `apps/mamoru-operator/src/yield-receipts.ts`, `state.ts` | 012 HT6 → 013 B4 |
+| `apps/mamoru-operator/src/state.ts` | 011 T-CAP-06 → 012 HT5 → 012 HT6 → 013 B4 |
+| `apps/mamoru-operator/src/yield-receipts.ts` | 012 HT6 → 013 B4 |
 | `apps/mamoru-app/src/api/yield-ledger.ts` | 012 HT7 → 013 B1 → 013 B5 |
 
 Migrations are written as `XXXX_*.sql`; the coordinator numbers them at merge in merge order. Operator changes from all three specs share redeploys: one to beta per block, one to production at the end.

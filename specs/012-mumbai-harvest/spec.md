@@ -42,7 +42,8 @@ known is reported as not counted, never as 0 and never folded silently into a sm
   mint harvested-unsold volatile: it is always sold (no mint-direct exception).
 - **HRV-R2. A sale below its cost waits and accumulates.** While the harvested-unsold value is ≤ the sale's op cost x
   the harvest factor, the bucket says `DECIDE_WAIT_HARVEST_SALE`; later harvests add to it and it is sold as soon as it
-  covers the cost.
+  covers the cost. After 7 days the bar drops to 1 × op cost, so harvested fees are never stuck; below that they are
+  dust and stay in the idle total.
 - **HRV-R3. Reinvest USDC with the usual rules, past the fill band.** Free USDC a review leaves unplaced, at or above
   `vaultMinDeposit` (40 USDC), goes to the Stable bucket's vault on Base even inside the 3 % fill band, up to one unit
   below the drain line (target + 5 points of total), so no later review redeems it. Money another bucket is waiting for
@@ -63,8 +64,9 @@ known is reported as not counted, never as 0 and never folded silently into a sm
   B.2). No change.
 - **HRV-R7. Keep positions before reinvesting (V4).** A reinvestment op (sale of R1, sweep of R3, an entry of
   harvested USDC) goes only if V4's room after it (`budgetLeft`: min of account bucket, sub-bucket, 30 days, 24 h)
-  still covers re-minting **all** current LP positions on that chain, `reserve = 1.25 x LP value` (a re-range re-mints
-  the position, ~1.0, and swaps to re-centre it, ~0.25 on average per PRD §9's 10,000 + 2,500 example). Otherwise the
+  still covers re-minting **all** current LP positions on that chain, `reserve = 1.5 x LP value`: a re-range re-mints
+  the position (1.0) and swaps to re-centre it, at most half its value (0.5, a fully out-of-range position is one token
+  and re-centres to about half each). An upper bound, not an average. Otherwise the
   USDC or volatile waits with `DECIDE_WAIT_BUDGET`. A vault at its ceiling (`ratioBps x C`, I5) is not deposited into.
   V3 has no `budgetLeft`: V3 relies on the on-chain per-pool totals and the operator's revert handling.
 - **HRV-R8. Threshold unchanged.** Harvest fires when fees > 3 x op cost (`costFactorBps: 30000`).

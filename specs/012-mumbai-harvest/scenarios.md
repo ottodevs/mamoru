@@ -24,5 +24,9 @@ policy and account shape, live = read-only on prod data. Evidence in `specs/012-
 | HRV-S17 | — | op | V4 op reverts `Cap24hExceeded(s, v)` | op record | decoded name and values recorded |
 | HRV-S18 | R4 | unit | return done at t0; sleeve still idle-short at t0 + 2 h | review on Base | no `bridge_out` to that chain until t0 + 24 h, `DECIDE_WAIT_BRIDGE` |
 | HRV-S19 | — (one definition) | d1 | fixture of 5 accounts, Base + Monad, all sources | same read time | Σ Portfolio earned == `/stats` total earned; same for 24 h |
-| HRV-S20 | R5 | live | prod D1 + chain, read-only | run reconciliation script | count of vault holdings with cost basis vs not counted, written to `results/vault-basis-<date>.md` |
+| HRV-S20 | R5 | live | prod D1 + chain, read-only | run reconciliation script | count of vault holdings with cost basis vs not counted, written to `results/vault-basis-<date>.md`. **Release gate:** every holding whose shares all came from engine ops has a basis (0 unexplained among them); any other unexplained holding is listed with its reason and shows the "not counted" marker in Portfolio |
+| HRV-S21 | R1 | unit (operator) | harvested counter 10, balance 100; a re-range mint spends 10 of that token | next observation | counter 0; no harvest sale proposed; principal untouched |
+| HRV-S22 | R5 R9 | D1 fixture (copy of prod receipts) | accounts with collected fees before the switch | HT7 migration + replay | per account, total earned after ≥ earned-so-far before; no fee row lost or doubled on replay |
+| HRV-S23 | R2 | unit (decide) | harvested volatile worth 2 × op cost, `harvestedSince` 8 days ago | review | sale proposed (age bar 1×) |
+| HRV-S24 | R5 | unit (app) | vault interval 48 h with 4 USDC yield, window covers its last 24 h | earned 24h | counts 2 USDC (prorated), not 4 |
 | HRV-S21 | R1 R3 R9 | live | prod after release | pick one account that harvested | collect, sale and reinvest tx hashes; matching `yield_ledger_income` events; `/yield` figure includes them; recorded in `results/` |

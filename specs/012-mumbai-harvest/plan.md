@@ -24,12 +24,16 @@ Spec: `spec.md`. Tasks: `tasks.md`. Scenarios: `scenarios.md`. Cross-spec order:
 
 - Operator state (`state.ts`, per account): `harvested: Record<chainId, Record<token, string>>`. On a confirmed harvest
   op: `+= facts.collected` of the volatile side. On a confirmed sale op marked `harvestSale: true`: `−= amountIn` sold
-  (receipt). At each observation: `= min(harvested, balance)`.
+  (receipt). On any other confirmed engine op that spends that token (entry, re-range mint, swap): `−= min(harvested,
+  amount spent)` — harvested tokens are consumed first, so the counter never exceeds what is still harvested and a
+  later sale cannot reach principal. At each observation: `= min(harvested, balance)`.
 - `Observation.harvested?: Record<RegistryName, bigint>`.
 - Decide: new `harvestSaleOf(obs, policy)` in `harvest/index.ts`. For each token with `harvested > 0`:
   `amount = min(harvested, balance)`; pool = a policy pool with that token, eligible (not `exitOnly`), first in policy
   order; grant `convertKey`; proposal kind `enter_swap` with `harvestSale: true`. If its value ≤ op cost x
-  `costFactorBps` → no proposal, code `DECIDE_WAIT_HARVEST_SALE`.
+  `costFactorBps` → no proposal, code `DECIDE_WAIT_HARVEST_SALE`. **Age limit:** `harvestedSince` per token (first
+  harvest that made it > 0); after 7 days the sale goes as soon as its value > 1 × op cost (not 3×), so fees never wait
+  forever; below 1 × cost it is dust and stays (shown in the idle total).
 - Precedence: `exit > rerange > harvest > harvestSale > reduce > idle > entry`.
 - Entries and `idleConvertOf` see `balance − harvested` for volatile tokens (principal only).
 
@@ -52,7 +56,10 @@ bucket skip.
 - V4: `askReturn` as today. V3: HT9 reads the account's enabled sessions on Monad (`isPermissionEnabled`, signed
   grants) on a fork of the live state. If a bridge-out session exists: return = `bridge_out` on the remote engine,
   clipped by `bridgeLimit` (`perCall`, `amountLeft`; `unknown` → no op, `DECIDE_WAIT_BRIDGE_LIMIT`). If not: no op,
-  code `DECIDE_WAIT_RENEWAL`, the account listed in #107 as "needs a renewal" with the read as evidence.
+  code `DECIDE_WAIT_RENEWAL`, the account listed in #107 as "needs a renewal" with the read as evidence. **Owner-accepted
+  constraint** (PRD §5.1 "No: contracts", decision 4 within signed limits): a V3 session without a Monad bridge-out
+  grant cannot be given one without the owner's signature; its USDC returns after the owner renews. Not a defect of
+  this spec.
 
 ### R5, R9: event ledger
 
@@ -88,15 +95,22 @@ CREATE TABLE yield_ledger_vault_samples (
   its 24 h change from `account_worked_samples.fees_usd` (013 B5).
 - Definitions (one module, `apps/mamoru-app/src/api/earned.ts`, used by Portfolio and by 013):
   - `total earned = Σ income(all sources incl. backfill) + accrued now`
-  - `earned 24h = Σ income(t ≥ now − 24h, source ≠ backfill) + (accrued now − accrued at now − 24h)`; accrued at a
-    time = the nearest sample at or before it; missing → the 24 h figure is not counted.
+  - `earned 24h = Σ income in the window (source ≠ backfill) + (accrued at t1 − accrued at t1 − 24h)`, window
+    (t1 − 24h, t1], t1 = the account's latest fee sample (013 plan §3.2). Fee events count at block time. A vault-yield
+    row covers an interval (prev sample, sample]: it is **prorated by the interval's overlap with the window**, so a
+    48 h gap never puts 36 h-old yield in the 24 h figure. Accrued at a time = the nearest sample at or before it;
+    missing → not counted. Approximate by decision (Ot and Brais, 6 Nov).
+  - **History replay (HT7):** at migration, every Collect already in `yield_ledger_account_receipts` /
+    stored op facts is written as an income event (`harvest` or `re-range` from its op, block time from the receipt;
+    days without per-op detail → one `backfill` row per account and day with the day's collected total). After the
+    switch, each account's total earned ≥ its earned-so-far before it (scenario HRV-S22).
   - Any `usd = null` or `explained = 0` → `status: 'partial'` with the parts not counted.
 
 ### R7: room
 
 `Observation.budget?: { room: bigint }`: V4 only, min of `budgetLeft`'s four values less a 2 % margin; read failure →
 `room = 0n`. Decide: `reserve = LP value × 125 / 100`; a reinvestment op with value `v` goes only if
-`room − v ≥ reserve`. Exit, rerange, harvest, reduce, redeem are never gated.
+`room − v ≥ reserve`, `reserve = LP value × 150 / 100`. Exit, rerange, harvest, reduce, redeem are never gated.
 
 ### R10: marker
 
