@@ -433,3 +433,17 @@ describe('spec 013 B5: stats facts (accrued fees per sample, CCTP transfers)', (
     expect(row()).toEqual({ account_key: ACCOUNT_KEY, state: 'minted', burn_block: 100, minted_block: 5000 })
   })
 })
+
+describe('spec 013 A1-D2: the latest snapshot keeps positions by token and idle by token', () => {
+  test('positions_json carries tokens, amounts and legs; tokens_json the idle split; an older operator leaves tokens_json NULL', async () => {
+    const db = memoryD1()
+    seedAccount(db)
+    const legs = position({ value0Usdc: '3000000', value1Usdc: '2000000', valueUsdc: '5000000' })
+    await writeAccountSnapshot(db, snapshot({ safes: [safe({ positions: [legs], tokensUsdc: { USDC: '7000000', cbBTC: '1000000' } })] }), new Date())
+    const row = db.raw.query('SELECT positions_json, tokens_json FROM account_snapshot_latest').get() as { positions_json: string; tokens_json: string | null }
+    expect(JSON.parse(row.positions_json)[0]).toMatchObject({ token0: 'USDC', token1: 'cbBTC', amount0: '5000000', amount1: '0', value0Usdc: '3000000', value1Usdc: '2000000' })
+    expect(JSON.parse(row.tokens_json!)).toEqual({ USDC: '7000000', cbBTC: '1000000' })
+    await writeAccountSnapshot(db, snapshot({ safes: [safe()] }), new Date())
+    expect((db.raw.query('SELECT tokens_json FROM account_snapshot_latest').get() as { tokens_json: string | null }).tokens_json).toBeNull()
+  })
+})

@@ -27,6 +27,9 @@ export type PositionWire = {
   collectable0: string
   collectable1: string
   valueUsdc: string
+  /** Spec 013 A1-D2: the two legs of `valueUsdc` at the same price. Absent from an older operator. */
+  value0Usdc?: string
+  value1Usdc?: string
   feesUsdc: string
   owedUsdc: string
   /**
@@ -59,6 +62,8 @@ export type SafeWire = {
   /** otto/mamoru#210: shares in the registry's USDC vaults, each valued at its share price. Absent: none held. */
   vaults?: { name: string; shares: string; valueUsdc: string }[]
   vaultUsdc?: string
+  /** Spec 013 A1-D2: `idleUsdc` per token at the read's prices. Absent from an operator older than the field. */
+  tokensUsdc?: Record<string, string>
 }
 /** One UTC day's full totals, not a delta: writing them again is a no-op. `collectedUsdc` is absent while a fee of that day is unpriced. */
 export type DayReceiptWire = {
@@ -174,18 +179,27 @@ export async function writeAccountSnapshot(db: Db, snapshot: SnapshotWire, now: 
     }
     const { accountKey, env } = account
     const address = safe.safe.toLowerCase()
-    const positionsJson = JSON.stringify(safe.positions.map((p) => ({ tokenId: p.tokenId, pool: p.pool, inRange: p.inRange, valueUsdc: p.valueUsdc, accrued0: p.accrued0, accrued1: p.accrued1, owed0: p.owed0, owed1: p.owed1, feesUsdc: p.feesUsdc, owedUsdc: p.owedUsdc })))
-    await db
-      .prepare(
-        `INSERT INTO account_snapshot_latest (chain_id, address, account_key, env, block, read_at, deployed, idle_usdc, lp_usdc, fees_usdc, owed_usdc, total_usdc, positions_json, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    // Spec 013 A1-D2: each position's tokens, amounts and legs in USD too, so Stats splits value by token exactly.
+    const positionsJson = JSON.stringify(safe.positions.map((p) => ({
+      tokenId: p.tokenId, pool: p.pool, inRange: p.inRange, valueUsdc: p.valueUsdc, accrued0: p.accrued0, accrued1: p.accrued1, owed0: p.owed0, owed1: p.owed1, feesUsdc: p.feesUsdc, owedUsdc: p.owedUsdc,
+      token0: p.token0, token1: p.token1, amount0: p.amount0, amount1: p.amount1,
+      ...(p.value0Usdc !== undefined && p.value1Usdc !== undefined ? { value0Usdc: p.value0Usdc, value1Usdc: p.value1Usdc } : {}),
+    })))
+    const tokensJson = safe.tokensUsdc ? JSON.stringify(safe.tokensUsdc) : null
+    const latestSql = (tokens: boolean) => `INSERT INTO account_snapshot_latest (chain_id, address, account_key, env, block, read_at, deployed, idle_usdc, lp_usdc, fees_usdc, owed_usdc, total_usdc, positions_json, updated_at${tokens ? ', tokens_json' : ''})
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${tokens ? ', ?' : ''})
          ON CONFLICT(chain_id, address) DO UPDATE SET
            account_key = excluded.account_key, env = excluded.env, block = excluded.block, read_at = excluded.read_at, deployed = excluded.deployed,
            idle_usdc = excluded.idle_usdc, lp_usdc = excluded.lp_usdc, fees_usdc = excluded.fees_usdc, owed_usdc = excluded.owed_usdc,
-           total_usdc = excluded.total_usdc, positions_json = excluded.positions_json, updated_at = excluded.updated_at`,
-      )
-      .bind(snapshot.chainId, address, accountKey, env, Number(snapshot.block), snapshot.readAt, safe.deployed ? 1 : 0, Number(safe.idleUsdc), Number(safe.lpUsdc), Number(safe.feesUsdc), Number(safe.owedUsdc), Number(safe.totalUsdc), positionsJson, now.toISOString())
-      .run()
+           total_usdc = excluded.total_usdc, positions_json = excluded.positions_json, updated_at = excluded.updated_at${tokens ? ', tokens_json = excluded.tokens_json' : ''}`
+    const latestValues = [snapshot.chainId, address, accountKey, env, Number(snapshot.block), snapshot.readAt, safe.deployed ? 1 : 0, Number(safe.idleUsdc), Number(safe.lpUsdc), Number(safe.feesUsdc), Number(safe.owedUsdc), Number(safe.totalUsdc), positionsJson, now.toISOString()]
+    // A Worker running before the A1-D2 migration writes the row without tokens_json instead of failing the pull.
+    try {
+      await db.prepare(latestSql(true)).bind(...latestValues, tokensJson).run()
+    } catch (e) {
+      if (!/no such column|has no column/i.test(e instanceof Error ? e.message : String(e))) throw e
+      await db.prepare(latestSql(false)).bind(...latestValues).run()
+    }
 
     const receipt = receipts.get(accountKey)
     // collected/gas fall back to yield_ledger_account_receipts: a row created after that day's receipt was delivered
