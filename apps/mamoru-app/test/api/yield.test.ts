@@ -38,20 +38,28 @@ describe('loadYieldLedger (otto/mamoru#129)', () => {
     )
   }
 
-  test('a receipt newer than the latest snapshot (a Stop collected what it still shows as accrued) withholds accrued and earned-so-far, never adds them twice', async () => {
+  test('a collect after the latest snapshot (a Stop collected what it still shows as accrued) is counted once: as accrued until a snapshot after it, then as income', async () => {
     db.raw.exec(
       `INSERT INTO account_snapshot_latest (chain_id, address, account_key, env, block, read_at, deployed, idle_usdc, lp_usdc, fees_usdc, owed_usdc, total_usdc, positions_json, updated_at)
        VALUES (${CHAIN_ID}, '0xsafe', '${ACCOUNT_KEY}', 'unknown', 1000, '2026-10-16T09:00:00.000Z', 1, 0, 0, 1000000, 0, 1000000, '[]', '2026-10-16T09:00:05.000Z')`,
     )
     seedReceipts(db, '2026-10-16', 1_000_000, '1')
     db.raw.exec(`UPDATE yield_ledger_account_receipts SET updated_at = '2026-10-16T09:10:05.000Z'`)
+    // spec 012: the Stop's collect is one income event at its block time (09:05), after the snapshot's cutoff (09:00).
+    db.raw.exec(
+      `INSERT INTO yield_ledger_income (event_id, chain_id, account_key, env, source, t_s, from_s, usd, updated_at)
+       VALUES ('0xstop:3', ${CHAIN_ID}, '${ACCOUNT_KEY}', 'unknown', 're-range', ${Date.parse('2026-10-16T09:05:00.000Z') / 1000}, NULL, 1000000, '2026-10-16T09:10:05.000Z')`,
+    )
     let view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
     expect(view.collectedUsd).toBe('1000000')
     expect(view.accruedUsd).toBeNull()
-    expect(view.earnedSoFarUsd).toBeNull()
-    db.raw.exec(`UPDATE account_snapshot_latest SET fees_usdc = 0, updated_at = '2026-10-16T09:10:05.000Z'`)
-    view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
+    // Earned is cut at the snapshot: the fees are counted once, as accrued at 09:00; the later collect is not added.
     expect(view.earnedSoFarUsd).toBe('1000000')
+    db.raw.exec(`UPDATE account_snapshot_latest SET fees_usdc = 0, read_at = '2026-10-16T09:10:00.000Z', updated_at = '2026-10-16T09:10:05.000Z'`)
+    view = await loadYieldLedger(db, CHAIN_ID, ACCOUNT_KEY)
+    // A snapshot after the collect: the same fees, now as income.
+    expect(view.earnedSoFarUsd).toBe('1000000')
+    expect(view.earnedStatus).toBe('complete')
   })
 
   test('collectedUsd and gasPaidWei sum across yield_ledger_account_receipts rows once any is known', async () => {
