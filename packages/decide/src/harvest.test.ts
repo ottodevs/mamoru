@@ -1,6 +1,9 @@
 // otto/mamoru#107 (spec 012 HRV-R11, unit part of HRV-S13): the harvest sale on every live policy. Each one, holding
-// harvested volatile worth well above its sale cost, proposes the sale of exactly that amount under a grant its own
-// signed session carries, and it passes the preliminary gate. The fork run (HT10) executes it on chain.
+// harvested volatile worth well above its sale cost, proposes the sale of exactly that amount under the pool's
+// manage-any grant (named here, not read back from decide), and it passes the preliminary gate; without that one
+// session it proposes no sale. The fork run (HT10) executes each sale on chain against the signed sessions.
+// one-auth-v4's grant keys come from its pool table (`withRegistryPools`, as the operator builds it); the deployment
+// addresses below are placeholders that do not enter any key.
 import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV6, conservadorLiveV7, grantKey, liveWmonUsdcMonadV6, oneAuthV4Live, staticPool, withRegistryPools, type PolicyVersion } from '@mamoru/policy'
 import { address, baseRegistry, entry, monadRegistry, type Registry } from '@mamoru/registry'
@@ -19,12 +22,13 @@ const v4 = withRegistryPools(oneAuthV4Live, D, ['pool:USDC/USDT/100', 'pool:WETH
 const BASE_POOLS = [pool('pool:USDC/USDT/100', 1, baseRegistry), pool('pool:USDC/cbBTC/500', -69_080, baseRegistry), pool('pool:WETH/USDC/3000', -193_380, baseRegistry)]
 const MONAD = pool('pool:WMON/USDC/3000', -260_000, monadRegistry)
 
-const LIVE: { name: string; policy: PolicyVersion; registry: Registry; pools: PoolObs[]; token: string; ethPrice: Observation['ethPrice'] }[] = [
-  { name: 'conservador-live-v6 (cbBTC)', policy: conservadorLiveV6, registry: baseRegistry, pools: BASE_POOLS, token: 'cbBTC', ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' } },
-  { name: 'conservador-live-v6 (WETH)', policy: conservadorLiveV6, registry: baseRegistry, pools: BASE_POOLS, token: 'WETH', ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' } },
-  { name: 'conservador-live-v7 (WETH)', policy: conservadorLiveV7, registry: baseRegistry, pools: BASE_POOLS, token: 'WETH', ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' } },
-  { name: 'live-wmon-usdc-monad-v6 (WMON)', policy: liveWmonUsdcMonadV6, registry: monadRegistry, pools: [MONAD], token: 'WMON', ethPrice: { pool: MONAD.name, sqrtPriceX96: MONAD.sqrtPriceX96, token0: 'WMON' } },
-  { name: 'one-auth-v4 live (WETH)', policy: v4, registry: baseRegistry, pools: BASE_POOLS, token: 'WETH', ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' } },
+const LIVE: { name: string; policy: PolicyVersion; registry: Registry; pools: PoolObs[]; token: string; grant: string; ethPrice: Observation['ethPrice'] }[] = [
+  { name: 'conservador-live-v6 (cbBTC)', grant: 'manage-any:pool:USDC/cbBTC/500', policy: conservadorLiveV6, registry: baseRegistry, pools: BASE_POOLS, token: 'cbBTC', ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' } },
+  { name: 'conservador-live-v6 (WETH)', grant: 'manage-any:pool:WETH/USDC/3000', policy: conservadorLiveV6, registry: baseRegistry, pools: BASE_POOLS, token: 'WETH', ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' } },
+  { name: 'conservador-live-v7 (cbBTC)', grant: 'manage-any:pool:USDC/cbBTC/500', policy: conservadorLiveV7, registry: baseRegistry, pools: BASE_POOLS, token: 'cbBTC', ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' } },
+  { name: 'conservador-live-v7 (WETH)', grant: 'manage-any:pool:WETH/USDC/3000', policy: conservadorLiveV7, registry: baseRegistry, pools: BASE_POOLS, token: 'WETH', ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' } },
+  { name: 'live-wmon-usdc-monad-v6 (WMON)', grant: 'manage-any:pool:WMON/USDC/3000', policy: liveWmonUsdcMonadV6, registry: monadRegistry, pools: [MONAD], token: 'WMON', ethPrice: { pool: MONAD.name, sqrtPriceX96: MONAD.sqrtPriceX96, token0: 'WMON' } },
+  { name: 'one-auth-v4 live (WETH)', grant: 'manage-any:pool:WETH/USDC/3000', policy: v4, registry: baseRegistry, pools: BASE_POOLS, token: 'WETH', ethPrice: { pool: 'pool:WETH/USDC/3000', sqrtPriceX96: sqrtRatioAtTick(-193_380), token0: 'WETH' } },
 ]
 
 const NOW = 2_000_000n
@@ -52,12 +56,16 @@ describe('the harvest sale on every live policy (HRV-R11)', () => {
       }
       const p = c.pools.find((x) => x.token0 === c.token || x.token1 === c.token)!
       const cost = opCostInSavings(base, 'USDC')
-      const unit = inSavings(p, c.token, 10n ** 18n, 'USDC') || 1n
+      const unit = inSavings(p, c.token, 10n ** 18n, 'USDC')
+      expect(unit > 0n).toBe(true)
       const amount = ((cost * 50n) * 10n ** 18n) / unit + 1n
       const d = decide({ ...base, balances: { USDC: 0n, [c.token]: amount }, harvested: { [c.token]: { amount, since: Number(NOW) - 60 } } }, c.policy)
       expect(d.proposal).toMatchObject({ kind: 'enter_swap', tokenIn: c.token, tokenOut: 'USDC', amountIn: amount, harvestSale: true })
-      expect(base.sessions.map((s) => s.grant)).toContain((d.proposal as { grant: string }).grant)
-      expect(d.trail.at(-1)).toMatchObject({ verdict: 'GO' })
+      expect((d.proposal as { grant: string }).grant).toBe(c.grant)
+      expect(d.trail.filter((t) => t.gate === 'ehg')).toEqual([{ gate: 'ehg', verdict: 'GO', reason: 'EHG_OK' }])
+      // Without that session, no sale.
+      const without = decide({ ...base, sessions: base.sessions.filter((x) => x.grant !== c.grant), balances: { USDC: 0n, [c.token]: amount }, harvested: { [c.token]: { amount, since: Number(NOW) - 60 } } }, c.policy)
+      expect(without.proposal?.kind === 'enter_swap' && without.proposal.harvestSale).toBeFalsy()
     })
   }
 })
