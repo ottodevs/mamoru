@@ -2,7 +2,7 @@
 
 > **ETHGlobal Mumbai 2026 · Continuity track.** Mamoru started at ETHGlobal Tokyo and has run in production with real funds since. Everything built during Mumbai is the commit range [`ethglobal-mumbai-start...ethglobal-mumbai-submission`](https://github.com/ottodevs/mamoru/compare/ethglobal-mumbai-start...main) (5 Nov 21:00 IST to 7 Nov 09:00 IST).
 >
-> **Mumbai scope** (status per item in `ETHGLOBAL.md`): 1) deposit cap raised from 1,000 to 10,000 USDC per account, proven on a fork with 10k and 100k deposits; 2) full harvest: Uniswap fees sold to USDC and reinvested, vault yield counted as earned; 3) public [Stats](https://app.mamoru.lol/stats), no account needed.
+> **Built in Mumbai** (status per item in `ETHGLOBAL.md`): 1) per-account cap raised from 1,000 to 10,000 USDC, live in production, proven on a Base fork up to 60,000; 2) full harvest: collected fees sold to USDC in their own step and reinvested, vault yield counted as earned; 3) public [Stats](https://app.mamoru.lol/stats) and a Portfolio + Stats menu, no account needed to read Stats.
 >
 > Before vs during, planning artifacts and AI use: [`ETHGLOBAL.md`](ETHGLOBAL.md) · Video: _TBD_ · Live: [app.mamoru.lol](https://app.mamoru.lol)
 
@@ -58,7 +58,7 @@ This is beta software that handles real money. Read [the risks](https://mamoru.l
 | [`contracts/`](contracts) | On-chain action policies (Solidity, Foundry) |
 | [`packages/backtest`](packages/backtest), [`packages/lab-bench`](packages/lab-bench), [`packages/lab-agent`](packages/lab-agent) | Strategy Lab |
 | [`scenarios/`](scenarios), [`packages/scenarios`](packages/scenarios) | Fork scenarios: attacks, walkaway, engine cycles |
-| [`specs/`](specs) | Specs 001 to 010, one folder each |
+| [`specs/`](specs) | Specs 001 to 013, one folder each (011–013: ETHGlobal Mumbai) |
 
 ## Run it locally
 
