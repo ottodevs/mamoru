@@ -2,7 +2,7 @@
 
 > **ETHGlobal Mumbai 2026 · Continuity track.** Mamoru started at ETHGlobal Tokyo and has run in production with real funds since. Everything built during Mumbai is the commit range [`ethglobal-mumbai-start...ethglobal-mumbai-submission`](https://github.com/ottodevs/mamoru/compare/ethglobal-mumbai-start...main) (5 Nov 21:00 IST to 7 Nov 09:00 IST).
 >
-> **Built in Mumbai** (status per item in `ETHGLOBAL.md`): 1) per-account cap raised from 1,000 to 10,000 USDC, live in production, proven on a Base fork up to 60,000; 2) full harvest: collected fees sold to USDC in their own step and reinvested, vault yield counted as earned; 3) public [Stats](https://app.mamoru.lol/stats) and a Portfolio + Stats menu, no account needed to read Stats.
+> **Built in Mumbai** (status per item in `ETHGLOBAL.md`): 1) per-account cap raised from 1,000 to 10,000 USDC, live in production, proven on a Base fork up to 60,000; 2) full harvest: collected fees sold to USDC in their own step and reinvested, vault yield counted as earned; 3) public Stats and a Portfolio + Stats menu, no account needed to read Stats ([beta.mamoru.lol/stats](https://beta.mamoru.lol/stats) until the event's production release).
 >
 > Before vs during, planning artifacts and AI use: [`ETHGLOBAL.md`](ETHGLOBAL.md) · Video: _TBD_ · Live: [app.mamoru.lol](https://app.mamoru.lol)
 
@@ -29,7 +29,7 @@ Fee: 10 % of the yield harvested. No yield, no fee. There is no token.
 
 | | |
 |---|---|
-| Live | Base mainnet. New accounts: 50 % stablecoin pool, 40 % cbBTC/USDC, 10 % WETH/USDC on Uniswap v3. Cap of 1,000 USDC per account by default. |
+| Live | Base mainnet. New accounts: 50 % stablecoin pool, 40 % cbBTC/USDC, 10 % WETH/USDC on Uniswap v3. Cap of 10,000 USDC per account since 7 Nov 2026 (existing accounts renew once). |
 | In beta, test accounts | 50 / 35 / 15 plan with Growth on Monad (WMON/USDC) and the Stable bucket in Morpho `gtUSDCp`. |
 | Next | One authorization (V4 policy): sign to create and to withdraw, nothing else. New pools, vaults and chains need no new signature. |
 
