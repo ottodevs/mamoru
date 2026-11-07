@@ -1,5 +1,7 @@
 # 013 Amendment A1: what Stats shows (Ot and Brais, 6 Nov 18:37–18:49Z)
 
+> **Status 7 Nov: delivered** (see spec.md status). Volume removed; design per PR #302, approved by Ot and Brais.
+
 Supersedes the metric set, copy and mockups of `spec.md` R5–R8, `design.md` and PR #302. Routes, menu, privacy
 guard (k ≥ 3, allow-if), freshness (`dataAsOf`) and the earned module (spec 012 `earned.ts`) stay.
 

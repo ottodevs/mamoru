@@ -1,5 +1,7 @@
 # 013: Stats, public and in the app
 
+> **Status 7 Nov: delivered** as amended by [A1](amendment-a1.md), live at app.mamoru.lol/stats since ~05:55 IST. Merged: #304, #314, #316, #319, #322–#324, #327, #329–#332, #325, #320. Deviation: earned is published from what the ledger can count (a floor) instead of hidden while incomplete (7 Nov, to show it at submission); accounts are counted per owner.
+
 - Ticket: otto/mamoru#377. Related: #107 (harvest, spec 012), #376 (cap, spec 011).
 - PRD: [`docs/ethglobal-mumbai/prd.md`](../../docs/ethglobal-mumbai/prd.md) (summary) §5.3 (final, 6 Nov).
 - Status: draft r1, 6 Nov 2026. Built during ETHGlobal Mumbai (Continuity).

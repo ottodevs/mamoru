@@ -1,5 +1,7 @@
 # 011: Cap 10,000 USDC per account, safe and provable
 
+> **Status 7 Nov: delivered**, except the 100k activation fix. Settings cap 10,000 live in production since 01:51 IST (existing accounts renew once; new accounts get it). Merged: #301, #307 (fork e2e 10k/30k/60k), #321 (no cap number when the operator is down), #306 (V3 bridge limit), #315 (spend hold). Open: #328 (100k). Found during implementation: `conservador-live-v7` is a renewal target only, so the fork e2e runs v5; at C = deposit the V3 window limits do not bind; #378 was a pool's signed daily budget above its depth (USDC/USDT at C = 100k), not gas; the UI names only depth and renewal (owners' decision).
+
 Ticket: otto/mamoru#376. Event: ETHGlobal Mumbai 2026 (Continuity), priority 1 of 3 (then 012 harvest, 013 stats).
 Source: Mumbai PRD §5.1, §9 and annex B.4 (Ot and Brais, 6 Nov 2026), summarized in `ETHGLOBAL.md`.
 Status: draft r1. Plan: `plan.md`. Tasks: `tasks.md`. Scenarios: `scenarios.md`.

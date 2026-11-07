@@ -1,5 +1,7 @@
 # Mumbai execution order (specs 011, 012, 013)
 
+> **Status 7 Nov:** all three blocks merged and in production (app `44b971b0`, operators `5e06f9c0`). In the last hours the team skipped the CI wait to meet the deadline; the stacking order above held.
+
 Priority: 011 cap, then 012 harvest, then 013 stats. Work runs in three blocks with a checkpoint after each; a block that runs long moves the next, never the order.
 
 | Block | IST (6–7 Nov) | Contents | Checkpoint |
