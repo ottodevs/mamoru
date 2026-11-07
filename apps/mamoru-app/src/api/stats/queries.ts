@@ -270,6 +270,12 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
     totalComplete = false
     dayComplete = false
   }
+  // Ot and Brais, 6 Nov: earned is published as the industry does, an approximate figure of what is counted (fees
+  // collected and accrued, vault yield where the shares are explained), not hidden until every part is known. It still
+  // needs every account read and at least one account with an earned figure.
+  const earnedPublished = everyAccountRead && latestRows.length > 0 && earnedAt.length > 0
+  totalComplete = earnedPublished
+  dayComplete = earnedPublished
 
   // ---- Days (T1, T2, T3, S6) from account_daily ----
   const daily = (await db
