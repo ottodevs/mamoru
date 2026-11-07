@@ -15,7 +15,7 @@ Parallel groups: tasks in the same group can run at once; a later group waits fo
 | D3 | Mockups 1280/390, Stats and Portfolio, all states; impeccable + hallmark passes. Figures only from D2's file; Portfolio uses invented round figures labeled "example" | `specs/013-mumbai-stats/design/*.html`, `*.png` | R1–R17 | design.md §6.1–3 | add tokens; show forecasts |
 | D4 | Post for OK; record the OK link here | this file (Gate line) | R4, R11, R17 | Gate below | start U-tasks before the OK |
 
-**Gate (D4):** _pending — link to Ot's and Brais's OK in `#devcon-8`._
+**Gate (D4):** passed. Ot and Brais approved the A1 mockups (PR #302) on 7 Nov with one change: the accounts block last, the donuts above APR over time.
 
 ## Phase B: data and API (starts now, parallel with D)
 

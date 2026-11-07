@@ -19,7 +19,7 @@ Output: `design/research.md` in this folder, ≤ 1 page, each pattern with a lin
 
 ## 2. Skills (D2)
 
-Use, in this order. Paths on lady:
+Use, in this order:
 
 | Skill | Use |
 |---|---|
@@ -81,6 +81,6 @@ line ("From Mamoru's on-chain reads · data as of 18:20 UTC", with a stale flag 
    (only D2's guarded export; Portfolio with round example figures, labeled), plus screenshots (`design/*.png`).
 2. States shown: with and without session (menu), loading, a gap (< 3 owners), "not counted", partial today, error.
 3. An `impeccable` critique pass and a `hallmark` audit, findings fixed, a short note of what changed.
-4. Posted in Mattermost `#devcon-8` for Ot and Brais.
+4. Posted in the team channel for Ot and Brais.
 5. **Gate:** Ot's and Brais's explicit OK in that thread, linked from `tasks.md`. Only then U-tasks start. A change
    they ask for is applied to the mockup first.
