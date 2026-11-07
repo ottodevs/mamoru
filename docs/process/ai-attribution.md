@@ -4,13 +4,13 @@ ETHGlobal asks for attribution of AI tools and for the planning artifacts behind
 
 ## ETHGlobal Mumbai 2026 (5–7 Nov)
 
-**Who decided.** Brais and Otto set the scope, approved the PRD, the copy and every mockup, and tested each piece on beta before production. No change reached `main` or production without a human deciding it.
+**Who decided.** Brais and Otto set the scope, approved the PRD, the copy and every mockup, and checked each piece on beta before production. No change reached `main` or production without a human deciding it.
 
 **How we worked.**
 1. **PRD** written from the team's decisions in our Mattermost, reviewed by Brais and Otto in rounds ([summary](../ethglobal-mumbai/prd.md)).
 2. **Specs** with GitHub Spec Kit, one folder per piece: [`specs/011-mumbai-cap`](../../specs/011-mumbai-cap/), [`specs/012-mumbai-harvest`](../../specs/012-mumbai-harvest/), [`specs/013-mumbai-stats`](../../specs/013-mumbai-stats/). Spec, plan, tasks and scenarios, drafted with AI and reviewed by models from other vendors before any code.
 3. **Implementation** by agents in isolated git worktrees, one task per branch and pull request, small commits, stacked when two tasks touch the same file. One coordinator session holds a lease and is the only one that merges, applies migrations and deploys.
-4. **Cross-vendor review.** Every pull request is reviewed by a model from a different vendor than the one that wrote it; funds-touching code gets two independent reviewers. Verdicts are posted on the pull request.
+4. **Cross-vendor review.** Every pull request is reviewed by a model from a different vendor than the one that wrote it; funds-touching code gets two independent reviewers. Verdicts are posted on the pull request. In the last hours before submission the team skipped the CI wait to meet the deadline: those changes went to `main` after a local `release:check` and are visible as direct pushes in the history.
 5. **Acceptance** only from real runs: fork scenarios, beta, then production. The agents work from a terminal; the team follows and steers from Mattermost.
 
 **Tools.** Claude Code (Claude Opus 5.5) for specs and implementation; Codex (GPT-6 Sol, GPT-6 Astra), Gemini 4 Argon and Gemini Flash for review. Specs went through up to 8 review rounds before any code. When one reviewer had no quota, the gate was two reviewers from different vendors that both had to approve. Keys, hosts and the session signer are outside the agents' reach.
