@@ -6,7 +6,7 @@ Decided by Brais and Otto on 6 Nov 2026. Order of work: cap, harvest, stats.
 
 1. **Cap 10,000 USDC per account**, safe and provable: fork e2e with 10k and 100k deposits; what fits enters by pool depth, the rest waits, full withdrawal returns everything. The app reads the cap from settings. 1,000,000 after the 100k test passes.
 2. **Full harvest**: collect Uniswap fees, sell them to USDC in a separate step sized on the real balance, reinvest with the usual bucket rules. Vault yield (share price growth) counts as earned. USDC above the threshold on one chain may return over CCTP to where it earns more.
-3. **Public Stats at `app.mamoru.lol/stats`**, no account needed: total deposits (vaults included), volume placed by the engine, earned in 24 h and in total. Aggregates only; no breakdown with fewer than 3 accounts. Missing data shows as "not counted", never 0. Design phase with mockups before building.
+3. **Public Stats at `app.mamoru.lol/stats`**, no account needed. Revised after the first mockups ([amendment A1](../../specs/013-mumbai-stats/amendment-a1.md)): where the money is (deposits, share working, exposure by asset and chain), what it earns (24 h, total, 7-day APR, APR over time) and the accounts. No volume. Aggregates only; no figure backed by fewer than 3 accounts; an incomplete figure is not shown. Design phase with mockups approved before building.
 
 ## Constraints
 
@@ -16,4 +16,4 @@ Decided by Brais and Otto on 6 Nov 2026. Order of work: cap, harvest, stats.
 
 ## Success
 
-Cap 10,000 written and read back in production; e2e evidence in the repo; real harvests with linked transactions; `/stats` live and the pitch numbers equal to it; small, frequent commits during the event.
+Cap 10,000 written and read back in production; e2e evidence in the repo; real harvests with linked transactions; `/stats` live and the pitch numbers equal to it; small, frequent commits during the event. Status: [`ETHGLOBAL.md`](../../ETHGLOBAL.md).
