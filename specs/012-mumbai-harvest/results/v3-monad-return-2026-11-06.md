@@ -16,14 +16,14 @@ Do the live accounts' Monad remote Safes carry a session grant that allows a CCT
 
 | Account (8) | Policy (remote spec) | Remote Safe (Monad) | Spec cap (USDC) | permissionIds | enabled on chain | Bridge-out on Monad |
 |---|---|---|---|---|---|---|
-| 8b0b4d7f | live-wmon-usdc-monad-v6 | 0xADd47283E643aB15e1a3E200e4c51427964937Ed | 500 | 1 | yes | no |
-| c23e94e1 | live-wmon-usdc-monad-v6 | 0x72040771fbc32cA01ab97318a5125fd406e0400E | 500 | 1 | yes | no |
-| c9d4179b | live-wmon-usdc-monad-v6 | 0x25E128d5BF622586890C50207104BA05311174c4 | 500 | 1 | yes | no |
-| 00a7a1df | live-wmon-usdc-monad-v6 | 0x86Cf74161651096b1D4B103230eC1dD4Ca3EdF9F | 500 | 1 | yes | no |
-| b54dda3a | live-wmon-usdc-monad-v6 | 0xD72A7cB9773Dc58a9B944f9737996F45dBD1F108 | 500 | 1 | yes | no |
-| b22428c7 | live-wmon-usdc-monad-v6 | 0x9aB701b0b1c73B82e3d810195CC292607b8EA0E8 | 500 | 1 | yes | no |
-| 307146b5 | live-wmon-usdc-monad-v6 | 0x8654FA14122595f2960Cf0Bf1cC28a2750AFDA49 | 500 | 1 | yes | no |
-| 88264d2f | live-wmon-usdc-monad-v6 | 0x71F5E94eF0A65F2354A59DB086D34b0F71E26f12 | 500 | 1 | yes | no |
+| 8b0b4d7f | live-wmon-usdc-monad-v6 | 0xADd4…37Ed | 500 | 1 | yes | no |
+| c23e94e1 | live-wmon-usdc-monad-v6 | 0x7204…400E | 500 | 1 | yes | no |
+| c9d4179b | live-wmon-usdc-monad-v6 | 0x25E1…74c4 | 500 | 1 | yes | no |
+| 00a7a1df | live-wmon-usdc-monad-v6 | 0x86Cf…dF9F | 500 | 1 | yes | no |
+| b54dda3a | live-wmon-usdc-monad-v6 | 0xD72A…F108 | 500 | 1 | yes | no |
+| b22428c7 | live-wmon-usdc-monad-v6 | 0x9aB7…A0E8 | 500 | 1 | yes | no |
+| 307146b5 | live-wmon-usdc-monad-v6 | 0x8654…DA49 | 500 | 1 | yes | no |
+| 88264d2f | live-wmon-usdc-monad-v6 | 0x71F5…6f12 | 500 | 1 | yes | no |
 
 All eight Base accounts run `conservador-live-v7`. Their remote specs are signed with `validUntil` in 2027 (1825064387 to 1825521757, unix s), so none has expired.
 
