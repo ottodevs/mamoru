@@ -1,6 +1,6 @@
 # 012: Full harvest: collect, sell to USDC, reinvest, and count vault yield as earned
 
-> **Status 7 Nov: delivered** and running in both operators since ~05:00 IST; first mainnet cycle on Monad (collect `0xd758f364…`, sale `0xb7099796…`). Merged: #303, #305, #308, #310–#313, #318. Open: #309 (copy approval). Found during implementation: V3 Monad sleeves have no bridge-out grant (return needs a new grant, after the hackathon); the 24 h hold after a return is unconditional; the harvested counter's clamp to the balance is stored, so an owner withdrawal lowers it for good.
+> **Status 7 Nov: delivered** and running in both operators since ~05:00 IST; first mainnet harvest on Monad (collect `0xd758f364…`, sale `0xb7099796…`). Merged: #303, #305, #308, #310–#313, #318. Open: #309 (copy approval). Found during implementation: V3 Monad sleeves have no bridge-out grant (return needs a new grant, after the hackathon); the 24 h hold after a return is unconditional; the harvested counter's clamp to the balance is stored, so an owner withdrawal lowers it for good.
 
 Ticket: otto/mamoru#107 (context: #140, the collect-only harvest). Event: ETHGlobal Mumbai 2026 (Continuity), priority 2 of 3.
 PRD: [`docs/ethglobal-mumbai/prd.md`](../../docs/ethglobal-mumbai/prd.md) (summary) §2 decisions 2 and 4, §5.2, §9, annex B.
