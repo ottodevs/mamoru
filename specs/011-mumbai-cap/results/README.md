@@ -20,5 +20,5 @@ Findings:
   an undeployed Safe). Ticket filed; until fixed, the cap stays at 10,000 (PRD: 1,000,000 only after the 100k proof).
 - **Update, 7 Nov:** a fork call trace (PR #328) shows the cause is not gas packing: the policy refuses the Start
   (`BadInit(11)`) because the USDC/USDT pool's signed daily budget at C = 100,000 (250,000) exceeds what the pool's
-  band can absorb (~179,000). PR #328 signs each pool's budget under its depth; with it the 100k run places and Stop
-  returns 99.94 %. At C = 10,000 the budget is 25,000, well inside the pool.
+  band can absorb (~179,000). PR #328 signs each pool's budget under its depth; its own 100k run log is in that PR and lands here when it
+  merges. At C = 10,000 the budget is 25,000, well inside the pool.
