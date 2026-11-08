@@ -314,6 +314,17 @@ describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
     expect(vaultWire([op('eng-4', { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [], v: FACTS_VERSION })])).toBeUndefined()
     expect(vaultWire([op('eng-5')])).toEqual({ flows: [], explained: null })
   })
+
+  test('an engine proposal never sent stops holding the vault state once a later op of the account has landed', () => {
+    const d = op('eng-1', { txHash: '0xaa', at: '2026-10-22T00:00:00.000Z', gasWei: '1', fees: [], v: FACTS_VERSION, vaultFlows: [{ vault: 'vault:gtUSDCp', kind: 'deposit', assets: '100', shares: '90', logIndex: 1 }] })
+    const proposal = (opId: string, updatedAt: string, state = 'proposed') => ({ opId, kind: 'enter', state, updatedAt }) as StoredOp
+    const landed = { ...d, updatedAt: '2026-11-07T00:38:36Z' } as StoredOp
+    expect(vaultWire([landed, proposal('eng-2', '2026-11-02T18:53:33Z')])?.explained).toEqual({ 'vault:gtUSDCp': '90' })
+    // The newest proposal, a submitted op and an owner proposal (it may still be signed) are still on their way.
+    expect(vaultWire([landed, proposal('eng-3', '2026-11-08T00:00:00Z')])?.explained).toBeNull()
+    expect(vaultWire([landed, proposal('eng-4', '2026-11-02T18:53:33Z', 'submitted')])?.explained).toBeNull()
+    expect(vaultWire([landed, proposal('own-5', '2026-11-02T18:53:33Z')])?.explained).toBeNull()
+  })
 })
 
 describe('#305 peer-gate fixes: history stays as it was, ids are unique, a lost receipt does not freeze the vault state', () => {

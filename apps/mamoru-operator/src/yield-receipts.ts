@@ -168,8 +168,18 @@ export function gaveUp(op: StoredOp): boolean {
   return !!m && m.txHash?.toLowerCase() === op.txHash?.toLowerCase() && m.count >= GIVE_UP_MISSES && Date.now() - m.first >= GIVE_UP_MS
 }
 
-/** An engine or owner op on its way (no receipt read can exist yet): what it moves is not in any flow until it lands. */
-const inFlight = (op: StoredOp): boolean => (op.opId.startsWith('eng-') || op.opId.startsWith('own-')) && (op.state === 'proposed' || op.state === 'submitted') && !op.txHash
+/**
+ * An engine or owner op on its way (no receipt read can exist yet): what it moves is not in any flow until it lands.
+ * An engine proposal never sent is dropped by the next engine tick, which proposes a new op: once a later op of the
+ * account has landed, the old proposal is not on its way. Kept unknown forever it held one beta account's vault yield
+ * unpriced from 6 Nov, which withheld every Stats series.
+ */
+const inFlight = (op: StoredOp, ops: readonly StoredOp[]): boolean => {
+  if (!(op.opId.startsWith('eng-') || op.opId.startsWith('own-')) || op.txHash) return false
+  if (op.state === 'submitted') return true
+  if (op.state !== 'proposed') return false
+  return !(op.opId.startsWith('eng-') && ops.some((o) => o.state === 'confirmed' && o.updatedAt > op.updatedAt))
+}
 
 /**
  * Facts read again for a newer layout keep what the old ones had priced: a price is frozen at the first snapshot after
@@ -344,7 +354,7 @@ export function vaultWire(ops: readonly StoredOp[]): AccountVaultWire | undefine
   }
   const flows = [...byId.values()]
   // Unknown while a receipt is due (not given up on) or an engine op is on its way; a receipt given up on makes it partial.
-  const pending = ops.some((o) => (needsFacts(o) && !gaveUp(o)) || inFlight(o))
+  const pending = ops.some((o) => (needsFacts(o) && !gaveUp(o)) || inFlight(o, ops))
   const incomplete = ops.some((o) => needsFacts(o) && gaveUp(o))
   // No flow read yet but receipts still due: say "unknown", not "none", or a vault held since before would count as unexplained-zero.
   if (!flows.length) return pending ? { flows, explained: null } : incomplete ? { flows, explained: {}, incomplete: true } : undefined
