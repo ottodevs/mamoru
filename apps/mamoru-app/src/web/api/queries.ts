@@ -155,8 +155,9 @@ export function useYieldLedger(accountKey: string | undefined) {
 }
 
 const STATS_STORE = 'mamoru.stats.v1'
-/** The last Stats this browser read is shown at once on the next visit, then replaced by the fresh read; never past a day. */
-const STATS_KEEP_MS = 24 * 3_600_000
+/** The last Stats this browser read is shown at once on the next visit, then replaced by the fresh read. Never past an
+ * hour: A1 hides a figure read longer ago than that (privacy.ts STALE_MS), so an older copy is not shown either. */
+const STATS_KEEP_MS = 3_600_000
 
 function lastStats(): StatsView | undefined {
   try {

@@ -257,4 +257,27 @@ describe('GET /api/stats reads the view the cron stored', () => {
     const row = db.raw.query('SELECT built_ms FROM stats_view WHERE id = 1').get() as { built_ms: number }
     expect(row.built_ms).toBe(NOW.getTime())
   })
+
+  test('a newer view the cron stored while the request was building is the one served', async () => {
+    const db = platform(5)
+    const h = harness(() => NOW, { statsCache: () => null })
+    h.env.DB = db
+    await refreshStatsView(db, new Date(NOW.getTime() - (STORED_TTL_S + 60) * 1000))
+    // The cron's newer build lands after the request read the stale row and before it stores its own.
+    const prepare = db.prepare.bind(db)
+    let reads = 0
+    db.prepare = ((sql: string) => {
+      if (sql.startsWith('SELECT view_json') && ++reads === 1) {
+        const stmt = prepare(sql)
+        return { ...stmt, bind: stmt.bind.bind(stmt), first: async () => {
+          const row = await stmt.first()
+          db.raw.exec(`INSERT INTO stats_view (id, view_json, built_ms) VALUES (1, '{"dataAsOf":null,"snapshots":{},"distributions":{},"series":{}}', ${NOW.getTime() + 1000}) ON CONFLICT (id) DO UPDATE SET view_json = excluded.view_json, built_ms = excluded.built_ms`)
+          return row
+        } }
+      }
+      return prepare(sql)
+    }) as typeof db.prepare
+    const v = (await (await h.request('/api/stats')).json()) as StatsView
+    expect(v.snapshots.totalDeposits).toBeUndefined()
+  })
 })

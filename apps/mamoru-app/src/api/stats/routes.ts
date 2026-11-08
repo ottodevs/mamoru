@@ -109,9 +109,12 @@ export function statsRoutes(cache: () => StatsCache | null = workersCache) {
       return apiError(c, 503, 'Stats are not available right now. Try again in a minute.', 'STATS_UNAVAILABLE')
     }
     await storeStatsView(c.env.DB, view, nowMs).catch(() => {})
-    await put(view, nowMs)
+    // The cron may have stored a newer view while this one was built: the newer one is served and cached.
+    const after = await storedStatsView(c.env.DB)
+    const newest = after && after.builtMs > nowMs ? after : { view, builtMs: nowMs }
+    await put(newest.view, newest.builtMs)
     c.header('cache-control', CACHE_CONTROL)
-    return c.json(view)
+    return c.json(withoutStale(newest.view, c.var.now()))
   })
   return stats
 }
