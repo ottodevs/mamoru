@@ -4,6 +4,7 @@ import { DRAIN_PER_CRON, drainFeedback } from './api/feedback.ts'
 import { readOpsFlags } from './api/ops-flags.ts'
 import { pullOperatorMetrics } from './api/operator-metrics.ts'
 import { runOperatorLinkWatch } from './api/operator-link-watch.ts'
+import { refreshStatsView } from './api/stats/routes.ts'
 import { pullWorkedSamples, pullYieldLedger, type OperatorFetch } from './api/yield-ledger.ts'
 
 // mamoru-app Worker (plan §19.1): /api/* runs here first; everything else is the SPA from ASSETS.
@@ -51,11 +52,12 @@ export async function runOperatorMetrics(env: Env, fetcher: OperatorFetch = (inp
 export default {
   fetch: app.fetch,
   // Cron (wrangler.jsonc `triggers`): posts the help and feedback notes that are stored and not yet in Mattermost,
-  // then pulls the operator's yield-ledger snapshot (otto/mamoru#129) and its /metrics (otto/mamoru#129 follow-up,
+  // then pulls the operator's yield-ledger snapshot (otto/mamoru#129) and builds the public Stats view from it, its /metrics (otto/mamoru#129 follow-up,
   // ungated) into D1, and probes the link to each operator (otto/mamoru#207).
   scheduled(_event: unknown, env: Env, ctx: { waitUntil(p: Promise<unknown>): void }) {
     ctx.waitUntil(drainFeedback(env.DB, (input, init) => fetch(input, init), env, new Date(), DRAIN_PER_CRON))
-    ctx.waitUntil(runYieldLedger(env))
+    // Stats are built from what the pull just stored.
+    ctx.waitUntil(runYieldLedger(env).then(() => refreshStatsView(env.DB, new Date())))
     ctx.waitUntil(runOperatorMetrics(env))
     ctx.waitUntil(runOperatorLinkWatch(env, (input, init) => fetch(input, init), new Date()))
   },

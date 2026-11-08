@@ -4,6 +4,7 @@ import { memoryD1 } from './d1.ts'
 import { harness } from './helpers.ts'
 import { inFlightNow, rowExposure, statsInput } from '../../src/api/stats/queries.ts'
 import { guardStats } from '../../src/api/stats/privacy.ts'
+import { refreshStatsView, STORED_TTL_S } from '../../src/api/stats/routes.ts'
 
 // Spec 013 amendment A1, task A1-D3: GET /api/stats v2 from D1 fixtures.
 
@@ -220,5 +221,40 @@ describe('review fixes', () => {
     for (let i = 1; i <= 3; i++) daily(db, '2026-11-05', 143, `mon-${i}`, { total: 50 * USDC, idle: 50 * USDC, lp: 0 })
     const v = guardStats(await statsInput(db, NOW))
     expect(v.series.earnedPerDay).toEqual([{ day: '2026-11-05', usd: 412.25 }])
+  })
+})
+
+describe('GET /api/stats reads the view the cron stored', () => {
+  test('a stored view younger than 15 min is served as stored, without building it again', async () => {
+    const h = harness(() => NOW, { statsCache: () => null })
+    const db = platform(5)
+    h.env.DB = db
+    await refreshStatsView(db, new Date(NOW.getTime() - 60_000))
+    // Money added after the build is not read: the request served the stored row.
+    latest(db, 8453, 'key-99', { idle: 1000 * USDC, lp: 0, vault: 0 })
+    const v = (await (await h.request('/api/stats')).json()) as StatsView
+    expect(v.snapshots.totalDeposits?.value).toBe(3150)
+  })
+
+  test('a stored view older than 15 min is built again on the request and stored', async () => {
+    const h = harness(() => NOW, { statsCache: () => null })
+    const db = platform(5)
+    h.env.DB = db
+    await refreshStatsView(db, new Date(NOW.getTime() - (STORED_TTL_S + 60) * 1000))
+    user(db, 'u6')
+    account(db, 'key-6', 'u6', 8453, addr(6))
+    latest(db, 8453, 'key-6', { idle: 100 * USDC, lp: 200 * USDC, vault: 300 * USDC })
+    const v = (await (await h.request('/api/stats')).json()) as StatsView
+    expect(v.snapshots.totalDeposits?.value).toBe(3750)
+    const row = db.raw.query('SELECT built_ms FROM stats_view WHERE id = 1').get() as { built_ms: number }
+    expect(row.built_ms).toBe(NOW.getTime())
+  })
+
+  test('an older build never overwrites a newer stored view', async () => {
+    const db = platform(5)
+    await refreshStatsView(db, NOW)
+    await refreshStatsView(db, new Date(NOW.getTime() - 60_000))
+    const row = db.raw.query('SELECT built_ms FROM stats_view WHERE id = 1').get() as { built_ms: number }
+    expect(row.built_ms).toBe(NOW.getTime())
   })
 })
