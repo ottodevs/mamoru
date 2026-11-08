@@ -3,7 +3,7 @@
 // figures the API did not send (incomplete, stale or backed by fewer than 3 accounts) is not drawn.
 import type { StatsAprPoint, StatsSlice, StatsView } from '@mamoru/domain'
 import { Link } from '@tanstack/react-router'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSession, useStats } from '../api/queries.ts'
 import { AreaChart, dayLabel, DayChart, Donut } from '../components/charts.tsx'
 import { MainTabs, TabBar } from '../components/nav.tsx'
@@ -13,6 +13,34 @@ import '../stats.css'
 const usd = (v: number) => (Math.abs(v) >= 100 ? `$${Math.round(v).toLocaleString('en-US')}` : `$${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`)
 const axisUsd = (v: number) => (v >= 1000 ? `$${(v / 1000).toFixed(v % 1000 ? 1 : 0)}K` : v >= 1 || v === 0 ? `$${Math.round(v)}` : `$${v.toFixed(2)}`)
 const pct = (v: number, d = 1) => `${v.toFixed(d)}%`
+
+const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+
+/** A figure that eases from what it showed to the new value (0.6 s), so a fresh read shows as a change, not a jump. */
+function Num({ value, fmt }: { value: number; fmt: (v: number) => string }) {
+  const [shown, setShown] = useState(value)
+  const from = useRef(value)
+  useEffect(() => {
+    const start = from.current
+    if (start === value || reducedMotion()) {
+      from.current = value
+      setShown(value)
+      return
+    }
+    let raf = 0
+    const t0 = performance.now()
+    const step = (t: number) => {
+      const k = Math.min(1, (t - t0) / 600)
+      const v = start + (value - start) * (1 - (1 - k) ** 3)
+      from.current = v
+      setShown(k < 1 ? v : value)
+      if (k < 1) raf = requestAnimationFrame(step)
+    }
+    raf = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(raf)
+  }, [value])
+  return <>{fmt(shown)}</>
+}
 
 export const statsCopy = {
   title: 'Stats',
@@ -85,14 +113,14 @@ function Hero({ v }: { v: StatsView }) {
             <Lab tip={statsCopy.depositsTip}>{statsCopy.deposits}</Lab>
           </div>
           <div className="sx-big" data-testid="stats-deposits">
-            {usd(dep.value)}
+            <Num value={dep.value} fmt={usd} />
           </div>
         </div>
         {work && dep.value > 0 ? (
           <div className="sx-working">
             <Lab tip={statsCopy.workingTip}>{statsCopy.working}</Lab>
             <div className="sx-wv" data-testid="stats-working">
-              {Math.round((work.value / dep.value) * 100)}%
+              <Num value={(work.value / dep.value) * 100} fmt={(v) => `${Math.round(v)}%`} />
             </div>
           </div>
         ) : null}
@@ -122,7 +150,7 @@ function Hero({ v }: { v: StatsView }) {
   )
 }
 
-function Figures({ items, label }: { items: { name: string; tip: string; value: string | null; id: string }[]; label: string }) {
+function Figures({ items, label }: { items: { name: string; tip: string; value: ReactNode | null; id: string }[]; label: string }) {
   const shown = items.filter((x) => x.value !== null)
   if (!shown.length) return null
   return (
@@ -245,9 +273,9 @@ export function StatsBody({ v }: { v: StatsView }) {
       <Figures
         label="Earnings"
         items={[
-          { id: 'earned24h', name: statsCopy.earned24h, tip: statsCopy.earned24hTip, value: s.earned24h ? usd(s.earned24h.value) : null },
-          { id: 'total-earned', name: statsCopy.totalEarned, tip: statsCopy.totalEarnedTip, value: s.totalEarned ? usd(s.totalEarned.value) : null },
-          { id: 'apr7d', name: statsCopy.apr7d, tip: statsCopy.apr7dTip, value: s.apr7d ? pct(s.apr7d.value) : null },
+          { id: 'earned24h', name: statsCopy.earned24h, tip: statsCopy.earned24hTip, value: s.earned24h ? <Num value={s.earned24h.value} fmt={usd} /> : null },
+          { id: 'total-earned', name: statsCopy.totalEarned, tip: statsCopy.totalEarnedTip, value: s.totalEarned ? <Num value={s.totalEarned.value} fmt={usd} /> : null },
+          { id: 'apr7d', name: statsCopy.apr7d, tip: statsCopy.apr7dTip, value: s.apr7d ? <Num value={s.apr7d.value} fmt={(v) => pct(v)} /> : null },
         ]}
       />
       {tvl?.length || perDay?.length ? (
@@ -298,9 +326,9 @@ export function StatsBody({ v }: { v: StatsView }) {
       <Figures
         label="Accounts"
         items={[
-          { id: 'accounts', name: statsCopy.accounts, tip: statsCopy.accountsTip, value: s.totalAccounts ? s.totalAccounts.value.toLocaleString('en-US') : null },
-          { id: 'average', name: statsCopy.average, tip: statsCopy.averageTip, value: s.averageAccount ? usd(s.averageAccount.value) : null },
-          { id: 'largest', name: statsCopy.largest, tip: statsCopy.largestTip, value: s.largestAccount ? usd(s.largestAccount.value) : null },
+          { id: 'accounts', name: statsCopy.accounts, tip: statsCopy.accountsTip, value: s.totalAccounts ? <Num value={s.totalAccounts.value} fmt={(v) => Math.round(v).toLocaleString('en-US')} /> : null },
+          { id: 'average', name: statsCopy.average, tip: statsCopy.averageTip, value: s.averageAccount ? <Num value={s.averageAccount.value} fmt={usd} /> : null },
+          { id: 'largest', name: statsCopy.largest, tip: statsCopy.largestTip, value: s.largestAccount ? <Num value={s.largestAccount.value} fmt={usd} /> : null },
         ]}
       />
       {v.dataAsOf ? (
@@ -310,6 +338,43 @@ export function StatsBody({ v }: { v: StatsView }) {
         </p>
       ) : null}
     </>
+  )
+}
+
+/** First visit only (later visits show the last read at once): the page's own shape, so nothing jumps when it fills. */
+function StatsSkeleton() {
+  return (
+    <div className="sx-skel" aria-busy="true" aria-label="Loading stats" data-testid="stats-skeleton">
+      <section className="sx-hero">
+        <div className="sx-hero-top">
+          <div>
+            <span className="sk sk-lab" />
+            <span className="sk sk-big" />
+          </div>
+          <div className="sx-working">
+            <span className="sk sk-lab" />
+            <span className="sk sk-wv" />
+          </div>
+        </div>
+        <span className="sk sk-bar" />
+      </section>
+      <section className="sx-figs">
+        {[0, 1, 2].map((i) => (
+          <div className="sx-fig" key={i}>
+            <span className="sk sk-lab" />
+            <span className="sk sk-val" />
+          </div>
+        ))}
+      </section>
+      <section className="sx-two">
+        {[0, 1].map((i) => (
+          <div className="sx-block" key={i}>
+            <span className="sk sk-h2" />
+            <span className="sk sk-chart" />
+          </div>
+        ))}
+      </section>
+    </div>
   )
 }
 
@@ -333,7 +398,9 @@ export function StatsPage() {
         <p>{statsCopy.sub}</p>
       </section>
       {stats.data ? (
-        <StatsBody v={stats.data} />
+        <div className="sx-body">
+          <StatsBody v={stats.data} />
+        </div>
       ) : stats.isError ? (
         <p className="err">
           {statsCopy.failed}{' '}
@@ -342,7 +409,7 @@ export function StatsPage() {
           </button>
         </p>
       ) : (
-        <div className="card h-40 animate-pulse" aria-hidden="true" />
+        <StatsSkeleton />
       )}
       <TabBar />
     </main>

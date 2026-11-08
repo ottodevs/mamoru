@@ -1,6 +1,6 @@
-import type { FundingView, OpView } from '@mamoru/domain'
+import type { FundingView, OpView, StatsView } from '@mamoru/domain'
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import { useCallback } from 'react'
+import { useCallback, useEffect } from 'react'
 import { useApi, type ApiClient } from './client.ts'
 
 export const queryKeys = {
@@ -154,10 +154,32 @@ export function useYieldLedger(accountKey: string | undefined) {
   })
 }
 
+const STATS_STORE = 'mamoru.stats.v1'
+/** The last Stats this browser read is shown at once on the next visit, then replaced by the fresh read; never past a day. */
+const STATS_KEEP_MS = 24 * 3_600_000
+
+function lastStats(): StatsView | undefined {
+  try {
+    const kept = JSON.parse(localStorage.getItem(STATS_STORE) ?? 'null') as { at: number; view: StatsView } | null
+    return kept && Date.now() - kept.at < STATS_KEEP_MS ? kept.view : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Spec 013: the public Stats. The API caches it for minutes; a slow poll is enough. */
 export function useStats() {
   const api = useApi()
-  return useQuery({ queryKey: queryKeys.stats, queryFn: () => api.stats(), retry: 1, refetchInterval: 5 * 60_000 })
+  const q = useQuery({ queryKey: queryKeys.stats, queryFn: () => api.stats(), retry: 1, refetchInterval: 5 * 60_000, placeholderData: lastStats })
+  useEffect(() => {
+    if (!q.data || q.isPlaceholderData) return
+    try {
+      localStorage.setItem(STATS_STORE, JSON.stringify({ at: Date.now(), view: q.data }))
+    } catch {
+      // storage full or blocked: the next visit loads without the last read
+    }
+  }, [q.data, q.isPlaceholderData])
+  return q
 }
 
 /** Spec 013 STATS-R14: the Portfolio's Total value by day. No retry: a failure hides the chart. */

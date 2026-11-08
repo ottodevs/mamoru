@@ -40,7 +40,7 @@
 .cx-donut { display: grid; grid-template-columns: auto 1fr; gap: 2rem; align-items: center; margin-top: 1.1rem; }
 .cx-donut .cx-ring { position: relative; }
 .cx-donut .cx-ring svg { display: block; }
-.cx-donut .seg-arc { animation: cx-fade .5s ease both; }
+.cx-donut .seg-arc { animation: cx-fade .5s ease both; transition: stroke-dasharray .6s cubic-bezier(.2,.7,.2,1), stroke-dashoffset .6s cubic-bezier(.2,.7,.2,1); }
 .cx-donut .centre { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .cx-donut .centre b { font-weight: 400; font-size: 1.9rem; line-height: 1; }
 .cx-donut .centre span { margin-top: .35rem; font-family: var(--font-mono); font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; color: var(--color-muted); }
@@ -71,7 +71,7 @@
 .sx-working .sx-lab { justify-content: flex-end; }
 .sx-wv { margin-top: .5rem; font-size: 2.6rem; line-height: 1; letter-spacing: -.01em; }
 .sx-alloc { display: flex; gap: 2px; height: 14px; margin-top: 1.6rem; }
-.sx-alloc span { display: block; height: 100%; border-radius: 2px; transform-origin: left; animation: cx-grow .5s cubic-bezier(.2,.7,.2,1) both; }
+.sx-alloc span { display: block; height: 100%; border-radius: 2px; transform-origin: left; animation: cx-grow .5s cubic-bezier(.2,.7,.2,1) both; transition: flex-grow .6s cubic-bezier(.2,.7,.2,1); }
 .sx-alloc-keys { list-style: none; display: flex; gap: 2rem; padding: 0; margin: .8rem 0 0; flex-wrap: wrap; }
 .sx-alloc-keys li { display: grid; grid-template-columns: 10px auto; column-gap: .5rem; align-items: baseline; }
 .sx-alloc-keys .sw { width: 10px; height: 10px; border-radius: 2px; align-self: center; }
@@ -101,6 +101,17 @@
 .sx-key .k-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-stone); margin-left: .9rem; }
 .sx-tip-sub { font-size: .75rem; opacity: .7; }
 .sx-src { margin-top: 2.2rem; padding-top: 1rem; border-top: 1px solid var(--color-wash); font-family: var(--font-mono); font-size: .72rem; color: var(--color-muted); line-height: 1.7; }
+.sx-body { animation: cx-fade .35s ease both; }
+.sx-skel .sk { display: block; border-radius: 3px; background: linear-gradient(90deg, color-mix(in srgb, var(--color-wash) 75%, transparent) 0%, color-mix(in srgb, var(--color-wash) 35%, transparent) 50%, color-mix(in srgb, var(--color-wash) 75%, transparent) 100%); background-size: 200% 100%; animation: sx-shimmer 1.3s ease-in-out infinite; }
+.sx-skel .sk-lab { width: 8.5rem; height: .7rem; }
+.sx-skel .sk-big { width: 15rem; max-width: 60vw; height: 4.1rem; margin-top: .6rem; }
+.sx-skel .sx-working .sk { margin-left: auto; }
+.sx-skel .sk-wv { width: 5.5rem; height: 2.6rem; margin-top: .5rem; }
+.sx-skel .sk-bar { height: 14px; margin-top: 1.6rem; }
+.sx-skel .sk-val { width: 7rem; height: 2.15rem; margin-top: .6rem; }
+.sx-skel .sk-h2 { width: 9rem; height: 1.3rem; }
+.sx-skel .sk-chart { height: 220px; margin-top: 1.1rem; }
+@keyframes sx-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 .sx-src .ok { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--color-emerald); margin-right: .4rem; vertical-align: 1px; }
 
 /* Portfolio: Total value with its chart, Total earned under it */
@@ -119,7 +130,8 @@
 .pf-since { font-family: var(--font-mono); font-size: .72rem; color: var(--color-muted); }
 
 @media (prefers-reduced-motion: reduce) {
-  .cx-draw, .cx-fill, .cx-end, .cx-pulse, .cx-donut .seg-arc, .sx-alloc span { animation: none; }
+  .cx-draw, .cx-fill, .cx-end, .cx-pulse, .cx-donut .seg-arc, .sx-alloc span, .sx-body, .sx-skel .sk { animation: none; }
+  .cx-donut .seg-arc, .sx-alloc span { transition: none; }
   .cx-tip { transition: none; }
 }
 
