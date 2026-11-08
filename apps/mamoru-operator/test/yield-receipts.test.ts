@@ -324,6 +324,9 @@ describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
     expect(vaultWire([landed, proposal('eng-3', '2026-11-08T00:00:00Z')])?.explained).toBeNull()
     expect(vaultWire([landed, proposal('eng-4', '2026-11-02T18:53:33Z', 'submitted')])?.explained).toBeNull()
     expect(vaultWire([landed, proposal('own-5', '2026-11-02T18:53:33Z')])?.explained).toBeNull()
+    // Mixed precision: a proposal half a second after the landed op is still on its way, whatever the string order.
+    expect(vaultWire([landed, proposal('eng-6', '2026-11-07T00:38:36.500Z')])?.explained).toBeNull()
+    expect(vaultWire([landed, proposal('eng-7', 'not a time')])?.explained).toBeNull()
   })
 })
 

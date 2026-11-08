@@ -178,7 +178,9 @@ const inFlight = (op: StoredOp, ops: readonly StoredOp[]): boolean => {
   if (!(op.opId.startsWith('eng-') || op.opId.startsWith('own-')) || op.txHash) return false
   if (op.state === 'submitted') return true
   if (op.state !== 'proposed') return false
-  return !(op.opId.startsWith('eng-') && ops.some((o) => o.state === 'confirmed' && o.updatedAt > op.updatedAt))
+  // Times compared as instants: stored ops mix second and millisecond precision, so their strings do not sort.
+  const at = Date.parse(op.updatedAt)
+  return !(op.opId.startsWith('eng-') && Number.isFinite(at) && ops.some((o) => o.state === 'confirmed' && Date.parse(o.updatedAt) > at))
 }
 
 /**
