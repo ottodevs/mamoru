@@ -509,6 +509,12 @@ const MONAD_HISTORY_STEP_BLOCKS = 1_000n
  * apart and a slice short of safe leave.
  */
 const MONAD_HISTORY_LAG_BLOCKS = 10_000n
+/**
+ * Blocks of deposits one log read asks for on Monad while an engine catches up on a gap (about 46 min of blocks): 10
+ * requests where a provider serves 1000-block ranges, 100 where it serves 100. A gap of days after an RPC outage was one
+ * request that outlived the client's timeout on every review, so the engine never caught up.
+ */
+const MONAD_CATCH_UP_BLOCKS = 10_000n
 /** otto/mamoru#358: an unchanged held-history read error is logged again after this long. */
 const HELD_HISTORY_ERROR_LOG_MS = 15 * 60_000
 /** otto/mamoru#358: how long a Monad review keeps reading those slices after its decision, while far behind. */
@@ -7780,7 +7786,7 @@ export class Operator {
         depositsAfter: BigInt(acc.depositsAfter),
         historyFromBlock: BigInt(acc.historyFromBlock),
         // otto/mamoru#358: Monad's providers serve 100-block log ranges; one read of a position's whole history timed out.
-        ...(this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? { historyStepBlocks: MONAD_HISTORY_STEP_BLOCKS, historyLagBlocks: MONAD_HISTORY_LAG_BLOCKS, historyReadMs: MONAD_HISTORY_READ_MS } : {}),
+        ...(this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? { historyStepBlocks: MONAD_HISTORY_STEP_BLOCKS, historyLagBlocks: MONAD_HISTORY_LAG_BLOCKS, historyReadMs: MONAD_HISTORY_READ_MS, catchUpBlocks: MONAD_CATCH_UP_BLOCKS } : {}),
         sessions,
         priorIncluded,
         carried: acc.carried ?? [],

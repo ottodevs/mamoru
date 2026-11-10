@@ -88,6 +88,14 @@ export type ObserveInput = {
   historyFromBlock: bigint
   /** When set, history already read is kept here and only new blocks are scanned. */
   historyCursor?: HistoryCursor
+  /**
+   * The widest range of safe blocks one deposits log read asks for. A wider gap after `depositsAfter` (an RPC outage)
+   * is read in slices of it, kept in `depositsCursor`, so no single request outlives the client's timeout and what
+   * was read is not read again. Absent, or without a cursor: one read, as before.
+   */
+  catchUpBlocks?: bigint
+  /** Deposits already read after `depositsAfter`, under `catchUpBlocks`. */
+  depositsCursor?: DepositsCursor
   intents: Observation['intents']
   slot: Observation['slot']
   twapWindowSeconds: number
@@ -553,15 +561,47 @@ function twapTick(cumulatives: readonly bigint[] | undefined, windowSeconds: num
   return Number(t)
 }
 
-async function readDeposits(client: PublicClient, acct: Address, input: ObserveInput, blockNumber: bigint, safeNumber: bigint): Promise<DepositObs[]> {
+/**
+ * Deposits read after `after` (the `depositsAfter` they were read for) up to `through`, a safe block whose hash is
+ * `hash`. Owned by one engine. Each slice is kept as soon as it is read: it ends at a safe block whose hash is the same
+ * before and after the read, so it holds whatever the rest of its observation does.
+ */
+export type DepositsCursor = { after: bigint; through: bigint; hash: Hex | null; deposits: DepositObs[] }
+
+export function depositsCursor(): DepositsCursor {
+  return { after: -1n, through: -1n, hash: null, deposits: [] }
+}
+
+/** How long one observation keeps reading slices of a deposits gap before it fails and leaves the rest for the next one. */
+export const CATCH_UP_MS = 30_000
+
+export async function readDeposits(client: PublicClient, acct: Address, input: ObserveInput, blockNumber: bigint, safeNumber: bigint): Promise<DepositObs[]> {
   if (input.depositsAfter >= blockNumber) return []
   const reg = input.registry ?? baseRegistry
-  const logs = await client.getLogs({ address: address(input.savingsAsset, reg), event: transferEvent, args: { to: acct }, fromBlock: input.depositsAfter + 1n, toBlock: blockNumber })
   const pools = new Set(registryNames(reg).pools.map((p) => address(p, reg).toLowerCase()))
   const npm = address('NonfungiblePositionManager', reg).toLowerCase()
-  return logs
-    .filter((l) => !pools.has(l.args.from!.toLowerCase()) && l.args.from!.toLowerCase() !== npm)
-    .map((l) => ({ token: input.savingsAsset, amount: l.args.value!, block: l.blockNumber!, txHash: l.transactionHash!, logIndex: l.logIndex!, safe: l.blockNumber! <= safeNumber }))
+  const read = async (fromBlock: bigint, toBlock: bigint): Promise<DepositObs[]> => {
+    const logs = await client.getLogs({ address: address(input.savingsAsset, reg), event: transferEvent, args: { to: acct }, fromBlock, toBlock })
+    return logs
+      .filter((l) => !pools.has(l.args.from!.toLowerCase()) && l.args.from!.toLowerCase() !== npm)
+      .map((l) => ({ token: input.savingsAsset, amount: l.args.value!, block: l.blockNumber!, txHash: l.transactionHash!, logIndex: l.logIndex!, safe: l.blockNumber! <= safeNumber }))
+  }
+  const c = input.depositsCursor
+  const step = input.catchUpBlocks
+  if (!c || step === undefined || step <= 0n || safeNumber - input.depositsAfter <= step) return read(input.depositsAfter + 1n, blockNumber)
+  // A cursor read for another start, past the safe head (it moved back), or whose last block changed hash starts over.
+  const stale = c.after !== input.depositsAfter || c.through > safeNumber || (c.hash !== null && (await client.getBlock({ blockNumber: c.through })).hash !== c.hash)
+  if (stale) Object.assign(c, { after: input.depositsAfter, through: input.depositsAfter, hash: null, deposits: [] })
+  const deadline = Date.now() + CATCH_UP_MS
+  while (safeNumber - c.through > step) {
+    if (Date.now() >= deadline) throw new ReasonError('OBS_RPC_UNAVAILABLE', `deposits: read to block ${c.through} of ${safeNumber}, ${step} blocks per request`)
+    const to = c.through + step
+    const before = (await client.getBlock({ blockNumber: to })).hash
+    const found = await read(c.through + 1n, to)
+    if ((await client.getBlock({ blockNumber: to })).hash !== before) throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${to} changed hash during the deposits read`)
+    Object.assign(c, { through: to, hash: before, deposits: [...c.deposits, ...found] })
+  }
+  return [...c.deposits, ...(await read(c.through + 1n, blockNumber))]
 }
 
 export type ChainPositionEvent = PositionEvent & { blockNumber: bigint; txHash: Hex }

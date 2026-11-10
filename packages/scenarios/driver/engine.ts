@@ -9,6 +9,7 @@ import {
   Batch,
   contractRead,
   multicall3Of,
+  depositsCursor,
   historyCursor,
   isSafeAndCanonical,
   observe,
@@ -389,6 +390,12 @@ export type EngineConfig = {
   historyLagBlocks?: bigint
   /** otto/mamoru#358: how long a review may keep reading held-history slices after its decision. Absent: one slice. */
   historyReadMs?: number
+  /**
+   * The widest range of safe blocks one deposits log read asks for (ObserveInput.catchUpBlocks). Set where a gap of a
+   * few days, left by an RPC outage, cannot be read in one request before the client times out (Monad: 1000-block log
+   * ranges, about 216k blocks a day). Absent: one read, as before.
+   */
+  catchUpBlocks?: bigint
   /** Session uses already confirmed on chain before this engine started (restart): replayed into the ledger so caps and usage limits count them. */
   priorIncluded?: { permissionId: Hex; calls: Execution[] }[]
   /**
@@ -712,6 +719,8 @@ export class Engine {
   readonly historyFromBlock: bigint
   /** Position history read so far: each review scans only the blocks after it. */
   private readonly historyCursor = historyCursor()
+  /** Deposits read so far after `depositsAfter`, while a long gap is read in slices (`catchUpBlocks`). */
+  private readonly depositsCursor = depositsCursor()
   /** otto/mamoru#358: history of held positions the observation's cursor does not follow, read up to `through` (a safe block). */
   private heldTurn = 0
   private heldReading = false
@@ -892,6 +901,7 @@ export class Engine {
       allowedTokenIds: this.allowedTokenIds,
       historyFromBlock: this.historyFromBlock,
       historyCursor: this.historyCursor,
+      ...(this.cfg.catchUpBlocks !== undefined ? { catchUpBlocks: this.cfg.catchUpBlocks, depositsCursor: this.depositsCursor } : {}),
       poolCache: this.cfg.poolCache,
       intents: this.cfg.intents?.() ?? { paused: false, exitRequested: false },
       slot: live ? { opId: live.opId, state: live.state } : null,
