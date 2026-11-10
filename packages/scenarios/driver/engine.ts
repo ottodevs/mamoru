@@ -1397,17 +1397,21 @@ export class Engine {
     const kept = this.opSearch.get(key)
     const joined = kept && kept.through >= op.prepareBlock! && kept.through <= safe.number && (await this.client.getBlock({ blockNumber: kept.through })).hash === kept.hash
     const from = joined ? kept.through + 1n : op.prepareBlock!
+    // The blocks kept as searched are still the ones before this read once it is done, or the search starts over
+    // (gate of #340: a reorg during the read could have moved a landing into what was already searched).
+    const stillJoined = async () => !joined || (await this.client.getBlock({ blockNumber: kept.through })).hash === kept.hash
     if (safe.number >= from && safe.number - from >= step) {
       const to = from + step - 1n
       const before = (await this.client.getBlock({ blockNumber: to })).hash
       const ev = await readUserOpEvent(this.client, key, from, this.registry, to)
       if (ev) return ev
-      if ((await this.client.getBlock({ blockNumber: to })).hash === before) this.opSearch.set(key, { through: to, hash: before })
+      if ((await this.client.getBlock({ blockNumber: to })).hash === before && (await stillJoined())) this.opSearch.set(key, { through: to, hash: before })
       else this.opSearch.delete(key)
       return 'searching'
     }
     const ev = await readUserOpEvent(this.client, key, from, this.registry)
     this.opSearch.delete(key)
+    if (!ev && !(await stillJoined())) return 'searching'
     return ev
   }
 

@@ -321,6 +321,28 @@ describe('a rejected or unseen userOp is settled from the chain only (otto/mamor
     expect(w.priv.released).toHaveLength(0)
   })
 
+  test('under catchUpBlocks a reorg of the searched blocks during a read starts the search over, never drops the op (gate of #340)', async () => {
+    const w = engineAt({ timestamp: 1_121n }, policy, { catchUpBlocks: 20n })
+    rejectedOp(w.engine, 1_120n)
+    await w.priv.resumePending()
+    w.chain.nonce = 6n
+    const ranges = logRanges(w)
+    await w.priv.watchReleased()
+    await w.priv.watchReleased()
+    // The final read runs while block 134, the end of what was searched, is reorged.
+    const client = (w.engine as unknown as { client: { getLogs: (q: { fromBlock: bigint; toBlock: bigint | string }) => Promise<unknown[]> } }).client
+    const inner = client.getLogs
+    client.getLogs = async (q) => {
+      const r = await inner(q)
+      if (q.toBlock === 'latest') w.chain.eventBlock = { number: 134n, hash: `0x${'99'.repeat(32)}` }
+      return r
+    }
+    await w.priv.watchReleased()
+    expect(w.priv.released).toHaveLength(1)
+    await w.priv.watchReleased()
+    expect(ranges.at(-1)).toEqual([95n, 114n])
+  })
+
   test('under catchUpBlocks a freed op found in a later slice lands as before (#337)', async () => {
     const w = engineAt({ timestamp: 1_121n }, policy, { catchUpBlocks: 20n })
     const op = rejectedOp(w.engine, 1_120n)
