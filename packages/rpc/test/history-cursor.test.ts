@@ -227,3 +227,80 @@ describe('readPositionHistoryFrom', () => {
     expect(next.through).toBe(150n)
   })
 })
+
+describe('readPositionHistoryFrom catching up in slices (catchUpBlocks)', () => {
+  const read = (client: PublicClient, cursor: HistoryCursor, ids: bigint[], to: bigint, safe: bigint) =>
+    readFrom(client, cursor, ids, 100n, to, safe, undefined, baseRegistry, 30n).then((r) => (Object.assign(cursor, r.next), r.events))
+
+  test('a cold cursor reads its range in slices up to the safe block, then the tail, and matches a full read', async () => {
+    const { client, ranges } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    const events = await read(client, cursor, [1n, 2n], 200n, 195n)
+    const full = await readPositionHistory(fakeClient(LOGS).client, [1n, 2n], 100n, 200n)
+    expect(events.map(key)).toEqual(full.map(key))
+    expect(ranges.every(([a, b]) => b - a + 1n <= 30n)).toBe(true)
+    expect(cursor.through).toBe(195n)
+  })
+
+  test('out of time, the slices read are kept and the next call goes on from there', async () => {
+    const { client, ranges } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    const realNow = Date.now
+    let t = realNow()
+    Date.now = () => (t += 10_000)
+    try {
+      await expect(read(client, cursor, [1n, 2n], 400n, 395n)).rejects.toThrow('history: cursor read to block')
+    } finally {
+      Date.now = realNow
+    }
+    const kept = cursor.through
+    expect(kept).toBeGreaterThan(99n)
+    expect(kept).toBeLessThan(365n)
+    ranges.length = 0
+    const events = await read(client, cursor, [1n, 2n], 400n, 395n)
+    expect(ranges[0]![0]).toBe(kept + 1n)
+    expect(events.map(key)).toEqual((await readPositionHistory(fakeClient(LOGS).client, [1n, 2n], 100n, 400n)).map(key))
+  })
+
+  test('a tokenId new to a cursor far from its origin is backfilled in slices, kept across calls', async () => {
+    const { client, ranges } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    await read(client, cursor, [1n], 200n, 200n)
+    const realNow = Date.now
+    let t = realNow()
+    Date.now = () => (t += 10_000)
+    try {
+      await expect(read(client, cursor, [1n, 2n], 200n, 200n)).rejects.toThrow('history: backfill read to block')
+    } finally {
+      Date.now = realNow
+    }
+    expect(cursor.ids.has('2')).toBe(false)
+    const part = cursor.backfill!.through
+    expect(part).toBeGreaterThan(99n)
+    ranges.length = 0
+    const events = await read(client, cursor, [1n, 2n], 200n, 200n)
+    expect(ranges[0]![0]).toBe(part + 1n)
+    expect(cursor.ids.has('2')).toBe(true)
+    expect(cursor.backfill).toBeNull()
+    expect(events.map(key)).toEqual((await readPositionHistory(fakeClient(LOGS).client, [1n, 2n], 100n, 200n)).map(key))
+  })
+
+  test('a slice whose end changes hash during its read fails and keeps nothing of it', async () => {
+    const { client, forks } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    const flip = client.request.bind(client)
+    ;(client as any).request = async (args: any) => {
+      const r = await flip(args)
+      if (BigInt(args.params[0].toBlock) === 129n) forks.add(129n)
+      return r
+    }
+    await expect(read(client, cursor, [1n, 2n], 200n, 195n)).rejects.toThrow('changed hash')
+    expect(cursor.through).toBe(-1n)
+  })
+
+  test('without catchUpBlocks a cold cursor is one read, as before', async () => {
+    const { client, ranges } = fakeClient(LOGS)
+    await readPositionHistoryFrom(client, historyCursor(), [1n, 2n], 100n, 200n, 195n)
+    expect(ranges[0]).toEqual([100n, 195n])
+  })
+})

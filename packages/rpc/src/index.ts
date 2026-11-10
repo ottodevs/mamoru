@@ -322,7 +322,7 @@ export async function observe(client: PublicClient, input: ObserveInput): Promis
       throw e instanceof ReasonError ? e : new ReasonError('OBS_RPC_UNAVAILABLE', `logs: ${(e as { details?: string }).details ?? e.message.split('\n')[0]}`)
     })
   const cursorRead = input.historyCursor
-    ? await logs(readPositionHistoryFrom(client, input.historyCursor, input.allowedTokenIds, input.historyFromBlock, blockNumber, safe.number, safe.hash, reg))
+    ? await logs(readPositionHistoryFrom(client, input.historyCursor, input.allowedTokenIds, input.historyFromBlock, blockNumber, safe.number, safe.hash, reg, input.catchUpBlocks))
     : null
   const history = cursorRead ? cursorRead.events : await logs(readPositionHistory(client, input.allowedTokenIds, input.historyFromBlock, blockNumber, reg))
   const owed = applyPrincipal(new Map(), history)
@@ -635,16 +635,27 @@ export async function readPositionHistory(client: PublicClient, tokenIds: readon
 }
 
 /** Position history already read for `fromBlock`, up to `through` (a safe block whose hash is `hash`), and for which tokenIds. Owned by one engine. */
-export type HistoryCursor = { fromBlock: bigint; through: bigint; hash: Hex | null; ids: Set<string>; events: ChainPositionEvent[] }
+export type HistoryCursor = {
+  fromBlock: bigint
+  through: bigint
+  hash: Hex | null
+  ids: Set<string>
+  events: ChainPositionEvent[]
+  /**
+   * Under `catchUpBlocks`: the history of tokenIds new to the cursor, read from `fromBlock` up to `through` (a safe
+   * block whose hash held across its read), while it is still short of the cursor's own `through`.
+   */
+  backfill?: { ids: Set<string>; through: bigint; events: ChainPositionEvent[] } | null
+}
 
 export function historyCursor(): HistoryCursor {
-  return { fromBlock: -1n, through: -1n, hash: null, ids: new Set(), events: [] }
+  return { fromBlock: -1n, through: -1n, hash: null, ids: new Set(), events: [], backfill: null }
 }
 
 const byChainOrder = (a: ChainPositionEvent, b: ChainPositionEvent) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1)
 
 function resetCursor(cursor: HistoryCursor, fromBlock: bigint): void {
-  Object.assign(cursor, { fromBlock, through: fromBlock - 1n, hash: null, ids: new Set<string>(), events: [] })
+  Object.assign(cursor, { fromBlock, through: fromBlock - 1n, hash: null, ids: new Set<string>(), events: [], backfill: null })
 }
 
 /**
@@ -652,6 +663,11 @@ function resetCursor(cursor: HistoryCursor, fromBlock: bigint): void {
  * Only blocks at or below `safeBlock` are kept; everything after the cursor is read again on every call.
  * A new origin, or a cursor block whose hash changed (reorg), starts over. `cursor` is not touched:
  * the caller commits `next` only once its whole observation is consistent.
+ *
+ * Under `catchUpBlocks`, a range wider than it (a cursor that starts cold after a restart, a tokenId new to a cursor
+ * far from its origin, an RPC outage) is read in slices of it that end at safe blocks whose hash holds across the
+ * read. After CATCH_UP_MS the slices read so far are committed to `cursor` (each one holds on its own) and the read
+ * fails with OBS_RPC_UNAVAILABLE; the next call goes on from there.
  */
 export async function readPositionHistoryFrom(
   client: PublicClient,
@@ -664,8 +680,25 @@ export async function readPositionHistoryFrom(
   safeHash?: Hex,
   /** otto/mamoru#61: the registry whose position manager is read; absent: Base's. */
   registry: Registry = baseRegistry,
+  /** The widest range one log read asks for (ObserveInput.catchUpBlocks); absent: each range in one read. */
+  catchUpBlocks?: bigint,
 ): Promise<{ events: ChainPositionEvent[]; next: HistoryCursor }> {
-  const next: HistoryCursor = { ...cursor, ids: new Set(cursor.ids), events: [...cursor.events] }
+  const next: HistoryCursor = { ...cursor, ids: new Set(cursor.ids), events: [...cursor.events], backfill: cursor.backfill ?? null }
+  const step = catchUpBlocks !== undefined && catchUpBlocks > 0n ? catchUpBlocks : undefined
+  const deadline = Date.now() + CATCH_UP_MS
+  // A slice [from, to] read whole: the hash of `to` is the same before the read and after it, or the observation fails.
+  const slice = async (ids: readonly bigint[], from: bigint, to: bigint): Promise<{ events: ChainPositionEvent[]; hash: Hex }> => {
+    const before = (await client.getBlock({ blockNumber: to })).hash
+    const events = await historyEndingAt(client, ids, from, to, before, registry)
+    if (!events) throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${to} changed hash during the history read`)
+    return { events, hash: before }
+  }
+  // Out of time: keep what was read (every slice holds on its own) and leave the rest for the next call.
+  const pause = (what: string, through: bigint, of: bigint) => {
+    if (Date.now() < deadline) return
+    Object.assign(cursor, next)
+    throw new ReasonError('OBS_RPC_UNAVAILABLE', `history: ${what} read to block ${through} of ${of}, ${step} blocks per request`)
+  }
   if (tokenIds.length === 0 || fromBlock > toBlock) return { events: [], next }
   if (next.fromBlock !== fromBlock) resetCursor(next, fromBlock)
   // A head behind the cursor (lagging node or rollback): its blocks cannot be checked here, so read in full and keep the cursor.
@@ -675,7 +708,21 @@ export async function readPositionHistoryFrom(
   if (next.hash && (await hashAt(next.through)) !== next.hash) resetCursor(next, fromBlock)
   // A tokenId the cursor has not seen: backfill its history up to the cursor once.
   const fresh = tokenIds.filter((id) => !next.ids.has(String(id)))
-  if (fresh.length > 0) {
+  if (fresh.length > 0 && step !== undefined && next.through >= fromBlock && next.hash && next.through - fromBlock >= step) {
+    // Sliced backfill, kept across calls while the fresh tokenIds stay the same.
+    const key = fresh.map(String).sort().join(',')
+    let b = next.backfill && [...next.backfill.ids].sort().join(',') === key && next.backfill.through <= next.through ? next.backfill : { ids: new Set(fresh.map(String)), through: fromBlock - 1n, events: [] }
+    while (b.through < next.through) {
+      next.backfill = b
+      pause('backfill', b.through, next.through)
+      const to = b.through + step < next.through ? b.through + step : next.through
+      const r = await slice(fresh, b.through + 1n, to)
+      b = { ids: b.ids, through: to, events: [...b.events, ...r.events] }
+    }
+    next.events.push(...b.events)
+    for (const id of fresh) next.ids.add(String(id))
+    next.backfill = null
+  } else if (fresh.length > 0) {
     if (next.through >= fromBlock && next.hash) {
       const backfill = await historyEndingAt(client, fresh, fromBlock, next.through, next.hash, registry)
       if (backfill) next.events.push(...backfill)
@@ -685,6 +732,14 @@ export async function readPositionHistoryFrom(
     for (const id of next.ids.size === 0 ? tokenIds : fresh) next.ids.add(String(id))
   }
   const stable = safeBlock < toBlock ? safeBlock : toBlock
+  while (step !== undefined && stable - next.through > step) {
+    pause('cursor', next.through, stable)
+    const to = next.through + step
+    const r = await slice([...next.ids].map(BigInt), next.through + 1n, to)
+    next.events.push(...r.events)
+    next.through = to
+    next.hash = r.hash
+  }
   if (stable > next.through) {
     // The cursor only moves to a block whose hash is the same before the read and after it.
     const before = await hashAt(stable)
