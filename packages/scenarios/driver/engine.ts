@@ -19,6 +19,7 @@ import {
   readPositionHistory,
   type ChainPositionEvent,
   readUserOpEvent,
+  type UserOpEventRead,
   rpcClient,
   simulateFromEntryPoint,
   type GuardSeries,
@@ -1380,12 +1381,48 @@ export class Engine {
     return [...this.released, ...pending.filter((o) => !this.released.includes(o))]
   }
 
+  /** #337: blocks already searched for a released op's event without finding it, up to `through` (a safe block whose hash is `hash`). */
+  private readonly opSearch = new Map<string, { through: bigint; hash: Hex }>()
+
+  /**
+   * #337: a released op's event, searched from its prepare block. Under `catchUpBlocks` a range wider than it (an op
+   * carried for days) is searched one slice per review, ending at safe blocks whose hash held across the read and joined
+   * to the slice before by its kept hash, so no request outlives the client's timeout. Null while the search is still
+   * short of the safe block: no conclusion may be drawn from a missing event then.
+   */
+  private async searchReleased(op: OpRecord, safe: { number: bigint; hash: Hex }): Promise<UserOpEventRead | null | 'searching'> {
+    const step = this.cfg.catchUpBlocks
+    if (step === undefined) return readUserOpEvent(this.client, op.userOpHash!, op.prepareBlock!, this.registry)
+    const key = op.userOpHash!
+    const kept = this.opSearch.get(key)
+    const joined = kept && kept.through >= op.prepareBlock! && kept.through <= safe.number && (await this.client.getBlock({ blockNumber: kept.through })).hash === kept.hash
+    const from = joined ? kept.through + 1n : op.prepareBlock!
+    if (safe.number >= from && safe.number - from >= step) {
+      const to = from + step - 1n
+      const before = (await this.client.getBlock({ blockNumber: to })).hash
+      const ev = await readUserOpEvent(this.client, key, from, this.registry, to)
+      if (ev) return ev
+      if ((await this.client.getBlock({ blockNumber: to })).hash === before) this.opSearch.set(key, { through: to, hash: before })
+      else this.opSearch.delete(key)
+      return 'searching'
+    }
+    const ev = await readUserOpEvent(this.client, key, from, this.registry)
+    this.opSearch.delete(key)
+    return ev
+  }
+
   private async watchReleased(): Promise<void> {
     if (!this.released.length) return
     const safe = await this.client.getBlock({ blockTag: 'safe' })
     const nonceAtSafe = await this.entryPointNonce(safe.number)
     for (const op of [...this.released]) {
-      const ev = await readUserOpEvent(this.client, op.userOpHash!, op.prepareBlock!, this.registry)
+      // #337: the nonce at `safe` still the op's own means it has not landed at or below `safe` (a landing spends it),
+      // and only a safe landing is applied below: nothing to search for yet. A days-old op of an account whose nonce
+      // never moved was searched from its prepare block on every review, a request that outlived the client's timeout.
+      if (this.cfg.catchUpBlocks !== undefined && nonceAtSafe === op.nonce) continue
+      const found = await this.searchReleased(op, safe)
+      if (found === 'searching') continue
+      const ev = found
       if (!ev) {
         if (nonceAtSafe !== op.nonce) {
           this.released.splice(this.released.indexOf(op), 1)

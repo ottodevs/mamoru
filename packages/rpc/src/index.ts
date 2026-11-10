@@ -937,8 +937,8 @@ export function userOpLogs<L extends Log>(txLogs: readonly L[], eventLogIndex: n
 }
 
 /** FR-AA-004 and FR-ENG-008: the UserOperationEvent of a hash, read from the RPC, with the logs of that userOp only. */
-export async function readUserOpEvent(client: PublicClient, userOpHash: Hex, fromBlock: bigint, registry: Registry = baseRegistry): Promise<UserOpEventRead | null> {
-  const logs = await client.getLogs({ address: address('EntryPointV07', registry), event: userOperationEvent, args: { userOpHash }, fromBlock, toBlock: 'latest' })
+export async function readUserOpEvent(client: PublicClient, userOpHash: Hex, fromBlock: bigint, registry: Registry = baseRegistry, toBlock?: bigint): Promise<UserOpEventRead | null> {
+  const logs = await client.getLogs({ address: address('EntryPointV07', registry), event: userOperationEvent, args: { userOpHash }, fromBlock, toBlock: toBlock ?? 'latest' })
   if (logs.length > 1) throw new Error(`${logs.length} UserOperationEvents for ${userOpHash}`)
   const ev = logs[0]
   if (!ev) return null

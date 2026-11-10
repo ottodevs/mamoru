@@ -287,6 +287,55 @@ describe('a rejected or unseen userOp is settled from the chain only (otto/mamor
     expect(w.priv.released).toHaveLength(0)
   })
 
+  /** Records the range of every log read of `w`'s client. */
+  function logRanges(w: ReturnType<typeof engineAt>): [bigint, bigint | string][] {
+    const ranges: [bigint, bigint | string][] = []
+    const client = (w.engine as unknown as { client: { getLogs: (q: { fromBlock: bigint; toBlock: bigint | string }) => Promise<unknown[]> } }).client
+    const inner = client.getLogs
+    client.getLogs = async (q) => (ranges.push([q.fromBlock, q.toBlock]), inner(q))
+    return ranges
+  }
+
+  test('under catchUpBlocks a freed op whose nonce at safe is still its own is not searched for (#337)', async () => {
+    const w = engineAt({ timestamp: 1_121n }, policy, { catchUpBlocks: 20n })
+    rejectedOp(w.engine, 1_120n)
+    await w.priv.resumePending()
+    const ranges = logRanges(w)
+    await w.priv.watchReleased()
+    expect(ranges).toEqual([])
+    expect(w.priv.released).toHaveLength(1)
+  })
+
+  test('under catchUpBlocks a freed op is searched one slice per review and dropped only once the search reaches safe (#337)', async () => {
+    const w = engineAt({ timestamp: 1_121n }, policy, { catchUpBlocks: 20n })
+    rejectedOp(w.engine, 1_120n)
+    await w.priv.resumePending()
+    w.chain.nonce = 6n
+    const ranges = logRanges(w)
+    await w.priv.watchReleased()
+    expect(w.priv.released).toHaveLength(1)
+    await w.priv.watchReleased()
+    expect(w.priv.released).toHaveLength(1)
+    await w.priv.watchReleased()
+    expect(ranges).toEqual([[95n, 114n], [115n, 134n], [135n, 'latest']])
+    expect(w.priv.released).toHaveLength(0)
+  })
+
+  test('under catchUpBlocks a freed op found in a later slice lands as before (#337)', async () => {
+    const w = engineAt({ timestamp: 1_121n }, policy, { catchUpBlocks: 20n })
+    const op = rejectedOp(w.engine, 1_120n)
+    await w.priv.resumePending()
+    w.chain.nonce = 6n
+    w.chain.safeNumber = 160n
+    await w.priv.watchReleased()
+    expect(w.priv.released).toHaveLength(1)
+    w.chain.events = [eventOf(op, false)]
+    w.chain.eventBlock = { number: 160n, hash: `0x${'33'.repeat(32)}` }
+    for (let i = 0; i < 3 && w.priv.released.length; i++) await w.priv.watchReleased()
+    expect(w.engine.journal.op(op.opId)).toMatchObject({ lateIncluded: true, included: { blockNumber: 160n } })
+    expect(w.priv.released).toHaveLength(0)
+  })
+
   test('an op whose block was reorged out is looked for again, not left holding the slot (pre-existing, Sol review of #64)', async () => {
     const w = engineAt({ timestamp: 1_121n })
     const op = rejectedOp(w.engine, 1_120n)
