@@ -93,6 +93,20 @@ describe('readDeposits catching up on a long gap', () => {
     expect(cursor.deposits).toEqual([])
   })
 
+  test('a reorg between two slices drops what was kept and reads it all again (gate of #339)', async () => {
+    const { client, forks } = fakeClient([150n])
+    const inner = client.getLogs.bind(client)
+    ;(client as any).getLogs = async (args: any) => {
+      const r = await inner(args)
+      if (args.toBlock === 700n) forks.add(400n)
+      return r
+    }
+    const cursor = depositsCursor()
+    await expect(readDeposits(client, ACCT, input({ depositsAfter: 100n, catchUpBlocks: 300n, depositsCursor: cursor }), 1000n, 990n)).rejects.toThrow('block 400 changed hash')
+    expect(cursor.deposits).toEqual([])
+    expect(cursor.after).toBe(-1n)
+  })
+
   test('a gap too long for one observation keeps what it read and fails, and the next one goes on from there', async () => {
     const { client, ranges } = fakeClient([150n, 5000n])
     const cursor = depositsCursor()

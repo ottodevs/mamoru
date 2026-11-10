@@ -602,6 +602,13 @@ export async function readDeposits(client: PublicClient, acct: Address, input: O
     const before = (await client.getBlock({ blockNumber: to })).hash
     const found = await read(c.through + 1n, to)
     if ((await client.getBlock({ blockNumber: to })).hash !== before) throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${to} changed hash during the deposits read`)
+    // The slice joins the one before: its start's parent is still the block kept. Otherwise a reorg between the two
+    // could keep deposits of a branch that is gone under a hash of the new one; all of it is read again.
+    if (c.hash !== null && (await client.getBlock({ blockNumber: c.through })).hash !== c.hash) {
+      const moved = c.through
+      Object.assign(c, { after: -1n, through: -1n, hash: null, deposits: [] })
+      throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${moved} changed hash during the deposits read`)
+    }
     Object.assign(c, { through: to, hash: before, deposits: [...c.deposits, ...found] })
   }
   return [...c.deposits, ...(await read(c.through + 1n, blockNumber))]
@@ -645,7 +652,7 @@ export type HistoryCursor = {
    * Under `catchUpBlocks`: the history of tokenIds new to the cursor, read from `fromBlock` up to `through` (a safe
    * block whose hash held across its read), while it is still short of the cursor's own `through`.
    */
-  backfill?: { ids: Set<string>; through: bigint; events: ChainPositionEvent[] } | null
+  backfill?: { ids: Set<string>; through: bigint; hash: Hex | null; events: ChainPositionEvent[] } | null
 }
 
 export function historyCursor(): HistoryCursor {
@@ -686,11 +693,15 @@ export async function readPositionHistoryFrom(
   const next: HistoryCursor = { ...cursor, ids: new Set(cursor.ids), events: [...cursor.events], backfill: cursor.backfill ?? null }
   const step = catchUpBlocks !== undefined && catchUpBlocks > 0n ? catchUpBlocks : undefined
   const deadline = Date.now() + CATCH_UP_MS
-  // A slice [from, to] read whole: the hash of `to` is the same before the read and after it, or the observation fails.
-  const slice = async (ids: readonly bigint[], from: bigint, to: bigint): Promise<{ events: ChainPositionEvent[]; hash: Hex }> => {
+  // A slice [from, to] read whole: the hash of `to` is the same before the read and after it, and the block before
+  // `from` still has the hash it was kept with (`prev`), so the slice joins the ones before it on one chain. Otherwise
+  // the observation fails and nothing read in this call is kept (gate of #339: no events of a reorged-out branch kept
+  // under a hash of the new one).
+  const slice = async (ids: readonly bigint[], from: bigint, to: bigint, prev: Hex | null): Promise<{ events: ChainPositionEvent[]; hash: Hex }> => {
     const before = (await client.getBlock({ blockNumber: to })).hash
     const events = await historyEndingAt(client, ids, from, to, before, registry)
     if (!events) throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${to} changed hash during the history read`)
+    if (prev !== null && (await client.getBlock({ blockNumber: from - 1n })).hash !== prev) throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${from - 1n} changed hash during the history read`)
     return { events, hash: before }
   }
   // Out of time: keep what was read (every slice holds on its own) and leave the rest for the next call.
@@ -711,13 +722,18 @@ export async function readPositionHistoryFrom(
   if (fresh.length > 0 && step !== undefined && next.through >= fromBlock && next.hash && next.through - fromBlock >= step) {
     // Sliced backfill, kept across calls while the fresh tokenIds stay the same.
     const key = fresh.map(String).sort().join(',')
-    let b = next.backfill && [...next.backfill.ids].sort().join(',') === key && next.backfill.through <= next.through ? next.backfill : { ids: new Set(fresh.map(String)), through: fromBlock - 1n, events: [] }
+    const kept = next.backfill && [...next.backfill.ids].sort().join(',') === key && next.backfill.through <= next.through ? next.backfill : null
+    // A backfill kept from an earlier call whose last block changed hash starts over.
+    const held = kept && (kept.hash === null || (await client.getBlock({ blockNumber: kept.through })).hash === kept.hash)
+    let b = held ? kept : { ids: new Set(fresh.map(String)), through: fromBlock - 1n, hash: null as Hex | null, events: [] as ChainPositionEvent[] }
     while (b.through < next.through) {
       next.backfill = b
       pause('backfill', b.through, next.through)
       const to = b.through + step < next.through ? b.through + step : next.through
-      const r = await slice(fresh, b.through + 1n, to)
-      b = { ids: b.ids, through: to, events: [...b.events, ...r.events] }
+      const r = await slice(fresh, b.through + 1n, to, b.hash)
+      // Its last slice ends at the cursor's block, which must still be the one the cursor holds.
+      if (to === next.through && r.hash !== next.hash) throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${to} changed hash during the history read`)
+      b = { ids: b.ids, through: to, hash: r.hash, events: [...b.events, ...r.events] }
     }
     next.events.push(...b.events)
     for (const id of fresh) next.ids.add(String(id))
@@ -735,7 +751,7 @@ export async function readPositionHistoryFrom(
   while (step !== undefined && stable - next.through > step) {
     pause('cursor', next.through, stable)
     const to = next.through + step
-    const r = await slice([...next.ids].map(BigInt), next.through + 1n, to)
+    const r = await slice([...next.ids].map(BigInt), next.through + 1n, to, next.hash)
     next.events.push(...r.events)
     next.through = to
     next.hash = r.hash

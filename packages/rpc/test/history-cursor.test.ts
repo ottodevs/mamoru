@@ -298,6 +298,21 @@ describe('readPositionHistoryFrom catching up in slices (catchUpBlocks)', () => 
     expect(cursor.through).toBe(-1n)
   })
 
+  test('a reorg between two slices fails the read and keeps neither (gate of #339)', async () => {
+    const { client, forks } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    const inner = client.request.bind(client)
+    ;(client as any).request = async (args: any) => {
+      const r = await inner(args)
+      // The first slice ends at 129; while the second one is read, 129 is reorged out.
+      if (BigInt(args.params[0].toBlock) === 159n) forks.add(129n)
+      return r
+    }
+    await expect(read(client, cursor, [1n, 2n], 200n, 195n)).rejects.toThrow('block 129 changed hash')
+    expect(cursor.through).toBe(-1n)
+    expect(cursor.events).toEqual([])
+  })
+
   test('without catchUpBlocks a cold cursor is one read, as before', async () => {
     const { client, ranges } = fakeClient(LOGS)
     await readPositionHistoryFrom(client, historyCursor(), [1n, 2n], 100n, 200n, 195n)
