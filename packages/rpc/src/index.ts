@@ -91,7 +91,10 @@ export type ObserveInput = {
   /**
    * The widest range of safe blocks one deposits log read asks for. A wider gap after `depositsAfter` (an RPC outage)
    * is read in slices of it, kept in `depositsCursor`, so no single request outlives the client's timeout and what
-   * was read is not read again. Absent, or without a cursor: one read, as before.
+   * was read is not read again. Absent, or without a cursor: one read, as before. Each slice is still one
+   * eth_getLogs request: the operator's RPC proxy splits it into the ranges its providers accept (rpc-proxy
+   * `logsFrom`), so the slice bounds the request's duration, not the provider's range limit. The tail after the
+   * cursor spans at most `catchUpBlocks` plus the blocks between the safe head and the observation block.
    */
   catchUpBlocks?: bigint
   /** Deposits already read after `depositsAfter`, under `catchUpBlocks`. */
