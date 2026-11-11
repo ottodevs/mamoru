@@ -136,4 +136,28 @@ describe('rpc proxy configuration', () => {
     }
     expect(new Set(calls)).toEqual(new Set(['http://127.0.0.1:9/']))
   })
+
+  test('with a chain id, eth_chainId is answered by the proxy and no provider is asked', async () => {
+    const up = fakeFetch()
+    const proxy = startRpcProxy(PRIMARY, { fetch: up.fetch, chainId: 8453, proven: [PRIMARY] })
+    try {
+      expect(await chainId(proxy.url)).toBe('0x2105')
+      const batch = await fetch(proxy.url, { method: 'POST', body: JSON.stringify([{ jsonrpc: '2.0', id: 7, method: 'eth_chainId', params: [] }]) })
+      expect(await batch.json()).toEqual([{ jsonrpc: '2.0', id: 7, result: '0x2105' }])
+    } finally {
+      proxy.stop()
+    }
+    expect(up.calls).toEqual([])
+  })
+
+  test('without a chain id, eth_chainId is still forwarded', async () => {
+    const up = fakeFetch()
+    const proxy = startRpcProxy(PRIMARY, { fetch: up.fetch })
+    try {
+      await chainId(proxy.url)
+    } finally {
+      proxy.stop()
+    }
+    expect(up.calls.length).toBeGreaterThan(0)
+  })
 })

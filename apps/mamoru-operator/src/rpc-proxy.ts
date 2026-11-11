@@ -601,6 +601,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   }
   async function handleInner(msg: Req, seen: Witnessed): Promise<unknown> {
     try {
+      // The chain of this proxy is known and every provider is shut out unless it proved it: no upstream call is needed.
+      if (msg.method === 'eth_chainId' && opts.chainId !== undefined) return { jsonrpc: '2.0', id: msg.id, result: `0x${opts.chainId.toString(16)}` }
       if (msg.method === 'eth_blockNumber') return { jsonrpc: '2.0', id: msg.id, result: `0x${(await head()).toString(16)}` }
       if (msg.method === 'eth_getBlockByNumber' && (msg.params?.[0] === 'latest' || msg.params?.[0] === 'pending')) {
         return { jsonrpc: '2.0', id: msg.id, result: await one('eth_getBlockByNumber', [`0x${(await head()).toString(16)}`, msg.params?.[1] ?? false]) }
