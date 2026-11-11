@@ -1735,7 +1735,13 @@ export class Operator {
     if (this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID && this.readsElsewhere(acc)) this.enginePeers.set(acc.accountKey, await this.peerRead(acc, PEER_ENGINE_MAX_AGE_MS, this.coverOf(getAddress(acc.ctx.address), observedBlock)))
     const peers: PeerRead = this.readsElsewhere(acc) ? (this.enginePeers.get(acc.accountKey) ?? { ok: false, chainId: 0 }) : { ok: true, chains: [] }
     // otto/mamoru#355: the review counts its own Safe at the observation's block.
-    return { capUsdc: this.effectiveCap(acc), elsewhereUsdc: this.elsewhereOf(acc, peers, { safe: getAddress(acc.ctx.address), block: observedBlock }) }
+    const elsewhereUsdc = this.elsewhereOf(acc, peers, { safe: getAddress(acc.ctx.address), block: observedBlock })
+    // otto/mamoru#382: a remote Safe's own cap is its home's bridge-out total, not the account's. The total above is the
+    // account's, so it is held to the account's cap its home answers (the lowest, if several), and what this Safe places
+    // to its own. A home on older code answers no cap: then the remote cap alone, as before.
+    const homeCaps = this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID && peers.ok ? peers.chains.flatMap((e) => (e.chainId !== this.cfg.chainId && e.active && e.capUsdc !== undefined ? [e.capUsdc] : [])) : []
+    if (!homeCaps.length) return { capUsdc: this.effectiveCap(acc), elsewhereUsdc }
+    return { capUsdc: homeCaps.reduce((a, b) => (b < a ? b : a)), elsewhereUsdc, chainCapUsdc: this.effectiveCap(acc) }
   }
 
   /**
@@ -1783,6 +1789,8 @@ export class Operator {
       active: e.active,
       releases,
       ...(returns?.ids.length ? { returns: returns.ids } : {}),
+      // otto/mamoru#382: the account's cap, for a remote Safe of it to place within (only a home chain answers one).
+      ...(acc?.active && this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID ? { capUsdc: this.effectiveCap(acc).toString() } : {}),
     }
   }
 

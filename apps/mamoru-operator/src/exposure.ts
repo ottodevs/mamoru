@@ -29,6 +29,11 @@ export type ChainExposure = {
    * counting exactly these ids; one not listed is never taken as held.
    */
   returns?: string[]
+  /**
+   * The cap the answering operator runs this Safe's account at (effectiveCap), when that account is active and on a home
+   * chain. A remote Safe's own cap is its bridge-out total, not the account's: its engine places within this one.
+   */
+  capUsdc?: bigint
 }
 
 /** otto/mamoru#355: one release of a remote Safe as its operator reports it. Amounts are base-unit strings. */
@@ -161,7 +166,7 @@ export function coversAsked(had: Covered | undefined, want: Covered | undefined)
  * What GET /internal/exposure/<address> answers. Amounts are base-unit strings. otto/mamoru#355: `releases` (a remote
  * Safe's operator) and `returns` (the home's), both optional: a peer on older code sends neither and ignores both.
  */
-export type ExposureWire = { chainId: number; address: string; block: string; idleUsdc: string; placedUsdc: string; active: boolean; releases?: ReleaseWire[]; returns?: string[] }
+export type ExposureWire = { chainId: number; address: string; block: string; idleUsdc: string; placedUsdc: string; active: boolean; releases?: ReleaseWire[]; returns?: string[]; capUsdc?: string }
 
 export type PeerRead = { ok: true; chains: ChainExposure[] } | { ok: false; chainId: number }
 
@@ -323,11 +328,11 @@ export class PeerExposure {
         return null
       }
       const lists = listsOf(w)
-      if (!lists) {
-        console.log(`[peer] chain ${peer.chainId} exposure read malformed (releases or returns)`)
+      if (!lists || (w.capUsdc !== undefined && (typeof w.capUsdc !== 'string' || !UINT.test(w.capUsdc)))) {
+        console.log(`[peer] chain ${peer.chainId} exposure read malformed (releases, returns or cap)`)
         return null
       }
-      return { chainId: peer.chainId, idleUsdc: BigInt(w.idleUsdc), placedUsdc: BigInt(w.placedUsdc), active: w.active, at: { safe: address, block: BigInt(w.block) }, ...lists }
+      return { chainId: peer.chainId, idleUsdc: BigInt(w.idleUsdc), placedUsdc: BigInt(w.placedUsdc), active: w.active, at: { safe: address, block: BigInt(w.block) }, ...lists, ...(w.capUsdc !== undefined ? { capUsdc: BigInt(w.capUsdc) } : {}) }
     } catch (e) {
       // Fixed text only: an error may quote the URL.
       console.log(`[peer] chain ${peer.chainId} exposure read failed (${e instanceof Error && e.name === 'TimeoutError' ? 'timeout' : 'unreachable'})`)

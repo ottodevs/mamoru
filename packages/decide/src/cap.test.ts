@@ -117,6 +117,17 @@ describe('otto/mamoru#212: placing within the cap', () => {
     expect(end.balances.USDC! >= 900n * USDC).toBe(true)
   })
 
+  test('a chain cap bounds what this chain places, on top of the account cap (otto/mamoru#382)', () => {
+    // The account cap leaves 9,000; this Safe's own cap of 500 is what binds.
+    const o = obs({ balances: { USDC: 1_000n * USDC }, cap: { capUsdc: 10_000n * USDC, elsewhereUsdc: 1_000n * USDC, chainCapUsdc: 500n * USDC } })
+    expect(capRoomOf(o, V2)).toBe(500n * USDC)
+    expect(placedOf(settle(o), V2) <= 500n * USDC).toBe(true)
+    // The account cap binds when it is the smaller room.
+    expect(capRoomOf({ ...o, cap: { capUsdc: 1_200n * USDC, elsewhereUsdc: 1_000n * USDC, chainCapUsdc: 500n * USDC } }, V2)).toBe(200n * USDC)
+    // A chain read failing still places nothing new.
+    expect(capRoomOf({ ...o, cap: { capUsdc: 10_000n * USDC, elsewhereUsdc: null, chainCapUsdc: 500n * USDC } }, V2)).toBe(0n)
+  })
+
   test('another chain that could not be read: nothing new is placed (fail closed)', () => {
     const o = obs({ balances: { USDC: 500n * USDC }, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: null } })
     expect(capRoomOf(o, V2)).toBe(0n)

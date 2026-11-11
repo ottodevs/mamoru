@@ -119,8 +119,10 @@ export type Observation = {
    * cap (backtest, lab). `elsewhereUsdc` null: another chain could not be read, so nothing new is placed.
    * `reinvestUsdc`: savings the engine's own re-range, reduce or conversion took out of what was placed, which it may
    * put back whatever the cap and the other chains say (finishing a re-range is not new money). Absent: none.
+   * `chainCapUsdc`: a second bound on what this chain's Safe alone places (a remote Safe's own cap, its bridge-out total,
+   * when `capUsdc` is the account's cap its home answers). Absent: none.
    */
-  cap?: { capUsdc: bigint; elsewhereUsdc: bigint | null; reinvestUsdc?: bigint }
+  cap?: { capUsdc: bigint; elsewhereUsdc: bigint | null; reinvestUsdc?: bigint; chainCapUsdc?: bigint }
   /**
    * Spec 004: 24 h history per pool, from TWAP samples (see `marketOf`). Read only by a policy with `guards`;
    * absent or null fields make the guard rules abstain.

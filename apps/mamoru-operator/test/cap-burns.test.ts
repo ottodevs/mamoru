@@ -48,7 +48,7 @@ type Priv = {
   localTotal(acc: AccountState, safe: Address): Promise<{ total: bigint; safe: Address; block: bigint }>
   startTotal(acc: AccountState, local: { total: bigint; safe: Address; block: bigint }): Promise<{ total: bigint; across: boolean }>
   peerRead(acc: AccountState, maxAgeMs: number, covered?: Covered): Promise<PeerRead>
-  engineCap(acc: AccountState, observedBlock: bigint): Promise<{ capUsdc: bigint; elsewhereUsdc: bigint | null }>
+  engineCap(acc: AccountState, observedBlock: bigint): Promise<{ capUsdc: bigint; elsewhereUsdc: bigint | null; chainCapUsdc?: bigint }>
   enginePeers: Map<string, PeerRead>
   elsewhereOf(acc: AccountState, peers: PeerRead): bigint | null
 }
@@ -451,5 +451,38 @@ describe('otto/mamoru#332 review r2', () => {
     const late = r.read(SAFE, 30_000, cov(5n))
     expect(asked).toBe(3) // the uncovered answer stands for it: no read at all
     expect(idle(await late)).toBe(1n)
+  })
+})
+
+describe('a remote Safe is held to the account cap its home answers (otto/mamoru#382)', () => {
+  type Caps = { effectiveCap(a: AccountState): bigint }
+  test('the Monad engine takes the home cap for the account total and its own cap for what it places', async () => {
+    const s = setup()
+    s.baseAcc.signedCapUsdc = (10_000n * USDC).toString()
+    s.monadAcc.signedCapUsdc = (50n * USDC).toString()
+    const home = (s.base as unknown as Caps).effectiveCap(s.baseAcc)
+    const own = (s.monad as unknown as Caps).effectiveCap(s.monadAcc)
+    expect(own).toBeLessThan(home)
+    // The home answers its account's cap for its own Safe only; the Monad Safe answers none.
+    expect((await s.base.exposureFor(BASE_SAFE)).capUsdc).toBe(home.toString())
+    expect((await s.base.exposureFor(MONAD_SAFE)).capUsdc).toBeUndefined()
+    expect((await s.monad.exposureFor(MONAD_SAFE)).capUsdc).toBeUndefined()
+    // The home holds more than the Monad Safe's own cap: its total is still counted, against the account's cap.
+    expect(await s.m.engineCap(s.monadAcc, s.chains.monadBlock)).toEqual({ capUsdc: home, elsewhereUsdc: TRUE, chainCapUsdc: own })
+    // Base itself never takes a peer's cap.
+    s.b.enginePeers.set('brais', await s.b.peerRead(s.baseAcc, 2_000))
+    expect(await s.b.engineCap(s.baseAcc, s.chains.baseBlock)).toEqual({ capUsdc: home, elsewhereUsdc: 0n })
+  })
+
+  test('a home that is not running the account answers no cap: the remote cap alone, as before', async () => {
+    const s = setup()
+    s.baseAcc.active = false
+    const own = (s.monad as unknown as Caps).effectiveCap(s.monadAcc)
+    expect(await s.m.engineCap(s.monadAcc, s.chains.monadBlock)).toEqual({ capUsdc: own, elsewhereUsdc: TRUE })
+  })
+
+  test('a malformed cap in an answer fails the read (nothing new is placed)', async () => {
+    const bad = new PeerExposure([{ chainId: 8453, url: 'http://base.test' }], SECRET, (async () => Response.json({ chainId: 8453, address: BASE_SAFE.toLowerCase(), block: '1', idleUsdc: '0', placedUsdc: '0', active: true, releases: [], capUsdc: '-1' })) as never, () => T0)
+    expect((await bad.read(BASE_SAFE, 1_000)).ok).toBe(false)
   })
 })
