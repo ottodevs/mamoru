@@ -71,10 +71,10 @@ describe('SnapshotLoop (otto/mamoru#136)', () => {
     expect(loop.current).not.toBeNull()
   })
 
-  test('MAMORU_SNAPSHOT_MS: 30 s by default, never under 10 s, garbage is the default', () => {
-    expect(snapshotIntervalMs(undefined)).toBe(30_000)
-    expect(snapshotIntervalMs('')).toBe(30_000)
-    expect(snapshotIntervalMs('abc')).toBe(30_000)
+  test('MAMORU_SNAPSHOT_MS: 5 min by default, never under 10 s, garbage is the default', () => {
+    expect(snapshotIntervalMs(undefined)).toBe(300_000)
+    expect(snapshotIntervalMs('')).toBe(300_000)
+    expect(snapshotIntervalMs('abc')).toBe(300_000)
     expect(snapshotIntervalMs('-5')).toBe(10_000)
     expect(snapshotIntervalMs('0')).toBe(10_000)
     expect(snapshotIntervalMs('60000')).toBe(60_000)

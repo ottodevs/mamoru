@@ -364,7 +364,7 @@ describe('decision reads fall back only to trusted providers', () => {
 // Which loop of the operator made a request: told by the path the proxy is called on, counted apart from the provider.
 describe('requests by component', () => {
   test('componentOf: the closed set, anything else is unlabelled', () => {
-    expect(['/c/engine', '/c/watcher', '/c/operator', '/c/relayer', '/c/engine/'].map(componentOf)).toEqual(['engine', 'watcher', 'operator', 'relayer', 'engine'])
+    expect(['/c/engine', '/c/watcher', '/c/operator', '/c/relayer', '/c/snapshot', '/c/engine/'].map(componentOf)).toEqual(['engine', 'watcher', 'operator', 'relayer', 'snapshot', 'engine'])
     expect(['/', '', '/c/', '/c/attacker', '/c/engine/extra', '/c/ENGINE', '/x/engine'].map(componentOf)).toEqual(Array(7).fill('unlabelled'))
   })
 

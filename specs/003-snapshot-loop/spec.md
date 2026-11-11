@@ -51,7 +51,7 @@ accrued fees, owed, and total, plus every position with its amounts.
   explicitly (empty return from the Safe address in the batch, `eth_getCode` on retry), never inferred from a failure.
 - Over the keyed CU budget the loop slows to one read a minute, like the other loops that can wait.
 - Base only: the reader takes pools and tokens from the Base registry. Other chains wait for `registryFor(chainId)`.
-- `MAMORU_SNAPSHOT_MS`: default 30 s, never under 10 s.
+- `MAMORU_SNAPSHOT_MS`: default 5 min (the app pulls every 10 min), never under 10 s.
 
 ## Cost (Alchemy CU: `eth_blockNumber` 10, `eth_call` 26)
 
@@ -72,7 +72,7 @@ every 30 s is too much for the free keyed tier, so phase 3 changes what is re-re
   of up to 100k addresses), pools' `Swap` logs for prices and fee growth;
 - route the `snapshot` component to QuickNode (Build plan at 1.1% of 80M credits on 15 Oct).
 
-Default interval 30 s (`MAMORU_SNAPSHOT_MS`).
+Default interval 5 min (`MAMORU_SNAPSHOT_MS`).
 
 ## Storage (D1, `migrations/d1/0009_account_snapshots.sql`)
 

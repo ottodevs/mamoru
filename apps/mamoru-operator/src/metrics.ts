@@ -308,7 +308,7 @@ function componentView(b: Buckets): ComponentSnapshot {
 }
 
 /** Who made a request: the loops of the operator, as the loopback proxy is told by the path it was called on. A closed set. */
-export const COMPONENTS = ['engine', 'watcher', 'operator', 'relayer'] as const
+export const COMPONENTS = ['engine', 'watcher', 'operator', 'relayer', 'snapshot'] as const
 export type Component = (typeof COMPONENTS)[number] | 'unlabelled'
 
 export function componentOf(pathname: string): Component {
