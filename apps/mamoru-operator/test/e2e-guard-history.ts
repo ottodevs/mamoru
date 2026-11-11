@@ -2,7 +2,7 @@
 // oracle answer the full 24.5 h window `marketOf` needs, or does `observeGuardHistory` fall back to the rolling
 // series — and does that series survive a simulated restart. Prints the on-chain/fallback split and the request
 // count of the extra Multicall3 batch (the CU cost LC-T6 adds). Never touches the live operator.
-// Upstream: RPC_URL or BASE_RPC_URL from the environment only; a public Base RPC when neither is set.
+// Upstream: BASE_FORK_RPC_URL, default the public Base RPC; the keyed one only with E2E_ALLOW_KEYED=1. Pinned fork block.
 import { mkdtempSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,9 +11,10 @@ import { baseRegistry, entry } from '@mamoru/registry'
 import { MULTICALL3, observeGuardHistory, type PoolGuardTarget } from '@mamoru/rpc'
 import { assertNoKeyInArgv, sanitizedEnv } from '../../../packages/scenarios/fork/anvil.ts'
 import { startForkProxy } from '../../../packages/scenarios/proxy/index.ts'
+import { forkBlockArgs, useBaseForkRpc } from './fork-upstream.ts'
 import { GuardHistoryStore } from '../src/guard-history-state.ts'
 
-if (!process.env.RPC_URL) process.env.RPC_URL = process.env.BASE_RPC_URL ?? 'https://mainnet.base.org'
+useBaseForkRpc()
 const WINDOW_SECONDS = 1_800
 const LIVE_POOLS = ['pool:USDC/USDT/100', 'pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000'] as const
 const log = (m: string) => console.log(`[guard-history] ${m}`)
@@ -23,7 +24,7 @@ const anvilBin = Bun.which('anvil') ?? join(homedir(), '.foundry/bin/anvil')
 const probe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
 const port = probe.port as number
 probe.stop(true)
-const argv = ['--fork-url', proxy.url, '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--no-request-size-limit']
+const argv = ['--fork-url', proxy.url, ...forkBlockArgs(), '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--no-request-size-limit']
 assertNoKeyInArgv(argv, ['RPC_URL', 'BASE_RPC_URL'])
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-guard-history-e2e-'))
 const anvil = Bun.spawn([anvilBin, ...argv], { stdout: Bun.file(join(dir, 'anvil.log')), stderr: Bun.file(join(dir, 'anvil.log')), env: sanitizedEnv() })

@@ -12,6 +12,24 @@ export const RATE_LIMIT_WAIT_MS = 40_000
 
 export type ForkProxy = { url: string; requests: () => number; stop: () => void }
 
+/** Hosts of keyed providers: every fork read there is billed (a QuickNode credit each), and a head fork re-reads all of it. */
+const KEYED_HOST = /(^|\.)quiknode\.pro$/i
+
+/**
+ * A fork run reads hundreds of thousands of slots, so the keyed provider is refused unless E2E_ALLOW_KEYED=1. The URL
+ * is never in the message: only the name of the variable that holds it.
+ */
+export function assertNotKeyed(upstream: string, envVar: string, env: Record<string, string | undefined> = process.env): void {
+  if (env.E2E_ALLOW_KEYED === '1') return
+  let host = ''
+  try {
+    host = new URL(upstream).hostname
+  } catch {
+    return
+  }
+  if (KEYED_HOST.test(host)) throw new Error(`${envVar} is a keyed provider (billed per call): fork from a public RPC, or set E2E_ALLOW_KEYED=1 to use it on purpose`)
+}
+
 /**
  * Loopback proxy that anvil forks from. The upstream URL is read from the
  * environment inside this process and never leaves it: not in argv, not in
@@ -20,6 +38,7 @@ export type ForkProxy = { url: string; requests: () => number; stop: () => void 
 export function startForkProxy(envVar = 'RPC_URL'): ForkProxy {
   const upstream = process.env[envVar]
   if (!upstream) throw new Error(`${envVar} is not set`)
+  assertNotKeyed(upstream, envVar)
   let count = 0
   const server: Server<undefined> = Bun.serve({
     hostname: LOOPBACK,

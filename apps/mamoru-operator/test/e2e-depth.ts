@@ -3,10 +3,10 @@
 // (the signed cap C a renewed account would have, so the policy's spending windows bind as in production), Start is not refused by size, the engine places what each pool's depth
 // allows and reports the rest as waiting (DECIDE_WAIT_DEPTH), then the owner's Stop brings everything back as USDC.
 // Opt-in, not in CI: a cold fork of Base and up to 10 min. Same harness as e2e-fork.ts (anvil fork of Base keeping
-// chain id 8453, upstream from RPC_URL or BASE_RPC_URL or ~/.config/mamoru-operator/env, the operator behind the
+// chain id 8453, upstream BASE_FORK_RPC_URL (default the public Base RPC; the keyed one only with E2E_ALLOW_KEYED=1), the operator behind the
 // engine port that refuses anvil_* methods). Run: DEPOSIT_USDC=100000 bun test/e2e-depth.ts
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { toHex } from 'viem'
@@ -25,15 +25,9 @@ import { bootOperator } from '../src/boot.ts'
 import { DEFAULT_SPONSOR, SPONSOR_BOUNDS, type SponsorPolicy } from '../src/sponsorship.ts'
 import { signedCall, warmPrepare } from './e2e-client.ts'
 import { catchUpClock, forkUpstreamArgs, fundUsdc } from './fork-funding.ts'
+import { forkBlockArgs, useBaseForkRpc } from './fork-upstream.ts'
 
-const envFile = join(homedir(), '.config/mamoru-operator/env')
-if (!process.env.RPC_URL && existsSync(envFile)) {
-  for (const line of readFileSync(envFile, 'utf8').split('\n')) {
-    const m = /^\s*(?:export\s+)?([A-Z0-9_]+)=(.*)$/.exec(line)
-    if (m && process.env[m[1]!] === undefined) process.env[m[1]!] = m[2]!.replace(/^["']|["']$/g, '')
-  }
-}
-if (!process.env.RPC_URL && process.env.BASE_RPC_URL) process.env.RPC_URL = process.env.BASE_RPC_URL
+useBaseForkRpc()
 
 const DEPOSIT = BigInt(process.env.DEPOSIT_USDC ?? '10000') * 1_000_000n
 const POLICY = process.env.MAMORU_POLICY ?? 'conservador-live-v5'
@@ -68,7 +62,7 @@ const anvilBin = process.env.ANVIL_BIN ?? Bun.which('anvil') ?? join(homedir(), 
 const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
 const port = portProbe.port as number
 portProbe.stop(true)
-const argv = ['--fork-url', proxy.url, ...forkUpstreamArgs(), '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
+const argv = ['--fork-url', proxy.url, ...forkBlockArgs(), ...forkUpstreamArgs(), '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
 assertNoKeyInArgv(argv, ['RPC_URL', 'BASE_RPC_URL'])
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-operator-e2e-'))
 const anvil = Bun.spawn([anvilBin, ...argv], { stdout: Bun.file(join(dir, 'anvil.log')), stderr: Bun.file(join(dir, 'anvil.log')), env: sanitizedEnv() })

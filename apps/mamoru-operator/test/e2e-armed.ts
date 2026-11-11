@@ -1,10 +1,10 @@
 // E2E of armed activation: the owner signs with 0 USDC, the deposit lands later, the operator executes alone.
 // Same harness as e2e-fork.ts: E2E of the live operator on an anvil fork of Base that keeps chain id 8453.
-// The upstream RPC comes from the environment only (RPC_URL or BASE_RPC_URL, or ~/.config/mamoru-operator/env)
+// The upstream RPC comes from the environment only (BASE_FORK_RPC_URL, default the public Base RPC; the keyed one only with E2E_ALLOW_KEYED=1)
 // and reaches anvil through a loopback proxy; the operator talks to anvil through the engine port, which
 // refuses anvil_* methods. Blocks advance by themselves (--block-time 1), so the operator runs unchanged.
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { toHex, type Hex } from 'viem'
@@ -20,16 +20,10 @@ import { WHALE } from '../../../packages/scenarios/fixtures/world.ts'
 import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/webauthn/index.ts'
 import { bootOperator } from '../src/boot.ts'
 import { signedCall } from './e2e-client.ts'
-import { forkUpstreamArgs } from './fork-funding.ts'
+import { catchUpClock, forkUpstreamArgs } from './fork-funding.ts'
+import { forkBlockArgs, useBaseForkRpc } from './fork-upstream.ts'
 
-const envFile = join(homedir(), '.config/mamoru-operator/env')
-if (!process.env.RPC_URL && existsSync(envFile)) {
-  for (const line of readFileSync(envFile, 'utf8').split('\n')) {
-    const m = /^\s*(?:export\s+)?([A-Z0-9_]+)=(.*)$/.exec(line)
-    if (m && process.env[m[1]!] === undefined) process.env[m[1]!] = m[2]!.replace(/^["']|["']$/g, '')
-  }
-}
-if (!process.env.RPC_URL && process.env.BASE_RPC_URL) process.env.RPC_URL = process.env.BASE_RPC_URL
+useBaseForkRpc()
 
 const DEPOSIT = 10_000_000n
 const t0 = Date.now()
@@ -45,7 +39,7 @@ const anvilBin = Bun.which('anvil') ?? join(homedir(), '.foundry/bin/anvil')
 const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
 const port = portProbe.port as number
 portProbe.stop(true)
-const argv = ['--fork-url', proxy.url, ...forkUpstreamArgs(), '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
+const argv = ['--fork-url', proxy.url, ...forkBlockArgs(), ...forkUpstreamArgs(), '--chain-id', '8453', '--host', '127.0.0.1', '--port', String(port), '--slots-in-an-epoch', '1', '--block-time', '1', '--no-request-size-limit']
 assertNoKeyInArgv(argv, ['RPC_URL', 'BASE_RPC_URL'])
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-operator-e2e-'))
 const anvil = Bun.spawn([anvilBin, ...argv], { stdout: Bun.file(join(dir, 'anvil.log')), stderr: Bun.file(join(dir, 'anvil.log')), env: sanitizedEnv() })
@@ -72,6 +66,7 @@ const cleanup = async () => {
 
 try {
   log(`fork of Base at block ${await lab.client.getBlockNumber()}, chain ${await lab.client.getChainId()}`)
+  await catchUpClock(lab)
 
   // --- the account, as the Worker would describe it ------------------------
   const passkey = new SoftwarePasskey(PASSKEY_SCALARS.a1)

@@ -1,5 +1,5 @@
 // Runs every e2e-*.ts one after the other, each under a timeout, and prints a PASS/FAIL table. Exit 1 when any fails.
-// Needs foundry on PATH and RPC_URL, BASE_RPC_URL, BASE_FORK_RPC_URL, L1_RPC_URL (public ones work). E2E_TIMEOUT_S: per script (default 900).
+// Needs foundry on PATH and BASE_FORK_RPC_URL, L1_RPC_URL (public ones work; both default to public RPCs where the script has a default). BASE_RPC_URL/RPC_URL are not read unless E2E_ALLOW_KEYED=1. E2E_FORK_BLOCK pins the Base fork block. E2E_TIMEOUT_S: per script (default 900).
 // Usage: bun run e2e:all [name ...]   (names without the e2e- prefix, e.g. fork v4)
 import { spawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync } from 'node:fs'
