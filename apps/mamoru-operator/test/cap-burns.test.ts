@@ -456,29 +456,45 @@ describe('otto/mamoru#332 review r2', () => {
 
 describe('a remote Safe is held to the account cap its home answers (otto/mamoru#382)', () => {
   type Caps = { effectiveCap(a: AccountState): bigint }
-  test('the Monad engine takes the home cap for the account total and its own cap for what it places', async () => {
+  /** Brais's Base account names his Monad Safe as its remote Safe; the other account of the same owner names another. */
+  const linked = () => {
     const s = setup()
     s.baseAcc.signedCapUsdc = (10_000n * USDC).toString()
     s.monadAcc.signedCapUsdc = (50n * USDC).toString()
-    const home = (s.base as unknown as Caps).effectiveCap(s.baseAcc)
-    const own = (s.monad as unknown as Caps).effectiveCap(s.monadAcc)
-    expect(own).toBeLessThan(home)
-    // The home answers its account's cap for its own Safe only; the Monad Safe answers none.
-    expect((await s.base.exposureFor(BASE_SAFE)).capUsdc).toBe(home.toString())
-    expect((await s.base.exposureFor(MONAD_SAFE)).capUsdc).toBeUndefined()
+    s.baseAcc.remote = { chainId: 143, address: MONAD_SAFE, permissionIds: [] } as unknown as AccountState['remote']
+    const other = getAddress('0x00000000000000000000000000000000000c0ffe')
+    const otherAcc = { ...structuredClone(s.baseAcc), accountKey: 'other', ctx: ctxOf('other', 8453, other), signedCapUsdc: '1', remote: { chainId: 143, address: getAddress('0x00000000000000000000000000000000000b0b0b'), permissionIds: [] } } as unknown as AccountState
+    ;(s.base as unknown as { store: StateStore }).store.state.accounts.other = otherAcc
+    return { ...s, home: (s.base as unknown as Caps).effectiveCap(s.baseAcc), own: (s.monad as unknown as Caps).effectiveCap(s.monadAcc), otherAcc }
+  }
+
+  test('the Monad engine takes its home account cap for the account total and its own cap for what it places', async () => {
+    const s = linked()
+    expect(s.own).toBeLessThan(s.home)
+    // The home answers the cap only when asked for its account's remote Safe; never for its own Safe or another address.
+    expect((await s.base.exposureFor(MONAD_SAFE)).capUsdc).toBe(s.home.toString())
+    expect((await s.base.exposureFor(BASE_SAFE)).capUsdc).toBeUndefined()
+    // A Monad operator never answers one.
     expect((await s.monad.exposureFor(MONAD_SAFE)).capUsdc).toBeUndefined()
     // The home holds more than the Monad Safe's own cap: its total is still counted, against the account's cap.
-    expect(await s.m.engineCap(s.monadAcc, s.chains.monadBlock)).toEqual({ capUsdc: home, elsewhereUsdc: TRUE, chainCapUsdc: own })
+    expect(await s.m.engineCap(s.monadAcc, s.chains.monadBlock)).toEqual({ capUsdc: s.home, elsewhereUsdc: TRUE, chainCapUsdc: s.own })
     // Base itself never takes a peer's cap.
     s.b.enginePeers.set('brais', await s.b.peerRead(s.baseAcc, 2_000))
-    expect(await s.b.engineCap(s.baseAcc, s.chains.baseBlock)).toEqual({ capUsdc: home, elsewhereUsdc: 0n })
+    expect(await s.b.engineCap(s.baseAcc, s.chains.baseBlock)).toEqual({ capUsdc: s.home, elsewhereUsdc: 0n })
+  })
+
+  test("another account of the same owner, with a lower cap, does not bound this remote Safe", async () => {
+    const s = linked()
+    const lower = (s.base as unknown as Caps).effectiveCap(s.otherAcc)
+    expect(lower).toBeLessThan(s.home)
+    expect((await s.m.engineCap(s.monadAcc, s.chains.monadBlock)).capUsdc).toBe(s.home)
   })
 
   test('a home that is not running the account answers no cap: the remote cap alone, as before', async () => {
-    const s = setup()
+    const s = linked()
     s.baseAcc.active = false
-    const own = (s.monad as unknown as Caps).effectiveCap(s.monadAcc)
-    expect(await s.m.engineCap(s.monadAcc, s.chains.monadBlock)).toEqual({ capUsdc: own, elsewhereUsdc: TRUE })
+    expect((await s.base.exposureFor(MONAD_SAFE)).capUsdc).toBeUndefined()
+    expect(await s.m.engineCap(s.monadAcc, s.chains.monadBlock)).toEqual({ capUsdc: s.own, elsewhereUsdc: TRUE })
   })
 
   test('a malformed cap in an answer fails the read (nothing new is placed)', async () => {

@@ -31,8 +31,10 @@ export function capRoomOf(obs: Observation, policy: PolicyVersion): bigint | nul
   let left = cap.elsewhereUsdc === null || obs.vaultsUnread?.length ? 0n : cap.capUsdc - cap.elsewhereUsdc - placed
   // A remote Safe places within its own cap as well as the account's.
   if (cap.chainCapUsdc !== undefined && cap.chainCapUsdc - placed < left) left = cap.chainCapUsdc - placed
-  // What the engine's own re-range or reduce took out goes back in, even above the cap or with a chain unread.
-  return left > reinvest ? left : reinvest
+  // What the engine's own re-range or reduce took out goes back in, even above the cap or with a chain unread; never
+  // above this Safe's own cap (otto/mamoru#382).
+  const back = cap.chainCapUsdc !== undefined && cap.chainCapUsdc - placed < reinvest ? (cap.chainCapUsdc > placed ? cap.chainCapUsdc - placed : 0n) : reinvest
+  return left > back ? left : back
 }
 
 /**

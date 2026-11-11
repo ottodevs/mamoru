@@ -126,6 +126,9 @@ describe('otto/mamoru#212: placing within the cap', () => {
     expect(capRoomOf({ ...o, cap: { capUsdc: 1_200n * USDC, elsewhereUsdc: 1_000n * USDC, chainCapUsdc: 500n * USDC } }, V2)).toBe(200n * USDC)
     // A chain read failing still places nothing new.
     expect(capRoomOf({ ...o, cap: { capUsdc: 10_000n * USDC, elsewhereUsdc: null, chainCapUsdc: 500n * USDC } }, V2)).toBe(0n)
+    // What a re-range freed goes back in above the account cap, but never above this Safe's own cap.
+    expect(capRoomOf({ ...o, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 1_000n * USDC, chainCapUsdc: 500n * USDC, reinvestUsdc: 800n * USDC } }, V2)).toBe(500n * USDC)
+    expect(capRoomOf({ ...o, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 1_000n * USDC, chainCapUsdc: 500n * USDC, reinvestUsdc: 300n * USDC } }, V2)).toBe(300n * USDC)
   })
 
   test('another chain that could not be read: nothing new is placed (fail closed)', () => {

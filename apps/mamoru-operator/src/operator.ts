@@ -1737,9 +1737,11 @@ export class Operator {
     // otto/mamoru#355: the review counts its own Safe at the observation's block.
     const elsewhereUsdc = this.elsewhereOf(acc, peers, { safe: getAddress(acc.ctx.address), block: observedBlock })
     // otto/mamoru#382: a remote Safe's own cap is its home's bridge-out total, not the account's. The total above is the
-    // account's, so it is held to the account's cap its home answers (the lowest, if several), and what this Safe places
-    // to its own. A home on older code answers no cap: then the remote cap alone, as before.
-    const homeCaps = this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID && peers.ok ? peers.chains.flatMap((e) => (e.chainId !== this.cfg.chainId && e.active && e.capUsdc !== undefined ? [e.capUsdc] : [])) : []
+    // account's, so it is held to the account's cap, which the home answers when asked for this very Safe (the account
+    // whose remote Safe it is), and what this Safe places to its own. No cap answered (a home on older code, or not
+    // running the account): the remote cap alone, as before.
+    const own = getAddress(acc.ctx.address).toLowerCase()
+    const homeCaps = this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID && peers.ok ? peers.chains.flatMap((e) => (e.chainId !== this.cfg.chainId && e.at?.safe.toLowerCase() === own && e.capUsdc !== undefined ? [e.capUsdc] : [])) : []
     if (!homeCaps.length) return { capUsdc: this.effectiveCap(acc), elsewhereUsdc }
     return { capUsdc: homeCaps.reduce((a, b) => (b < a ? b : a)), elsewhereUsdc, chainCapUsdc: this.effectiveCap(acc) }
   }
@@ -1760,6 +1762,16 @@ export class Operator {
     // unread and places nothing new, never a total that leaves the vault out.
     if (r.vaultsUnread?.length) throw capCheckUnavailable()
     const e = this.localExposure(acc, r)
+    // otto/mamoru#382: asked for the remote Safe of an account running here, its home answers that account's cap (the
+    // lowest, should two name it), for the remote Safe to place within. Only a home chain answers one.
+    let homeCap: bigint | undefined
+    if (this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID) {
+      for (const a of Object.values(this.store.state.accounts)) {
+        if (!a.active || a.remote?.address.toLowerCase() !== safe.toLowerCase()) continue
+        const c = this.effectiveCap(a)
+        if (homeCap === undefined || c < homeCap) homeCap = c
+      }
+    }
     // otto/mamoru#332 (Base): the account's burns to Monad not yet in the caller's own read (`covered`, the Safe and Monad
     // block the caller's total uses), as idle USDC on its way. Asked without one (the older path): every burn not failed.
     // By source Safe: the burns that left this very address, whether or not an account here still names it.
@@ -1789,8 +1801,7 @@ export class Operator {
       active: e.active,
       releases,
       ...(returns?.ids.length ? { returns: returns.ids } : {}),
-      // otto/mamoru#382: the account's cap, for a remote Safe of it to place within (only a home chain answers one).
-      ...(acc?.active && this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID ? { capUsdc: this.effectiveCap(acc).toString() } : {}),
+      ...(homeCap !== undefined ? { capUsdc: homeCap.toString() } : {}),
     }
   }
 
