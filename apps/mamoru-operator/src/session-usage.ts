@@ -4,6 +4,7 @@ import { encodeAbiParameters, encodePacked, hexToBigInt, keccak256, parseAbi, to
 import type { Address } from '@mamoru/domain'
 import { baseRegistry, address, type Registry } from '@mamoru/registry'
 import type { SessionGrant } from '@mamoru/policy'
+import { Batch, contractRead, multicall3Of, type Read } from '@mamoru/rpc'
 
 const USAGE_LIMIT_ABI = parseAbi(['function usageLimitConfigs(bytes32 id, address multiplexer, address account) view returns (uint128 limit, uint128 used)'])
 
@@ -16,6 +17,8 @@ export type ChainUsage = { used: number; spentBps: number | null; cumulative?: {
 type Reader = {
   readContract(args: { address: Address; abi: typeof USAGE_LIMIT_ABI; functionName: 'usageLimitConfigs'; args: readonly [Hex, Address, Address]; blockNumber?: bigint }): Promise<readonly [bigint, bigint]>
   getStorageAt(args: { address: Address; slot: Hex; blockNumber?: bigint }): Promise<Hex | undefined>
+  /** Present on a real client: the reads of a batch go through it as one Multicall3 call. */
+  call?: unknown
 }
 
 /** Smart Sessions IdLib: a userOp policy's config id is keccak(account, permissionId). */
@@ -43,20 +46,35 @@ export function cumulativeLimitSlot(configId: Hex, multiplexer: Address, account
   return base + 2n + 4n * BigInt(rule) + 2n
 }
 
+/** What `readChainUsage` may be told: the Multicall3 of the chain (default: the registry's); null reads every counter on its own. */
+export type ChainUsageOptions = { multicall3?: Address | null }
+
 /**
  * Uses of every grant, and its fullest cumulative rule in basis points of its cap, as the chain counts them. A grant
  * whose read fails, or whose limit on chain is not the one it was signed with, is left out (the caller falls back
  * on its own count).
+ *
+ * The `usageLimitConfigs` reads of all grants go out as Multicall3.aggregate3 at the one block (a handful of requests
+ * whatever the number of grants); a read that fails inside the batch is run again on its own and fails the same way
+ * it would have alone. The cumulative rules' counters are storage slots: `eth_getStorageAt` cannot ride Multicall3.
  */
 /** `blockNumber`: otto/mamoru#376, every counter read at that one block (absent: latest, as before). */
-export async function readChainUsage(client: Reader, account: Address, grants: readonly { permissionId: Hex; grant: SessionGrant }[], registry: Registry = baseRegistry, blockNumber?: bigint): Promise<Map<string, ChainUsage>> {
+export async function readChainUsage(
+  client: Reader,
+  account: Address,
+  grants: readonly { permissionId: Hex; grant: SessionGrant }[],
+  registry: Registry = baseRegistry,
+  blockNumber?: bigint,
+  opts: ChainUsageOptions = {},
+): Promise<Map<string, ChainUsage>> {
   const at = blockNumber === undefined ? {} : { blockNumber }
   const multiplexer = address('SmartSession', registry)
   const out = new Map<string, ChainUsage>()
+  const configs = await readConfigs(client, account, grants, registry, multiplexer, blockNumber, opts.multicall3 === undefined ? multicall3Of(registry) : opts.multicall3)
   await Promise.all(
-    grants.map(async (g) => {
+    grants.map(async (g, gi) => {
       try {
-        const [limit, used] = await client.readContract({ address: address('UsageLimitPolicy', registry), abi: USAGE_LIMIT_ABI, functionName: 'usageLimitConfigs', args: [userOpConfigId(account, g.permissionId), multiplexer, account], ...at })
+        const [limit, used] = await configs[gi]!.need()
         if (limit !== BigInt(g.grant.userOp.usageLimit)) return
         let spentBps: number | null = null
         const cumulative: { limit: bigint; used: bigint }[] = []
@@ -64,7 +82,11 @@ export async function readChainUsage(client: Reader, account: Address, grants: r
           for (const [ri, rule] of a.params.entries()) {
             if (rule.cumulativeLimit === undefined) continue
             const slot = cumulativeLimitSlot(actionConfigId(account, g.permissionId, a.targetAddress, a.selector), multiplexer, account, ri)
-            const [l, u] = await Promise.all([client.getStorageAt({ address: address('UniActionPolicy', registry), slot: toHex(slot, { size: 32 }), ...at }), client.getStorageAt({ address: address('UniActionPolicy', registry), slot: toHex(slot + 1n, { size: 32 }), ...at })])
+            const policy = address('UniActionPolicy', registry)
+            const [l, u] = await Promise.all([
+              client.getStorageAt({ address: policy, slot: toHex(slot, { size: 32 }), ...at }),
+              client.getStorageAt({ address: policy, slot: toHex(slot + 1n, { size: 32 }), ...at }),
+            ])
             if (!l || !u || hexToBigInt(l) !== rule.cumulativeLimit) return
             cumulative.push({ limit: rule.cumulativeLimit, used: hexToBigInt(u) })
             const bps = rule.cumulativeLimit === 0n ? 10_000 : Number((hexToBigInt(u) * 10_000n) / rule.cumulativeLimit)
@@ -78,6 +100,31 @@ export async function readChainUsage(client: Reader, account: Address, grants: r
     }),
   )
   return out
+}
+
+/**
+ * `usageLimitConfigs` of every grant at one block, through Multicall3 when the client can `call` and the chain pins one.
+ * When the batch request itself fails, each read goes out on its own, as before batching: one bad answer never costs
+ * the others.
+ */
+async function readConfigs(client: Reader, account: Address, grants: readonly { permissionId: Hex; grant: SessionGrant }[], registry: Registry, multiplexer: Address, blockNumber: bigint | undefined, multicall3: Address | null) {
+  const policy = address('UsageLimitPolicy', registry)
+  const reads = (batch: Batch) =>
+    grants.map((g) => batch.add(contractRead(client as never, { address: policy, abi: USAGE_LIMIT_ABI, functionName: 'usageLimitConfigs', args: [userOpConfigId(account, g.permissionId), multiplexer, account], ...(blockNumber === undefined ? {} : { blockNumber }) } as never) as Read<readonly [bigint, bigint]>))
+  if (multicall3 !== null && typeof (client as { call?: unknown }).call === 'function') {
+    const batch = new Batch(client as never, multicall3, blockNumber)
+    const handles = reads(batch)
+    try {
+      await batch.run()
+      return handles
+    } catch {
+      // The aggregate request failed (provider error, oversized answer): fall through to one read per grant.
+    }
+  }
+  const alone = new Batch(client as never, null, blockNumber)
+  const handles = reads(alone)
+  await alone.run()
+  return handles
 }
 
 const POLICY_BUDGET_ABI = parseAbi([
