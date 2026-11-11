@@ -124,6 +124,15 @@ describe('usage counters through Multicall3', () => {
     expect(b.counts.readContract).toBe(1)
   })
 
+  test('a grant whose read cannot be built (malformed permission id) is left out alone, the others stay', async () => {
+    const bad = { ...GRANTS[1]!, permissionId: '0x1234' as Hex }
+    for (const withCall of [true, false]) {
+      const b = batchedChain({ withCall })
+      const u = await readChainUsage(b.client as never, ACCOUNT, [GRANTS[0]!, bad, GRANTS[2]!])
+      expect([...u.keys()].sort()).toEqual([PIDS[0]!, PIDS[2]!])
+    }
+  })
+
   test('when the batch request itself fails, each read goes out on its own', async () => {
     const b = batchedChain({ batchFails: true })
     const u = await readChainUsage(b.client as never, ACCOUNT, GRANTS)

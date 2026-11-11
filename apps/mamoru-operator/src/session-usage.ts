@@ -4,7 +4,7 @@ import { encodeAbiParameters, encodePacked, hexToBigInt, keccak256, parseAbi, to
 import type { Address } from '@mamoru/domain'
 import { baseRegistry, address, type Registry } from '@mamoru/registry'
 import type { SessionGrant } from '@mamoru/policy'
-import { Batch, contractRead, multicall3Of, type Read } from '@mamoru/rpc'
+import { Batch, contractRead, multicall3Of, type Handle, type Read } from '@mamoru/rpc'
 
 const USAGE_LIMIT_ABI = parseAbi(['function usageLimitConfigs(bytes32 id, address multiplexer, address account) view returns (uint128 limit, uint128 used)'])
 
@@ -109,8 +109,15 @@ export async function readChainUsage(
  */
 async function readConfigs(client: Reader, account: Address, grants: readonly { permissionId: Hex; grant: SessionGrant }[], registry: Registry, multiplexer: Address, blockNumber: bigint | undefined, multicall3: Address | null) {
   const policy = address('UsageLimitPolicy', registry)
-  const reads = (batch: Batch) =>
-    grants.map((g) => batch.add(contractRead(client as never, { address: policy, abi: USAGE_LIMIT_ABI, functionName: 'usageLimitConfigs', args: [userOpConfigId(account, g.permissionId), multiplexer, account], ...(blockNumber === undefined ? {} : { blockNumber }) } as never) as Read<readonly [bigint, bigint]>))
+  // A grant whose read cannot even be built (a malformed stored permissionId) fails alone, in its own need().
+  const reads = (batch: Batch): Pick<Handle<readonly [bigint, bigint]>, 'need'>[] =>
+    grants.map((g) => {
+      try {
+        return batch.add(contractRead(client as never, { address: policy, abi: USAGE_LIMIT_ABI, functionName: 'usageLimitConfigs', args: [userOpConfigId(account, g.permissionId), multiplexer, account], ...(blockNumber === undefined ? {} : { blockNumber }) } as never) as Read<readonly [bigint, bigint]>)
+      } catch (e) {
+        return { need: () => Promise.reject(e) }
+      }
+    })
   if (multicall3 !== null && typeof (client as { call?: unknown }).call === 'function') {
     const batch = new Batch(client as never, multicall3, blockNumber)
     const handles = reads(batch)
