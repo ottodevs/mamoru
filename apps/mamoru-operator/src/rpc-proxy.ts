@@ -501,6 +501,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    */
   async function chunkFrom(p: LogProvider, filter: any, a: bigint, b: bigint, isChunk: boolean, retryUntil: number | null, deadline?: number): Promise<unknown> {
     for (let k = 0; ; k++) {
+      if (k > 0) inTime(deadline)
       try {
         // A retry waits for its answer at most RATE_RETRY_ASK_MS: it never holds the range much past the retry window.
         return await ask(p.url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], isChunk, k === 0 ? leftOf(deadline) : Math.min(leftOf(deadline), RATE_RETRY_ASK_MS))
@@ -596,6 +597,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     // Review of #398: the whole request answers within LOGS_REQUEST_MS, every ask in it bounded by what is left (the caller
     // times out at 60 s; before, sequential provider asks of up to 30 s each could outlast it).
     const deadline = Date.now() + (opts.logsRequestMs ?? LOGS_REQUEST_MS)
+    // Retries end before the deadline does, whatever the two are set to.
+    const retryWindow = retryUntil < deadline ? retryUntil : deadline
     const span = to - from + 1n
     const requests = (p: LogProvider) => (Number.isFinite(p.logRange) ? (span + BigInt(p.logRange) - 1n) / BigInt(p.logRange) : 1n)
     const tier = (p: LogProvider, n: bigint) => (trusted.includes(p.url) && n <= TRUSTED_LOG_MAX_REQUESTS ? 0 : 1)
@@ -616,7 +619,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
           last ??= { code: -32603, message: 'eth_getLogs: no provider answered within the request deadline' }
           break
         }
-        const logs = await verifiedLogs(p, filter, from, to, seen, k < order.length ? retryUntil : null, deadline)
+        const logs = await verifiedLogs(p, filter, from, to, seen, k < order.length ? retryWindow : null, deadline)
         if (metrics) safeMetrics(() => metrics.recordLogRange(label, 'accepted'))
         return logs
       } catch (e) {

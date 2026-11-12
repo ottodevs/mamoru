@@ -195,6 +195,19 @@ describe('eth_getLogs routing by provider range', () => {
     }
   })
 
+  test('a rate-limited upstream chunk is not asked again when the wait would cross the request deadline (review of #398)', async () => {
+    const w = world(LOGS)
+    w.providers[ALCHEMY]!.limited = () => true
+    const proxy = startRpcProxy(ALCHEMY, { fetch: w.fetch, fallbacks: FALLBACKS, logRanges: {}, logsRequestMs: 200 })
+    try {
+      const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ address: '0x01', fromBlock: hex(1000), toBlock: hex(1009) }] }) })
+      void (await res.json())
+      expect(w.logsCalls(ALCHEMY).length).toBe(1)
+    } finally {
+      proxy.stop()
+    }
+  })
+
   test('a provider that fails midway through a chunked range is dropped whole: the next one reads the whole range, no gaps, no duplicates', async () => {
     const w = world(LOGS)
     w.providers[DRPC]!.down = true
