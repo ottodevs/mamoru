@@ -566,8 +566,10 @@ export async function bootOperator(o: BootOptions) {
   // those that answered here are proven already.
   const chain = await proveChain([o.rpcUrl, ...trustedFromEnv()])
   if (!chain) throw new Error('neither BASE_RPC_URL (RPC_URL) nor MAMORU_RPC_TRUSTED answered eth_chainId')
-  // otto/mamoru#367: on Monad the 10-block keyed fallback serves no log range that takes it more than 4 requests.
-  const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics, chainId: chain.chainId, proven: chain.proven, ...(chain.chainId === BRIDGE_MONAD_CHAIN_ID ? { keyedLogMaxRequests: 4n } : {}) })
+  // otto/mamoru#367, #388: the 10-block keyed fallback serves no log range that takes it more than 4 requests, on any
+  // chain. On Base an archive range fell through to it after the upstream (QuickNode since 2 Nov) failed: 8,172 chunks
+  // and about 617k Alchemy CU in one hour on 11 Nov, against a 40k budget, and still no answer.
+  const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics, chainId: chain.chainId, proven: chain.proven, keyedLogMaxRequests: 4n })
   // One path per component, for the counters only: the proxy serves them all the same way.
   const via = (component: string) => `${proxy.url}c/${component}`
   o = { ...o, rpcUrl: via('engine') }
