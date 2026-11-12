@@ -315,6 +315,9 @@ export function providerWords(message: unknown): string {
   return redactSecrets(words.map((w) => (ADDRESS_PART_RE.test(w) && !DECIMAL_RE.test(w) ? '[redacted]' : w)).join(' '))
 }
 
+/** otto/mamoru#398: waits before asking a rate-limited log chunk again of the same provider (then it fails as before). */
+export const RATE_RETRY_MS = [300, 1_000]
+
 export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { url: string; stop: () => void } {
   const providerTimeoutMs = opts.providerTimeoutMs ?? 30_000
   const rawSend = opts.fetch ?? fetch
@@ -456,7 +459,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const rpc = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
     if (!rpc) return r.json.result
     if (metrics) safeMetrics(() => metrics.recordError(label, method, classifyRpcError(r.status, rpc)))
-    throw Object.assign(new Error(String(rpc.message)), { rpc })
+    throw Object.assign(new Error(String(rpc.message)), { rpc, status: r.status })
   }
   const ranges = (from: bigint, to: bigint, size: number): [bigint, bigint][] => {
     if (!Number.isFinite(size)) return [[from, to]]
@@ -474,12 +477,28 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   }
   type Rejection = Exclude<LogRangeOutcome, 'accepted'>
   const fail = (message: string, reason: Rejection = 'provider_error') => Object.assign(new Error(message), { rpc: { code: -32603, message }, reason })
+  /**
+   * otto/mamoru#398: one chunk, asked again of the upstream after a short wait when it answers that it is over its rate
+   * (a per-second limit, gone a moment later). Live 12 Nov on Base: the upstream rate-limited ~10% of a catch-up's chunks,
+   * each failed the whole range, and the public fallbacks cannot serve archive ranges, so the read never ended. Only the
+   * upstream: a fallback over its rate is passed over at once, as before, so a range every provider refuses fails fast.
+   */
+  async function chunkFrom(p: LogProvider, filter: any, a: bigint, b: bigint, isChunk: boolean): Promise<unknown> {
+    for (let k = 0; ; k++) {
+      try {
+        return await ask(p.url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], isChunk)
+      } catch (e) {
+        if (p.url !== upstream || k >= RATE_RETRY_MS.length || classifyRpcError((e as any).status, (e as any).rpc) !== 'rateCapacity') throw e
+        await Bun.sleep(RATE_RETRY_MS[k]!)
+      }
+    }
+  }
   /** The whole range from one provider, in chunks it accepts. Any failed chunk fails the provider: providers are never mixed inside one range. */
   async function logsFrom(p: LogProvider, filter: any, from: bigint, to: bigint): Promise<unknown[]> {
     const chunks = ranges(from, to, p.logRange)
     const out: unknown[] = []
     for (let i = 0; i < chunks.length; i += 4) {
-      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => ask(p.url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], chunks.length > 1)))
+      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => chunkFrom(p, filter, a, b, chunks.length > 1)))
       for (const logs of part) {
         if (!Array.isArray(logs)) throw fail('eth_getLogs answered no list')
         out.push(...logs)

@@ -22,6 +22,8 @@ type Provider = {
   forkLogs?: Log[]
   down?: boolean
   failAt?: (from: number, to: number) => boolean
+  /** otto/mamoru#398: answers this request that it is over its rate (HTTP 429). */
+  limited?: (from: number, to: number) => boolean
   calls: Call[]
 }
 
@@ -58,6 +60,7 @@ function world(logs: Log[]) {
     p.calls.push({ method: body.method, from, to })
     if (p.down) return refuse(-32603, 'service unavailable', 503)
     if (to - from + 1 > p.limit) return refuse(-32602, `query exceeds max block range ${p.limit}`)
+    if (p.limited?.(from, to)) return refuse(429, 'Too many requests, please retry', 429)
     if (p.failAt?.(from, to)) return refuse(-32000, 'Archive requests require a personal token')
     const visible = forkFrom === undefined ? logs : [...logs.filter((l) => Number(l.blockNumber) < forkFrom), ...(p.forkLogs ?? [])]
     const last = Math.min(to, p.head)
@@ -121,6 +124,29 @@ describe('eth_getLogs routing by provider range', () => {
     expect(r.result).toEqual(inOrder(1000, 1149))
     expect(w.logsCalls(PUBLICNODE).length).toBe(1)
     expect(w.logsCalls(DRPC)).toEqual([{ method: 'eth_getLogs', from: 1000, to: 1149 }])
+  })
+
+  test('an upstream chunk over its rate once is asked again of the upstream: the range stays there (otto/mamoru#398)', async () => {
+    const w = world(LOGS)
+    let once = true
+    w.providers[ALCHEMY]!.limited = (from) => from === 1000 && once && !(once = false)
+    const r = await getLogs(w, 1000, 1009)
+    expect(r.result).toEqual(inOrder(1000, 1009))
+    expect(w.logsCalls(ALCHEMY)).toEqual([{ method: 'eth_getLogs', from: 1000, to: 1009 }, { method: 'eth_getLogs', from: 1000, to: 1009 }])
+    expect(w.logsCalls(PUBLICNODE).length + w.logsCalls(DRPC).length + w.logsCalls(BASE_ORG).length).toBe(0)
+  })
+
+  test('an upstream still over its rate after the retries, or a fallback over its rate, is passed over as before (otto/mamoru#398)', async () => {
+    const w = world(LOGS)
+    w.providers[ALCHEMY]!.limited = () => true
+    const r = await getLogs(w, 1000, 1009)
+    expect(r.result).toEqual(inOrder(1000, 1009))
+    // Three asks per pass (the first and two retries); the range is then read from a fallback.
+    expect(w.logsCalls(ALCHEMY).length).toBe(3)
+    const v = world(LOGS)
+    v.providers[PUBLICNODE]!.limited = () => true
+    expect((await getLogs(v, 1000, 1149)).result).toEqual(inOrder(1000, 1149))
+    expect(v.logsCalls(PUBLICNODE).length).toBe(1)
   })
 
   test('a provider that fails midway through a chunked range is dropped whole: the next one reads the whole range, no gaps, no duplicates', async () => {
