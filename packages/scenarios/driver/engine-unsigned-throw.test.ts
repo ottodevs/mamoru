@@ -3,7 +3,7 @@
 // cast, like engine-vault.test.ts.
 import { describe, expect, test } from 'bun:test'
 import type { Decision } from '@mamoru/decide'
-import { BaseError, ExecutionRevertedError, InternalRpcError, ResourceUnavailableRpcError, RpcRequestError, TimeoutError } from 'viem'
+import { BaseError, ExecutionRevertedError, InternalRpcError, InvalidInputRpcError, ResourceUnavailableRpcError, RpcRequestError, TimeoutError } from 'viem'
 import { Engine, isTransportError, thrownSummary } from './engine.ts'
 import { MemoryJournal, type OpRecord } from './journal.ts'
 
@@ -99,6 +99,24 @@ describe('only a provider that did not answer frees the slot (review of #357)', 
       throw new InternalRpcError(answered(-32603, 'internal error'))
     })
     await expect(runOp()).rejects.toThrow('An internal error was received.')
+    expect(journal.live).toBeNull()
+  })
+
+  test('a provider failure viem has no class for (bare RpcRequestError) frees the slot; a malformed request does not (live 11 Nov)', async () => {
+    const getLogs = (code: number, message: string, data?: string) => new RpcRequestError({ body: { method: 'eth_getLogs' }, error: { code, message, ...(data ? { data } : {}) }, url: 'https://base.example' })
+    expect(isTransportError(getLogs(429, 'compute units exceeded'))).toBe(true)
+    expect(isTransportError(getLogs(-32050, 'backend failure'))).toBe(true)
+    for (const code of [-32700, -32600, -32601, -32602]) expect(isTransportError(getLogs(code, 'bad request'))).toBe(false)
+    // A class viem mapped decides by itself: an invalid input (-32000) stays a refusal.
+    expect(isTransportError(new InvalidInputRpcError(getLogs(-32000, 'nonce too low')))).toBe(false)
+    expect(isTransportError(getLogs(-32050, 'execution reverted'))).toBe(false)
+    expect(isTransportError(getLogs(-32050, 'failed', '0x08c379a0'))).toBe(false)
+    expect(thrownSummary(getLogs(429, 'compute units exceeded'))).toBe('RPC Request failed. (eth_getLogs, code 429)')
+    const { journal, op, runOp } = setup(async () => {
+      throw getLogs(429, 'compute units exceeded')
+    })
+    await expect(runOp()).rejects.toThrow('RPC Request failed.')
+    expect(journal.op(op.opId).state).toBe('discarded')
     expect(journal.live).toBeNull()
   })
 

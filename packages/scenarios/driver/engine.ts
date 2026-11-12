@@ -92,6 +92,25 @@ export function engineGas(baseFee: bigint, caps?: GasCaps): GasSettings | null {
  */
 const TRANSPORT_ERRORS = new Set(['TimeoutError', 'HttpRequestError', 'SocketClosedError', 'WebSocketRequestError', 'LimitExceededRpcError', 'InternalRpcError', 'ResourceUnavailableRpcError'])
 
+/**
+ * JSON-RPC codes of a request the provider could not take as sent (parse error, invalid request, unknown method, invalid
+ * params): ours to fix, never retried blindly.
+ */
+const REQUEST_ERROR_CODES = new Set([-32700, -32600, -32601, -32602])
+
+/**
+ * A provider's answer that it failed with a code viem has no class for (a 429 rate limit, a -32007..-32099 server
+ * error): viem throws its bare RpcRequestError ("RPC Request failed."). Live 11 Nov on Base: an eth_getLogs of a harvest
+ * answered so kept seven accounts' slots until a restart. Only when viem mapped nothing: a mapped class decides by itself.
+ */
+function unmappedProviderFailure(chain: unknown[]): boolean {
+  if (chain.some((x) => /RpcError$/.test(String((x as { name?: unknown })?.name)))) return false
+  return chain.some((x) => {
+    const { name, code } = (x ?? {}) as { name?: unknown; code?: unknown }
+    return name === 'RpcRequestError' && typeof code === 'number' && !REQUEST_ERROR_CODES.has(code)
+  })
+}
+
 /** The error and its `.cause` chain (bounded: a cyclic chain ends). */
 function causeChain(e: unknown): unknown[] {
   const out: unknown[] = []
@@ -116,7 +135,7 @@ function revertIn(chain: unknown[]): boolean {
 /** otto/mamoru#357: a throw that is the provider not answering (anywhere in its cause chain), not a bug, a refusal or a revert. */
 export function isTransportError(e: unknown): boolean {
   const chain = causeChain(e)
-  return !revertIn(chain) && chain.some((x) => TRANSPORT_ERRORS.has((x as { name?: unknown })?.name as string))
+  return !revertIn(chain) && (chain.some((x) => TRANSPORT_ERRORS.has((x as { name?: unknown })?.name as string)) || unmappedProviderFailure(chain))
 }
 
 /**
@@ -132,7 +151,10 @@ export function thrownSummary(e: unknown): string {
       return Array.isArray(meta) ? meta.filter((m): m is string => typeof m === 'string' && m.startsWith('Request body:')) : []
     })
     const methods = [...new Set(bodies.flatMap((b) => [...b.matchAll(/"method":"([A-Za-z0-9_]+)"/g)].map((m) => m[1])))]
-    return methods.length ? `${first} (${methods.join(', ')})` : first
+    // The provider's JSON-RPC code, so an answer viem has no class for says which it was.
+    const code = (causeChain(e).find((x) => (x as { name?: unknown })?.name === 'RpcRequestError') as { code?: unknown } | undefined)?.code
+    const notes = [...methods, ...(typeof code === 'number' ? [`code ${code}`] : [])]
+    return notes.length ? `${first} (${notes.join(', ')})` : first
   } catch {
     return 'an unreadable thrown value'
   }
