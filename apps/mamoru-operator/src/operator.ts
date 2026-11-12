@@ -1878,10 +1878,16 @@ export class Operator {
    * The policy the engine decides with: the account's, plus depth sizing when the operator is configured for it.
    * Grants are always built from `policyOf`: depth sizing changes how much an entry places, never what a session allows.
    */
-  /** otto/mamoru#389: the saved position history for the engine, only when read for the account's current origin. */
+  /**
+   * otto/mamoru#389: the saved position history for the engine, only when read for the account's current origin. One that
+   * cannot be used (malformed, another origin) is dropped here, so the next save replaces it (review of #389: the save
+   * check reads its `through`).
+   */
   private savedHistory(acc: AccountState): { historyCursor?: HistoryCursor } {
     const c = acc.historyCursor ? restoreHistoryCursor(acc.historyCursor) : null
-    return c && c.fromBlock === BigInt(acc.historyFromBlock) ? { historyCursor: c } : {}
+    if (c && c.fromBlock === BigInt(acc.historyFromBlock)) return { historyCursor: c }
+    delete acc.historyCursor
+    return {}
   }
 
   enginePolicyOf(acc: AccountState): PolicyVersion {
@@ -8077,7 +8083,7 @@ export class Operator {
           this.store.save()
         }
         // otto/mamoru#389: the position history as well (a restart read it again from activation, 2-3.7M blocks on Base).
-        if (runner.engine.historyThrough - BigInt(acc.historyCursor?.through ?? '-1') >= DEPOSITS_SAVE_BLOCKS) {
+        if (runner.engine.historyThrough - savedThrough(acc) >= DEPOSITS_SAVE_BLOCKS) {
           acc.historyCursor = runner.engine.storedHistory()
           this.store.save()
         }
@@ -8489,6 +8495,15 @@ function fmtUnits(v: bigint, decimals: number): string {
   const s = v.toString().padStart(decimals + 1, '0')
   const frac = s.slice(-decimals).slice(0, decimals > 6 ? 6 : 2).replace(/0+$/, '')
   return frac ? `${s.slice(0, -decimals)}.${frac}` : s.slice(0, -decimals)
+}
+
+/** otto/mamoru#389: how far the saved position history goes; -1 when there is none or it cannot be read (then it is replaced). */
+function savedThrough(acc: AccountState): bigint {
+  try {
+    return acc.historyCursor ? BigInt(acc.historyCursor.through) : -1n
+  } catch {
+    return -1n
+  }
 }
 
 function fmtUsdc(v: bigint): string {
