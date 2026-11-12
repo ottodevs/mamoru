@@ -266,6 +266,8 @@ export type RpcProxyOptions = {
    * of every provider by requests broke all Monad observations (a provider's table range, drpc 10000, is not its plan's).
    */
   keyedLogMaxRequests?: bigint
+  /** Review of #398: an eth_getLogs request's deadline (default LOGS_REQUEST_MS, 50 s). */
+  logsRequestMs?: number
   /**
    * Blocks behind the tip that `latest` is served at; default MAMORU_HEAD_LAG or 3. 0 for Ethereum and Monad
    * (otto/mamoru#285): a move's send block (`fromBlock`) is read at the tip, so its log scans start where the send is.
@@ -321,6 +323,8 @@ export const RATE_RETRY_MS = [300, 1_000]
 const RATE_RETRY_WINDOW_MS = 10_000
 /** How long a retry waits for its answer. */
 const RATE_RETRY_ASK_MS = 5_000
+/** An eth_getLogs request's own deadline, under the engine client's 60 s timeout. */
+const LOGS_REQUEST_MS = 50_000
 /** An answer about the range itself, never a rate: asking again gets the same refusal. */
 const RANGE_REFUSAL = /result|response size|block range|range (is )?too|exceeds/i
 
@@ -483,17 +487,19 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   }
   type Rejection = Exclude<LogRangeOutcome, 'accepted'>
   const fail = (message: string, reason: Rejection = 'provider_error') => Object.assign(new Error(message), { rpc: { code: -32603, message }, reason })
+  /** otto/mamoru#398 (review): what a provider ask may wait inside an eth_getLogs request's deadline, never past it. */
+  const leftOf = (deadline?: number): number => (deadline === undefined ? providerTimeoutMs : Math.max(1, Math.min(providerTimeoutMs, deadline - Date.now())))
   /**
    * otto/mamoru#398: one chunk, asked again of the upstream after a short wait when it answers that it is over its rate
    * (a per-second limit, gone a moment later). Live 12 Nov on Base: the upstream rate-limited ~10% of a catch-up's chunks,
    * each failed the whole range, and the public fallbacks cannot serve archive ranges, so the read never ended. Only the
    * upstream: a fallback over its rate is passed over at once, as before, so a range every provider refuses fails fast.
    */
-  async function chunkFrom(p: LogProvider, filter: any, a: bigint, b: bigint, isChunk: boolean, retryUntil: number | null): Promise<unknown> {
+  async function chunkFrom(p: LogProvider, filter: any, a: bigint, b: bigint, isChunk: boolean, retryUntil: number | null, deadline?: number): Promise<unknown> {
     for (let k = 0; ; k++) {
       try {
         // A retry waits for its answer at most RATE_RETRY_ASK_MS: it never holds the range much past the retry window.
-        return await ask(p.url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], isChunk, k === 0 ? providerTimeoutMs : Math.min(providerTimeoutMs, RATE_RETRY_ASK_MS))
+        return await ask(p.url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], isChunk, k === 0 ? leftOf(deadline) : Math.min(leftOf(deadline), RATE_RETRY_ASK_MS))
       } catch (e) {
         // Review of #398: only within the request's retry window (the caller times out at 60 s), only in the first pass over
         // the providers, and never for an answer about the range itself (too many results, too wide).
@@ -504,11 +510,11 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     }
   }
   /** The whole range from one provider, in chunks it accepts. Any failed chunk fails the provider: providers are never mixed inside one range. */
-  async function logsFrom(p: LogProvider, filter: any, from: bigint, to: bigint, retryUntil: number | null = null): Promise<unknown[]> {
+  async function logsFrom(p: LogProvider, filter: any, from: bigint, to: bigint, retryUntil: number | null = null, deadline?: number): Promise<unknown[]> {
     const chunks = ranges(from, to, p.logRange)
     const out: unknown[] = []
     for (let i = 0; i < chunks.length; i += 4) {
-      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => chunkFrom(p, filter, a, b, chunks.length > 1, retryUntil)))
+      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => chunkFrom(p, filter, a, b, chunks.length > 1, retryUntil, deadline)))
       for (const logs of part) {
         if (!Array.isArray(logs)) throw fail('eth_getLogs answered no list')
         out.push(...logs)
@@ -518,14 +524,14 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   }
   /** Witness answers of one incoming request, by block number: ranges of that request ending at the same block share them. Never kept longer. */
   type Witnessed = Map<string, { url: string; hash: string }>
-  const blockHash = async (url: string, n: bigint): Promise<string | null> => (await ask(url, 'eth_getBlockByNumber', [hex(n), false]))?.hash ?? null
+  const blockHash = async (url: string, n: bigint, deadline?: number): Promise<string | null> => (await ask(url, 'eth_getBlockByNumber', [hex(n), false], false, leftOf(deadline)))?.hash ?? null
   /**
    * The hash of block `n` from a provider other than `p`, asked directly: no fallback chain that could land
    * on `p` itself. Logs from the upstream are witnessed by the fallbacks in order; logs from a fallback by the
    * upstream first, then the other fallbacks. A witness that fails or does not have the block yet is skipped;
    * the first one that has it decides. Null when none has it.
    */
-  async function witnessHash(p: LogProvider, n: bigint, seen: Witnessed): Promise<string | null> {
+  async function witnessHash(p: LogProvider, n: bigint, seen: Witnessed, deadline?: number): Promise<string | null> {
     const known = seen.get(String(n))
     if (known && !sameOperator(known.url, p.url)) return known.hash
     // A block a trusted provider of another operator answered moments ago (see `recent`).
@@ -537,7 +543,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     for (const w of logProviders) {
       // Independence is by operator, not by URL: another key or another spelling of the same provider is no witness.
       if (sameOperator(w.url, p.url)) continue
-      const hash = await blockHash(w.url, n).catch(() => null)
+      const hash = await blockHash(w.url, n, deadline).catch(() => null)
       if (!hash) continue
       seen.set(String(n), { url: w.url, hash })
       return hash
@@ -552,13 +558,13 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * `recent`), and the upstream is held to the same rule. One direct block read on the provider and, unless a
    * trusted provider of another operator just answered that block, one on the witness per range.
    */
-  async function verifiedLogs(p: LogProvider, filter: any, from: bigint, to: bigint, seen: Witnessed, retryUntil: number | null = null): Promise<unknown[]> {
-    const logs = await logsFrom(p, filter, from, to, retryUntil)
-    const own = await blockHash(p.url, to)
+  async function verifiedLogs(p: LogProvider, filter: any, from: bigint, to: bigint, seen: Witnessed, retryUntil: number | null = null, deadline?: number): Promise<unknown[]> {
+    const logs = await logsFrom(p, filter, from, to, retryUntil, deadline)
+    const own = await blockHash(p.url, to, deadline)
     if (!own) throw fail(`provider does not have block ${to}: its logs for the range may be incomplete`)
     // A local fork is one node and the only provider: there is no witness by construction, and its own block is the check.
     if (local) return logs
-    const witness = await witnessHash(p, to, seen)
+    const witness = await witnessHash(p, to, seen, deadline)
     if (!witness) throw fail(`no other provider has block ${to} to witness the logs`, 'no_witness')
     if (own.toLowerCase() !== witness.toLowerCase()) throw fail(`provider and witness have another block ${to}: the logs may be from another chain view`, 'hash_mismatch')
     return logs
@@ -580,6 +586,9 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     // trusted ones would need many small requests (Alchemy free: 10 blocks each). Two passes, as for every other call.
     // otto/mamoru#398: rate-limited upstream chunks are asked again only this early in the request.
     const retryUntil = Date.now() + RATE_RETRY_WINDOW_MS
+    // Review of #398: the whole request answers within LOGS_REQUEST_MS, every ask in it bounded by what is left (the caller
+    // times out at 60 s; before, sequential provider asks of up to 30 s each could outlast it).
+    const deadline = Date.now() + (opts.logsRequestMs ?? LOGS_REQUEST_MS)
     const span = to - from + 1n
     const requests = (p: LogProvider) => (Number.isFinite(p.logRange) ? (span + BigInt(p.logRange) - 1n) / BigInt(p.logRange) : 1n)
     const tier = (p: LogProvider, n: bigint) => (trusted.includes(p.url) && n <= TRUSTED_LOG_MAX_REQUESTS ? 0 : 1)
@@ -596,7 +605,11 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       if (k === order.length) await Bun.sleep(250)
       const label = labelOf(p.url)
       try {
-        const logs = await verifiedLogs(p, filter, from, to, seen, k < order.length ? retryUntil : null)
+        if (Date.now() >= deadline) {
+          last ??= { code: -32603, message: 'eth_getLogs: no provider answered within the request deadline' }
+          break
+        }
+        const logs = await verifiedLogs(p, filter, from, to, seen, k < order.length ? retryUntil : null, deadline)
         if (metrics) safeMetrics(() => metrics.recordLogRange(label, 'accepted'))
         return logs
       } catch (e) {

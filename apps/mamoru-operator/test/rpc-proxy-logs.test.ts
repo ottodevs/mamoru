@@ -160,6 +160,22 @@ describe('eth_getLogs routing by provider range', () => {
     expect(w.logsCalls(ALCHEMY).length).toBe(1)
   })
 
+  test('a request answers within its deadline even when every provider hangs (review of #398)', async () => {
+    const w = world(LOGS)
+    const hang = (_url: string, init: RequestInit) => new Promise<Response>((_, reject) => init.signal?.addEventListener('abort', () => reject(new Error('aborted'))))
+    const proxy = startRpcProxy(ALCHEMY, { fetch: hang as never, fallbacks: FALLBACKS, logRanges: {}, logsRequestMs: 400 })
+    try {
+      const t0 = Date.now()
+      const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ address: '0x01', fromBlock: hex(1000), toBlock: hex(1009) }] }) })
+      const r = (await res.json()) as Answer
+      expect(r.error).toBeDefined()
+      expect(Date.now() - t0).toBeLessThan(2_000)
+    } finally {
+      proxy.stop()
+    }
+    void w
+  })
+
   test('a provider that fails midway through a chunked range is dropped whole: the next one reads the whole range, no gaps, no duplicates', async () => {
     const w = world(LOGS)
     w.providers[DRPC]!.down = true
