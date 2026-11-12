@@ -262,6 +262,44 @@ describe('readPositionHistoryFrom catching up in slices (catchUpBlocks)', () => 
     expect(events.map(key)).toEqual((await readPositionHistory(fakeClient(LOGS).client, [1n, 2n], 100n, 400n)).map(key))
   })
 
+  test('a slice the provider fails keeps the slices before it, and the next call goes on from there (otto/mamoru#388)', async () => {
+    const { client, ranges } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    const serve = client.request.bind(client)
+    let fail = true
+    ;(client as any).request = async (args: any) => {
+      if (fail && BigInt(args.params[0].fromBlock) >= 190n) throw Object.assign(new Error('RPC Request failed.'), { name: 'RpcRequestError', code: -32011 })
+      return serve(args)
+    }
+    await expect(read(client, cursor, [1n, 2n], 400n, 395n)).rejects.toThrow('RPC Request failed.')
+    const kept = cursor.through
+    expect(kept).toBe(189n)
+    fail = false
+    ranges.length = 0
+    const events = await read(client, cursor, [1n, 2n], 400n, 395n)
+    expect(ranges[0]![0]).toBe(190n)
+    expect(events.map(key)).toEqual((await readPositionHistory(fakeClient(LOGS).client, [1n, 2n], 100n, 400n)).map(key))
+  })
+
+  test('a backfill slice the provider fails keeps the backfill read before it (otto/mamoru#388)', async () => {
+    const { client, ranges } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    await read(client, cursor, [1n], 200n, 200n)
+    const serve = client.request.bind(client)
+    let fail = true
+    ;(client as any).request = async (args: any) => {
+      if (fail && BigInt(args.params[0].fromBlock) >= 160n) throw Object.assign(new Error('RPC Request failed.'), { name: 'RpcRequestError', code: -32011 })
+      return serve(args)
+    }
+    await expect(read(client, cursor, [1n, 2n], 200n, 200n)).rejects.toThrow('RPC Request failed.')
+    expect(cursor.backfill!.through).toBe(159n)
+    fail = false
+    ranges.length = 0
+    const events = await read(client, cursor, [1n, 2n], 200n, 200n)
+    expect(ranges[0]![0]).toBe(160n)
+    expect(events.map(key)).toEqual((await readPositionHistory(fakeClient(LOGS).client, [1n, 2n], 100n, 200n)).map(key))
+  })
+
   test('a tokenId new to a cursor far from its origin is backfilled in slices, kept across calls', async () => {
     const { client, ranges } = fakeClient(LOGS)
     const cursor = historyCursor()

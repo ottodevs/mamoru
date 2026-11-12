@@ -710,6 +710,18 @@ export async function readPositionHistoryFrom(
     Object.assign(cursor, next)
     throw new ReasonError('OBS_RPC_UNAVAILABLE', `history: ${what} read to block ${through} of ${of}, ${step} blocks per request`)
   }
+  // otto/mamoru#388: a slice the provider failed (a rate limit, a timeout) keeps the slices read before it, as running out
+  // of time does: each holds on its own, and the next call goes on from there. Live 12 Nov on Base: one failed slice of a
+  // 2.5M-block catch-up threw away all the others, and every review began again from the account's activation. A
+  // changed block hash keeps nothing (gate of #339).
+  const sliced = async (read: () => Promise<{ events: ChainPositionEvent[]; hash: Hex }>) => {
+    try {
+      return await read()
+    } catch (e) {
+      if (!(e instanceof ReasonError && e.code === 'OBS_BLOCK_INCONSISTENT')) Object.assign(cursor, next)
+      throw e
+    }
+  }
   if (tokenIds.length === 0 || fromBlock > toBlock) return { events: [], next }
   if (next.fromBlock !== fromBlock) resetCursor(next, fromBlock)
   // A head behind the cursor (lagging node or rollback): its blocks cannot be checked here, so read in full and keep the cursor.
@@ -730,7 +742,7 @@ export async function readPositionHistoryFrom(
       next.backfill = b
       pause('backfill', b.through, next.through)
       const to = b.through + step < next.through ? b.through + step : next.through
-      const r = await slice(fresh, b.through + 1n, to, b.hash)
+      const r = await sliced(() => slice(fresh, b.through + 1n, to, b.hash))
       // Its last slice ends at the cursor's block, which must still be the one the cursor holds.
       if (to === next.through && r.hash !== next.hash) throw new ReasonError('OBS_BLOCK_INCONSISTENT', `block ${to} changed hash during the history read`)
       b = { ids: b.ids, through: to, hash: r.hash, events: [...b.events, ...r.events] }
@@ -751,7 +763,7 @@ export async function readPositionHistoryFrom(
   while (step !== undefined && stable - next.through > step) {
     pause('cursor', next.through, stable)
     const to = next.through + step
-    const r = await slice([...next.ids].map(BigInt), next.through + 1n, to, next.hash)
+    const r = await sliced(() => slice([...next.ids].map(BigInt), next.through + 1n, to, next.hash))
     next.events.push(...r.events)
     next.through = to
     next.hash = r.hash
