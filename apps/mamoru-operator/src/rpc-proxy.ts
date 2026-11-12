@@ -494,8 +494,10 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   }
   // Every ask of an eth_getLogs request takes its timeout here, so none starts past the deadline (review of #398).
   const leftOf = (deadline?: number): number => {
-    inTime(deadline)
-    return deadline === undefined ? providerTimeoutMs : Math.max(1, Math.min(providerTimeoutMs, deadline - Date.now()))
+    if (deadline === undefined) return providerTimeoutMs
+    const left = deadline - Date.now()
+    if (left <= 0) throw fail('eth_getLogs: no provider answered within the request deadline')
+    return Math.min(providerTimeoutMs, left)
   }
   /**
    * otto/mamoru#398: one chunk, asked again of the upstream after a short wait when it answers that it is over its rate
@@ -616,7 +618,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     // What the caller is told when nothing is accepted: a range that was read but not witnessed says more than a provider being down.
     let unwitnessed: any = null
     for (const [k, { p }] of [...order, ...order].entries()) {
-      if (k === order.length) await Bun.sleep(250)
+      if (k === order.length && Date.now() + 250 < deadline) await Bun.sleep(250)
       const label = labelOf(p.url)
       try {
         if (Date.now() >= deadline) {
