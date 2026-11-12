@@ -26,7 +26,8 @@ export const conservadorLiveV7: PolicyVersion = {
   ...conservadorLiveV6,
   policyId: 'conservador-live-v7',
   version: '0.1.0',
-  // #186: at live relayer cost a deposit earns its two operations back in about a month from ~40 USDC.
+  // #186: at live relayer cost a deposit earns its two operations back in about a month from ~40 USDC. The engine runs
+  // with V7_ENGINE's floor instead (otto/mamoru#390); this one stays because it is part of the signed hash.
   vaultMinDeposit: 40_000_000n,
   buckets: [
     { id: 'stables', preference: 5000, pools: [], vaults: [...V7_VAULTS] },
@@ -58,3 +59,23 @@ export const conservadorLiveV7: PolicyVersion = {
 
 /** Fork-only twin of conservadorLiveV7. */
 export const conservadorLabV7: PolicyVersion = { ...conservadorLiveV7, policyId: 'conservador-lab-v7', chain: 'fork' }
+
+/**
+ * otto/mamoru#390 (Ot, 12 Nov): the vault floor the engine places with on v7. A vault operation costs about 0.02 USD on
+ * Base now, so 40 USDC left the Stable bucket of a small account idle (1.43 USDC of a 2.85 account, two buckets of
+ * three). Not a field of the policy: its hash salts the session ids (saltOf), so a change there moves every v7 grant.
+ * The operator's engine applies it (`enginePolicyOf`), as SLEEVE_ENGINE.
+ */
+const V7_ENGINE = { vaultMinDeposit: 1_000_000n } as const satisfies Partial<PolicyVersion>
+const v7Engines = new WeakMap<PolicyVersion, PolicyVersion>()
+
+/** `p` as the engine runs it: a v7 policy with V7_ENGINE, any other policy unchanged. Same object per `p`. */
+export function v7EnginePolicy(p: PolicyVersion): PolicyVersion {
+  if (p.policyId !== conservadorLiveV7.policyId && p.policyId !== conservadorLabV7.policyId) return p
+  let e = v7Engines.get(p)
+  if (!e) {
+    e = { ...p, ...V7_ENGINE }
+    v7Engines.set(p, e)
+  }
+  return e
+}

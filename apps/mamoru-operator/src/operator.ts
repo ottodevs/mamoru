@@ -6,7 +6,7 @@ import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, m
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, restoreHistoryCursor, senderNotEoa, type HistoryCursor, SIM_CALL_GAS, simulateCalls, SharedGuardReads, type SimCall, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LAB_POLICIES, POLICIES, sleeveEnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, registryPoolsKey, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, POLICIES, sleeveEnginePolicy, v7EnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, registryPoolsKey, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -1896,8 +1896,8 @@ export class Operator {
       const v = this.v4Engine(acc).policy
       return this.cfg.settings ? withEngineSettings(v, this.cfg.settings.forAccount(acc.accountKey).settings) : v
     }
-    // otto/mamoru#347: a remote Safe's policy runs on target weights, outside its signed hash.
-    const p = this.withAccountBudgets(acc, sleeveEnginePolicy(this.policyOf(acc)))
+    // otto/mamoru#347: a remote Safe's policy runs on target weights, outside its signed hash; #390: v7 with a 1 USDC vault floor.
+    const p = this.withAccountBudgets(acc, sleeveEnginePolicy(v7EnginePolicy(this.policyOf(acc))))
     if (this.cfg.settings) {
       // Spec 006: depth sizing and the guard come from the account's engine settings. Memoized per settings, so an
       // unchanged version hands every review the same policy object.

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { conservadorLiveV7, grantKey } from '@mamoru/policy'
+import { conservadorLiveV6, conservadorLiveV7, grantKey, v7EnginePolicy } from '@mamoru/policy'
 import { baseRegistry, address, entry } from '@mamoru/registry'
 import { quoteMint, sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import { allocate, bucketValues, decide, positionValue, type Observation, type PoolObs, type PositionObs, type VaultObs } from './index.ts'
@@ -126,6 +126,20 @@ describe('conservador-live-v7: the stables bucket in vaults (otto/mamoru#210)', 
     const w = (d.waiting ?? []).find((x) => x.bucket === 'stables')
     expect(w?.code).toBe('DECIDE_WAIT_GAS')
     expect(w!.amount).toBe(30n * USDC)
+  })
+
+  test('as the engine runs v7 (1 USDC vault floor, otto/mamoru#390), a 2.85 USDC account supplies its Stable share', () => {
+    const E = v7EnginePolicy(V7)
+    expect(E.vaultMinDeposit).toBe(1n * USDC)
+    // The signed object, and so its hash and every session id, is untouched; other policies come back as they are.
+    expect(V7.vaultMinDeposit).toBe(40n * USDC)
+    expect(v7EnginePolicy(V7)).toBe(E)
+    expect(v7EnginePolicy(conservadorLiveV6)).toBe(conservadorLiveV6)
+    const d = decide(obs({ balances: { USDC: 2_850_000n, USDT: 0n, cbBTC: 0n, WETH: 0n } }), E)
+    expect(d.proposal).toMatchObject({ kind: 'vault_deposit', bucket: 'stables', vault: 'vault:gtUSDCp' })
+    // Below the floor it still waits.
+    const small = decide(obs({ balances: { USDC: 1_500_000n, USDT: 0n, cbBTC: 0n, WETH: 0n } }), E)
+    expect(small.buckets.find((b) => b.bucket === 'stables')?.code).toBe('DECIDE_WAIT_GAS')
   })
 
   test('gtUSDCp full or without a session: Aave waBasUSDC takes the deposit; neither open: the share waits', () => {
