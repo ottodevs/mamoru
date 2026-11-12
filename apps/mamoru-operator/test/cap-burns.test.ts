@@ -483,6 +483,22 @@ describe('a remote Safe is held to the account cap its home answers (otto/mamoru
     expect(await s.b.engineCap(s.baseAcc, s.chains.baseBlock)).toEqual({ capUsdc: s.home, elsewhereUsdc: 0n })
   })
 
+  test('the remote Safe places up to what it was signed for, not the code default of an operator without settings (otto/mamoru#384)', async () => {
+    const s = linked()
+    s.monadAcc.signedCapUsdc = (500n * USDC).toString()
+    // The Monad operator has no engine settings: its own cap for the account is the 100 USDC default, below the 500 signed.
+    expect(s.monadAcc.active).toBe(true)
+    expect((s.monad as unknown as Caps).effectiveCap(s.monadAcc)).toBe(100n * USDC)
+    expect((await s.m.engineCap(s.monadAcc, s.chains.monadBlock)).chainCapUsdc).toBe(500n * USDC)
+  })
+
+  test('without a cap from the home, an operator without settings keeps its own cap (fail closed, otto/mamoru#384)', async () => {
+    const s = linked()
+    s.monadAcc.signedCapUsdc = (500n * USDC).toString()
+    s.baseAcc.active = false
+    expect(await s.m.engineCap(s.monadAcc, s.chains.monadBlock)).toEqual({ capUsdc: 100n * USDC, elsewhereUsdc: TRUE })
+  })
+
   test("another account of the same owner, with a lower cap, does not bound this remote Safe", async () => {
     const s = linked()
     const lower = (s.base as unknown as Caps).effectiveCap(s.otherAcc)

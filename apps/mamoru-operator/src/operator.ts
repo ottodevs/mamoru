@@ -51,6 +51,7 @@ import { buildMoneyMap, chainLegOf, returnRows, unreadLeg, type ReturnLeg } from
 import type { GuardReadsState } from './guard-reads-state.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { BridgeLimit, Observation, PeerPositionObs, Proposal } from '@mamoru/decide'
+import { capRoomOf } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, POSITION_DUST_USDC, amountsForLiquidity, idleTokens, inUsdc, livePool, nativePricePool, positionUsdc, positionView, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
@@ -1740,10 +1741,12 @@ export class Operator {
     // account's, so it is held to the account's cap, which the home answers when asked for this very Safe (the account
     // whose remote Safe it is), and what this Safe places to its own. No cap answered (a home on older code, or not
     // running the account): the remote cap alone, as before.
+    // otto/mamoru#384: with the account's cap answered there, this Safe's own cap is the one its grants were signed for.
+    // Not effectiveCap: this operator runs without engine settings, so capFor is the 100 USDC code default, below it.
     const own = getAddress(acc.ctx.address).toLowerCase()
     const homeCaps = this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID && peers.ok ? peers.chains.flatMap((e) => (e.chainId !== this.cfg.chainId && e.at?.safe.toLowerCase() === own && e.capUsdc !== undefined ? [e.capUsdc] : [])) : []
     if (!homeCaps.length) return { capUsdc: this.effectiveCap(acc), elsewhereUsdc }
-    return { capUsdc: homeCaps.reduce((a, b) => (b < a ? b : a)), elsewhereUsdc, chainCapUsdc: this.effectiveCap(acc) }
+    return { capUsdc: homeCaps.reduce((a, b) => (b < a ? b : a)), elsewhereUsdc, chainCapUsdc: this.signedCapOf(acc) }
   }
 
   /**
@@ -8021,7 +8024,10 @@ export class Operator {
             const last = o ? engine.journal.transitions.filter((t) => t.opId === o.opId).at(-1) : null
             safeMetrics(() => this.watchSpendHold(acc, engine))
             // `last.detail` is free text (unlike d.reason/o.state/o.stateCode, all closed enums): redact it.
-            const prefix = `[engine ${acc.accountKey}] block ${d.observationRef.block} ${d.kind} ${d.reason}${o ? ` -> ${o.opId} ${o.state} ${o.stateCode}` : ''}`
+            // otto/mamoru#384: a hold for want of capital says what the cap left, so a cap hold reads without a replay.
+            const cap = d.reason === 'DECIDE_NO_CAPITAL' ? r.observation.cap : undefined
+            const capNote = cap ? ` (cap ${fmtUsdc(cap.capUsdc)}, elsewhere ${cap.elsewhereUsdc === null ? 'unread' : fmtUsdc(cap.elsewhereUsdc)}${cap.chainCapUsdc !== undefined ? `, this Safe ${fmtUsdc(cap.chainCapUsdc)}` : ''}, room ${fmtUsdc(capRoomOf(r.observation, this.enginePolicyOf(acc)) ?? 0n)})` : ''
+            const prefix = `[engine ${acc.accountKey}] block ${d.observationRef.block} ${d.kind} ${d.reason}${capNote}${o ? ` -> ${o.opId} ${o.state} ${o.stateCode}` : ''}`
             if (last?.detail) logErr(prefix, last.detail)
             else console.log(prefix)
             safeMetrics(() => this.engineHealth.record(acc.accountKey, true, d.code, undefined))
