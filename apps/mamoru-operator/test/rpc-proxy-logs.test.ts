@@ -24,6 +24,8 @@ type Provider = {
   failAt?: (from: number, to: number) => boolean
   /** otto/mamoru#398: answers this request that it is over its rate (HTTP 429). */
   limited?: (from: number, to: number) => boolean
+  /** The words of that answer (default: a per-second limit). */
+  limitedMessage?: string
   calls: Call[]
 }
 
@@ -60,7 +62,7 @@ function world(logs: Log[]) {
     p.calls.push({ method: body.method, from, to })
     if (p.down) return refuse(-32603, 'service unavailable', 503)
     if (to - from + 1 > p.limit) return refuse(-32602, `query exceeds max block range ${p.limit}`)
-    if (p.limited?.(from, to)) return refuse(429, 'Too many requests, please retry', 429)
+    if (p.limited?.(from, to)) return refuse(p.limitedMessage ? -32005 : 429, p.limitedMessage ?? 'Too many requests, please retry', p.limitedMessage ? 200 : 429)
     if (p.failAt?.(from, to)) return refuse(-32000, 'Archive requests require a personal token')
     const visible = forkFrom === undefined ? logs : [...logs.filter((l) => Number(l.blockNumber) < forkFrom), ...(p.forkLogs ?? [])]
     const last = Math.min(to, p.head)
@@ -147,6 +149,15 @@ describe('eth_getLogs routing by provider range', () => {
     v.providers[PUBLICNODE]!.limited = () => true
     expect((await getLogs(v, 1000, 1149)).result).toEqual(inOrder(1000, 1149))
     expect(v.logsCalls(PUBLICNODE).length).toBe(1)
+  })
+
+  test('an upstream answer about the range itself (too many results) is not asked again (review of #398)', async () => {
+    const w = world(LOGS)
+    w.providers[ALCHEMY]!.limited = () => true
+    w.providers[ALCHEMY]!.limitedMessage = 'query returned more than 10000 results, limit exceeded'
+    const r = await getLogs(w, 1000, 1009)
+    expect(r.result).toEqual(inOrder(1000, 1009))
+    expect(w.logsCalls(ALCHEMY).length).toBe(1)
   })
 
   test('a provider that fails midway through a chunked range is dropped whole: the next one reads the whole range, no gaps, no duplicates', async () => {

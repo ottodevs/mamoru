@@ -317,6 +317,10 @@ export function providerWords(message: unknown): string {
 
 /** otto/mamoru#398: waits before asking a rate-limited log chunk again of the same provider (then it fails as before). */
 export const RATE_RETRY_MS = [300, 1_000]
+/** otto/mamoru#398: a chunk is asked again only while its asks so far took less than this (the caller times out at 60 s). */
+const RATE_RETRY_WITHIN_MS = 5_000
+/** An answer about the range itself, never a rate: asking again gets the same refusal. */
+const RANGE_REFUSAL = /result|response size|block range|range (is )?too|exceeds/i
 
 export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { url: string; stop: () => void } {
   const providerTimeoutMs = opts.providerTimeoutMs ?? 30_000
@@ -483,22 +487,27 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * each failed the whole range, and the public fallbacks cannot serve archive ranges, so the read never ended. Only the
    * upstream: a fallback over its rate is passed over at once, as before, so a range every provider refuses fails fast.
    */
-  async function chunkFrom(p: LogProvider, filter: any, a: bigint, b: bigint, isChunk: boolean): Promise<unknown> {
+  async function chunkFrom(p: LogProvider, filter: any, a: bigint, b: bigint, isChunk: boolean, retry: boolean): Promise<unknown> {
+    const t0 = Date.now()
     for (let k = 0; ; k++) {
       try {
         return await ask(p.url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], isChunk)
       } catch (e) {
-        if (p.url !== upstream || k >= RATE_RETRY_MS.length || classifyRpcError((e as any).status, (e as any).rpc) !== 'rateCapacity') throw e
+        // Review of #398: only while the asks so far were quick (a slow refusal would outlast the caller's timeout), only in
+        // the first pass over the providers, and never for an answer about the range itself (too many results, too wide).
+        const quick = Date.now() - t0 < RATE_RETRY_WITHIN_MS
+        const overRate = classifyRpcError((e as any).status, (e as any).rpc) === 'rateCapacity' && !RANGE_REFUSAL.test(String((e as any).rpc?.message ?? ''))
+        if (!retry || p.url !== upstream || k >= RATE_RETRY_MS.length || !quick || !overRate) throw e
         await Bun.sleep(RATE_RETRY_MS[k]!)
       }
     }
   }
   /** The whole range from one provider, in chunks it accepts. Any failed chunk fails the provider: providers are never mixed inside one range. */
-  async function logsFrom(p: LogProvider, filter: any, from: bigint, to: bigint): Promise<unknown[]> {
+  async function logsFrom(p: LogProvider, filter: any, from: bigint, to: bigint, retry = false): Promise<unknown[]> {
     const chunks = ranges(from, to, p.logRange)
     const out: unknown[] = []
     for (let i = 0; i < chunks.length; i += 4) {
-      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => chunkFrom(p, filter, a, b, chunks.length > 1)))
+      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => chunkFrom(p, filter, a, b, chunks.length > 1, retry)))
       for (const logs of part) {
         if (!Array.isArray(logs)) throw fail('eth_getLogs answered no list')
         out.push(...logs)
@@ -542,8 +551,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * `recent`), and the upstream is held to the same rule. One direct block read on the provider and, unless a
    * trusted provider of another operator just answered that block, one on the witness per range.
    */
-  async function verifiedLogs(p: LogProvider, filter: any, from: bigint, to: bigint, seen: Witnessed): Promise<unknown[]> {
-    const logs = await logsFrom(p, filter, from, to)
+  async function verifiedLogs(p: LogProvider, filter: any, from: bigint, to: bigint, seen: Witnessed, retry = false): Promise<unknown[]> {
+    const logs = await logsFrom(p, filter, from, to, retry)
     const own = await blockHash(p.url, to)
     if (!own) throw fail(`provider does not have block ${to}: its logs for the range may be incomplete`)
     // A local fork is one node and the only provider: there is no witness by construction, and its own block is the check.
@@ -584,7 +593,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       if (k === order.length) await Bun.sleep(250)
       const label = labelOf(p.url)
       try {
-        const logs = await verifiedLogs(p, filter, from, to, seen)
+        const logs = await verifiedLogs(p, filter, from, to, seen, k < order.length)
         if (metrics) safeMetrics(() => metrics.recordLogRange(label, 'accepted'))
         return logs
       } catch (e) {
