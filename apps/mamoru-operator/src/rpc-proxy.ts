@@ -317,8 +317,10 @@ export function providerWords(message: unknown): string {
 
 /** otto/mamoru#398: waits before asking a rate-limited log chunk again of the same provider (then it fails as before). */
 export const RATE_RETRY_MS = [300, 1_000]
-/** otto/mamoru#398: a chunk is asked again only while its asks so far took less than this (the caller times out at 60 s). */
-const RATE_RETRY_WITHIN_MS = 5_000
+/** otto/mamoru#398: how long into an eth_getLogs request a rate-limited upstream chunk may still be asked again (the caller times out at 60 s). */
+const RATE_RETRY_WINDOW_MS = 10_000
+/** How long a retry waits for its answer. */
+const RATE_RETRY_ASK_MS = 5_000
 /** An answer about the range itself, never a rate: asking again gets the same refusal. */
 const RANGE_REFUSAL = /result|response size|block range|range (is )?too|exceeds/i
 
@@ -372,8 +374,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const logRanges = opts.logRanges ?? logRangesFromEnv()
   // The upstream keeps its setting (Alchemy or MAMORU_LOG_RANGE: chunks of maxLogRange); every other provider has its own range.
   const logProviders = providers.map((url, i) => ({ url, logRange: i === 0 && chunkLogs ? maxLogRange : logRangeOf(url, logRanges) }))
-  async function post(url: string, body: unknown): Promise<{ status: number; json: any }> {
-    const res = await send(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(providerTimeoutMs) })
+  async function post(url: string, body: unknown, timeoutMs = providerTimeoutMs): Promise<{ status: number; json: any }> {
+    const res = await send(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) })
     let json: any = null
     try {
       json = await res.json()
@@ -449,11 +451,11 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   type LogProvider = (typeof logProviders)[number]
   const hex = (n: bigint) => `0x${n.toString(16)}`
   /** One request to one provider, no fallback: the result, or a throw carrying the RPC error. */
-  async function ask(url: string, method: string, params: unknown[], isChunk = false): Promise<any> {
+  async function ask(url: string, method: string, params: unknown[], isChunk = false, timeoutMs = providerTimeoutMs): Promise<any> {
     const label = labelOf(url)
     let r: { status: number; json: any }
     try {
-      r = await post(url, { jsonrpc: '2.0', id: ++id, method, params })
+      r = await post(url, { jsonrpc: '2.0', id: ++id, method, params }, timeoutMs)
     } catch (e) {
       const rpc = { code: -32603, message: (e as Error).message.split('\n')[0] }
       if (metrics) safeMetrics(() => (metrics.recordRequest(label, method, isChunk, Date.now(), caller.getStore()), metrics.recordError(label, method, classifyRpcError(undefined, rpc))))
@@ -487,27 +489,26 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * each failed the whole range, and the public fallbacks cannot serve archive ranges, so the read never ended. Only the
    * upstream: a fallback over its rate is passed over at once, as before, so a range every provider refuses fails fast.
    */
-  async function chunkFrom(p: LogProvider, filter: any, a: bigint, b: bigint, isChunk: boolean, retry: boolean): Promise<unknown> {
-    const t0 = Date.now()
+  async function chunkFrom(p: LogProvider, filter: any, a: bigint, b: bigint, isChunk: boolean, retryUntil: number | null): Promise<unknown> {
     for (let k = 0; ; k++) {
       try {
-        return await ask(p.url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], isChunk)
+        // A retry waits for its answer at most RATE_RETRY_ASK_MS: it never holds the range much past the retry window.
+        return await ask(p.url, 'eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }], isChunk, k === 0 ? providerTimeoutMs : Math.min(providerTimeoutMs, RATE_RETRY_ASK_MS))
       } catch (e) {
-        // Review of #398: only while the asks so far were quick (a slow refusal would outlast the caller's timeout), only in
-        // the first pass over the providers, and never for an answer about the range itself (too many results, too wide).
-        const quick = Date.now() - t0 < RATE_RETRY_WITHIN_MS
+        // Review of #398: only within the request's retry window (the caller times out at 60 s), only in the first pass over
+        // the providers, and never for an answer about the range itself (too many results, too wide).
         const overRate = classifyRpcError((e as any).status, (e as any).rpc) === 'rateCapacity' && !RANGE_REFUSAL.test(String((e as any).rpc?.message ?? ''))
-        if (!retry || p.url !== upstream || k >= RATE_RETRY_MS.length || !quick || !overRate) throw e
+        if (retryUntil === null || p.url !== upstream || k >= RATE_RETRY_MS.length || Date.now() + RATE_RETRY_MS[k]! >= retryUntil || !overRate) throw e
         await Bun.sleep(RATE_RETRY_MS[k]!)
       }
     }
   }
   /** The whole range from one provider, in chunks it accepts. Any failed chunk fails the provider: providers are never mixed inside one range. */
-  async function logsFrom(p: LogProvider, filter: any, from: bigint, to: bigint, retry = false): Promise<unknown[]> {
+  async function logsFrom(p: LogProvider, filter: any, from: bigint, to: bigint, retryUntil: number | null = null): Promise<unknown[]> {
     const chunks = ranges(from, to, p.logRange)
     const out: unknown[] = []
     for (let i = 0; i < chunks.length; i += 4) {
-      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => chunkFrom(p, filter, a, b, chunks.length > 1, retry)))
+      const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => chunkFrom(p, filter, a, b, chunks.length > 1, retryUntil)))
       for (const logs of part) {
         if (!Array.isArray(logs)) throw fail('eth_getLogs answered no list')
         out.push(...logs)
@@ -551,8 +552,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * `recent`), and the upstream is held to the same rule. One direct block read on the provider and, unless a
    * trusted provider of another operator just answered that block, one on the witness per range.
    */
-  async function verifiedLogs(p: LogProvider, filter: any, from: bigint, to: bigint, seen: Witnessed, retry = false): Promise<unknown[]> {
-    const logs = await logsFrom(p, filter, from, to, retry)
+  async function verifiedLogs(p: LogProvider, filter: any, from: bigint, to: bigint, seen: Witnessed, retryUntil: number | null = null): Promise<unknown[]> {
+    const logs = await logsFrom(p, filter, from, to, retryUntil)
     const own = await blockHash(p.url, to)
     if (!own) throw fail(`provider does not have block ${to}: its logs for the range may be incomplete`)
     // A local fork is one node and the only provider: there is no witness by construction, and its own block is the check.
@@ -577,6 +578,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     // A trusted provider that serves the range in a few requests goes first. Then the fewest requests, the
     // configured order breaking ties: a public provider (witnessed) serves logs only after those, or when the
     // trusted ones would need many small requests (Alchemy free: 10 blocks each). Two passes, as for every other call.
+    // otto/mamoru#398: rate-limited upstream chunks are asked again only this early in the request.
+    const retryUntil = Date.now() + RATE_RETRY_WINDOW_MS
     const span = to - from + 1n
     const requests = (p: LogProvider) => (Number.isFinite(p.logRange) ? (span + BigInt(p.logRange) - 1n) / BigInt(p.logRange) : 1n)
     const tier = (p: LogProvider, n: bigint) => (trusted.includes(p.url) && n <= TRUSTED_LOG_MAX_REQUESTS ? 0 : 1)
@@ -593,7 +596,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       if (k === order.length) await Bun.sleep(250)
       const label = labelOf(p.url)
       try {
-        const logs = await verifiedLogs(p, filter, from, to, seen, k < order.length)
+        const logs = await verifiedLogs(p, filter, from, to, seen, k < order.length ? retryUntil : null)
         if (metrics) safeMetrics(() => metrics.recordLogRange(label, 'accepted'))
         return logs
       } catch (e) {
