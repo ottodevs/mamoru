@@ -659,6 +659,48 @@ export function historyCursor(): HistoryCursor {
   return { fromBlock: -1n, through: -1n, hash: null, ids: new Set(), events: [], backfill: null }
 }
 
+/** otto/mamoru#389: a HistoryCursor as JSON keeps it (bigints as decimal strings), without a backfill still under way. */
+export type StoredHistoryCursor = {
+  fromBlock: string
+  through: string
+  hash: Hex | null
+  ids: string[]
+  events: { kind: 'decrease' | 'collect'; tokenId: string; amount0: string; amount1: string; logIndex: number; blockNumber: string; txHash: Hex }[]
+}
+
+/** otto/mamoru#389: the cursor as the operator saves it. A backfill under way is left out: it is read again. */
+export function storeHistoryCursor(c: HistoryCursor): StoredHistoryCursor {
+  return {
+    fromBlock: c.fromBlock.toString(),
+    through: c.through.toString(),
+    hash: c.hash,
+    ids: [...c.ids],
+    events: c.events.map((e) => ({ kind: e.kind, tokenId: e.tokenId.toString(), amount0: e.amount0.toString(), amount1: e.amount1.toString(), logIndex: e.logIndex, blockNumber: e.blockNumber.toString(), txHash: e.txHash })),
+  }
+}
+
+/**
+ * otto/mamoru#389: a saved cursor back, so a restart reads only the blocks after it. Null when it cannot be read whole (it
+ * is then read again from the origin). Its last block's hash is checked at the next read (readPositionHistoryFrom: a
+ * changed hash, or another origin, starts the cursor over), so a reorg since the save keeps nothing of it.
+ */
+export function restoreHistoryCursor(s: unknown): HistoryCursor | null {
+  try {
+    const c = s as StoredHistoryCursor
+    if (!c || !Array.isArray(c.ids) || !Array.isArray(c.events) || (c.hash !== null && !/^0x[0-9a-fA-F]+$/.test(c.hash))) return null
+    const events: ChainPositionEvent[] = c.events.map((e) => {
+      if ((e.kind !== 'decrease' && e.kind !== 'collect') || !Number.isInteger(e.logIndex) || !/^0x[0-9a-fA-F]{64}$/.test(e.txHash)) throw new Error('bad event')
+      return { kind: e.kind, tokenId: BigInt(e.tokenId), amount0: BigInt(e.amount0), amount1: BigInt(e.amount1), logIndex: e.logIndex, blockNumber: BigInt(e.blockNumber), txHash: e.txHash }
+    })
+    const through = BigInt(c.through)
+    if (c.hash === null && through >= 0n) return null
+    if (events.some((e) => e.blockNumber > through)) return null
+    return { fromBlock: BigInt(c.fromBlock), through, hash: c.hash, ids: new Set(c.ids.map((x) => BigInt(x).toString())), events, backfill: null }
+  } catch {
+    return null
+  }
+}
+
 const byChainOrder = (a: ChainPositionEvent, b: ChainPositionEvent) => (a.blockNumber === b.blockNumber ? a.logIndex - b.logIndex : a.blockNumber < b.blockNumber ? -1 : 1)
 
 function resetCursor(cursor: HistoryCursor, fromBlock: bigint): void {

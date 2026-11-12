@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters, encodeEventTopics, numberToHex, zeroAddress, type Hex, type PublicClient } from 'viem'
 import { positionEventsAbi } from '@mamoru/projector'
 import { baseRegistry, address } from '@mamoru/registry'
-import { historyCursor, readPositionHistory, readPositionHistoryFrom as readFrom, type HistoryCursor } from '../src/index.ts'
+import { historyCursor, readPositionHistory, readPositionHistoryFrom as readFrom, restoreHistoryCursor, storeHistoryCursor, type HistoryCursor } from '../src/index.ts'
 
 // Read and commit, as a consistent observe() does.
 async function readPositionHistoryFrom(client: PublicClient, cursor: HistoryCursor, ...rest: [readonly bigint[], bigint, bigint, bigint]) {
@@ -355,5 +355,43 @@ describe('readPositionHistoryFrom catching up in slices (catchUpBlocks)', () => 
     const { client, ranges } = fakeClient(LOGS)
     await readPositionHistoryFrom(client, historyCursor(), [1n, 2n], 100n, 200n, 195n)
     expect(ranges[0]).toEqual([100n, 195n])
+  })
+})
+
+describe('a cursor kept across a restart (otto/mamoru#389)', () => {
+  test('saved as JSON and restored, the next read scans only the blocks after it and matches a full read', async () => {
+    const { client, ranges } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    await readPositionHistoryFrom(client, cursor, [1n, 2n], 100n, 160n, 150n)
+    const saved = JSON.parse(JSON.stringify(storeHistoryCursor(cursor)))
+    const back = restoreHistoryCursor(saved)!
+    expect(back.through).toBe(cursor.through)
+    expect(back.events.map(key)).toEqual(cursor.events.map(key))
+    ranges.length = 0
+    const events = await readPositionHistoryFrom(client, back, [1n, 2n], 100n, 200n, 195n)
+    expect(ranges.every(([a]) => a > cursor.through)).toBe(true)
+    expect(events.map(key)).toEqual((await readPositionHistory(fakeClient(LOGS).client, [1n, 2n], 100n, 200n)).map(key))
+  })
+
+  test('a saved cursor whose last block changed hash since is read again from its origin', async () => {
+    const { client, ranges, forks } = fakeClient(LOGS)
+    const cursor = historyCursor()
+    await readPositionHistoryFrom(client, cursor, [1n, 2n], 100n, 160n, 150n)
+    const back = restoreHistoryCursor(JSON.parse(JSON.stringify(storeHistoryCursor(cursor))))!
+    forks.add(back.through)
+    ranges.length = 0
+    await readPositionHistoryFrom(client, back, [1n, 2n], 100n, 200n, 195n)
+    expect(ranges[0]![0]).toBe(100n)
+  })
+
+  test('anything malformed restores nothing (read again from the origin)', () => {
+    const good = storeHistoryCursor({ ...historyCursor(), fromBlock: 100n, through: 150n, hash: `0x${'aa'.repeat(32)}`, ids: new Set(['1']) })
+    expect(restoreHistoryCursor(good)).not.toBeNull()
+    expect(restoreHistoryCursor(null)).toBeNull()
+    expect(restoreHistoryCursor({ ...good, hash: '0xzz' })).toBeNull()
+    expect(restoreHistoryCursor({ ...good, through: 'x' })).toBeNull()
+    expect(restoreHistoryCursor({ ...good, hash: null })).toBeNull()
+    expect(restoreHistoryCursor({ ...good, events: [{ kind: 'mint', tokenId: '1', amount0: '0', amount1: '0', logIndex: 0, blockNumber: '120', txHash: `0x${'01'.repeat(32)}` }] })).toBeNull()
+    expect(restoreHistoryCursor({ ...good, events: [{ kind: 'collect', tokenId: '1', amount0: '0', amount1: '0', logIndex: 0, blockNumber: '151', txHash: `0x${'01'.repeat(32)}` }] })).toBeNull()
   })
 })

@@ -11,6 +11,9 @@ import {
   multicall3Of,
   depositsCursor,
   historyCursor,
+  type HistoryCursor,
+  storeHistoryCursor,
+  type StoredHistoryCursor,
   isSafeAndCanonical,
   observe,
   observeGuardHistory,
@@ -408,6 +411,8 @@ export type EngineConfig = {
   gasModel?: 'gas_used' | 'gas_limit'
   /** First block of the managed positions' history on a restarted engine. Default: depositsAfter. */
   historyFromBlock?: bigint
+  /** otto/mamoru#389: the position history read before a restart (restoreHistoryCursor); absent: read from historyFromBlock. */
+  historyCursor?: HistoryCursor
   /**
    * otto/mamoru#358: at most this many blocks of a held position's history are read per review, for a position the
    * observation's cursor does not follow (one admitted before this run). Set where one read of the whole history times
@@ -750,8 +755,18 @@ export class Engine {
   readonly savingsLog: SavingsLogRow[] = []
   /** Managed positions are minted by this engine after this block (plan §12.4), so their whole history is on chain from here. */
   readonly historyFromBlock: bigint
-  /** Position history read so far: each review scans only the blocks after it. */
-  private readonly historyCursor = historyCursor()
+  /** Position history read so far: each review scans only the blocks after it (otto/mamoru#389: kept across restarts). */
+  private readonly historyCursor: HistoryCursor
+  /** otto/mamoru#389: the position history read so far, as the operator saves it. */
+  storedHistory(): StoredHistoryCursor {
+    return storeHistoryCursor(this.historyCursor)
+  }
+
+  /** How far the position history is read (-1: not yet). */
+  get historyThrough(): bigint {
+    return this.historyCursor.through
+  }
+
   /** Deposits read so far after `depositsAfter`, while a long gap is read in slices (`catchUpBlocks`). */
   private readonly depositsCursor = depositsCursor()
   /** otto/mamoru#358: history of held positions the observation's cursor does not follow, read up to `through` (a safe block). */
@@ -800,6 +815,7 @@ export class Engine {
     readonly cfg: EngineConfig,
     private readonly hooks: EngineHooks,
   ) {
+    this.historyCursor = cfg.historyCursor ?? historyCursor()
     this.client = rpcClient(cfg.rpcUrl)
     this.registry = cfg.registry ?? baseRegistry
     this.v3 = uniswapV3(this.registry)

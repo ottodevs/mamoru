@@ -1,3 +1,4 @@
+import type { StoredHistoryCursor } from '@mamoru/rpc'
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AccountContext, Hex, OpView, RemoteSpec } from '@mamoru/domain'
@@ -147,6 +148,8 @@ export type AccountState = {
   managedTokenIds: string[]
   depositsAfter: string
   historyFromBlock: string
+  /** otto/mamoru#389: the engine's position history read so far (storeHistoryCursor), so a restart reads only the gap. */
+  historyCursor?: StoredHistoryCursor
   /** Block the engine's current grants were enabled in by a renewal: the engine must not observe before it. */
   grantsFromBlock?: string
   /** Bumped at each activation so engine op ids stay unique across runs. */

@@ -5,7 +5,7 @@ import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountCo
 import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
-import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, senderNotEoa, SIM_CALL_GAS, simulateCalls, SharedGuardReads, type SimCall, type SimCallResult } from '@mamoru/rpc'
+import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, restoreHistoryCursor, senderNotEoa, type HistoryCursor, SIM_CALL_GAS, simulateCalls, SharedGuardReads, type SimCall, type SimCallResult } from '@mamoru/rpc'
 import { MONAD_LAB_POLICIES, POLICIES, sleeveEnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, registryPoolsKey, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
@@ -1878,6 +1878,12 @@ export class Operator {
    * The policy the engine decides with: the account's, plus depth sizing when the operator is configured for it.
    * Grants are always built from `policyOf`: depth sizing changes how much an entry places, never what a session allows.
    */
+  /** otto/mamoru#389: the saved position history for the engine, only when read for the account's current origin. */
+  private savedHistory(acc: AccountState): { historyCursor?: HistoryCursor } {
+    const c = acc.historyCursor ? restoreHistoryCursor(acc.historyCursor) : null
+    return c && c.fromBlock === BigInt(acc.historyFromBlock) ? { historyCursor: c } : {}
+  }
+
   enginePolicyOf(acc: AccountState): PolicyVersion {
     // otto/mamoru#293: a V4 account's pools are MamoruRegistry's, read on chain (v4Engine), never the static template's.
     if (this.onV4(acc) && this.cfg.oneAuth && acc.grants[0]?.grant.oneAuthV4) {
@@ -7814,6 +7820,8 @@ export class Operator {
         nonceLane: 0,
         depositsAfter: BigInt(acc.depositsAfter),
         historyFromBlock: BigInt(acc.historyFromBlock),
+        // otto/mamoru#389: the history read before the restart, when it was read for this same origin.
+        ...this.savedHistory(acc),
         // otto/mamoru#358: Monad's providers serve 100-block log ranges; one read of a position's whole history timed out.
         ...(this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? { historyStepBlocks: MONAD_HISTORY_STEP_BLOCKS, historyLagBlocks: MONAD_HISTORY_LAG_BLOCKS, historyReadMs: MONAD_HISTORY_READ_MS, catchUpBlocks: MONAD_CATCH_UP_BLOCKS } : this.offBase() ? {} : { catchUpBlocks: BASE_CATCH_UP_BLOCKS }),
         sessions,
@@ -8066,6 +8074,11 @@ export class Operator {
         // Persist how far deposits were read, so a restart or a failed review does not rescan from activation.
         if (runner.engine.depositsAfter - BigInt(acc.depositsAfter) >= DEPOSITS_SAVE_BLOCKS) {
           acc.depositsAfter = runner.engine.depositsAfter.toString()
+          this.store.save()
+        }
+        // otto/mamoru#389: the position history as well (a restart read it again from activation, 2-3.7M blocks on Base).
+        if (runner.engine.historyThrough - BigInt(acc.historyCursor?.through ?? '-1') >= DEPOSITS_SAVE_BLOCKS) {
+          acc.historyCursor = runner.engine.storedHistory()
           this.store.save()
         }
         this.syncEngineOps(acc, runner)
