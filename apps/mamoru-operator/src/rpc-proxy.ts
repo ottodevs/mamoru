@@ -492,7 +492,11 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const inTime = (deadline?: number) => {
     if (deadline !== undefined && Date.now() >= deadline) throw fail('eth_getLogs: no provider answered within the request deadline')
   }
-  const leftOf = (deadline?: number): number => (deadline === undefined ? providerTimeoutMs : Math.max(1, Math.min(providerTimeoutMs, deadline - Date.now())))
+  // Every ask of an eth_getLogs request takes its timeout here, so none starts past the deadline (review of #398).
+  const leftOf = (deadline?: number): number => {
+    inTime(deadline)
+    return deadline === undefined ? providerTimeoutMs : Math.max(1, Math.min(providerTimeoutMs, deadline - Date.now()))
+  }
   /**
    * otto/mamoru#398: one chunk, asked again of the upstream after a short wait when it answers that it is over its rate
    * (a per-second limit, gone a moment later). Live 12 Nov on Base: the upstream rate-limited ~10% of a catch-up's chunks,
