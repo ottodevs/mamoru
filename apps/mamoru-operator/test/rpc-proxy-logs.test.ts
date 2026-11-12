@@ -176,6 +176,25 @@ describe('eth_getLogs routing by provider range', () => {
     void w
   })
 
+  test('a provider that answers but slowly stops being asked once the request is past its deadline (review of #398)', async () => {
+    const w = world(LOGS)
+    w.providers[DRPC]!.down = true
+    w.providers[BASE_ORG]!.down = true
+    w.providers[PUBLICNODE]!.down = true
+    const slow = async (url: string, init: RequestInit) => (url === ALCHEMY ? await Bun.sleep(150) : undefined, w.fetch(url, init))
+    const proxy = startRpcProxy(ALCHEMY, { fetch: slow as never, fallbacks: FALLBACKS, logRanges: {}, logsRequestMs: 250 })
+    try {
+      // Ten 10-block chunks of the upstream, in batches of four, 150 ms each: the third batch would start at 300 ms, past 250.
+      const res = await fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ address: '0x01', fromBlock: hex(1000), toBlock: hex(1099) }] }) })
+      void (await res.json())
+      const asked = w.logsCalls(ALCHEMY).length
+      expect(asked).toBeGreaterThan(0)
+      expect(asked).toBeLessThan(10)
+    } finally {
+      proxy.stop()
+    }
+  })
+
   test('a provider that fails midway through a chunked range is dropped whole: the next one reads the whole range, no gaps, no duplicates', async () => {
     const w = world(LOGS)
     w.providers[DRPC]!.down = true

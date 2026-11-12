@@ -488,6 +488,10 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   type Rejection = Exclude<LogRangeOutcome, 'accepted'>
   const fail = (message: string, reason: Rejection = 'provider_error') => Object.assign(new Error(message), { rpc: { code: -32603, message }, reason })
   /** otto/mamoru#398 (review): what a provider ask may wait inside an eth_getLogs request's deadline, never past it. */
+  /** Review of #398: past the request's deadline nothing more is asked, of this provider or another. */
+  const inTime = (deadline?: number) => {
+    if (deadline !== undefined && Date.now() >= deadline) throw fail('eth_getLogs: no provider answered within the request deadline')
+  }
   const leftOf = (deadline?: number): number => (deadline === undefined ? providerTimeoutMs : Math.max(1, Math.min(providerTimeoutMs, deadline - Date.now())))
   /**
    * otto/mamoru#398: one chunk, asked again of the upstream after a short wait when it answers that it is over its rate
@@ -514,6 +518,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const chunks = ranges(from, to, p.logRange)
     const out: unknown[] = []
     for (let i = 0; i < chunks.length; i += 4) {
+      inTime(deadline)
       const part = await Promise.all(chunks.slice(i, i + 4).map(([a, b]) => chunkFrom(p, filter, a, b, chunks.length > 1, retryUntil, deadline)))
       for (const logs of part) {
         if (!Array.isArray(logs)) throw fail('eth_getLogs answered no list')
@@ -560,10 +565,12 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    */
   async function verifiedLogs(p: LogProvider, filter: any, from: bigint, to: bigint, seen: Witnessed, retryUntil: number | null = null, deadline?: number): Promise<unknown[]> {
     const logs = await logsFrom(p, filter, from, to, retryUntil, deadline)
+    inTime(deadline)
     const own = await blockHash(p.url, to, deadline)
     if (!own) throw fail(`provider does not have block ${to}: its logs for the range may be incomplete`)
     // A local fork is one node and the only provider: there is no witness by construction, and its own block is the check.
     if (local) return logs
+    inTime(deadline)
     const witness = await witnessHash(p, to, seen, deadline)
     if (!witness) throw fail(`no other provider has block ${to} to witness the logs`, 'no_witness')
     if (own.toLowerCase() !== witness.toLowerCase()) throw fail(`provider and witness have another block ${to}: the logs may be from another chain view`, 'hash_mismatch')
