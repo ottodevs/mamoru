@@ -4,7 +4,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { Decision } from '@mamoru/decide'
 import { BaseError, ExecutionRevertedError, InternalRpcError, InvalidInputRpcError, ResourceUnavailableRpcError, RpcRequestError, TimeoutError } from 'viem'
-import { Engine, isTransportError, thrownSummary } from './engine.ts'
+import { Engine, isTransportError, repeatsDiscard, thrownSummary } from './engine.ts'
 import { MemoryJournal, type OpRecord } from './journal.ts'
 
 const timeout = () => new TimeoutError({ body: { method: 'eth_simulateV1', params: [] }, url: 'https://rpc.monad.example' })
@@ -128,6 +128,21 @@ describe('only a provider that did not answer frees the slot (review of #357)', 
       throw new Error('journal broke')
     }
     await expect(runOp()).rejects.toThrow('took too long')
+  })
+})
+
+describe('a proposal discarded for a provider failure is proposed again (otto/mamoru#392)', () => {
+  test('the same premise after a provider discard is retried; after any other discard it waits for a new premise', async () => {
+    const { journal, op, runOp } = setup(async () => {
+      throw timeout()
+    })
+    await expect(runOp()).rejects.toThrow('took too long')
+    const discarded = journal.lastDiscarded()!
+    expect(discarded.opId).toBe(op.opId)
+    expect(repeatsDiscard(discarded, harvest.premiseHash)).toBe(false)
+    expect(repeatsDiscard({ premiseHash: harvest.premiseHash, stateCode: 'EHG_SWAP_IMPACT_OVER_LIMIT' }, harvest.premiseHash)).toBe(true)
+    expect(repeatsDiscard({ premiseHash: harvest.premiseHash, stateCode: 'EHG_SWAP_IMPACT_OVER_LIMIT' }, '0x02')).toBe(false)
+    expect(repeatsDiscard(undefined, harvest.premiseHash)).toBe(false)
   })
 })
 

@@ -132,6 +132,16 @@ function revertIn(chain: unknown[]): boolean {
   })
 }
 
+/**
+ * Whether a proposal repeats the last discarded op (same premise): it is not proposed again until the premise changes.
+ * otto/mamoru#392: not after a discard the provider caused (OBS_RPC_UNAVAILABLE, #357): that op was freed to be retried,
+ * and a harvest's premise does not change between reviews. Live 12 Nov on Base: six accounts decided DECIDE_HARVEST on
+ * every review with no op after one such discard.
+ */
+export function repeatsDiscard(last: Pick<OpRecord, 'premiseHash' | 'stateCode'> | undefined, premiseHash: string): boolean {
+  return !!last && last.premiseHash === premiseHash && last.stateCode !== 'OBS_RPC_UNAVAILABLE'
+}
+
 /** otto/mamoru#357: a throw that is the provider not answering (anywhere in its cause chain), not a bug, a refusal or a revert. */
 export function isTransportError(e: unknown): boolean {
   const chain = causeChain(e)
@@ -1054,7 +1064,7 @@ export class Engine {
     const key = decision.proposal ? proposalKey(decision.proposal) : ''
     const backedOff = !!decision.proposal && this.backoff.some((b) => b.until > obs.block.timestamp && (b.premiseHash === decision.premiseHash || b.key === key))
     // The spend gate is asked last: a proposal already deduped or backed off never reaches it.
-    const deduped = (!!decision.proposal && this.journal.lastDiscarded()?.premiseHash === decision.premiseHash) || backedOff || (!!decision.proposal && this.cfg.spendGate?.(decision.proposal) === false)
+    const deduped = (!!decision.proposal && repeatsDiscard(this.journal.lastDiscarded(), decision.premiseHash)) || backedOff || (!!decision.proposal && this.cfg.spendGate?.(decision.proposal) === false)
     const record = this.journal.recordDecision(decision, deduped ? 'REVIEW_DEDUPED' : undefined)
     if (!decision.proposal || deduped) return { kind: 'decided', observation: obs, record, op: null }
     const op = this.journal.propose(record, decision.proposal.grant)
