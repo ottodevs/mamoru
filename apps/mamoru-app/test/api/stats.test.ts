@@ -153,6 +153,63 @@ describe('days: T1, T2, T3 and S6 from account_daily', () => {
     const v = guardStats(await statsInput(db, NOW))
     expect(v.series.earnedPerDay).toEqual([{ day: '2026-11-05', usd: 0.5, collectedUsd: 0 }])
   })
+
+  /** Days 1..lastDay of Nov: Base (5 accounts, no vault) and Monad every day; `gap` has no rows, `vaultFrom` days hold unpriced vault money. */
+  function history(lastDay: number, o: { gap?: number; vaultFrom?: number }) {
+    const db = platform(5)
+    for (let d = 1; d <= lastDay; d++) {
+      if (d === o.gap) continue
+      const day = `2026-11-${String(d).padStart(2, '0')}`
+      const vault = o.vaultFrom !== undefined && d >= o.vaultFrom ? 300 : 0
+      for (let i = 1; i <= 5; i++) daily(db, day, 8453, `key-${i}`, { total: (300 + vault) * USDC, idle: 100 * USDC, lp: 200 * USDC, feesOpen: 0, feesClose: 0.05 * USDC })
+      for (let i = 1; i <= 3; i++) daily(db, day, 143, `mon-${i}`, { total: 50 * USDC, idle: 50 * USDC, lp: 0 })
+    }
+    return db
+  }
+  const LATER = new Date('2026-11-14T10:00:00.000Z')
+
+  test('an incomplete last closed day is dropped; the days before it, and the 7-day APR, still show', async () => {
+    // 1..12 Nov; the 12th has vault money and no priced vault yield (ticket otto/mamoru#404).
+    const db = history(12, { vaultFrom: 12 })
+    const input = await statsInput(db, LATER)
+    const v = guardStats(input)
+    expect(v.series.totalDeposits?.at(0)?.day).toBe('2026-11-01')
+    expect(v.series.totalDeposits?.at(-1)?.day).toBe('2026-11-11')
+    expect(v.series.earnedPerDay?.at(-1)?.day).toBe('2026-11-11')
+    expect(v.series.apr?.all.at(-1)).toMatchObject({ day: '2026-11-11' })
+    expect(v.series.apr?.all.at(-1)?.apr7d).toBeDefined()
+    expect(input.snapshots.apr7d?.complete).toBe(true)
+    expect(Number.isFinite(input.snapshots.apr7d?.value)).toBe(true)
+  })
+
+  test('served route: GET /api/stats with 12 Nov incomplete still serves the three series', async () => {
+    const h = harness(() => LATER, { statsCache: () => null })
+    h.env.DB = history(12, { vaultFrom: 12 })
+    const res = await h.request('/api/stats')
+    expect(res.status).toBe(200)
+    const v = (await res.json()) as StatsView
+    expect(v.series.totalDeposits?.length).toBe(11)
+    expect(v.series.earnedPerDay?.length).toBe(11)
+    expect(v.series.apr?.all.length).toBe(11)
+    expect(v.series.apr?.all.at(-1)?.apr7d).toBeDefined()
+  })
+
+  test('a day with no rows inside the history keeps the days after it, contiguous, and the 7-day APR is not taken across it', async () => {
+    const db = history(11, { gap: 4 })
+    const v = guardStats(await statsInput(db, LATER))
+    expect(v.series.totalDeposits?.map((p) => p.day)).toEqual(['2026-11-05', '2026-11-06', '2026-11-07', '2026-11-08', '2026-11-09', '2026-11-10', '2026-11-11'])
+    const apr = v.series.apr?.all ?? []
+    expect(apr.filter((p) => p.apr7d !== undefined).map((p) => p.day)).toEqual(['2026-11-11'])
+  })
+
+  test('more than three incomplete trailing days: the data is stale and the series are withheld', async () => {
+    const db = history(12, { vaultFrom: 8 })
+    const input = await statsInput(db, LATER)
+    const v = guardStats(input)
+    expect(v.series.totalDeposits).toBeUndefined()
+    expect(v.series.apr).toBeUndefined()
+    expect(input.snapshots.apr7d?.complete).toBe(false)
+  })
 })
 
 describe('pure pieces', () => {

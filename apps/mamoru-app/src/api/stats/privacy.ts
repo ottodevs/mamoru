@@ -73,11 +73,26 @@ export function validSuffix<T>(points: readonly T[], ok: (p: T) => boolean): T[]
   return points.slice(i)
 }
 
+/** How many closed days at the end of a series may be missing or incomplete before the series is considered stale. */
+export const MAX_TRAILING_GAP = 3
+
+/**
+ * The points a chart may show: trailing incomplete days are dropped (at most MAX_TRAILING_GAP of them: a day whose figures
+ * are not all known is not published, and it must not blank the days that are), then the longest valid run ending at
+ * the new last point. Contiguity is kept, so a 7-day window never spans a hole. Nothing if more than MAX_TRAILING_GAP
+ * days at the end are invalid (the data would be stale).
+ */
+export function validRun<T>(points: readonly T[], ok: (p: T) => boolean, incomplete: (p: T) => boolean = (p) => !ok(p), maxTrailing = MAX_TRAILING_GAP): T[] {
+  let end = points.length
+  while (end > 0 && points.length - end < maxTrailing && incomplete(points[end - 1]!)) end--
+  return validSuffix(points.slice(0, end), ok)
+}
+
 const aprOk = (p: GuardAprDay) => p.complete && finite(p.earned) && finite(p.capital) && p.capital > 0 && enoughOwners(p.owners.size)
 
 /** Daily APR (percent) and, once 7 valid days exist, the 7-day figure from 7-day sums (capital-weighted, no compounding). */
 export function guardApr(days: readonly GuardAprDay[] | undefined): StatsAprPoint[] | undefined {
-  const run = validSuffix(days ?? [], aprOk)
+  const run = validRun(days ?? [], aprOk, (p) => !p.complete)
   if (!run.length) return undefined
   return run.map((p, i) => {
     const point: StatsAprPoint = { day: p.day, apr: round((p.earned / p.capital) * 365 * 100, 'pct') }
@@ -105,12 +120,12 @@ export function guardStats(input: GuardInput): StatsView {
   const all = guardApr(input.apr.all)
   const base = guardApr(input.apr.base)
   const monad = guardApr(input.apr.monad)
-  const earnedPerDay = validSuffix(input.earnedPerDay, (p) => p.complete && finite(p.usd) && finite(p.collectedUsd) && enoughOwners(p.owners.size)).map((p) => ({
+  const earnedPerDay = validRun(input.earnedPerDay, (p) => p.complete && finite(p.usd) && finite(p.collectedUsd) && enoughOwners(p.owners.size), (p) => !p.complete).map((p) => ({
     day: p.day,
     usd: round(p.usd, 'cents'),
     ...(enoughOwners(p.collectors.size) || p.collectedUsd === 0 ? { collectedUsd: round(p.collectedUsd, 'cents') } : {}),
   }))
-  const totalDeposits = validSuffix(input.totalDeposits, (p) => p.complete && finite(p.usd) && enoughOwners(p.owners.size)).map((p) => ({ day: p.day, usd: round(p.usd, 'dollars') }))
+  const totalDeposits = validRun(input.totalDeposits, (p) => p.complete && finite(p.usd) && enoughOwners(p.owners.size), (p) => !p.complete).map((p) => ({ day: p.day, usd: round(p.usd, 'dollars') }))
   const series: StatsView['series'] = {}
   if (all) series.apr = { all, ...(base ? { base } : {}), ...(monad ? { monad } : {}) }
   if (earnedPerDay.length) series.earnedPerDay = earnedPerDay
