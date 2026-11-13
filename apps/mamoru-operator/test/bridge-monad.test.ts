@@ -361,7 +361,7 @@ describe('the sleeve\'s idle USDC and since when (otto/mamoru#401, spec 012 HRV-
     // No threshold given: no idle in the answer (as before).
     expect(await bridge.remote('acc-1', ACCOUNT, WINDOW)).toEqual({ value: idle, inFlight: 0n, ready: true })
     const since = Math.floor(T0 / 1000)
-    expect(await bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).toEqual({ value: idle, inFlight: 0n, ready: true, idle, idleSince: since })
+    expect(await bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).toEqual({ value: idle, inFlight: 0n, ready: true, idle, idleThreshold: 100_000n, idleSince: since })
     now += 7 * 3_600_000
     expect((await bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).idleSince).toBe(since)
     const again = setup({ dir: (bridge as unknown as { stateDir: string }).stateDir, now: () => now })
@@ -369,7 +369,7 @@ describe('the sleeve\'s idle USDC and since when (otto/mamoru#401, spec 012 HRV-
     expect((await again.bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).idleSince).toBe(since)
     // Placed: below the threshold, no clock; idle again later starts a new one.
     idle = 0n
-    expect(await again.bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).toEqual({ value: 0n, inFlight: 0n, ready: true, idle: 0n })
+    expect(await again.bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).toEqual({ value: 0n, inFlight: 0n, ready: true, idle: 0n, idleThreshold: 100_000n })
     idle = 30_000_000n
     now += 60_000
     expect((await again.bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).idleSince).toBe(Math.floor(now / 1000))
@@ -392,6 +392,55 @@ describe('the idle clock belongs to one Safe (otto/mamoru#401 review)', () => {
     // And back on the first Safe it starts again too: the journal keeps one clock, for the Safe it last read.
     now += 60_000
     expect((await bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).idleSince).toBe(Math.floor(now / 1000))
+  })
+})
+
+describe('otto/mamoru#401 review r2', () => {
+  const WINDOW = 1_800
+  const U = 1_000_000n
+  type Live = { readSleeve: () => Promise<{ value: bigint; block: bigint; ready: boolean; idle: bigint }> }
+
+  test('the clock runs only above max(1 % of the account, the floor): 30 -> 3 for an hour -> 30 starts it again', async () => {
+    let now = T0
+    const { bridge } = setup({ now: () => now })
+    let block = 7_000n
+    let idle = 30n * U
+    ;(bridge as unknown as Live).readSleeve = async () => ({ value: 40n * U, block: block++, ready: true, idle })
+    // 1,000 USDC on Base plus the 40 of the sleeve: 1 % is 10.40 USDC, above the 0.10 floor.
+    const threshold = (sleeve: bigint) => ((1_000n * U + sleeve) / 100n > 100_000n ? (1_000n * U + sleeve) / 100n : 100_000n)
+    const at = () => bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], threshold)
+    expect(await at()).toMatchObject({ idle: 30n * U, idleThreshold: 10_400_000n, idleSince: Math.floor(T0 / 1000) })
+    idle = 3n * U
+    now += 30 * 60_000
+    expect((await at()).idleSince).toBeUndefined()
+    now += 30 * 60_000
+    expect((await at()).idleSince).toBeUndefined()
+    idle = 30n * U
+    now += 60_000
+    // Back above: a new clock from now, not from T0, so nothing is due for another hour.
+    expect((await at()).idleSince).toBe(Math.floor(now / 1000))
+    // At the threshold exactly is not above it.
+    idle = 10_400_000n
+    expect((await at()).idleSince).toBeUndefined()
+  })
+
+  test("a new Safe read one block behind never takes the old Safe's value; unreadable, it is unread", async () => {
+    const { bridge } = setup()
+    const live = bridge as unknown as Live
+    live.readSleeve = async () => ({ value: 1_000n * U, block: 7_000n, ready: true, idle: 1_000n * U })
+    expect((await bridge.remote('acc-1', ACCOUNT, WINDOW)).value).toBe(1_000n * U)
+    const NEW = '0x00000000000000000000000000000000000000bb' as const
+    live.readSleeve = async () => ({ value: 0n, block: 6_999n, ready: true, idle: 0n })
+    expect(await bridge.remote('acc-1', NEW, WINDOW, undefined, [], () => 100_000n)).toEqual({ value: 0n, inFlight: 0n, ready: true, idle: 0n, idleThreshold: 100_000n })
+    // The old Safe read the same way still keeps its own last value against a lagging provider.
+    const other = setup()
+    ;(other.bridge as unknown as Live).readSleeve = async () => ({ value: 1_000n * U, block: 7_000n, ready: true, idle: 0n })
+    await other.bridge.remote('acc-1', ACCOUNT, WINDOW)
+    ;(other.bridge as unknown as Live).readSleeve = async () => {
+      throw new Error('Monad RPC down')
+    }
+    await expect(other.bridge.remote('acc-1', NEW, WINDOW)).rejects.toThrow('never read')
+    expect((await other.bridge.remote('acc-1', ACCOUNT, WINDOW)).value).toBe(1_000n * U)
   })
 })
 

@@ -44,6 +44,12 @@ export type Observation = {
     idle?: bigint
     idleSince?: number
     /**
+     * otto/mamoru#401 (review r2): the threshold the operator's idle clock ran above (max(1 % of the account's value, the
+     * entry floor) as it measured them). Decide judges `idle` against this same figure, so a return always follows a full
+     * dwell period above it. Absent: decide's own max(1 % of its total, entryMin).
+     */
+    idleThreshold?: bigint
+    /**
      * otto/mamoru#401: the sleeve Safe's own signed cap (its spec's `capUsdc`), raw savings units: it never places more,
      * so nothing is bridged past it. Absent: not known (the bridge-out grant bounds it alone, as before).
      */

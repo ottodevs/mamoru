@@ -51,7 +51,7 @@ import { buildMoneyMap, chainLegOf, returnRows, unreadLeg, type ReturnLeg } from
 import type { GuardReadsState } from './guard-reads-state.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { BridgeLimit, Decision, Observation, PeerPositionObs, Proposal } from '@mamoru/decide'
-import { capRoomOf, DEFAULT_MIN_ENTRY } from '@mamoru/decide'
+import { bucketValues, capRoomOf, DEFAULT_MIN_ENTRY, RETURN_IDLE_BPS } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, POSITION_DUST_USDC, amountsForLiquidity, idleTokens, inUsdc, livePool, nativePricePool, positionUsdc, positionView, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
@@ -6316,8 +6316,8 @@ export class Operator {
       // design-C Safe there (what it still holds counts toward the cap; nothing is bridged to it).
       const old = this.designC(acc)
       return {
-        remote: async (block: bigint) => {
-          const a = this.withReturns(acc, await bridge.remote(acc.accountKey, v.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, ids, this.idleMinOf(acc)))
+        remote: async (block: bigint, local?: Observation) => {
+          const a = this.withReturns(acc, await bridge.remote(acc.accountKey, v.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, ids, this.idleMinOf(acc, local)))
           if (!old) return a
           const b = await bridge.remote(`${acc.accountKey}#retired`, old.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, [])
           return { ...a, value: a.value + b.value - b.inFlight, inFlight: a.inFlight, ready: a.ready }
@@ -6334,23 +6334,30 @@ export class Operator {
     // otto/mamoru#401: a Safe too small to ever be funded is never read: empty, no room, its share stays here.
     if (this.unfundable(acc, rs)) return { remote: async () => ({ value: 0n, inFlight: 0n, ready: false, cap: 0n }) }
     return {
-      remote: async (block: bigint) => {
+      remote: async (block: bigint, local?: Observation) => {
         const open = Math.floor(Date.now() / 1000) < rs.spec.validUntil - REMOTE_BRIDGE_STOP_SECONDS
         // otto/mamoru#401: with its idle USDC (spec 012 HRV-R4) and its own signed cap (nothing is bridged past it).
-        const r = await bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, open ? rs.permissionIds : [], this.idleMinOf(acc))
+        const r = await bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, open ? rs.permissionIds : [], this.idleMinOf(acc, local))
         return /^[0-9]+$/.test(rs.spec.capUsdc) ? { ...r, cap: BigInt(rs.spec.capUsdc) } : r
       },
     }
   }
 
   /**
-   * otto/mamoru#401 (spec 012 HRV-R4): the operator's idle clock runs while the sleeve's own USDC is at or above the
-   * account's entry floor. Decide adds the owner's rule on top (more than max(1 % of the account's value, that floor), for
-   * more than RETURN_DWELL_SECONDS): it knows the account's value, this read does not.
+   * otto/mamoru#401 (spec 012 HRV-R4, owner rule): the return threshold the sleeve's idle clock runs above: max(1 % of the
+   * account's value, the entry floor). The figure goes to decide with the clock (`idleThreshold`), which judges against it,
+   * so a return needs a full dwell period continuously above it.
    */
-  private idleMinOf(acc: AccountState): (value: bigint) => bigint {
-    const min = this.enginePolicyOf(acc).minEntry ?? DEFAULT_MIN_ENTRY
-    return () => min
+  private idleMinOf(acc: AccountState, local?: Observation): (value: bigint) => bigint {
+    const policy = this.enginePolicyOf(acc)
+    const min = policy.minEntry ?? DEFAULT_MIN_ENTRY
+    // This chain's part of the account (its savings, idle volatile, positions, vaults), as decide values it; the sleeve's
+    // value (with what is in flight) is added per read.
+    const here = local ? bucketValues({ ...local, remote: undefined }, policy, new Set(policy.buckets.flatMap((b) => b.pools))).total : 0n
+    return (sleeve) => {
+      const byValue = ((here + sleeve) * RETURN_IDLE_BPS) / 10_000n
+      return byValue > min ? byValue : min
+    }
   }
 
   /**

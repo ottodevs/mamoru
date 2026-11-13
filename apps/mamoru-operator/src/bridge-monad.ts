@@ -499,32 +499,37 @@ export class MonadBridge {
    * holds rather than size the account without its sleeve). A read from a block older than the last one recorded (a
    * lagging provider) is not used: the last one is. `baseBlock`: the block the engine read the local balances at.
    */
-  async remote(accountKey: string, safe: Address, twapWindowSeconds: number, baseBlock?: bigint, permissionIds: readonly Hex[] = [], idleMin?: (value: bigint) => bigint): Promise<{ value: bigint; inFlight: bigint; ready: boolean; idle?: bigint; idleSince?: number }> {
+  async remote(accountKey: string, safe: Address, twapWindowSeconds: number, baseBlock?: bigint, permissionIds: readonly Hex[] = [], idleMin?: (value: bigint) => bigint): Promise<{ value: bigint; inFlight: bigint; ready: boolean; idle?: bigint; idleSince?: number; idleThreshold?: bigint }> {
+    const stored = this.journal.sleeves[accountKey]
+    // otto/mamoru#401 (review r2): what the journal holds is of one Safe. Another Safe under the same key (a new remote, a
+    // move) never inherits its value, its idle or its clock. An entry from before `safe` was recorded counts as this one.
+    const last = stored && (stored.safe === undefined || stored.safe === safe.toLowerCase()) ? stored : undefined
+    const sameSafe = stored?.safe !== undefined && stored.safe === safe.toLowerCase()
     let read: { value: bigint; block: bigint; ready: boolean; idle: bigint }
     try {
       if (!(await this.monadVerified())) throw new Error('Monad RPC not checked yet')
       read = await this.readSleeve(safe, twapWindowSeconds, permissionIds)
     } catch (e) {
-      const last = this.journal.sleeves[accountKey]
       // The provider's error may quote its keyed URL: redacted before it reaches the engine's journal.
       if (!last) throw new ReasonError('OBS_RPC_UNAVAILABLE', `Monad sleeve of ${accountKey} unreadable and never read: ${redactSecrets((e as Error).message?.split('\n')[0] ?? String(e))}`)
       const settled = await this.settledAt(accountKey, baseBlock, undefined)
       const inFlight = this.inFlight(accountKey, BigInt(last.block), settled)
       return { value: BigInt(last.value) + inFlight, inFlight, ready: false }
     }
-    const last = this.journal.sleeves[accountKey]
-    // otto/mamoru#401: the idle clock belongs to one Safe; another Safe under the same key (a new remote, a move) starts it again.
-    const sameSafe = last?.safe !== undefined && last.safe === safe.toLowerCase()
-    let idleSince = sameSafe ? last?.idleSince : undefined
-    if (last && BigInt(last.block) > read.block) {
-      // A lagging provider: its older read could miss a mint the journal already places at or before the last block.
-      read = { value: BigInt(last.value), block: BigInt(last.block), ready: read.ready, idle: sameSafe ? BigInt(last.idle ?? '0') : 0n }
-    } else {
-      // otto/mamoru#401 (spec 012 HRV-R4): since when the Safe's own USDC has stayed at or above the return threshold, kept
-      // across restarts; it starts again whenever a read finds it below (its engine placed it).
-      read = { ...read, idle: read.idle ?? 0n }
-      idleSince = idleMin !== undefined && read.idle >= idleMin(read.value) ? (idleSince ?? Math.floor(this.now() / 1000)) : undefined
-      if (!last || last.value !== read.value.toString() || BigInt(last.block) < read.block || last.idle !== read.idle.toString() || last.idleSince !== idleSince) {
+    read = { ...read, idle: read.idle ?? 0n }
+    const lagging = !!last && BigInt(last.block) > read.block
+    // A lagging provider: its older read could miss a mint the journal already places at or before the last block (same Safe only).
+    if (lagging) read = { value: BigInt(last!.value), block: BigInt(last!.block), ready: read.ready, idle: sameSafe ? BigInt(last!.idle ?? '0') : 0n }
+    const settled = await this.settledAt(accountKey, baseBlock, read.block)
+    const inFlight = this.inFlight(accountKey, read.block, settled)
+    // otto/mamoru#401 (spec 012 HRV-R4, review r2): the idle clock runs only while the Safe's own USDC is above the return
+    // threshold the caller gives for this sleeve value (the same one decide then judges against, `idleThreshold`), and
+    // starts again whenever a read finds it at or below. Kept across restarts; a lagging read does not move it.
+    const threshold = idleMin?.(read.value + inFlight)
+    let idleSince = sameSafe ? stored?.idleSince : undefined
+    if (!lagging) {
+      idleSince = threshold !== undefined && read.idle > threshold ? (idleSince ?? Math.floor(this.now() / 1000)) : undefined
+      if (!stored || !sameSafe || stored.value !== read.value.toString() || BigInt(stored.block) < read.block || stored.idle !== read.idle.toString() || stored.idleSince !== idleSince) {
         this.journal.sleeves[accountKey] = { value: read.value.toString(), block: read.block.toString(), at: this.iso(), safe: safe.toLowerCase(), idle: read.idle.toString(), ...(idleSince !== undefined ? { idleSince } : {}) }
         try {
           this.save()
@@ -532,11 +537,9 @@ export class MonadBridge {
           logErr('[bridge-monad] journal write failed:', e)
         }
       }
-    }
-    const settled = await this.settledAt(accountKey, baseBlock, read.block)
-    const inFlight = this.inFlight(accountKey, read.block, settled)
-    // `idle` only when a threshold was given (the caller's policy reads it); `idleSince` only while at or above it.
-    return { value: read.value + inFlight, inFlight, ready: read.ready && !settled.unsure && !this.coolingDown(accountKey), ...(idleMin !== undefined ? { idle: read.idle, ...(idleSince !== undefined ? { idleSince } : {}) } : {}) }
+    } else if (threshold !== undefined && read.idle <= threshold) idleSince = undefined
+    // `idle` only when a threshold was given (the caller's policy reads it); `idleSince` only while above it.
+    return { value: read.value + inFlight, inFlight, ready: read.ready && !settled.unsure && !this.coolingDown(accountKey), ...(threshold !== undefined ? { idle: read.idle, idleThreshold: threshold, ...(idleSince !== undefined ? { idleSince } : {}) } : {}) }
   }
 
   /** Whether a recent bridge-out failure of the account still holds bridging (its sleeve reads not ready). */

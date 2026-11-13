@@ -30,7 +30,8 @@ function idleDue(obs: Observation, entryMin: bigint, total: bigint): bigint {
   const idle = obs.remote?.idle ?? 0n
   const since = obs.remote?.idleSince
   const byValue = (total * RETURN_IDLE_BPS) / 10_000n
-  const threshold = byValue > entryMin ? byValue : entryMin
+  // The clock's own threshold when it says which: the dwell was measured above exactly that.
+  const threshold = obs.remote?.idleThreshold ?? (byValue > entryMin ? byValue : entryMin)
   return idle > threshold && since !== undefined && obs.block.timestamp - BigInt(since) > RETURN_DWELL_SECONDS ? idle : 0n
 }
 

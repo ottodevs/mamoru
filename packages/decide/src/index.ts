@@ -24,7 +24,7 @@ export { PACKAGING_STABLES_DAY_PCT, PACKAGING_TVL_DROP_PCT, PACKAGING_VOLUME_RUL
 export { eelOf, impactAt, PACKAGING_EEL_CAP_USD, PACKAGING_EEL_RULES, poolDepthShadowRisk } from './shadow-pool-depth.ts'
 export { fallBpsOf, fallFreezeOf, marketOf, type CumulativePoint } from './guard/index.ts'
 export { belowShareOf, edgeBpsOf, meanTickAt, rangeFor, realizedVolOf, regimeOf, skewedRange, spiking, volWidthTicks, widenEarly, widthFor, type Regime } from './geometry/index.ts'
-export { allocate, reusablePosition, DEFAULT_INCREASE_TOLERANCE_BPS, DEFAULT_MIN_ENTRY, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
+export { allocate, reusablePosition, DEFAULT_INCREASE_TOLERANCE_BPS, DEFAULT_MIN_ENTRY, RETURN_DWELL_SECONDS, RETURN_IDLE_BPS, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
 export { depthOf, twapFloor, type Depth } from './depth/index.ts'
 export { MAX_FEE_APR_BPS, outOfRangeSinceOf, rerangeWorth, RERANGE_OPS, withOutOfRangeSince, type RerangeWorth } from './rebalance/lazy.ts'
 export { weightTargets } from './rebalance/weights.ts'

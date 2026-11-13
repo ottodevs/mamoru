@@ -516,8 +516,9 @@ export type EngineConfig = {
    * (any error): the review holds as an observation failure. Absent: no `remote` (a remote bucket then waits with
    * DECIDE_WAIT_BRIDGE and nothing is bridged). `block` is the observation's block on this chain: a bridge signed but
    * not yet landed there is still in the local balances read at it, and is not counted in flight a second time.
+   * `local` (otto/mamoru#401): this chain's observation just read, for what depends on the account's value (the idle threshold).
    */
-  remote?: (block: bigint) => Promise<NonNullable<Observation['remote']>>
+  remote?: (block: bigint, local?: Observation) => Promise<NonNullable<Observation['remote']>>
   /**
    * otto/mamoru#376 (spec 011 CAP-R5): what the bridge-out grant still allows, set on that session as
    * `SessionObs.bridgeLimit` at every review. Absent: the session carries none, which decide reads as unknown (waits).
@@ -1031,7 +1032,7 @@ export class Engine {
     // decision without it would size the local buckets on part of the account.
     if (this.cfg.remote) {
       try {
-        obs = { ...obs, remote: await this.cfg.remote(obs.block.number) }
+        obs = { ...obs, remote: await this.cfg.remote(obs.block.number, obs) }
       } catch (e) {
         if (e instanceof ReasonError) return { kind: 'observation-failed', code: e.code, detail: e.detail }
         return { kind: 'observation-failed', code: 'OBS_RPC_UNAVAILABLE', detail: `remote value: ${(e as Error).message?.split('\n')[0] ?? String(e)}` }

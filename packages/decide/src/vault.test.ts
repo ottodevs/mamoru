@@ -459,6 +459,15 @@ describe('idle USDC on the sleeve comes home (otto/mamoru#107, spec 012 HRV-R4)'
     expect(decide(at({ remote: remote(30n * USDC, 60 * 60 + 1) }), V7).returnDue?.amount).toBe(30n * USDC)
   })
 
+  test("otto/mamoru#401 review r2: decide judges idle against the clock's own threshold", () => {
+    const remote = (idle: bigint, ago: number, idleThreshold: bigint) => ({ value: 40n * USDC, inFlight: 0n, ready: true, idle, idleSince: Number(NOW) - ago, idleThreshold })
+    // The clock restarted when idle came back to 30 (it had dropped to 3): one minute in, nothing is due.
+    expect(decide(at({ remote: remote(30n * USDC, 60, 10_400_000n) }), V7).returnDue).toBeUndefined()
+    expect(decide(at({ remote: remote(30n * USDC, 61 * 60, 10_400_000n) }), V7).returnDue?.amount).toBe(30n * USDC)
+    // Not above the clock's threshold: not due, whatever decide's own total would say.
+    expect(decide(at({ remote: remote(20n * USDC, 61 * 60, 20n * USDC) }), V7).returnDue).toBeUndefined()
+  })
+
   test('never both ways in one review: idle due home holds the bridge out, and a bridge out asks nothing back', () => {
     const d = decide(at({ remote: { value: 40n * USDC, inFlight: 0n, ready: true, idle: 30n * USDC, idleSince: Number(NOW) - 7 * 3_600 } }), V7)
     expect(d.returnDue?.amount).toBe(30n * USDC)
