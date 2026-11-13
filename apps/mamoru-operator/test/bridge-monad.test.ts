@@ -444,6 +444,50 @@ describe('otto/mamoru#401 review r2', () => {
   })
 })
 
+describe('otto/mamoru#401 review r3', () => {
+  const WINDOW = 1_800
+  const U = 1_000_000n
+  type Live = { readSleeve: () => Promise<{ value: bigint; block: bigint; ready: boolean; idle: bigint }>; journal: { sleeves: Record<string, { idleSince?: number; safe?: string; value: string; block: string; at: string }> } }
+
+  test('a reset seen on a lagging read is kept: the old clock never resumes', async () => {
+    let now = T0
+    const { bridge } = setup({ now: () => now })
+    const live = bridge as unknown as Live
+    live.readSleeve = async () => ({ value: 30n * U, block: 7_000n, ready: true, idle: 30n * U })
+    let threshold = 10n * U
+    const at = () => bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => threshold)
+    const start = Math.floor(T0 / 1000)
+    expect((await at()).idleSince).toBe(start)
+    // 50 min later the threshold rises above the idle, on a review whose provider lags one block.
+    now += 50 * 60_000
+    threshold = 40n * U
+    live.readSleeve = async () => ({ value: 30n * U, block: 6_999n, ready: true, idle: 30n * U })
+    expect((await at()).idleSince).toBeUndefined()
+    expect(live.journal.sleeves['acc-1']!.idleSince).toBeUndefined()
+    // Next review: the threshold falls back and the read is current. A new clock, never the 50 min one.
+    now += 60_000
+    threshold = 10n * U
+    live.readSleeve = async () => ({ value: 30n * U, block: 7_001n, ready: true, idle: 30n * U })
+    expect((await at()).idleSince).toBe(Math.floor(now / 1000))
+  })
+
+  test('an entry that does not say which Safe it was read for is never reused, lagging or unreadable', async () => {
+    const { bridge } = setup()
+    const live = bridge as unknown as Live
+    // Safe A's 1,000 USDC, written before `safe` was recorded.
+    live.journal.sleeves['acc-1'] = { value: (1_000n * U).toString(), block: '7000', at: new Date(T0).toISOString() }
+    const B = '0x00000000000000000000000000000000000000bb' as const
+    live.readSleeve = async () => ({ value: 0n, block: 6_999n, ready: true, idle: 0n })
+    expect((await bridge.remote('acc-1', B, WINDOW)).value).toBe(0n)
+    const other = setup()
+    ;(other.bridge as unknown as Live).journal.sleeves['acc-1'] = { value: (1_000n * U).toString(), block: '7000', at: new Date(T0).toISOString() }
+    ;(other.bridge as unknown as Live).readSleeve = async () => {
+      throw new Error('Monad RPC down')
+    }
+    await expect(other.bridge.remote('acc-1', B, WINDOW)).rejects.toThrow('never read')
+  })
+})
+
 // ---- Review of PR #144 (Claude Opus 5.5 + Gemini Argon): one regression test per finding fixed. ----
 
 describe('review of #144: settling a sending burn reads a bounded range', () => {

@@ -501,10 +501,11 @@ export class MonadBridge {
    */
   async remote(accountKey: string, safe: Address, twapWindowSeconds: number, baseBlock?: bigint, permissionIds: readonly Hex[] = [], idleMin?: (value: bigint) => bigint): Promise<{ value: bigint; inFlight: bigint; ready: boolean; idle?: bigint; idleSince?: number; idleThreshold?: bigint }> {
     const stored = this.journal.sleeves[accountKey]
-    // otto/mamoru#401 (review r2): what the journal holds is of one Safe. Another Safe under the same key (a new remote, a
-    // move) never inherits its value, its idle or its clock. An entry from before `safe` was recorded counts as this one.
-    const last = stored && (stored.safe === undefined || stored.safe === safe.toLowerCase()) ? stored : undefined
+    // otto/mamoru#401 (review r2, r3): what the journal holds is of one Safe. Another Safe under the same key (a new remote,
+    // a move) never inherits its value, its idle or its clock; nor does any Safe inherit an entry that does not say which
+    // Safe it was read for (written before `safe` was recorded): such an entry is as good as no read.
     const sameSafe = stored?.safe !== undefined && stored.safe === safe.toLowerCase()
+    const last = sameSafe ? stored : undefined
     let read: { value: bigint; block: bigint; ready: boolean; idle: bigint }
     try {
       if (!(await this.monadVerified())) throw new Error('Monad RPC not checked yet')
@@ -537,7 +538,17 @@ export class MonadBridge {
           logErr('[bridge-monad] journal write failed:', e)
         }
       }
-    } else if (threshold !== undefined && read.idle <= threshold) idleSince = undefined
+    } else if (threshold !== undefined && read.idle <= threshold && idleSince !== undefined) {
+      // otto/mamoru#401 (review r3): a reset seen on a lagging read is kept too, or a later review would resume the old clock.
+      idleSince = undefined
+      const { idleSince: _dropped, ...rest } = stored!
+      this.journal.sleeves[accountKey] = rest
+      try {
+        this.save()
+      } catch (e) {
+        logErr('[bridge-monad] journal write failed:', e)
+      }
+    }
     // `idle` only when a threshold was given (the caller's policy reads it); `idleSince` only while above it.
     return { value: read.value + inFlight, inFlight, ready: read.ready && !settled.unsure && !this.coolingDown(accountKey), ...(threshold !== undefined ? { idle: read.idle, idleThreshold: threshold, ...(idleSince !== undefined ? { idleSince } : {}) } : {}) }
   }
