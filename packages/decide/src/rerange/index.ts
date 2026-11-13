@@ -111,7 +111,7 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
   if (!hasManageAny(policy) || policy.range.adjust !== 'on_out_of_range' || p.liquidity === 0n) return { code: null, proposal: null }
   // otto/mamoru#213: a bucket at preference 0 is being left (v6's USDC/cbBTC): `reduce` empties it, a re-range would
   // put its money back in (and its exit-only grant has no mint).
-  if (policy.buckets.find((b) => b.pools.includes(pool.name as never))?.preference === 0) return { code: null, proposal: null }
+  if (policy.buckets.find((b) => b.pools.includes(pool.name as never))?.preference === 0) return { code: pool.tick < p.tickLower || pool.tick >= p.tickUpper ? 'DECIDE_RANGE_EXIT_ONLY' : null, proposal: null }
   // Built only when proposed: a pool without its own manage-any grant must not throw before the trigger says so.
   const proposal = (why: NonNullable<RerangeProposal['why']>): RerangeProposal => ({ kind: 'rerange', grant: anyKey(policy, 'manage-any', pool.name), pool: pool.name, tokenId: p.tokenId, liquidity: p.liquidity, why, tickLower: p.tickLower, tickUpper: p.tickUpper })
   const lazy = policy.range.lazy
@@ -122,7 +122,7 @@ export function rerangeOf(obs: Observation, policy: PolicyVersion, p: PositionOb
     const since = p.outOfRangeSince ?? null
     // Live wait rule: out this long, any distance past the edge is no passing swing.
     const waited = lazy.maxWaitSeconds !== undefined && since !== null && (pool.tick < p.tickLower || pool.tick >= p.tickUpper) && obs.block.timestamp - since >= BigInt(lazy.maxWaitSeconds)
-    if (!past && !waited) return { code: null, proposal: null }
+    if (!past && !waited) return { code: pool.tick < p.tickLower || pool.tick >= p.tickUpper ? 'DECIDE_RANGE_WAIT' : null, proposal: null }
     const lastAt = obs.lastRerangeAt ?? null
     if (lastAt !== null && obs.block.timestamp - lastAt < BigInt(policy.range.cooldownSeconds)) return { code: 'DECIDE_RANGE_COOLDOWN', proposal: null }
     if (atWeeklyCap(obs, policy, pool)) return { code: 'DECIDE_RANGE_WEEKLY_CAP', proposal: null }

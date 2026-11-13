@@ -125,11 +125,10 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       if (managed && depegged && pool.name === depegged.name) {
         // Nothing moves in a depegged pool but the guard's own exit.
         codes.push('RISK_DEPEG_PAIRED')
-        if (within) managedInRange++
-        else managedOutOfRange++
+        if (p.liquidity > 0n) { if (within) managedInRange++; else managedOutOfRange++ }
       } else if (managed) {
-        if (within) managedInRange++
-        else managedOutOfRange++
+        // otto/mamoru#402: an empty NFT (liquidity 0) is neither in nor out of range.
+        if (p.liquidity > 0n) { if (within) managedInRange++; else managedOutOfRange++ }
         const r = rerangeOf(obs, policy, p, pool)
         if (r.code) codes.push(r.code)
         if (!within && !r.proposal && !rangeHold && r.code && RANGE_HOLD_CODES.has(r.code)) rangeHold = r.code
@@ -317,7 +316,11 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     if (managedOutOfRange > 0) return rangeHold ?? 'OBS_POSITION_OUT_OF_RANGE'
     // Spec 004: the app and /ops show that money waits because of a fall, not that nothing is to do.
     if (frozen.size > 0) return 'DECIDE_ENTRY_PAUSED_FALL'
-    if (managedInRange > 0) return 'DECIDE_IN_RANGE'
+    if (managedInRange > 0) {
+      // otto/mamoru#402: idle money above the minimum entry that waits names its bucket's wait; the largest amount wins, then the bucket id.
+      const idle = waiting.filter((w) => BUCKET_WAIT_CODES.has(w.code)).sort((a, b) => (a.amount === b.amount ? (a.bucket < b.bucket ? -1 : 1) : a.amount > b.amount ? -1 : 1))[0]
+      return idle?.code ?? 'DECIDE_IN_RANGE'
+    }
     const blocking = buckets.find((b) => b.code !== 'PLAN_BUCKET_NO_EXECUTABLE_POOL')
     return blocking?.code ?? 'PLAN_BUCKET_NO_EXECUTABLE_POOL'
   }
@@ -335,7 +338,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
 }
 
 /** otto/mamoru#223: the re-range codes that say why an out-of-range position waits. */
-const RANGE_HOLD_CODES: ReadonlySet<ReasonCode> = new Set(['DECIDE_RANGE_COOLDOWN', 'DECIDE_RANGE_BELOW_COST', 'DECIDE_RANGE_NO_FEE_HISTORY'])
+const RANGE_HOLD_CODES: ReadonlySet<ReasonCode> = new Set(['DECIDE_RANGE_COOLDOWN', 'DECIDE_RANGE_WAIT', 'DECIDE_RANGE_WEEKLY_CAP', 'DECIDE_RANGE_BELOW_COST', 'DECIDE_RANGE_NO_FEE_HISTORY'])
+const BUCKET_WAIT_CODES: ReadonlySet<ReasonCode> = new Set(['DECIDE_WAIT_GAS', 'DECIDE_WAIT_DEPTH', 'DECIDE_WAIT_BUDGET', 'DECIDE_WAIT_VAULT_LIQUIDITY'])
 
 /** A rerange proposal without its display-only fields (otto/mamoru#219), as FR-LC-001 hashed it before them. */
 function premiseOf(p: RerangeProposal): RerangeProposal {

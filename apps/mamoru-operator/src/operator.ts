@@ -8038,7 +8038,7 @@ export class Operator {
             if (!sameWaiting(runner.waiting, waiting)) this.fundingMoved(acc)
             runner.waiting = waiting
             // otto/mamoru#223: why an out-of-range position is left where it is, for the app to say so.
-            const rangeHolds = d.positions.flatMap((x) => (x.codes.includes('OBS_POSITION_OUT_OF_RANGE') ? x.codes.filter((c) => c === 'DECIDE_RANGE_COOLDOWN' || c === 'DECIDE_RANGE_BELOW_COST' || c === 'DECIDE_RANGE_NO_FEE_HISTORY').map((code) => ({ tokenId: x.tokenId.toString(), code })) : []))
+            const rangeHolds = d.positions.flatMap((x) => (x.codes.includes('OBS_POSITION_OUT_OF_RANGE') ? x.codes.filter((c) => c === 'DECIDE_RANGE_COOLDOWN' || c === 'DECIDE_RANGE_WAIT' || c === 'DECIDE_RANGE_WEEKLY_CAP' || c === 'DECIDE_RANGE_BELOW_COST' || c === 'DECIDE_RANGE_NO_FEE_HISTORY').map((code) => ({ tokenId: x.tokenId.toString(), code })) : []))
             if (JSON.stringify(rangeHolds) !== JSON.stringify(runner.rangeHolds ?? [])) this.fundingMoved(acc)
             runner.rangeHolds = rangeHolds
             const o = r.op ? engine.journal.op(r.op.opId) : null

@@ -117,7 +117,7 @@ export const homeCopy = {
   upToDate: (time: string) => `Nothing to do right now. Mamoru looks again at ${time}.`,
   // otto/mamoru#223: the status line when the only thing held is an out-of-range position, by its re-range code.
   upToDateHeld: (code: string, time: string) =>
-    `${code === 'DECIDE_RANGE_BELOW_COST' ? 'An out-of-range position is too small to re-centre at a profit, so Mamoru leaves it.' : code === 'DECIDE_RANGE_COOLDOWN' ? 'An out-of-range position waits a little before it is re-centred.' : 'An out-of-range position is left for now: its pool fees are not measured yet.'} Mamoru looks again at ${time}.`,
+    `${code === 'DECIDE_RANGE_BELOW_COST' ? 'An out-of-range position is too small to re-centre at a profit, so Mamoru leaves it.' : code === 'DECIDE_RANGE_COOLDOWN' || code === 'DECIDE_RANGE_WAIT' || code === 'DECIDE_RANGE_WEEKLY_CAP' ? 'An out-of-range position waits a little before it is re-centred.' : 'An out-of-range position is left for now: its pool fees are not measured yet.'} Mamoru looks again at ${time}.`,
   waitDepth: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: the ${pair} pool is not deep enough for more right now. Checked at ${time}.`,
   waitFall: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: ${pair} is falling fast, so Mamoru adds nothing there until it settles. Checked at ${time}.`,
   waitMany: (amount: string, n: number, why: string, time: string) => `${amount} USDC is waiting in ${n} pools: ${why}. Checked at ${time}.`,
@@ -408,7 +408,7 @@ function pair(p: FundingView['positions'][number]): string {
 /** otto/mamoru#223: the truth about an out-of-range position, from the engine's re-range code; the generic line when it says none. */
 export function rangeHoldCopy(code: string | undefined): string {
   if (code === 'DECIDE_RANGE_BELOW_COST') return homeCopy.heldBelowCost
-  if (code === 'DECIDE_RANGE_COOLDOWN') return homeCopy.heldCooldown
+  if (code === 'DECIDE_RANGE_COOLDOWN' || code === 'DECIDE_RANGE_WAIT' || code === 'DECIDE_RANGE_WEEKLY_CAP') return homeCopy.heldCooldown
   if (code === 'DECIDE_RANGE_NO_FEE_HISTORY') return homeCopy.heldNoHistory
   return homeCopy.paused
 }

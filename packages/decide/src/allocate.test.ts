@@ -363,6 +363,18 @@ describe('minimum entry by gas', () => {
     expect(a.buckets.find((b) => b.bucket === 'stables')!.code).toBe('DECIDE_WAIT_GAS')
   })
 
+  // otto/mamoru#402: one position in range no longer hides the wait of the idle money beside it.
+  test('with a position in range, idle money that waits names its bucket wait, not DECIDE_IN_RANGE', () => {
+    const held: PositionObs = { tokenId: 7n, pool: 'pool:USDC/USDT/100', tickLower: -100, tickUpper: 100, liquidity: 10n ** 7n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: false }
+    const o = obs({ balances: { USDC: 50n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, positions: [held] })
+    const d = decide(o, { ...V2, minEntryGasMultiple: 1_000_000 })
+    expect(d.kind).toBe('hold')
+    expect(d.waiting?.length).toBeGreaterThan(0)
+    expect(d.reason).toBe('DECIDE_WAIT_GAS')
+    // Without the wait the hold stays the in-range one.
+    expect(decide(obs({ positions: [held] }), V2).reason).not.toBe('DECIDE_WAIT_GAS')
+  })
+
   test('the floor still holds when gas is nearly free', () => {
     const cheap = obs({ balances: { USDC: 50_000n, USDT: 0n, cbBTC: 0n, WETH: 0n }, gas: { maxFeePerGas: 1n, opGasUnits: 1n } })
     const a = allocate(cheap, { ...V2, minEntryGasMultiple: 5 }, false)

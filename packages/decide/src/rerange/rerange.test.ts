@@ -78,6 +78,24 @@ describe('rerange (manage-any)', () => {
     expect(d.reason).toBe('DECIDE_IN_RANGE')
   })
 
+  // otto/mamoru#402
+  test('an empty NFT out of range does not make the hold out-of-range while the live position is in range', () => {
+    const empty = position({ tokenId: 8n, tickLower: TICK - 4000, tickUpper: TICK - 3000, liquidity: 0n })
+    const d = decide(obs({ balances: BALANCED, positions: [empty, position()] }), live)
+    expect(d.kind).toBe('hold')
+    expect(d.reason).toBe('DECIDE_IN_RANGE')
+  })
+
+  test('lazy: out of range but not past the buffer holds with DECIDE_RANGE_WAIT, named as the hold', () => {
+    const lazy = { ...live, range: { ...live.range, lazy: { edgeBufferTicks: 400, minDwellSeconds: 0, horizonSeconds: 86_400, lvrWeightBps: 10_000, requireCostEstimate: false } } }
+    const d = decide(obs({ balances: BALANCED, positions: [position()], pools: [pool(TICK + 1100)] }), lazy)
+    expect(d.kind).toBe('hold')
+    expect(d.positions[0]!.codes).toContain('DECIDE_RANGE_WAIT')
+    expect(d.reason).toBe('DECIDE_RANGE_WAIT')
+    // In range there is nothing to wait for.
+    expect(decide(obs({ balances: BALANCED, positions: [position()] }), lazy).positions[0]!.codes).not.toContain('DECIDE_RANGE_WAIT')
+  })
+
   test('cooldown not passed: hold with DECIDE_RANGE_COOLDOWN; passed: rerange', () => {
     const o = obs({ balances: BALANCED, positions: [position()], pools: [pool(TICK - 1500)], lastRerangeAt: 10_000n - 600n })
     const held = decide(o, live)
