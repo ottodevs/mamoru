@@ -31,6 +31,8 @@ export type World = {
   nextTokenId: bigint
   /** Timestamp of the last re-range, for the policy cooldown. */
   lastRerangeAt: bigint | null
+  /** otto/mamoru#406: every re-range done, for the weekly cap (`Observation.recentReranges`, as the engine builds it). */
+  reranges?: { pool: string; at: bigint; merge?: true }[]
   /** Lab (#101 CPPI): highest account value seen at a review, raw savings units. */
   peakValue?: bigint
   /** Lab (#101 round 3): the depeg guard's state and the last deviation measured, as the engine would keep them. */
@@ -195,6 +197,7 @@ export function apply(w: World, p: Proposal, s: PoolSample, time: number, slippa
   if (p.kind === 'rerange') {
     w.positions.splice(w.positions.indexOf(pos), 1)
     w.lastRerangeAt = BigInt(time)
+    ;(w.reranges ??= []).push({ pool: p.pool, at: BigInt(time), ...(p.why === 'merge' ? { merge: true as const } : {}) })
   }
   return { ok: true, ...fees }
 }

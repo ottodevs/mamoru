@@ -2,7 +2,7 @@
 //   bun packages/backtest/cli/sweep.ts                                   today's live policy on TRAIN
 //   bun packages/backtest/cli/sweep.ts --split all                       TRAIN and TEST, reported apart
 //   bun packages/backtest/cli/sweep.ts --set range.cooldownSeconds=3600 --name cd1h      variant + the unchanged baseline
-//   bun packages/backtest/cli/sweep.ts --variants my-variants.json       [{ "name", "policy", "overrides" }, ...]
+//   bun packages/backtest/cli/sweep.ts --variants my-variants.json       [{ "name", "policy", "overrides", "engine" }, ...] (engine: the /ops engine settings, e.g. rerange maxPerWeek, guard)
 // Options: --policy <id> (conservador-live-v2), --windows a,b, --deposits 1000,100000, --jobs N, --out <dir>,
 // --no-baseline, --start-offset <minutes> (every window starts that much later; its end stays). Tune on TRAIN; run TEST once per candidate, to judge it. Same inputs give the same files.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
