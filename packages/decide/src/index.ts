@@ -13,6 +13,7 @@ import { anyKey, convertKey, idleConvertOf, isManaged, mergeOf, ratioConvertOf, 
 import type { Decision, GateStep, GuardNote, Observation, Proposal, RerangeProposal, ShadowNote, ShadowRisk, VaultRedeemProposal } from './types.ts'
 import { capRoomOf, withinCap } from './cap.ts'
 import { fitOpRoom } from './op-room.ts'
+import { opCostInSavings } from './value.ts'
 import { poolStatsShadowRisk } from './shadow-pool-stats.ts'
 import { poolDepthShadowRisk } from './shadow-pool-depth.ts'
 
@@ -284,6 +285,14 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     }
   }
 
+  // otto/mamoru#410: a priced op the action policy would refuse as too large for the pool's depth is cut to what it
+  // takes, before the gate, so the gate judges the op that is sent.
+  if (proposal && obs.opRoom) {
+    const minEntry = policy.minEntry ?? DEFAULT_MIN_ENTRY
+    const gas = 10n * opCostInSavings(obs, policy.savingsAsset)
+    proposal = fitOpRoom(proposal, obs, policy.savingsAsset, gas > minEntry ? gas : minEntry)
+    if (!proposal) reason = 'DECIDE_WAIT_DEPTH'
+  }
   // Plan §9, step 9: a preliminary NO GO drops the proposal with its code.
   if (proposal) {
     const gateOf = (p: Proposal) => (poolless(p) ? ehgBridge(obs, policy, p.grant) : ehgPreliminary(obs, policy, obs.pools.find((x) => x.name === p.pool)!, p.grant))
@@ -301,11 +310,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       reason = gate.reason
     }
   }
-  // otto/mamoru#410: a priced op the action policy would refuse as too large for the pool's depth is cut to what it takes.
-  if (proposal && obs.opRoom) {
-    proposal = fitOpRoom(proposal, obs, policy.savingsAsset, policy.minEntry ?? DEFAULT_MIN_ENTRY)
-    if (!proposal) reason = 'DECIDE_WAIT_DEPTH'
-  }
+
 
   /** otto/mamoru#400: true when the savings a redeem frees would go back into a vault, or nowhere, at the next allocation. */
   function redeemReturns(p: VaultRedeemProposal): boolean {

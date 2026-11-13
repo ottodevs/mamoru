@@ -432,15 +432,17 @@ describe('each priced op fits the per-op room the policy allows', () => {
     expect(d.reason).toBe('DECIDE_WAIT_DEPTH')
   })
 
-  test('a mint is cut in proportion, a sale is cut but never dropped, an unlisted pool is left alone', () => {
+  test('a mint is cut in proportion, a sale is cut down to the floor, an unlisted pool is left alone', () => {
     const o = monadObs({ ...base, opRoom: room(100_000_000n) })
     const mint = { kind: 'enter_mint' as const, grant: anyGrant as `manage-any:${string}`, pool: MONAD_POOL, tickLower: MONAD_TICK - 600, tickUpper: MONAD_TICK + 600, amount0Desired: 0n, amount1Desired: 400_000_000n }
     const m = fitOpRoom({ ...mint, amount0Desired: 0n }, o, 'USDC', 100_000n) as typeof mint
     expect(m.amount1Desired).toBe(100_000_000n)
     const sale = { kind: 'enter_swap' as const, grant: anyGrant as `manage-any:${string}`, pool: MONAD_POOL, tokenIn: 'WMON', tokenOut: 'USDC', fee: 3000, amountIn: 10n ** 24n }
-    const s = fitOpRoom(sale, monadObs({ ...base, opRoom: room(1_000n) }), 'USDC', 100_000n) as typeof sale
+    const s = fitOpRoom(sale, monadObs({ ...base, opRoom: room(5_000_000n) }), 'USDC', 100_000n) as typeof sale
     expect(s.amountIn).toBeGreaterThan(0n)
     expect(s.amountIn).toBeLessThan(sale.amountIn)
+    // A room under the floor holds a sale too: slivers would only spend gas.
+    expect(fitOpRoom(sale, monadObs({ ...base, opRoom: room(1_000n) }), 'USDC', 100_000n)).toBeNull()
     expect(fitOpRoom(sale, monadObs({ ...base, opRoom: room(0n) }), 'USDC', 100_000n)).toBeNull()
     expect(fitOpRoom(mint, monadObs({ ...base, opRoom: [{ pool: 'pool:WETH/USDC/500', room: 1n }] }), 'USDC', 100_000n)).toBe(mint)
   })

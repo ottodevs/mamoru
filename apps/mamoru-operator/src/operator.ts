@@ -116,6 +116,8 @@ const HELD_TIMER_READ_MS = 20_000
 export const REMOTE_STUCK_ALERT_MS = 30 * 60_000
 /** otto/mamoru#401: how long a remote Safe's policy-depth read is reused across reviews. */
 const DEPTH_SHORT_TTL_MS = 60_000
+/** otto/mamoru#410: how long a pool's last per-op room stands in for a read that fails. */
+const OP_ROOM_STALE_MS = 10 * 60_000
 /** otto/mamoru#277 (gate): pages per account for one stuck remote Safe, whatever codes its peer cycles through. */
 const REMOTE_STUCK_PAGES = 4
 /** otto/mamoru#277 (gate): a remote's code as it may reach a page or /metrics: a code shape, never free text from the peer. */
@@ -6409,13 +6411,20 @@ export class Operator {
     if (!pools.length) return {}
     return {
       opRoom: async (block) => {
+        // Each pool on its own: a pool whose read fails keeps its last room while it is recent (OP_ROOM_STALE_MS), else
+        // goes without one this review; the other pools keep theirs.
         const out: NonNullable<Observation['opRoom']> = []
         for (const p of pools) {
           const key = `${p.pool.name}:${p.band}:${p.in1}`
           let hit = this.opRooms.get(key)
           if (!hit || Date.now() - hit.at >= DEPTH_SHORT_TTL_MS) {
-            hit = { at: Date.now(), room: await v4OpRoom(this.client as never, p.pool, p.band, p.in1, block) }
-            this.opRooms.set(key, hit)
+            try {
+              hit = { at: Date.now(), room: await v4OpRoom(this.client as never, p.pool, p.band, p.in1, block) }
+              this.opRooms.set(key, hit)
+            } catch (e) {
+              console.error(`[engine] ${acc.accountKey.slice(0, 8)}: per-op depth of ${p.pool.name} not read: ${(e as Error).message?.split('\n')[0]}`)
+              if (!hit || Date.now() - hit.at >= OP_ROOM_STALE_MS) continue
+            }
           }
           out.push({ pool: p.pool.name, room: hit.room })
         }
