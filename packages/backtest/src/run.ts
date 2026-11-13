@@ -1,11 +1,11 @@
 import { keccak256, stringToHex } from 'viem'
 import type { Hex } from '@mamoru/domain'
-import { amountsOf, canonicalJson, decide, pegDeviationBps, pegStep, PEG_CLEAR, stageStep, type Proposal } from '@mamoru/decide'
+import { amountsOf, canonicalJson, decide, meanTickAt, pegDeviationBps, pegStep, PEG_CLEAR, REGIME_BUCKET, regimeStep, stageStep, type Proposal } from '@mamoru/decide'
 import { computeCaps, grantKey, policyHash, usageLimitFor, type Caps, type GrantTemplate, type PolicyVersion, type Price } from '@mamoru/policy'
 import { baseRegistry, entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import { accrueYield, compoundedShare, divertFees, driftStep, harvestReport, heldOutside, keepInKind, labHarvest, newLedger, poolLedger, recordCollect, recordEarned, type HarvestLedger } from './harvest.ts'
-import { emaTickOf, ETH_PRICE_POOL, observe, twapTick } from './observe.ts'
+import { cumulativeAt, emaTickOf, ETH_PRICE_POOL, observe, twapTick } from './observe.ts'
 import type { Dataset, GasModel, Metrics, OpEntry, OpKind, PoolSample, RunResult, Sample, SessionUse, SimConfig } from './types.ts'
 import { accrue, apply, inRange, newWorld, valueIn, type World } from './world.ts'
 
@@ -228,6 +228,10 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     return { bucket: b.id, k: ds.pools.indexOf(b.pools[0]!), sign: e.token0 === savings ? -1 : 1, highs: [] as { time: number; up: number }[] }
   })
 
+  // Lab (#409): the risk bucket's pool for the regime shift, and how often and how long it was defensive.
+  const regimePool = policy.regimeShift ? staged.find((st) => st.bucket === REGIME_BUCKET) : undefined
+  const regimeStats = { shifts: 0, defensiveSeconds: 0, lastTime: null as number | null }
+
   // A sample that lacks a pool the policy needs, or the pool that prices gas, is a gap: the run steps over it.
   const needed = [...new Set([...policy.buckets.flatMap((b) => b.pools), ETH_PRICE_POOL])].map((name) => ds.pools.indexOf(name))
   const usable = (s: Sample) => needed.every((k) => k >= 0 && s.pools[k])
@@ -322,6 +326,24 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
       const ema = emaTickOf(ds, st.k, i, tw)
       w.stages ??= {}
       w.stages[st.bucket] = stageStep(w.stages[st.bucket], { now: s.time, price: up, high7d: st.highs[0]!.up, ema: ema === null ? null : st.sign * ema }, policy.stagedExit)
+    }
+    // Lab (#409): the regime steps at every sample from TWAP history, as the engine would from its snapshots.
+    if (policy.regimeShift && regimePool && s.pools[regimePool.k]) {
+      const st = regimePool
+      const at = (t: number) => cumulativeAt(ds, st.k, t, tw)
+      const up = (tick: number | null) => (tick === null ? null : st.sign * tick)
+      const start = ds.samples[from]!.time
+      // 7-day figures from the history there is, at least 24 h of it (a Lab window is cut at its start).
+      const since7 = Math.max(s.time - 7 * 86_400, start + tw)
+      const enough = s.time - since7 >= 86_400
+      const a = enough ? at(since7) : null
+      const b = at(s.time)
+      const mean = a && b && b.time > a.time ? Math.floor(Number(b.tickCumulative - a.tickCumulative) / (b.time - a.time)) : null
+      const was = w.regime?.defensive ?? false
+      w.regime = regimeStep(w.regime, { now: s.time, price: st.sign * twapTick(ds, st.k, i, tw), ago24h: up(meanTickAt(s.time - 86_400, tw, at)), ago7d: enough ? up(meanTickAt(since7, tw, at)) : null, mean7d: up(mean) }, policy.regimeShift)
+      if (!was && w.regime.defensive) regimeStats.shifts++
+      if (was && regimeStats.lastTime !== null) regimeStats.defensiveSeconds += s.time - regimeStats.lastTime
+      regimeStats.lastTime = s.time
     }
     // Lab (#178): a harvest arm's own harvest takes the review's one operation; `decide` then waits for the next.
     const obs = series.time.length % every === 0 ? observe(ds, i, w, policy, gas.priorityFeeWei) : null
@@ -473,7 +495,8 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   const sessions = sessionUses(policy, tally, capUsdc)
   const harvest = lab ? harvestReport(lab, w, ds, last, price, minValue!) : undefined
   const pHash = policyHash(policy)
-  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, renewal, refused, deposit: config.deposit, topUps, gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions, ...(config.capUsdc === undefined ? {} : { capUsdc }), ...(refresh ? { refresh, usageRefreshes } : {}), ...(harvest ? { harvestArm: config.harvest, harvest } : {}) }
+  const regime = policy.regimeShift ? { shifts: regimeStats.shifts, defensiveSeconds: regimeStats.defensiveSeconds } : undefined
+  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, renewal, refused, deposit: config.deposit, topUps, gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions, ...(config.capUsdc === undefined ? {} : { capUsdc }), ...(refresh ? { refresh, usageRefreshes } : {}), ...(harvest ? { harvestArm: config.harvest, harvest } : {}), ...(regime ? { regime } : {}) }
   return {
     simVersion: SIM_VERSION,
     datasetId: ds.id,
@@ -488,6 +511,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     metrics,
     capacity: { depthWaits, idleBps: idleSamples === 0 ? 0 : Math.round(idleSum / idleSamples) },
     ...(harvest ? { harvest } : {}),
+    ...(regime ? { regime } : {}),
     resultHash: keccak256(stringToHex(canonicalJson(facts))) as Hex,
   }
 }
