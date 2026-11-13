@@ -474,6 +474,21 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     expect(amount > 140n * USDC && amount <= 150n * USDC).toBe(true)
   })
 
+  test('otto/mamoru#410: the entry a refused bridge gives way to is cut to its pool\'s per-op room too', () => {
+    const ready = { balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 0n, inFlight: 0n, ready: true } }
+    const noBridge = (o: ReturnType<typeof v6Obs>) => ({ ...o, sessions: o.sessions.filter((x) => x.grant !== 'bridge-out') })
+    const free = decide(noBridge(v6Obs(ready)), V6)
+    expect(free.proposal).toMatchObject({ kind: 'enter_swap', tokenIn: 'USDC' })
+    const pool = free.proposal!.pool
+    const room = 20n * USDC
+    const cut = decide({ ...noBridge(v6Obs(ready)), opRoom: [{ pool, room }] }, V6)
+    expect(cut.proposal).toMatchObject({ kind: 'enter_swap', pool, tokenIn: 'USDC' })
+    expect((cut.proposal as { amountIn: bigint }).amountIn).toBeLessThanOrEqual(room)
+    // A room under the floor: that pool waits, another bucket goes instead.
+    const held = decide({ ...noBridge(v6Obs(ready)), opRoom: [{ pool, room: 1n }] }, V6)
+    expect(held.proposal?.pool).not.toBe(pool)
+  })
+
   // Spec 011 SCN-CAP-06 (otto/mamoru#376): the bridge never asks more than the grant allows.
   const withLimit = (bridgeLimit: unknown) => (o: ReturnType<typeof v6Obs>) => ({ ...o, sessions: o.sessions.map((x) => (x.grant === 'bridge-out' ? { ...x, bridgeLimit } : x)) as typeof o.sessions })
   const growthGap = { balances: { USDC: 2_700n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 0n, inFlight: 0n, ready: true } }

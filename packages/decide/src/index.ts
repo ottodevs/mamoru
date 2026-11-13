@@ -287,10 +287,14 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
 
   // otto/mamoru#410: a priced op the action policy would refuse as too large for the pool's depth is cut to what it
   // takes, before the gate, so the gate judges the op that is sent.
-  if (proposal && obs.opRoom) {
+  const fitted = (p: Proposal): Proposal | null => {
+    if (!obs.opRoom) return p
     const minEntry = policy.minEntry ?? DEFAULT_MIN_ENTRY
     const gas = 10n * opCostInSavings(obs, policy.savingsAsset)
-    proposal = fitOpRoom(proposal, obs, policy.savingsAsset, gas > minEntry ? gas : minEntry)
+    return fitOpRoom(p, obs, policy.savingsAsset, { entry: gas > minEntry ? gas : minEntry, sale: gas })
+  }
+  if (proposal) {
+    proposal = fitted(proposal)
     if (!proposal) reason = 'DECIDE_WAIT_DEPTH'
   }
   // Plan §9, step 9: a preliminary NO GO drops the proposal with its code.
@@ -299,13 +303,18 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     let gate = gateOf(proposal)
     trail.push(gate)
     // otto/mamoru#215: a bridge that cannot go now never starves the Base buckets: the entry it displaced goes instead.
-    if (gate.verdict !== 'GO' && proposal.kind === 'bridge_out' && displaced && !releasing) {
-      proposal = displaced
-      reason = PROPOSAL_CODE[proposal.kind]
-      gate = gateOf(proposal)
-      trail.push(gate)
+    // otto/mamoru#410: that entry is cut to its pool's per-op room too, before its own gate.
+    const instead = gate.verdict !== 'GO' && proposal.kind === 'bridge_out' && displaced && !releasing ? fitted(displaced) : undefined
+    if (instead !== undefined) {
+      proposal = instead
+      if (!proposal) reason = 'DECIDE_WAIT_DEPTH'
+      else {
+        reason = PROPOSAL_CODE[proposal.kind]
+        gate = gateOf(proposal)
+        trail.push(gate)
+      }
     }
-    if (gate.verdict !== 'GO') {
+    if (proposal && gate.verdict !== 'GO') {
       proposal = null
       reason = gate.reason
     }

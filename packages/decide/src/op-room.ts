@@ -7,22 +7,24 @@ import { inSavings } from './value.ts'
  * otto/mamoru#410: MamoruActionPolicyV4 refuses a swap, mint or increase worth more than 1/DEPTH_MULTIPLE of the pool's
  * depth over its band (I2, `_requireDepth`), whatever the daily budget. The operator reads that bound per pool
  * (`Observation.opRoom`, in raw savings units, with margin); a priced op above it is cut down to it, so a thin pool
- * takes a large entry over several reviews instead of refusing every one (AA23). A room under `floor` (the minimum
- * entry, or ten times one op's gas when more) holds the op (DECIDE_WAIT_DEPTH), a sale too: it would only spend gas on
- * slivers, and arbitrage refills the band within blocks. Decreases are not priced, so an exit's decrease always goes.
+ * takes a large entry over several reviews instead of refusing every one (AA23). A room under the floor holds the op
+ * (DECIDE_WAIT_DEPTH): for an entry the minimum entry, or ten times one op's gas when more; for a sale (exit, depeg,
+ * release, harvest: savings out of the pool) the gas alone, so an exit keeps going in any slice worth its gas.
+ * Arbitrage refills the band within blocks. Decreases are not priced, so an exit's decrease always goes.
  * A pool without a bound in `opRoom` is left as it is.
  *
  * V4 values the op at the edge of its range (the TWAP band hull, a few band widths from the spot at most); the
  * operator's 20% margin on the room covers that for every V4 band (100 ticks, ~1%, at most today).
  */
-export function fitOpRoom(p: Proposal, obs: Observation, savings: RegistryName, floor: bigint): Proposal | null {
+export function fitOpRoom(p: Proposal, obs: Observation, savings: RegistryName, floor: { entry: bigint; sale: bigint }): Proposal | null {
   if (p.kind !== 'enter_swap' && p.kind !== 'enter_mint' && p.kind !== 'increase_liquidity') return p
   const room = obs.opRoom?.find((r) => r.pool === p.pool)?.room
   if (room === undefined) return p
   const pool = obs.pools.find((x) => x.name === p.pool)
   if (!pool) return p
   const value = p.kind === 'enter_swap' ? valueOf(pool, [[p.tokenIn, p.amountIn]], savings) : valueOf(pool, [[pool.token0, p.amount0Desired], [pool.token1, p.amount1Desired]], savings)
-  if (room < floor || room === 0n) return null
+  const sale = p.kind === 'enter_swap' && (p.tokenIn !== savings || p.harvestSale === true)
+  if (room < (sale ? floor.sale : floor.entry) || room === 0n) return null
   if (value <= room) return p
   const cut = (a: bigint) => (a * room) / value
   if (p.kind === 'enter_swap') return { ...p, amountIn: cut(p.amountIn) }
