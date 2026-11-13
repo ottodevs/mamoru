@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { guardApr, guardSplit, guardStats, validRun, validSuffix, type GuardAprDay, type GuardInput } from '../../src/api/stats/privacy.ts'
+import { guardApr, guardSplit, aprRun, guardStats, validRun, validSuffix, type GuardAprDay, type GuardInput } from '../../src/api/stats/privacy.ts'
 
 // Spec 013 STATS-R9 with amendment A1: k >= 3 allow-if; withheld = absent; slices below k merged into "Other".
 
@@ -51,6 +51,11 @@ describe('series', () => {
   test('a last day under 3 owners withholds the whole series', () => {
     expect(guardApr([day(1, 1, 100), day(2, 1, 100, 2)])).toBeUndefined()
     expect(validSuffix([1, 2, 3], (x) => x !== 2)).toEqual([3])
+  })
+  test('the 7-day window applies the series rule: a 2-owner day inside it is not published', () => {
+    const days = [...Array.from({ length: 6 }, (_, i) => day(i + 2, 0.1, 365, 3)), day(8, 0.1, 365, 2), day(9, 0.1, 365, 5, false)]
+    expect(guardApr(days)).toBeUndefined()
+    expect(aprRun(days)).toEqual([])
   })
   test('validRun drops up to 3 invalid trailing points, then keeps the run; a hole inside cuts the run; a longer tail is stale', () => {
     const ok = (x: number) => x > 0

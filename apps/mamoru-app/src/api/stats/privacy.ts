@@ -90,9 +90,12 @@ export function validRun<T>(points: readonly T[], ok: (p: T) => boolean, incompl
 
 const aprOk = (p: GuardAprDay) => p.complete && finite(p.earned) && finite(p.capital) && p.capital > 0 && enoughOwners(p.owners.size)
 
+/** The APR days that may be published: the one rule for the series and the 7-day snapshot. */
+export const aprRun = (days: readonly GuardAprDay[]): GuardAprDay[] => validRun(days, aprOk, (p) => !p.complete)
+
 /** Daily APR (percent) and, once 7 valid days exist, the 7-day figure from 7-day sums (capital-weighted, no compounding). */
 export function guardApr(days: readonly GuardAprDay[] | undefined): StatsAprPoint[] | undefined {
-  const run = validRun(days ?? [], aprOk, (p) => !p.complete)
+  const run = aprRun(days ?? [])
   if (!run.length) return undefined
   return run.map((p, i) => {
     const point: StatsAprPoint = { day: p.day, apr: round((p.earned / p.capital) * 365 * 100, 'pct') }

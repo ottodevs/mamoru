@@ -7,7 +7,7 @@
 // Owners behind a figure are those contributing a non-zero amount to it.
 import type { Db } from '../env.ts'
 import { loadEarned } from '../earned.ts'
-import { validRun } from './privacy.ts'
+import { aprRun } from './privacy.ts'
 import type { GuardAprDay, GuardDepositsDay, GuardEarnedDay, GuardFigure, GuardInput, GuardSlice, GuardSplit } from './privacy.ts'
 
 const USD = 1_000_000
@@ -382,7 +382,7 @@ export async function statsInput(db: Db, now: Date): Promise<GuardInput> {
   const aprAll = aprDays(null)
   // S6: the 7-day figure of the last day, from the same series privacy.ts guards.
   // An incomplete trailing day is skipped (as the series do), so one unpriced day does not withhold the figure.
-  const last7 = validRun(aprAll, (d) => d.complete && d.capital > 0, (d) => !d.complete).slice(-7)
+  const last7 = aprRun(aprAll).slice(-7)
   const s6Complete = last7.length === 7
   const s6 = s6Complete ? (last7.reduce((a, d) => a + d.earned, 0) / last7.reduce((a, d) => a + d.capital, 0)) * 365 * 100 : Number.NaN
   const s6Owners = new Set(last7.flatMap((d) => [...d.owners]))
