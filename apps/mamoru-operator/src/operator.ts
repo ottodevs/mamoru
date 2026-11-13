@@ -6331,6 +6331,8 @@ export class Operator {
     // to it from REMOTE_BRIDGE_STOP_SECONDS before then, so no USDC lands where Mamoru can no longer act. What is there
     // stays counted; renewing the remote sessions is otto/mamoru#253.
     // Judged at every review, not when the engine starts: an engine runs for months.
+    // otto/mamoru#401: a Safe too small to ever be funded is never read: empty, no room, its share stays here.
+    if (this.unfundable(acc, rs)) return { remote: async () => ({ value: 0n, inFlight: 0n, ready: false, cap: 0n }) }
     return {
       remote: async (block: bigint) => {
         const open = Math.floor(Date.now() / 1000) < rs.spec.validUntil - REMOTE_BRIDGE_STOP_SECONDS
@@ -6342,17 +6344,13 @@ export class Operator {
   }
 
   /**
-   * otto/mamoru#401 (spec 012 HRV-R4): the idle USDC of a sleeve worth `value` that its engine should have placed: at least
-   * the account's smallest entry, and more than the sleeve engine's own rebalance band of its value (inside the band it
-   * leaves USDC idle by design; that is no sign it could not place it, and a V3 home holds its bridge-outs while idle is due).
+   * otto/mamoru#401 (spec 012 HRV-R4): the operator's idle clock runs while the sleeve's own USDC is at or above the
+   * account's entry floor. Decide adds the owner's rule on top (more than max(1 % of the account's value, that floor), for
+   * more than RETURN_DWELL_SECONDS): it knows the account's value, this read does not.
    */
   private idleMinOf(acc: AccountState): (value: bigint) => bigint {
     const min = this.enginePolicyOf(acc).minEntry ?? DEFAULT_MIN_ENTRY
-    const band = BigInt(sleeveEnginePolicy(liveWmonUsdcMonadV6).rebalanceBandBps ?? 0)
-    return (value) => {
-      const inBand = (value * band) / 10_000n + 1n
-      return inBand > min ? inBand : min
-    }
+    return () => min
   }
 
   /**
@@ -7558,8 +7556,29 @@ export class Operator {
       if (fitted < cap) console.log(`[remote] ${acc.accountKey}: ${p.pool} on chain ${chainId} is ${fmtUsdc(depth)} deep; the Safe there is sized at ${fmtUsdc(fitted)} USDC, not ${fmtUsdc(cap)}`)
       cap = fitted
     }
-    if (cap < 1_000_000n) throw new HttpError(503, 'REMOTE_UNAVAILABLE', `The ${name} pool is too thin to start Mamoru there right now: nothing was changed, try again later`)
-    return cap
+    // Under what one entry must be worth, no bridge would ever go to it: the spec still names a Safe (the bridge-out grant
+    // needs its address), but it is never provisioned nor funded (`unfundable`), and its share works on this chain.
+    if (cap < this.remoteFloor(acc)) console.log(`[remote] ${acc.accountKey}: the Safe on ${name} would hold at most ${fmtUsdc(cap)} USDC, under one entry (${fmtUsdc(this.remoteFloor(acc))}); it is not created and its share stays here`)
+    return cap > 0n ? cap : 1n
+  }
+
+  /**
+   * otto/mamoru#401: the least a remote Safe's cap must allow for a bridge to it ever to be proposed: the home's entry floor
+   * (decide refuses a bridge under it) and the sleeve engine's own (it could not place less).
+   */
+  private remoteFloor(acc: AccountState): bigint {
+    const home = this.enginePolicyOf(acc).minEntry ?? DEFAULT_MIN_ENTRY
+    const sleeve = sleeveEnginePolicy(liveWmonUsdcMonadV6).minEntry ?? DEFAULT_MIN_ENTRY
+    return home > sleeve ? home : sleeve
+  }
+
+  /**
+   * otto/mamoru#401: a design-C remote Safe whose signed cap is under `remoteFloor` and that was never provisioned: nothing
+   * would ever be bridged to it, so it is not deployed, and the home reads it as empty with no room (cap 0), which keeps
+   * its whole share working on the home chain. One already running is read as usual (it may hold money).
+   */
+  private unfundable(acc: AccountState, rs: RemoteSafeRecord): boolean {
+    return !rs.ready && /^[0-9]+$/.test(rs.spec.capUsdc) && BigInt(rs.spec.capUsdc) < this.remoteFloor(acc)
   }
 
   /** Base side, a confirmed approval that provisions a remote Safe: fixed on the account, and its provisioning starts. */
@@ -7585,7 +7604,7 @@ export class Operator {
    */
   async provisionRemote(acc: AccountState): Promise<void> {
     const rs = acc.remote
-    if (!rs || rs.ready || !acc.active) return
+    if (!rs || rs.ready || !acc.active || this.unfundable(acc, rs)) return
     const peer = this.cfg.remotePeers?.[rs.chainId]
     if (!peer) return
     const res = await peer.provision(this.remoteContext(acc, rs))
@@ -7641,7 +7660,7 @@ export class Operator {
   /** Base side, on a timer: every running account whose remote Safe is not running yet is provisioned again. */
   async tickRemotes(): Promise<void> {
     for (const acc of Object.values(this.store.state.accounts)) {
-      if (!acc.remote || acc.remote.ready || !acc.active) continue
+      if (!acc.remote || acc.remote.ready || !acc.active || this.unfundable(acc, acc.remote)) continue
       await this.lock(acc.accountKey)
         .run(() => this.provisionRemote(acc))
         .catch((e) => {

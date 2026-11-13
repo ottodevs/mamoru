@@ -376,6 +376,25 @@ describe('the sleeve\'s idle USDC and since when (otto/mamoru#401, spec 012 HRV-
   })
 })
 
+describe('the idle clock belongs to one Safe (otto/mamoru#401 review)', () => {
+  const WINDOW = 1_800
+  test('another Safe read under the same account key starts its own clock', async () => {
+    let now = T0
+    const { bridge } = setup({ now: () => now })
+    const live = bridge as unknown as { readSleeve: () => Promise<{ value: bigint; block: bigint; ready: boolean; idle: bigint }> }
+    let block = 7_000n
+    live.readSleeve = async () => ({ value: 50n * 1_000_000n, block: block++, ready: true, idle: 50n * 1_000_000n })
+    const first = await bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)
+    expect(first.idleSince).toBe(Math.floor(T0 / 1000))
+    now += 5 * 3_600_000
+    const OTHER = '0x00000000000000000000000000000000000000bb' as const
+    expect((await bridge.remote('acc-1', OTHER, WINDOW, undefined, [], () => 100_000n)).idleSince).toBe(Math.floor(now / 1000))
+    // And back on the first Safe it starts again too: the journal keeps one clock, for the Safe it last read.
+    now += 60_000
+    expect((await bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).idleSince).toBe(Math.floor(now / 1000))
+  })
+})
+
 // ---- Review of PR #144 (Claude Opus 5.5 + Gemini Argon): one regression test per finding fixed. ----
 
 describe('review of #144: settling a sending burn reads a bounded range', () => {

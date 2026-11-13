@@ -604,6 +604,27 @@ describe('after a confirmed v6 approval the account\'s own Safe on Monad is prov
     expect(seen[1]).toEqual([])
   })
 
+  test('otto/mamoru#401 review: a pool too thin for one entry still approves, but the Safe there is never created nor funded', async () => {
+    const p = fakePeer()
+    // 0.30 USDC deep: the fitted cap (0.05) is under one entry, so no bridge could ever go to it.
+    const w = world(10_000_000n, { policy: v6, ...cfg6(p.peer, { remoteDepth: async () => 300_000n }) })
+    w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
+    chain(w, 0n)
+    const t = (await quiet(() => w.op.prepareActivate(ctx))).out
+    expect(BigInt(t.remote!.spec.capUsdc)).toBe(50_000n)
+    await quiet(() => confirm(w, t))
+    const acc = w.state.accounts.k!
+    expect(acc.active).toBe(true)
+    expect(acc.remote).toMatchObject({ address: t.remote!.address, ready: false })
+    await quiet(() => w.op.tickRemotes())
+    expect(p.provisioned).toEqual([])
+    // The engine sees it empty with no room: its share is placed on Base (decide's remoteSpill).
+    const o = w.op as unknown as { cfg: { bridgeMonad?: unknown }; remoteOf(a: AccountState): { remote?: (b: bigint) => Promise<unknown> } }
+    o.cfg.bridgeMonad = { remote: async () => Promise.reject(new Error('never read')) }
+    expect(await o.remoteOf(acc).remote!(1n)).toEqual({ value: 0n, inFlight: 0n, ready: false, cap: 0n })
+    expect(w.op.remoteStuck()).toEqual([])
+  })
+
   test('a pending answer keeps it not ready, and tickRemotes asks again until the Monad operator says active', async () => {
     const { w, p, t } = await started({ provision: { state: 'pending', code: 'REMOTE_SAFE_UNVERIFIED' } })
     await quiet(async () => {

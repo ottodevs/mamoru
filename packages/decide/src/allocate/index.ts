@@ -9,17 +9,29 @@ import { rangeFor, widthFor, widthOf } from '../geometry/index.ts'
 import { purgaIdentity, registryOf } from '../gates/index.ts'
 import type { GateStep, Observation, PoolObs, PositionObs, Proposal } from '../types.ts'
 import { amountsForLiquidity, bucketVaults, inSavings, opCostInSavings, vaultValue, volatileOf } from '../value.ts'
+import { localTarget, remoteSpill } from '../remote-spill.ts'
 
-/** otto/mamoru#107 (spec 012 HRV-R4): idle USDC on a sleeve this long at or above the threshold goes home. */
-export const RETURN_DWELL_SECONDS = 6n * 3_600n
+/**
+ * otto/mamoru#107 (spec 012 HRV-R4): idle USDC on a sleeve for more than this above the threshold goes home.
+ * otto/mamoru#401 (owner, 13 Nov 2026): 60 min, not 6 h: capital that cannot work there comes back within the hour.
+ */
+export const RETURN_DWELL_SECONDS = 3_600n
+/** otto/mamoru#401 (owner): the idle threshold is more than this share (bps) of the account's value, or the entry floor if larger. */
+export const RETURN_IDLE_BPS = 100n
 /** otto/mamoru#107 (spec 012 HRV-R4): after a return home, nothing is bridged back to that chain for this long. */
 export const RETURN_HOLD_SECONDS = 24n * 3_600n
 
-/** otto/mamoru#107: the sleeve's idle USDC due home: at or above the threshold for the dwell period. 0 when not. */
-function idleDue(obs: Observation, threshold: bigint): bigint {
+/**
+ * otto/mamoru#107: the sleeve's idle USDC due home. otto/mamoru#401 (owner): more than max(1 % of the account's value,
+ * the entry floor), for more than the dwell period (the operator's clock, `idleSince`). Its gas reserve is MON, never
+ * counted; a bridge in flight either way or the sleeve not ready holds the return (see the caller). 0 when not due.
+ */
+function idleDue(obs: Observation, entryMin: bigint, total: bigint): bigint {
   const idle = obs.remote?.idle ?? 0n
   const since = obs.remote?.idleSince
-  return idle >= threshold && since !== undefined && obs.block.timestamp - BigInt(since) >= RETURN_DWELL_SECONDS ? idle : 0n
+  const byValue = (total * RETURN_IDLE_BPS) / 10_000n
+  const threshold = byValue > entryMin ? byValue : entryMin
+  return idle > threshold && since !== undefined && obs.block.timestamp - BigInt(since) > RETURN_DWELL_SECONDS ? idle : 0n
 }
 
 /** Default smallest entry when the policy sets none: 0.10 of a 6-decimal savings asset. */
@@ -210,8 +222,10 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     // remote ones), byte for byte.
     const prefTotal = BigInt(policy.actionPolicy?.contractVersion === 4 ? preferenceTotal(policy) : executable.reduce((s, r) => s + r.b.preference, 0) + remote)
 
+    // otto/mamoru#401: the remote share its sleeve cannot hold (its cap) stays here, spread over the local buckets.
+    const spill = remoteSpill(obs, policy, total, prefTotal)
     const buckets: BucketValue[] = rows.map((r) => {
-      const target = (r.pool || r.vault) && prefTotal > 0n ? (total * BigInt(r.b.preference)) / prefTotal : 0n
+      const target = (r.pool || r.vault) && prefTotal > 0n ? localTarget(total, r.b.preference, prefTotal, remote, spill) : 0n
       return { bucket: r.b.id, pool: r.pool?.name ?? null, value: r.value, target, weightBps: total > 0n ? Number((r.value * 10_000n) / total) : 0, code: r.blocked ?? 'STRATEGY_PREFERENCE' }
     })
     // otto/mamoru#210 (review of #174, P1): an `exitOptIn` bucket the account has not opted out of yet (v7's USDC/USDT, held)
@@ -420,16 +434,18 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     for (const rb of policy.remoteBuckets ?? []) {
       if (unsafeDeposit || free === 0n) break
       const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
-      // otto/mamoru#401: never more than the sleeve's own cap lets it place; past it the money would only sit there idle.
+      // otto/mamoru#401: the sleeve's capacity is its own cap: the home bridges toward that, never past it (the rest of the
+      // share is placed here, `remoteSpill`). A gap under the entry floor or inside the band leaves nothing waiting.
       const cap = obs.remote?.cap
-      const gap = (cap !== undefined && cap < target ? cap : target) - (obs.remote?.value ?? 0n)
-      if (gap < minEntry || gap * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
+      const goal = cap !== undefined && cap < target ? cap : target
+      const gap = goal - (obs.remote?.value ?? 0n)
+      if (gap < minEntry || gap * 10_000n <= goal * BigInt(policy.rebalanceBandBps ?? 0)) continue
       let amount = gap < free ? gap : free
       // otto/mamoru#107 (spec 012 HRV-R4): no ping-pong. For 24 h after money came home from that chain nothing goes back
       // (a return itself empties the sleeve's idle, so its idle is no sign the sleeve placed anything), and nothing goes
       // while its idle USDC is due home.
       const returned = obs.remote?.returnedAt
-      if ((returned !== undefined && obs.block.timestamp - BigInt(returned) < RETURN_HOLD_SECONDS) || idleDue(obs, entryMin) > 0n) {
+      if ((returned !== undefined && obs.block.timestamp - BigInt(returned) < RETURN_HOLD_SECONDS) || idleDue(obs, entryMin, total) > 0n) {
         waiting.push({ bucket: rb.id, code: 'DECIDE_WAIT_BRIDGE', amount })
         continue
       }
@@ -469,7 +485,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
       const over = excess >= entryMin && excess * 10_000n > target * BigInt(policy.rebalanceBandBps ?? 0) ? excess : 0n
       // otto/mamoru#107 (spec 012 HRV-R4): also the sleeve's own idle USDC, once it has sat at or above the threshold for
       // the dwell period (its engine could not place it), even with the sleeve under its target: no veto between chains.
-      const idle = idleDue(obs, entryMin)
+      const idle = idleDue(obs, entryMin, total)
       const amount = over > idle ? over : idle
       if (amount === 0n) continue
       returnDue = { bucket: rb.id, chainId: rb.chainId, amount }

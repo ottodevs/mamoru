@@ -74,7 +74,7 @@ describe('a V3 sleeve whose idle USDC is due home is recorded as needing a renew
 
 // otto/mamoru#401: the home reads its design-C sleeve with the idle threshold (so HRV-R4 can see idle USDC) and its cap.
 describe("the home's view of a design-C sleeve carries its idle USDC and its own cap (otto/mamoru#401)", () => {
-  test('remote() is asked with the idle threshold (minEntry, or past the sleeve band) and the spec cap is added', async () => {
+  test('remote() is asked with the idle clock threshold (the entry floor) and the spec cap is added', async () => {
     const asked: unknown[][] = []
     const policy = { minEntry: 3_000_000n, remoteBuckets: [{ id: 'growth', chainId: 143 }], execution: { twapWindowSeconds: 1_800 } }
     const self = {
@@ -82,14 +82,15 @@ describe("the home's view of a design-C sleeve carries its idle USDC and its own
       enginePolicyOf: () => policy,
       onV4: () => false,
       idleMinOf: (Operator.prototype as unknown as { idleMinOf: unknown }).idleMinOf,
+      unfundable: () => false,
     }
     const acc = { accountKey: 'a', remote: { chainId: 143, address: '0x00000000000000000000000000000000000000cc', permissionIds: [], spec: { validUntil: 4_000_000_000, capUsdc: '1233333333' } } }
     const of = (Operator.prototype as unknown as { remoteOf: (a: unknown) => { remote?: (b: bigint) => Promise<unknown> } }).remoteOf.bind(self)
     const r = await of(acc).remote!(1n)
     const min = asked[0]!.at(-1) as (v: bigint) => bigint
-    // The account's smallest entry, or more than the sleeve engine's 3 % band of the sleeve's value when that is larger.
+    // The clock runs from the account's entry floor; decide adds the 1 %-of-account rule (it knows the account's value).
     expect(min(10_000_000n)).toBe(3_000_000n)
-    expect(min(1_000_000_000n)).toBe(30_000_001n)
+    expect(min(1_000_000_000n)).toBe(3_000_000n)
     expect(r).toEqual({ value: 10n, inFlight: 0n, ready: true, idle: 10n, cap: 1_233_333_333n })
   })
 })

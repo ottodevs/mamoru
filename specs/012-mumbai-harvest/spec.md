@@ -51,8 +51,9 @@ known is reported as not counted, never as 0 and never folded silently into a sm
   below the drain line (target + 5 points of total), so no later review redeems it. Money another bucket is waiting for
   (`waiting`) is never swept.
 - **HRV-R4. Idle USDC on another chain goes home.** No veto between chains (PRD decision 4). When a remote Safe's
-  **idle USDC** is ≥ the return threshold (`entryMin`, the floor an entry must be worth) and has stayed idle for one
-  dwell period (6 h) while its own engine could not place it, it is brought home over CCTP (standard, fee 0). After a
+  **idle USDC** is more than the return threshold (max(1 % of the account's value, `entryMin`); owner, 13 Nov 2026,
+  otto/mamoru#401) and has stayed idle for more than one dwell period (60 min; was 6 h) while its own engine could not
+  place it (its MON gas reserve, a bridge in flight or an active brake are not idle), it is brought home over CCTP (standard, fee 0). After a
   return, Base sends nothing to that chain for 24 h unless its sleeve placed everything (no ping-pong).
   V4: through #278's return path. V3: only if the live signed V3 remote policy allows a Monad→Base bridge-out, under
   spec 011's `SessionObs.bridgeLimit` (split sends, fail closed). If the signed policy forbids it, the account is

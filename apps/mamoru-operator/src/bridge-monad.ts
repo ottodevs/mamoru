@@ -513,15 +513,17 @@ export class MonadBridge {
       return { value: BigInt(last.value) + inFlight, inFlight, ready: false }
     }
     const last = this.journal.sleeves[accountKey]
-    let idleSince = last?.idleSince
+    // otto/mamoru#401: the idle clock belongs to one Safe; another Safe under the same key (a new remote, a move) starts it again.
+    const sameSafe = last?.safe !== undefined && last.safe === safe.toLowerCase()
+    let idleSince = sameSafe ? last?.idleSince : undefined
     if (last && BigInt(last.block) > read.block) {
       // A lagging provider: its older read could miss a mint the journal already places at or before the last block.
-      read = { value: BigInt(last.value), block: BigInt(last.block), ready: read.ready, idle: BigInt(last.idle ?? '0') }
+      read = { value: BigInt(last.value), block: BigInt(last.block), ready: read.ready, idle: sameSafe ? BigInt(last.idle ?? '0') : 0n }
     } else {
       // otto/mamoru#401 (spec 012 HRV-R4): since when the Safe's own USDC has stayed at or above the return threshold, kept
       // across restarts; it starts again whenever a read finds it below (its engine placed it).
       read = { ...read, idle: read.idle ?? 0n }
-      idleSince = idleMin !== undefined && read.idle >= idleMin(read.value) ? (last?.idleSince ?? Math.floor(this.now() / 1000)) : undefined
+      idleSince = idleMin !== undefined && read.idle >= idleMin(read.value) ? (idleSince ?? Math.floor(this.now() / 1000)) : undefined
       if (!last || last.value !== read.value.toString() || BigInt(last.block) < read.block || last.idle !== read.idle.toString() || last.idleSince !== idleSince) {
         this.journal.sleeves[accountKey] = { value: read.value.toString(), block: read.block.toString(), at: this.iso(), safe: safe.toLowerCase(), idle: read.idle.toString(), ...(idleSince !== undefined ? { idleSince } : {}) }
         try {

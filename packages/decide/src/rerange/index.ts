@@ -7,6 +7,7 @@ import { edgeBpsOf, rangeFor, widenEarly } from '../geometry/index.ts'
 import type { EnterSwapProposal, Observation, PoolObs, PositionObs, RerangeProposal, ReduceProposal, VaultRedeemProposal } from '../types.ts'
 import { bucketVaults, inSavings, opCostInSavings, vaultValue, volatileOf } from '../value.ts'
 import { rerangeWorth } from '../rebalance/lazy.ts'
+import { localTarget, remoteSpill } from '../remote-spill.ts'
 
 const Q96 = 1n << 96n
 const WEEK = 7n * 86_400n
@@ -227,8 +228,11 @@ export function bucketValues(obs: Observation, policy: PolicyVersion, policyPool
   }
   for (const b of policy.buckets) total += vaultValue(obs, b)
   const totalPreference = BigInt(preferenceTotal(policy))
+  // otto/mamoru#401: the same targets as allocate's: the remote share above the sleeve's cap is placed here.
+  const spill = remoteSpill(obs, policy, total, totalPreference)
+  const remotePref = (policy.remoteBuckets ?? []).reduce((s, b) => s + b.preference, 0)
   const buckets = policy.buckets.map((b): BucketValue => {
-    const target = (total * BigInt(b.preference)) / totalPreference
+    const target = localTarget(total, b.preference, totalPreference, remotePref, spill)
     if (b.vaults?.length) return { bucket: b.id, target, value: vaultValue(obs, b), pool: null, vault: true }
     const pool = b.pools[0] ?? null
     const value = pool ? (byPool.get(pool) ?? 0n) : b.id === 'stables' ? free : 0n

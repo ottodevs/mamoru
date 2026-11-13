@@ -388,7 +388,7 @@ describe('idle USDC on the sleeve comes home (otto/mamoru#107, spec 012 HRV-R4)'
   const sessions = obs().sessions.map((x) => ({ ...x, validUntil: Number(NOW) * 2, ...(x.grant === 'bridge-out' ? { bridgeLimit: { kind: 'v3' as const, perCall: 10n ** 12n, amountLeft: 10n ** 12n } } : {}) }))
   const at = (o: Partial<Observation>) => obs({ block: { number: 100n, hash: `0x${'11'.repeat(32)}`, timestamp: NOW }, sessions, balances: { USDC: 1_000n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, ...o })
 
-  test('30 USDC idle on the sleeve for 6 h comes home, even with the sleeve under its target (HRV-S06)', () => {
+  test('30 USDC idle on the sleeve for more than the dwell comes home, even with the sleeve under its target (HRV-S06)', () => {
     const d = decide(at({ remote: { value: 40n * USDC, inFlight: 0n, ready: true, idle: 30n * USDC, idleSince: Number(NOW) - 6 * 3_600 } }), V7)
     expect(d.returnDue).toEqual({ bucket: 'growth', chainId: 143, amount: 30n * USDC })
   })
@@ -418,6 +418,45 @@ describe('idle USDC on the sleeve comes home (otto/mamoru#107, spec 012 HRV-R4)'
     expect(wanted > 50n * USDC).toBe(true)
     // Already at its cap: nothing more goes.
     expect(decide(at({ remote: { value: 50n * USDC, inFlight: 0n, ready: true, cap: 50n * USDC } }), V7).proposal?.kind).not.toBe('bridge_out')
+  })
+
+  test('otto/mamoru#401: a sleeve fitted under what can be funded gets nothing, and its share works here instead', () => {
+    // A 1.20 USDC sleeve cap and a 3 USDC entry floor: no bridge can ever be worth sending.
+    const policy = { ...V7, minEntry: 3n * USDC }
+    const unfitted = decide(at({ remote: { value: 0n, inFlight: 0n, ready: true } }), policy)
+    expect(unfitted.proposal?.kind).toBe('bridge_out')
+    const d = decide(at({ remote: { value: 0n, inFlight: 0n, ready: true, cap: 1_200_000n } }), policy)
+    expect(d.proposal).not.toBeNull()
+    expect(d.proposal?.kind).not.toBe('bridge_out')
+    // Nothing is kept aside for the sleeve: its share is not waiting.
+    expect((d.waiting ?? []).some((w) => w.bucket === 'growth')).toBe(false)
+    // An unprovisioned sleeve reads as cap 0 and not ready: the same.
+    const none = decide(at({ remote: { value: 0n, inFlight: 0n, ready: false, cap: 0n } }), policy)
+    expect(none.proposal).not.toBeNull()
+    expect((none.waiting ?? []).some((w) => w.bucket === 'growth')).toBe(false)
+  })
+
+  test('otto/mamoru#401: the share a capped sleeve cannot hold raises the local targets, on both the entry and the drain side', () => {
+    const o = at({ remote: { value: 0n, inFlight: 0n, ready: true, cap: 0n } })
+    const free = at({ remote: { value: 0n, inFlight: 0n, ready: true } })
+    const capped = allocate(o, V7, false)
+    const plain = allocate(free, V7, false)
+    const sum = (a: typeof capped) => a.buckets.reduce((s, b) => s + b.target, 0n)
+    // Without a cap the local targets leave the remote share out; with a 0 cap they cover (nearly) the whole account.
+    expect(sum(plain) < sum(capped)).toBe(true)
+    expect(capped.total - sum(capped) <= BigInt(V7.buckets.length)).toBe(true)
+    const pools = new Set(V7.buckets.flatMap((b) => b.pools))
+    const drain = bucketValues(o, V7, pools)
+    for (const b of drain.buckets) expect(b.target).toBe(capped.buckets.find((x) => x.bucket === b.bucket)!.target)
+  })
+
+  test('otto/mamoru#401 (owner): idle goes home above max(1 % of the account, the entry floor), after more than 60 min', () => {
+    const remote = (idle: bigint, ago: number) => ({ value: 40n * USDC, inFlight: 0n, ready: true, idle, idleSince: Number(NOW) - ago })
+    // The account is 1,040 USDC: 1 % is 10.40.
+    expect(decide(at({ remote: remote(10_400_000n, 61 * 60) }), V7).returnDue).toBeUndefined()
+    expect(decide(at({ remote: remote(10_400_001n, 61 * 60) }), V7).returnDue?.amount).toBe(10_400_001n)
+    expect(decide(at({ remote: remote(30n * USDC, 60 * 60) }), V7).returnDue).toBeUndefined()
+    expect(decide(at({ remote: remote(30n * USDC, 60 * 60 + 1) }), V7).returnDue?.amount).toBe(30n * USDC)
   })
 
   test('never both ways in one review: idle due home holds the bridge out, and a bridge out asks nothing back', () => {
