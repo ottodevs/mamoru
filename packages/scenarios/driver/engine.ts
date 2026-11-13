@@ -547,6 +547,12 @@ export type EngineConfig = {
    */
   depthShort?: (block: bigint) => Promise<NonNullable<Observation['depthShort']>>
   /**
+   * otto/mamoru#410: the most one priced op in each pool may be worth for the account's action policy
+   * (`Observation.opRoom`), read at every review. A read that fails leaves the field absent (ops are not cut; the
+   * rejection backoff still bounds them). Absent: never read (an account not on MamoruActionPolicyV4).
+   */
+  opRoom?: (block: bigint) => Promise<NonNullable<Observation['opRoom']>>
+  /**
    * otto/mamoru#218: this account's confirmed re-ranges from before this engine started (block timestamp and pool),
    * for the weekly cap and the cooldown across a restart. The newest also seeds `lastRerangeAt`. Absent: none.
    */
@@ -1056,6 +1062,15 @@ export class Engine {
         if (short.length) obs = { ...obs, depthShort: short }
       } catch (e) {
         console.error(`[engine] ${this.cfg.account}: policy depth not read, entries are not held for it this review: ${thrownSummary(e)}`)
+      }
+    }
+    // otto/mamoru#410: each priced op sized to what the policy takes in that pool. A failed read decides without it.
+    if (this.cfg.opRoom) {
+      try {
+        const room = await this.cfg.opRoom(obs.block.number)
+        if (room.length) obs = { ...obs, opRoom: room }
+      } catch (e) {
+        console.error(`[engine] ${this.cfg.account}: per-op depth not read, ops are not cut for it this review: ${thrownSummary(e)}`)
       }
     }
     // Never decide on a view older than the engine's own last operation: a provider serving a head behind it shows

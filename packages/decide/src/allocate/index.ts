@@ -339,6 +339,18 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
           }
         }
       }
+      // otto/mamoru#410: no larger than one op the action policy lets through (V4 I2: the pool's band depth over
+      // DEPTH_MULTIPLE); the rest of the bucket goes in at later reviews, as increases of the same position.
+      const opRoom = obs.opRoom?.find((x) => x.pool === pool.name)?.room
+      if (opRoom !== undefined && opRoom < size) {
+        size = opRoom < entryMin ? 0n : opRoom
+        if (size === 0n) {
+          const held = gap < free ? gap : free
+          if (held >= minEntry) waiting.push({ bucket: r.b.id, code: 'DECIDE_WAIT_DEPTH', amount: held })
+          if (row) row.code = 'DECIDE_WAIT_DEPTH'
+          continue
+        }
+      }
       const wantVolatile = (size * volShare) / 10_000n
       const wantSavings = size - wantVolatile
       if (volatileValue * 10_000n < wantVolatile * SWAP_BELOW_BPS) {

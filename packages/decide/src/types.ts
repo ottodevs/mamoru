@@ -100,6 +100,13 @@ export type Observation = {
    * observation hashes as before).
    */
   depthShort?: { pool: RegistryName; depth: bigint; perWindow: bigint }[]
+  /**
+   * otto/mamoru#410: the most one swap, mint or increase in each pool may be worth for the account's action policy, in raw
+   * savings units: MamoruActionPolicyV4 refuses a priced op worth more than 1/DEPTH_MULTIPLE of the pool's depth over its
+   * band (I2). Read by the operator with a margin. Absent, or a pool not listed: no such bound (and the observation
+   * hashes as before).
+   */
+  opRoom?: { pool: RegistryName; room: bigint }[]
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
   lastRerangeAt?: bigint | null
   /**

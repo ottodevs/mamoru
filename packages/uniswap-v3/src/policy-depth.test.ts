@@ -72,3 +72,17 @@ describe('policyDepth: MamoruActionPolicy._depth, read for read (otto/mamoru#378
     expect(in0).toBeLessThanOrEqual(await policyDepth(r, 10, false))
   })
 })
+
+describe('policyDepth with V4\'s step cap (MamoruV4Helper.MAX_DEPTH_STEPS, otto/mamoru#410)', () => {
+  it('stops after maxSteps boundaries, a lower bound of the uncapped walk, and reads no tick past it', async () => {
+    const l = 10n ** 18n
+    // Spacing 1 against a 10-tick band: ten segments up; a cap of 3 walks three and reads two boundaries.
+    const full = await policyDepth(pool(0, l, 1), 10, true)
+    const r = pool(0, l, 1)
+    const capped = await policyDepth(r, 10, true, 3)
+    expect(capped).toBe([0, 1, 2].reduce((d, t) => d + (l * (sqrtRatioAtTick(t + 1) - sqrtRatioAtTick(t))) / Q96, 0n))
+    expect(capped).toBeLessThan(full)
+    expect(r.asked).toEqual([1, 2])
+    expect(await policyDepth(pool(0, l, 1), 10, true, 64)).toBe(full)
+  })
+})

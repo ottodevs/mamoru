@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import type { Address } from 'viem'
 import { V4_POOLS_MONAD, liveWmonUsdcMonadV6, v4BudgetCaps } from '@mamoru/policy'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { depthShortOf, fitRemoteCap, readPoolDepth, type DepthClient } from '../src/remote-depth.ts'
+import { V4_DEPTH_MULTIPLE, V4_MAX_DEPTH_STEPS, depthShortOf, fitRemoteCap, readPoolDepth, v4OpRoom, type DepthClient } from '../src/remote-depth.ts'
 
 const POLICY = '0x00000000000000000000000000000000000000a3' as Address
 const ACCOUNT = '0x0003d8021BBeC02291b7F0001e05d56BeC3734Cc' as Address
@@ -75,5 +75,17 @@ describe("a new remote Safe's cap fits its pool (otto/mamoru#401)", () => {
     expect(windowAt(c + 1n) > 3_700_000_000n).toBe(true)
     expect(fitRemoteCap(5_000_000_000n, 40_000_000_000n, windowAt)).toBe(5_000_000_000n)
     expect(fitRemoteCap(5_000_000_000n, 0n, windowAt)).toBe(0n)
+  })
+})
+
+// otto/mamoru#410: MamoruActionPolicyV4 refuses a priced op worth more than 1/20 of the band depth (I2).
+describe('the per-op room under MamoruActionPolicyV4', () => {
+  test('is the depth V4 reads over 20, at 80%, so an op of that size passes `_requireDepth`', async () => {
+    const c = client(10n ** 18n, { twapWindow: 0, perWindow: 0n })
+    const depth = await readPoolDepth(c, POOL, 100, true, undefined, V4_MAX_DEPTH_STEPS)
+    const room = await v4OpRoom(c, POOL, 100, true)
+    expect(room).toBe((depth * 8_000n) / 200_000n)
+    expect(room * V4_DEPTH_MULTIPLE).toBeLessThanOrEqual(depth)
+    expect(c.calls).not.toContain('configOf')
   })
 })

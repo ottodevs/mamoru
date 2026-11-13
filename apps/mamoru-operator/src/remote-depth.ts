@@ -33,7 +33,7 @@ export type DepthPool = { name: RegistryName; address: Address; token0: Address;
  * `_depthIn(pool, p, band, in1)` read for read at `blockNumber`: the smaller, in the budget token (token1 when `in1`), of
  * what selling into the pool takes to move its price `band` ticks either way.
  */
-export async function readPoolDepth(client: DepthClient, pool: DepthPool, band: number, in1: boolean, blockNumber?: bigint): Promise<bigint> {
+export async function readPoolDepth(client: DepthClient, pool: DepthPool, band: number, in1: boolean, blockNumber?: bigint, maxSteps?: number): Promise<bigint> {
   const at = blockNumber === undefined ? {} : { blockNumber }
   const read = (functionName: string, args?: readonly unknown[]) => client.readContract({ address: pool.address, abi: POOL_ABI, functionName, ...(args ? { args } : {}), ...at })
   const [slot0, liquidity, tickSpacing] = (await Promise.all([read('slot0'), read('liquidity'), read('tickSpacing')])) as [readonly [bigint, number], bigint, number]
@@ -49,6 +49,7 @@ export async function readPoolDepth(client: DepthClient, pool: DepthPool, band: 
     pool.token1,
     band,
     in1,
+    maxSteps,
   )
 }
 
@@ -90,4 +91,20 @@ export function fitRemoteCap(cap: bigint, depth: bigint, windowAt: (cap: bigint)
   // Rounding in the formulas: step down until the window fits.
   while (c > 0n && windowAt(c) > limit) c -= 1n
   return c
+}
+
+/** MamoruActionPolicyV4 (MamoruV4Helper): a priced op's value times this must fit the pool's band depth (I2). */
+export const V4_DEPTH_MULTIPLE = 20n
+/** MamoruV4Helper.MAX_DEPTH_STEPS: V4's depth walk stops after this many tick boundaries per direction. */
+export const V4_MAX_DEPTH_STEPS = 64
+/** Share of V4's per-op bound the engine sizes to: the depth is read before inclusion and the value at the band edge. */
+export const OP_ROOM_BPS = 8_000n
+
+/**
+ * otto/mamoru#410: the most one swap, mint or increase in `pool` may be worth under MamoruActionPolicyV4 (I2,
+ * `_requireDepth`: depth over `band` >= DEPTH_MULTIPLE x value), in the budget unit, with OP_ROOM_BPS of margin.
+ */
+export async function v4OpRoom(client: DepthClient, pool: DepthPool, band: number, in1: boolean, blockNumber?: bigint): Promise<bigint> {
+  const depth = await readPoolDepth(client, pool, band, in1, blockNumber, V4_MAX_DEPTH_STEPS)
+  return (depth * OP_ROOM_BPS) / (10_000n * V4_DEPTH_MULTIPLE)
 }

@@ -4,6 +4,7 @@ import { address, baseRegistry, entry, monadRegistry, type Registry } from '@mam
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { purgaIdentity, registryOf } from './gates/index.ts'
 import { allocate, canonicalJson, decide, type Observation, type PoolObs, type PositionObs } from './index.ts'
+import { fitOpRoom } from './op-room.ts'
 
 const POOL = 'pool:USDC/cbBTC/500'
 const ACCOUNT = '0x00000000000000000000000000000000000000aa'
@@ -402,5 +403,55 @@ describe('release: the remote Safe sends savings home', () => {
     const o = live({ balances: { USDC: 500_000n, WMON: 10n ** 22n }, positions: [held], release: { amount: 4_000_000n, chainId: 8453 } })
     const r = releaseOf(o, liveWmonUsdcMonadV6, new Set([MONAD_POOL]), new Set([MONAD_POOL]))
     expect(r?.proposal).toMatchObject({ kind: 'bridge_out', amount: 500_000n })
+  })
+})
+
+// otto/mamoru#410: MamoruActionPolicyV4 refuses a swap, mint or increase worth more than 1/20 of the pool's band depth
+// (I2). On WMON/USDC (~7.4k deep) that is ~370 USDC an op: a 2,000 USDC entry goes in over several reviews, never as
+// one op the policy refuses every time (AA23).
+describe('each priced op fits the per-op room the policy allows', () => {
+  const anyGrant = grantKeyFor(liveWmonUsdcMonadV6, 'manage-any', MONAD_POOL)
+  const session = { grant: anyGrant, permissionId: `0x${'03'.repeat(32)}` as const, validUntil: 10_000, active: true }
+  const room = (r: bigint) => [{ pool: MONAD_POOL, room: r }]
+  const base = { sessions: [session], native: 3n * 10n ** 18n, balances: { USDC: 2_000_000_000n, WMON: 0n } }
+
+  test('without a room nothing changes; with one the entry is cut to it', () => {
+    const free = decide(monadObs(base), liveWmonUsdcMonadV6)
+    expect(free.proposal).toMatchObject({ kind: 'enter_swap', pool: MONAD_POOL, tokenIn: 'USDC' })
+    const cut = decide(monadObs({ ...base, opRoom: room(300_000_000n) }), liveWmonUsdcMonadV6)
+    expect(cut.proposal).toMatchObject({ kind: 'enter_swap', pool: MONAD_POOL, tokenIn: 'USDC' })
+    const amountIn = (cut.proposal as { amountIn: bigint }).amountIn
+    expect(amountIn).toBeGreaterThan(0n)
+    expect(amountIn).toBeLessThanOrEqual(300_000_000n)
+    expect(amountIn).toBeLessThan((free.proposal as { amountIn: bigint }).amountIn)
+  })
+
+  test('a room under the minimum entry holds the entry with DECIDE_WAIT_DEPTH', () => {
+    const d = decide(monadObs({ ...base, opRoom: room(50_000n) }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toBeNull()
+    expect(d.reason).toBe('DECIDE_WAIT_DEPTH')
+  })
+
+  test('a mint is cut in proportion, a sale is cut but never dropped, an unlisted pool is left alone', () => {
+    const o = monadObs({ ...base, opRoom: room(100_000_000n) })
+    const mint = { kind: 'enter_mint' as const, grant: anyGrant as `manage-any:${string}`, pool: MONAD_POOL, tickLower: MONAD_TICK - 600, tickUpper: MONAD_TICK + 600, amount0Desired: 0n, amount1Desired: 400_000_000n }
+    const m = fitOpRoom({ ...mint, amount0Desired: 0n }, o, 'USDC', 100_000n) as typeof mint
+    expect(m.amount1Desired).toBe(100_000_000n)
+    const sale = { kind: 'enter_swap' as const, grant: anyGrant as `manage-any:${string}`, pool: MONAD_POOL, tokenIn: 'WMON', tokenOut: 'USDC', fee: 3000, amountIn: 10n ** 24n }
+    const s = fitOpRoom(sale, monadObs({ ...base, opRoom: room(1_000n) }), 'USDC', 100_000n) as typeof sale
+    expect(s.amountIn).toBeGreaterThan(0n)
+    expect(s.amountIn).toBeLessThan(sale.amountIn)
+    expect(fitOpRoom(sale, monadObs({ ...base, opRoom: room(0n) }), 'USDC', 100_000n)).toBeNull()
+    expect(fitOpRoom(mint, monadObs({ ...base, opRoom: [{ pool: 'pool:WETH/USDC/500', room: 1n }] }), 'USDC', 100_000n)).toBe(mint)
+  })
+
+  test('allocate sizes the entry to the room, so the swap buys only what that mint needs', () => {
+    const policy = { ...monadPolicy, minEntry: 100_000n }
+    const a = allocate(monadObs({ ...base, opRoom: room(300_000_000n) }), policy, false)
+    expect(a.proposal).toMatchObject({ kind: 'enter_swap', tokenIn: 'USDC' })
+    expect((a.proposal as { amountIn: bigint }).amountIn).toBeLessThanOrEqual(300_000_000n)
+    const held = allocate(monadObs({ ...base, opRoom: room(1n) }), policy, false)
+    expect(held.proposal).toBeNull()
+    expect(held.buckets.find((b) => b.pool === MONAD_POOL)?.code).toBe('DECIDE_WAIT_DEPTH')
   })
 })

@@ -1,7 +1,7 @@
 import { keccak256, stringToHex, type Hex } from 'viem'
 import type { ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, hasManageAny, policyHash, type PolicyVersion } from '@mamoru/policy'
-import { allocate, type Waiting } from './allocate/index.ts'
+import { allocate, DEFAULT_MIN_ENTRY, type Waiting } from './allocate/index.ts'
 import { enterBucket, safeSavings } from './enter/index.ts'
 import { ehgBridge, ehgPreliminary, purgaIdentity, registryOf } from './gates/index.ts'
 import { fallFreezeOf } from './guard/index.ts'
@@ -12,6 +12,7 @@ import { releaseOf } from './release/index.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, mergeOf, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, GuardNote, Observation, Proposal, RerangeProposal, ShadowNote, ShadowRisk, VaultRedeemProposal } from './types.ts'
 import { capRoomOf, withinCap } from './cap.ts'
+import { fitOpRoom } from './op-room.ts'
 import { poolStatsShadowRisk } from './shadow-pool-stats.ts'
 import { poolDepthShadowRisk } from './shadow-pool-depth.ts'
 
@@ -299,6 +300,11 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       proposal = null
       reason = gate.reason
     }
+  }
+  // otto/mamoru#410: a priced op the action policy would refuse as too large for the pool's depth is cut to what it takes.
+  if (proposal && obs.opRoom) {
+    proposal = fitOpRoom(proposal, obs, policy.savingsAsset, policy.minEntry ?? DEFAULT_MIN_ENTRY)
+    if (!proposal) reason = 'DECIDE_WAIT_DEPTH'
   }
 
   /** otto/mamoru#400: true when the savings a redeem frees would go back into a vault, or nowhere, at the next allocation. */

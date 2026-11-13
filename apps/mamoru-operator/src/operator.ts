@@ -74,7 +74,7 @@ import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activation
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
 import { livePoolStats, monadPoolStats, type PoolStatsCache } from './pool-stats.ts'
-import { depthShortOf, fitRemoteCap } from './remote-depth.ts'
+import { depthShortOf, fitRemoteCap, v4OpRoom } from './remote-depth.ts'
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
 export type AccountsSummary = { known: number; active: number; armed: number }
@@ -6386,6 +6386,44 @@ export class Operator {
     }
   }
 
+  /** otto/mamoru#410: V4's per-op bound by pool, shared by every account here (it depends on the pool only). */
+  private readonly opRooms = new Map<string, { at: number; room: bigint }>()
+
+  /**
+   * otto/mamoru#410: for an account on MamoruActionPolicyV4, the most one swap, mint or increase in each of its pools may
+   * be worth (`Observation.opRoom`): V4 refuses a priced op above 1/DEPTH_MULTIPLE of the pool's band depth (I2), so a
+   * thin pool (WMON/USDC on Monad, ~7.4k deep) takes a large entry over several reviews. Read at most every
+   * DEPTH_SHORT_TTL_MS per pool. Only pools whose budget unit is the savings asset (the bound is in it). Any other
+   * account: none.
+   */
+  private opRoomFor(acc: AccountState): Pick<EngineConfig, 'opRoom'> {
+    if (!this.onV4(acc)) return {}
+    const policy = this.enginePolicyOf(acc)
+    const reg = this.cfg.registry
+    const pools = [...new Set(policy.buckets.flatMap((b) => b.pools))].flatMap((name) => {
+      const spec = v4PoolOf(name, this.cfg.chainId)
+      if (!spec || spec.stable !== policy.savingsAsset) return []
+      const e = entry(name, reg)
+      return [{ pool: { name, address: e.address as Address, token0: address(e.token0!, reg), token1: address(e.token1!, reg) }, band: spec.bandTicks, in1: budgetIn1(spec) }]
+    })
+    if (!pools.length) return {}
+    return {
+      opRoom: async (block) => {
+        const out: NonNullable<Observation['opRoom']> = []
+        for (const p of pools) {
+          const key = `${p.pool.name}:${p.band}:${p.in1}`
+          let hit = this.opRooms.get(key)
+          if (!hit || Date.now() - hit.at >= DEPTH_SHORT_TTL_MS) {
+            hit = { at: Date.now(), room: await v4OpRoom(this.client as never, p.pool, p.band, p.in1, block) }
+            this.opRooms.set(key, hit)
+          }
+          out.push({ pool: p.pool.name, room: hit.room })
+        }
+        return out
+      },
+    }
+  }
+
   /** otto/mamoru#401: remote Safes whose entries wait for their pool's depth, since when (ms). */
   private readonly depthHeld = new Map<string, { pool: string; depth: bigint; perWindow: bigint; since: number }>()
 
@@ -8036,6 +8074,7 @@ export class Operator {
         },
         ...this.remoteOf(acc),
         ...this.depthShortFor(acc),
+        ...this.opRoomFor(acc),
         bridgeLimit: () => this.bridgeLimitFor(acc),
         spendGate: (p) => this.spendHold.admit(this.spendHoldKey(acc), p, Date.now()),
         rerangeHistory: rerangeHistoryOf(acc.ops, Math.floor(Date.now() / 1000)),

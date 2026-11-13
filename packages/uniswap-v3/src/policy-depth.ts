@@ -38,8 +38,12 @@ function amount0For(a: bigint, b: bigint, l: bigint): bigint {
   return ((l << 96n) * (hi - lo)) / hi / lo
 }
 
-/** Mirrors `_depth(pool, band, up)`: what selling token1 (up) or token0 (down) takes to move the price `band` ticks. */
-export async function policyDepth(r: DepthReads, band: number, up: boolean): Promise<bigint> {
+/**
+ * Mirrors `_depth(pool, band, up)`: what selling token1 (up) or token0 (down) takes to move the price `band` ticks.
+ * `maxSteps`: MamoruActionPolicyV4's walk stops after that many boundaries (MAX_DEPTH_STEPS, otto/mamoru#410); V3's
+ * does not (absent).
+ */
+export async function policyDepth(r: DepthReads, band: number, up: boolean, maxSteps?: number): Promise<bigint> {
   let sp = r.sqrtPriceX96
   let liq = r.liquidity
   const spacing = r.tickSpacing
@@ -49,12 +53,12 @@ export async function policyDepth(r: DepthReads, band: number, up: boolean): Pro
   if (r.tick < 0 && r.tick % spacing !== 0) b -= spacing
   if (up) b += spacing
   let d = 0n
-  for (;;) {
+  for (let steps = 0; ; steps++) {
     const last = up ? b >= end : b <= end
     const sb = sqrtRatioAtTick(last ? end : b)
     const l = liq > 0n ? liq : 0n
     d += up ? amount1For(sp, sb, l) : amount0For(sb, sp, l)
-    if (last) return d
+    if (last || (maxSteps !== undefined && steps + 1 >= maxSteps)) return d
     const net = await r.liquidityNet(b)
     liq = up ? liq + net : liq - net
     sp = sb
@@ -62,10 +66,10 @@ export async function policyDepth(r: DepthReads, band: number, up: boolean): Pro
   }
 }
 
-/** Mirrors `_depthIn(pool, p, band, in1)`: the depth in the budget's own token, the smaller of the two directions. */
-export async function policyDepthIn(r: DepthReads, token0: Address, token1: Address, band: number, in1: boolean): Promise<bigint> {
-  let up = await policyDepth(r, band, true)
-  let down = await policyDepth(r, band, false)
+/** Mirrors `_depthIn(pool, p, band, in1)` (V3) and `depthIn` (V4, with `maxSteps`): the depth in the budget's own token, the smaller of the two directions. */
+export async function policyDepthIn(r: DepthReads, token0: Address, token1: Address, band: number, in1: boolean, maxSteps?: number): Promise<bigint> {
+  let up = await policyDepth(r, band, true, maxSteps)
+  let down = await policyDepth(r, band, false, maxSteps)
   if (in1) down = quoteAtTick(clamp(r.tick - band), down, token0, token1)
   else up = quoteAtTick(clamp(r.tick + band), up, token1, token0)
   return up < down ? up : down
