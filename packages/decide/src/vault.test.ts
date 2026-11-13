@@ -468,6 +468,18 @@ describe('idle USDC on the sleeve comes home (otto/mamoru#107, spec 012 HRV-R4)'
     expect(decide(at({ remote: remote(20n * USDC, 61 * 60, 20n * USDC) }), V7).returnDue).toBeUndefined()
   })
 
+  test('otto/mamoru#401 on #408: a sleeve at its own cap counted once under the account cap; its spill is placed here within the room', () => {
+    // 1,000 USDC on Base, 100 on a sleeve capped at 100 (its share would be ~165): the rest of its share is placed here.
+    const remote = { value: 100n * USDC, inFlight: 0n, ready: true, cap: 100n * USDC }
+    const room = decide(at({ remote, cap: { capUsdc: 1_200n * USDC, elsewhereUsdc: 100n * USDC, elsewhereIncludesRemote: true } }), V7)
+    expect(room.proposal).not.toBeNull()
+    expect(room.proposal?.kind).not.toBe('bridge_out')
+    expect((room.waiting ?? []).some((w) => w.bucket === 'growth')).toBe(false)
+    // Whether the peer read holds the sleeve unknown: as another chain unread, nothing new is placed (#408, fail closed).
+    const unknown = decide(at({ remote, cap: { capUsdc: 1_200n * USDC, elsewhereUsdc: 100n * USDC } }), V7)
+    expect(unknown.proposal).toBeNull()
+  })
+
   test('never both ways in one review: idle due home holds the bridge out, and a bridge out asks nothing back', () => {
     const d = decide(at({ remote: { value: 40n * USDC, inFlight: 0n, ready: true, idle: 30n * USDC, idleSince: Number(NOW) - 7 * 3_600 } }), V7)
     expect(d.returnDue?.amount).toBe(30n * USDC)
