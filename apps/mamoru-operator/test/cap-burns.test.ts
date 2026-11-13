@@ -48,7 +48,7 @@ type Priv = {
   localTotal(acc: AccountState, safe: Address): Promise<{ total: bigint; safe: Address; block: bigint }>
   startTotal(acc: AccountState, local: { total: bigint; safe: Address; block: bigint }): Promise<{ total: bigint; across: boolean }>
   peerRead(acc: AccountState, maxAgeMs: number, covered?: Covered): Promise<PeerRead>
-  engineCap(acc: AccountState, observedBlock: bigint): Promise<{ capUsdc: bigint; elsewhereUsdc: bigint | null; chainCapUsdc?: bigint }>
+  engineCap(acc: AccountState, observedBlock: bigint): Promise<{ capUsdc: bigint; elsewhereUsdc: bigint | null; chainCapUsdc?: bigint; elsewhereIncludesRemote?: boolean }>
   enginePeers: Map<string, PeerRead>
   elsewhereOf(acc: AccountState, peers: PeerRead): bigint | null
 }
@@ -480,7 +480,21 @@ describe('a remote Safe is held to the account cap its home answers (otto/mamoru
     expect(await s.m.engineCap(s.monadAcc, s.chains.monadBlock)).toEqual({ capUsdc: s.home, elsewhereUsdc: TRUE, chainCapUsdc: s.own })
     // Base itself never takes a peer's cap.
     s.b.enginePeers.set('brais', await s.b.peerRead(s.baseAcc, 2_000))
-    expect(await s.b.engineCap(s.baseAcc, s.chains.baseBlock)).toEqual({ capUsdc: s.home, elsewhereUsdc: 0n })
+    // otto/mamoru#408: the peer read holds the remote Safe on Monad, and Base says so (decide counts it once).
+    expect(await s.b.engineCap(s.baseAcc, s.chains.baseBlock)).toEqual({ capUsdc: s.home, elsewhereUsdc: 0n, elsewhereIncludesRemote: true })
+  })
+
+  test('otto/mamoru#408: Base says whether elsewhereUsdc holds the remote Safe', async () => {
+    const s = linked()
+    s.b.enginePeers.set('brais', await s.b.peerRead(s.baseAcc, 2_000))
+    expect((await s.b.engineCap(s.baseAcc, s.chains.baseBlock)).elsewhereIncludesRemote).toBe(true)
+    // The owner's other Safes no longer list it: the read holds only the Base address on Monad, not the sleeve.
+    s.b.otherSafes = () => []
+    s.b.enginePeers.set('brais', await s.b.peerRead(s.baseAcc, 2_000))
+    expect((await s.b.engineCap(s.baseAcc, s.chains.baseBlock)).elsewhereIncludesRemote).toBe(false)
+    // No remote Safe: nothing said.
+    delete (s.baseAcc as { remote?: unknown }).remote
+    expect('elsewhereIncludesRemote' in (await s.b.engineCap(s.baseAcc, s.chains.baseBlock))).toBe(false)
   })
 
   test('the remote Safe places up to what it was signed for, not the code default of an operator without settings (otto/mamoru#384)', async () => {

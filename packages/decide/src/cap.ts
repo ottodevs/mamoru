@@ -29,12 +29,10 @@ export function capRoomOf(obs: Observation, policy: PolicyVersion): bigint | nul
   const reinvest = cap.reinvestUsdc ?? 0n
   // otto/mamoru#352: a vault of this chain unread is an unread leg, as another chain is: nothing new.
   const placed = placedOf(obs, policy)
-  // otto/mamoru#408: the other chains once. `elsewhereUsdc` (the peers' reads of the account's Safes there, burns in
-  // flight included) already holds the sleeve `obs.remote` values; counting both took it twice (b22428c7, 13 Nov: 145
-  // USDC of Monad counted twice left no room, and 77 USDC idle). The sleeve's own value stays the floor, in case a
-  // peer read does not reach it.
-  const remote = obs.remote?.value ?? 0n
-  const elsewhere = cap.elsewhereUsdc === null ? null : cap.elsewhereUsdc > remote ? cap.elsewhereUsdc : remote
+  // otto/mamoru#408: every exposure once. The sleeve `obs.remote` is added only when the operator says the peer reads
+  // in `elsewhereUsdc` do not hold it; when they do, it is already there (b22428c7, 13 Nov: 145 USDC of Monad counted
+  // twice left no room and 77 USDC idle). Not known: as another chain unread, nothing new.
+  const elsewhere = cap.elsewhereUsdc === null ? null : !obs.remote ? cap.elsewhereUsdc : cap.elsewhereIncludesRemote === true ? cap.elsewhereUsdc : cap.elsewhereIncludesRemote === false ? cap.elsewhereUsdc + obs.remote.value : null
   let left = elsewhere === null || obs.vaultsUnread?.length ? 0n : cap.capUsdc - elsewhere - placed
   // A remote Safe places within its own cap as well as the account's.
   if (cap.chainCapUsdc !== undefined && cap.chainCapUsdc - placed < left) left = cap.chainCapUsdc - placed

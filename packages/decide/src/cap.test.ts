@@ -300,7 +300,7 @@ describe('otto/mamoru#408: the sleeve on another chain counts once under the cap
   const weth = pool('pool:WETH/USDC/3000', TICK)
   const position: PositionObs = { tokenId: 6_558_090n, pool: weth.name, tickLower: -201_660, tickUpper: -199_680, liquidity: 52_509_451_446_978n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true, admitted: true }
   const REMOTE = 144_884_625n
-  const live = (elsewhereUsdc: bigint | null) =>
+  const live = (cap: Observation['cap']) =>
     obs({
       sessions,
       pools: [pool('pool:USDC/USDT/100', 1), pool('pool:USDC/cbBTC/500', -69_080), weth],
@@ -309,29 +309,51 @@ describe('otto/mamoru#408: the sleeve on another chain counts once under the cap
       positions: [position],
       vaults: [vault('vault:gtUSDCp', 470_365_902n), vault('vault:waBasUSDC', 0n)],
       remote: { value: REMOTE, inFlight: 0n, ready: true },
-      cap: { capUsdc: 1_000n * USDC, elsewhereUsdc },
+      cap,
     })
 
   test('the idle USDC and WETH go to the Balance bucket, within the room the cap really leaves', () => {
-    const o = live(REMOTE)
+    const o = live({ capUsdc: 1_000n * USDC, elsewhereUsdc: REMOTE, elsewhereIncludesRemote: true })
     const placed = placedOf(o, V7)
     // This chain only: the vault and the WETH bucket (position and idle WETH), never the Monad sleeve.
     expect(placed).toBe(bucketValues(o, V7, new Set(V7.buckets.flatMap((b) => b.pools))).total - 77_447_990n - REMOTE)
     expect(placed > 700n * USDC && placed < 720n * USDC).toBe(true)
-    expect(capRoomOf(o, V7)).toBe(1_000n * USDC - REMOTE - placed)
+    const room = capRoomOf(o, V7)!
+    expect(room).toBe(1_000n * USDC - REMOTE - placed)
+    expect(room > 138n * USDC && room < 139n * USDC).toBe(true)
     const d = decide(o, V7)
     // Balance is 104 USDC short of its 35 %: the WETH side of the entry is bought first, then the position takes it.
     expect(d.proposal).toMatchObject({ kind: 'enter_swap', pool: 'pool:WETH/USDC/3000', tokenIn: 'USDC', tokenOut: 'WETH' })
     expect(d.reason).toBe('DECIDE_ENTER')
   })
 
-  test('a peer read that misses the sleeve still counts it, once', () => {
-    const o = live(0n)
-    expect(capRoomOf(o, V7)).toBe(1_000n * USDC - REMOTE - placedOf(o, V7))
+  test('a read that misses the sleeve but holds another Safe never places past the cap', () => {
+    // Review of #359: cap 1000, 700 placed here, the sleeve 150, another Safe 100 read elsewhere without the sleeve.
+    const o = live({ capUsdc: 1_000n * USDC, elsewhereUsdc: 100n * USDC, elsewhereIncludesRemote: false })
+    const placed = placedOf(o, V7)
+    const room = capRoomOf(o, V7)!
+    expect(room).toBe(1_000n * USDC - 100n * USDC - REMOTE - placed)
+    // Everything counted, with the room spent: never above the cap.
+    expect(placed + REMOTE + 100n * USDC + room <= 1_000n * USDC).toBe(true)
+    // Not known whether the read holds the sleeve: as an unread chain, nothing new.
+    const unknown = live({ capUsdc: 1_000n * USDC, elsewhereUsdc: 100n * USDC })
+    expect(capRoomOf(unknown, V7)).toBe(0n)
+    expect(decide(unknown, V7).proposal).toBeNull()
+    // The unread rule still lets the engine's own re-range money back in.
+    expect(capRoomOf(live({ capUsdc: 1_000n * USDC, elsewhereUsdc: 100n * USDC, reinvestUsdc: 5n * USDC }), V7)).toBe(5n * USDC)
+  })
+
+  test('a remote Safe (chainCapUsdc, no sleeve of its own) is unchanged', () => {
+    // The account's cap and this Safe's own: the lower room wins, with no flag needed (no `remote` on a sleeve).
+    const { remote: _remote, ...sleeve } = live({ capUsdc: 1_000n * USDC, elsewhereUsdc: 100n * USDC, chainCapUsdc: 750n * USDC })
+    const placed = placedOf(sleeve, V7)
+    expect(capRoomOf(sleeve, V7)).toBe(750n * USDC - placed)
+    const { remote: _r, ...tight } = live({ capUsdc: 1_000n * USDC, elsewhereUsdc: 250n * USDC, chainCapUsdc: 750n * USDC })
+    expect(capRoomOf(tight, V7)).toBe(1_000n * USDC - 250n * USDC - placed)
   })
 
   test('a cap that really leaves no room says so, never DECIDE_IN_RANGE', () => {
-    const o = live(300n * USDC)
+    const o = live({ capUsdc: 1_000n * USDC, elsewhereUsdc: 300n * USDC, elsewhereIncludesRemote: true })
     expect(capRoomOf(o, V7)).toBe(0n)
     const d = decide(o, V7)
     expect(d.proposal).toBeNull()

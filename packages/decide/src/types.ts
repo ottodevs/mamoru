@@ -121,8 +121,11 @@ export type Observation = {
    * put back whatever the cap and the other chains say (finishing a re-range is not new money). Absent: none.
    * `chainCapUsdc`: a second bound on what this chain's Safe alone places (a remote Safe's own cap, its bridge-out total,
    * when `capUsdc` is the account's cap its home answers). Absent: none.
+   * `elsewhereIncludesRemote` (otto/mamoru#408): whether `elsewhereUsdc` holds a read of every Safe whose value is
+   * `remote` (true: the sleeve is in it; false: none of them is, so the cap adds `remote.value`). Absent with a `remote`:
+   * not known, and nothing new is placed, as with another chain unread.
    */
-  cap?: { capUsdc: bigint; elsewhereUsdc: bigint | null; reinvestUsdc?: bigint; chainCapUsdc?: bigint }
+  cap?: { capUsdc: bigint; elsewhereUsdc: bigint | null; reinvestUsdc?: bigint; chainCapUsdc?: bigint; elsewhereIncludesRemote?: boolean }
   /**
    * Spec 004: 24 h history per pool, from TWAP samples (see `marketOf`). Read only by a policy with `guards`;
    * absent or null fields make the guard rules abstain.

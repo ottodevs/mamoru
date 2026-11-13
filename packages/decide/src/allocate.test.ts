@@ -527,24 +527,23 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     // review r1): before #353 the cap cut the total to 600, the Monad target to 90, and 60 USDC were asked home.
     const o = v6Obs({ balances: { USDC: 850n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 150n * USDC, inFlight: 0n, ready: true } })
     expect(decide(o, V6).returnDue).toBeUndefined()
-    expect(decide({ ...o, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 0n } }, V6).returnDue).toBeUndefined()
-    const over = decide({ ...o, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 400n * USDC } }, V6)
+    expect(decide({ ...o, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 0n, elsewhereIncludesRemote: false } }, V6).returnDue).toBeUndefined()
+    const over = decide({ ...o, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 400n * USDC, elsewhereIncludesRemote: false } }, V6)
     expect(over.returnDue).toBeUndefined()
-    // The room is 1,000 - 400 elsewhere (the Monad sleeve is in it, otto/mamoru#408: never counted again as placed
-    // here): an entry spends at most that, and no bridge moves money for the cap.
+    // The room is 1,000 - 400 - 150 placed: an entry spends at most that, and no bridge moves money for the cap.
     const p = over.proposal
     expect(p?.kind).not.toBe('bridge_out')
     const spent = !p ? 0n : p.kind === 'enter_swap' && p.tokenIn === 'USDC' ? p.amountIn : p.kind === 'enter_mint' || p.kind === 'increase_liquidity' ? (p.pool.startsWith('pool:USDC/') ? p.amount0Desired : p.amount1Desired) : p.kind === 'vault_deposit' ? p.assets : 0n
-    expect(spent <= 600n * USDC).toBe(true)
-    // At the limit, and far over (everything counted twice): no return, no bridge, no entry.
-    for (const elsewhereUsdc of [1_000n * USDC, 5_000n * USDC]) {
-      const d = decide({ ...o, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc } }, V6)
+    expect(spent <= 450n * USDC).toBe(true)
+    // Far over (everything counted twice), and at the limit: no return, no bridge, no entry.
+    for (const elsewhereUsdc of [900n * USDC, 5_000n * USDC]) {
+      const d = decide({ ...o, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc, elsewhereIncludesRemote: false } }, V6)
       expect(d.returnDue).toBeUndefined()
       expect(d.proposal).toBeNull()
     }
     // A real excess on Monad is still due home under a cap, as without one.
     const heavy = v6Obs({ balances: { USDC: 600n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 400n * USDC, inFlight: 0n, ready: true } })
-    expect(decide({ ...heavy, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 400n * USDC } }, V6).returnDue).toEqual(decide(heavy, V6).returnDue)
+    expect(decide({ ...heavy, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 400n * USDC, elsewhereIncludesRemote: false } }, V6).returnDue).toEqual(decide(heavy, V6).returnDue)
   })
 
   test('otto/mamoru#353: under the cap a bridge-out goes only where the account would bridge without it, to the same bucket', () => {
@@ -556,7 +555,7 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     const free = decide(o, V6)
     expect(free.proposal?.kind).toBe('bridge_out')
     for (const room of [500n * USDC, 100n * USDC, 50n * USDC]) {
-      const d = decide({ ...o, cap: { capUsdc: room, elsewhereUsdc: 0n } }, V6)
+      const d = decide({ ...o, cap: { capUsdc: room, elsewhereUsdc: 0n, elsewhereIncludesRemote: false } }, V6)
       if (d.proposal?.kind === 'bridge_out') {
         expect(d.proposal.bucket).toBe((free.proposal as { bucket: string }).bucket)
         expect(d.proposal.amount <= room).toBe(true)
@@ -566,7 +565,7 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     // With the remote bucket on target the account would not bridge; under any cap it never does.
     const onTarget = v6Obs({ balances: { USDC: 850n * USDC, USDT: 0n, cbBTC: 0n, WETH: 0n }, remote: { value: 150n * USDC, inFlight: 0n, ready: true } })
     expect(decide(onTarget, V6).proposal?.kind).not.toBe('bridge_out')
-    for (const capUsdc of [1_000n, 700n, 400n, 160n].map((x) => x * USDC)) expect(decide({ ...onTarget, cap: { capUsdc, elsewhereUsdc: 0n } }, V6).proposal?.kind).not.toBe('bridge_out')
+    for (const capUsdc of [1_000n, 700n, 400n, 160n].map((x) => x * USDC)) expect(decide({ ...onTarget, cap: { capUsdc, elsewhereUsdc: 0n, elsewhereIncludesRemote: false } }, V6).proposal?.kind).not.toBe('bridge_out')
   })
 
   test('otto/mamoru#278: no return inside the band, below an entry, with anything in flight, the sleeve not ready, or the review paused', () => {

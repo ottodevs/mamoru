@@ -1752,8 +1752,24 @@ export class Operator {
     // Not effectiveCap: this operator runs without engine settings, so capFor is the 100 USDC code default, below it.
     const own = getAddress(acc.ctx.address).toLowerCase()
     const homeCaps = this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID && peers.ok ? peers.chains.flatMap((e) => (e.chainId !== this.cfg.chainId && e.at?.safe.toLowerCase() === own && e.capUsdc !== undefined ? [e.capUsdc] : [])) : []
-    if (!homeCaps.length) return { capUsdc: this.effectiveCap(acc), elsewhereUsdc }
+    if (!homeCaps.length) return { capUsdc: this.effectiveCap(acc), elsewhereUsdc, ...this.remoteInElsewhere(acc, peers) }
     return { capUsdc: homeCaps.reduce((a, b) => (b < a ? b : a)), elsewhereUsdc, chainCapUsdc: this.signedCapOf(acc) }
+  }
+
+  /**
+   * otto/mamoru#408: whether `elsewhereUsdc` already holds the Safes the engine's `remote` values (remoteOf: the sleeve on
+   * Monad, and a V4 account's retired design-C Safe there), so decide counts them exactly once. Every one of them in a
+   * peer read of Monad: true; none: false (decide adds `remote` to it); some only: not said, and decide places nothing new.
+   * No such Safe (no remote): nothing said.
+   */
+  private remoteInElsewhere(acc: AccountState, peers: PeerRead): { elsewhereIncludesRemote?: boolean } {
+    if (!peers.ok || this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID) return {}
+    const safes = this.onV4(acc) ? [acc.oneAuth?.remote?.address, this.designC(acc)?.address] : [acc.remote?.chainId === BRIDGE_MONAD_CHAIN_ID ? acc.remote.address : undefined]
+    const want = [...new Set(safes.flatMap((a) => (a ? [String(a).toLowerCase()] : [])))]
+    if (!want.length) return {}
+    const read = new Set(peers.chains.filter((e) => e.chainId === BRIDGE_MONAD_CHAIN_ID && e.at).map((e) => e.at!.safe.toLowerCase()))
+    const held = want.filter((a) => read.has(a)).length
+    return held === want.length ? { elsewhereIncludesRemote: true } : held === 0 ? { elsewhereIncludesRemote: false } : {}
   }
 
   /**
