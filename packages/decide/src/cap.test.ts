@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { conservadorLiveV2, conservadorLiveV7, grantKey } from '@mamoru/policy'
+import { conservadorLiveV2, conservadorLiveV7, grantKey, v7EnginePolicy } from '@mamoru/policy'
 import { address, baseRegistry, entry } from '@mamoru/registry'
 import { quoteMint, sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import { bucketValues, capRoomOf, decide, placedOf, withinCap, type Observation, type PoolObs, type PositionObs, type VaultObs } from './index.ts'
@@ -285,5 +285,56 @@ describe('otto/mamoru#352: v7 with a vault it does not name, and a vault that co
       expect(capRoomOf(unread, V7)).toBe(0n)
       expect(decide(unread, V7).proposal).toBeNull()
     }
+  })
+})
+
+describe('otto/mamoru#408: the sleeve on another chain counts once under the cap', () => {
+  // b22428c7 on Base, 13 Nov 2026 12:40 (block 56918067): 77.45 USDC and 0.011277 WETH (~22 USD) idle, the WETH/USDC
+  // position in range (~224.5), 470.37 in gtUSDCp, and its Monad sleeve worth 144.88, which the peer read of that Safe
+  // also counts (elsewhereUsdc). Signed cap 1000. The sleeve was counted twice (placedOf took it from bucketValues'
+  // total): 1000 - 144.88 - 861.79 < 0, no room, and 99.5 USD idle on a DECIDE_IN_RANGE hold for days.
+  const V7 = v7EnginePolicy(conservadorLiveV7)
+  const vault = (name: string, assets: bigint): VaultObs => ({ name, shares: assets, assets, maxWithdraw: assets, maxDeposit: 10n ** 15n, maxRedeem: assets })
+  const sessions = V7.session.grants.filter((g) => !g.perPosition).map((g, i) => ({ grant: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(2, '0').repeat(32)}` as const, validUntil: 10_000, active: true }))
+  const TICK = -200_525
+  const weth = pool('pool:WETH/USDC/3000', TICK)
+  const position: PositionObs = { tokenId: 6_558_090n, pool: weth.name, tickLower: -201_660, tickUpper: -199_680, liquidity: 52_509_451_446_978n, collectable0: 0n, collectable1: 0n, principalOwed0: 0n, principalOwed1: 0n, managed: true, admitted: true }
+  const REMOTE = 144_884_625n
+  const live = (elsewhereUsdc: bigint | null) =>
+    obs({
+      sessions,
+      pools: [pool('pool:USDC/USDT/100', 1), pool('pool:USDC/cbBTC/500', -69_080), weth],
+      ethPrice: { pool: weth.name, sqrtPriceX96: weth.sqrtPriceX96, token0: 'WETH' },
+      balances: { USDC: 77_447_990n, USDT: 0n, cbBTC: 0n, WETH: 11_276_891_714_961_176n },
+      positions: [position],
+      vaults: [vault('vault:gtUSDCp', 470_365_902n), vault('vault:waBasUSDC', 0n)],
+      remote: { value: REMOTE, inFlight: 0n, ready: true },
+      cap: { capUsdc: 1_000n * USDC, elsewhereUsdc },
+    })
+
+  test('the idle USDC and WETH go to the Balance bucket, within the room the cap really leaves', () => {
+    const o = live(REMOTE)
+    const placed = placedOf(o, V7)
+    // This chain only: the vault and the WETH bucket (position and idle WETH), never the Monad sleeve.
+    expect(placed).toBe(bucketValues(o, V7, new Set(V7.buckets.flatMap((b) => b.pools))).total - 77_447_990n - REMOTE)
+    expect(placed > 700n * USDC && placed < 720n * USDC).toBe(true)
+    expect(capRoomOf(o, V7)).toBe(1_000n * USDC - REMOTE - placed)
+    const d = decide(o, V7)
+    // Balance is 104 USDC short of its 35 %: the WETH side of the entry is bought first, then the position takes it.
+    expect(d.proposal).toMatchObject({ kind: 'enter_swap', pool: 'pool:WETH/USDC/3000', tokenIn: 'USDC', tokenOut: 'WETH' })
+    expect(d.reason).toBe('DECIDE_ENTER')
+  })
+
+  test('a peer read that misses the sleeve still counts it, once', () => {
+    const o = live(0n)
+    expect(capRoomOf(o, V7)).toBe(1_000n * USDC - REMOTE - placedOf(o, V7))
+  })
+
+  test('a cap that really leaves no room says so, never DECIDE_IN_RANGE', () => {
+    const o = live(300n * USDC)
+    expect(capRoomOf(o, V7)).toBe(0n)
+    const d = decide(o, V7)
+    expect(d.proposal).toBeNull()
+    expect(d.reason).toBe('DECIDE_NO_CAPITAL')
   })
 })

@@ -68,6 +68,12 @@ export type Allocation = {
   displaced?: Proposal
   /** otto/mamoru#278: the remote bucket's excess over its target and band, due home (the operator asks for it). */
   returnDue?: { bucket: string; chainId: ChainId; amount: bigint }
+  /**
+   * otto/mamoru#408: the cap's room took this review's entry: without the cap the account would place savings now, with
+   * it nothing goes. Decide names the hold DECIDE_NO_CAPITAL (the operator logs the cap, elsewhere and room with it),
+   * never DECIDE_IN_RANGE.
+   */
+  capHold?: true
 }
 
 /** The pool priced at its TWAP tick (slot0 when the TWAP is unavailable; the EHG then refuses to act on it). */
@@ -558,5 +564,6 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   } else if (entry(capped.proposal)) proposal = capped.proposal
   const pendingMint = [...open.pendingMint]
   for (const k of capped.pendingMint) if (!pendingMint.some((x) => x.pool === k.pool && x.grant === k.grant)) pendingMint.push(k)
-  return { total: open.total, free, buckets, proposal, trail, pendingMint, waiting: clip(capped.waiting, proposal, spend), ...(displaced ? { displaced } : {}), ...(open.returnDue ? { returnDue: open.returnDue } : {}) }
+  const capHold = !proposal && entry(open.proposal)
+  return { total: open.total, free, buckets, proposal, trail, pendingMint, waiting: clip(capped.waiting, proposal, spend), ...(displaced ? { displaced } : {}), ...(open.returnDue ? { returnDue: open.returnDue } : {}), ...(capHold ? { capHold: true as const } : {}) }
 }

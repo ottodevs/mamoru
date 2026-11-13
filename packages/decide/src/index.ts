@@ -152,6 +152,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // Target weights: pools whose idle volatile the allocation is about to mint.
   let pendingMint: ReadonlySet<string> | undefined
   let waiting: Waiting[] = []
+  let capHold = false
   let returnDue: Decision['returnDue']
   // otto/mamoru#215: the local entry a bridge took the review from, used when the bridge cannot go.
   let displaced: Proposal | undefined
@@ -165,6 +166,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     // Lab (#101 round 3): a bucket frozen by the depeg guard says so, not that it waits for a fall.
     for (const b of a.buckets) buckets.push({ bucket: b.bucket, code: depegged && b.bucket === 'stables' && b.code === 'DECIDE_ENTRY_PAUSED_FALL' ? 'RISK_DEPEG_PAIRED' : b.code })
     waiting = a.waiting
+    capHold = a.capHold === true
     // Never while paused or with the owner's exit asked for: the stop decides where the money goes then.
     if (!obs.intents.paused && !obs.intents.exitRequested) returnDue = a.returnDue
     trail.push(...a.trail)
@@ -319,7 +321,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     if (managedInRange > 0) {
       // otto/mamoru#402: idle money above the minimum entry that waits names its bucket's wait; the largest amount wins, then the bucket id.
       const idle = waiting.filter((w) => BUCKET_WAIT_CODES.has(w.code)).sort((a, b) => (a.amount === b.amount ? (a.bucket < b.bucket ? -1 : 1) : a.amount > b.amount ? -1 : 1))[0]
-      return idle?.code ?? 'DECIDE_IN_RANGE'
+      // otto/mamoru#408: savings the cap holds back say so; the operator logs the cap, elsewhere and room beside it.
+      return idle?.code ?? (capHold ? 'DECIDE_NO_CAPITAL' : 'DECIDE_IN_RANGE')
     }
     const blocking = buckets.find((b) => b.code !== 'PLAN_BUCKET_NO_EXECUTABLE_POOL')
     return blocking?.code ?? 'PLAN_BUCKET_NO_EXECUTABLE_POOL'

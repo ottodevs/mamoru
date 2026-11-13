@@ -530,13 +530,14 @@ describe('allocate (conservador-live-v6, a bucket on another chain: otto/mamoru#
     expect(decide({ ...o, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 0n } }, V6).returnDue).toBeUndefined()
     const over = decide({ ...o, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc: 400n * USDC } }, V6)
     expect(over.returnDue).toBeUndefined()
-    // The room is 1,000 - 400 - 150 placed: an entry spends at most that, and no bridge moves money for the cap.
+    // The room is 1,000 - 400 elsewhere (the Monad sleeve is in it, otto/mamoru#408: never counted again as placed
+    // here): an entry spends at most that, and no bridge moves money for the cap.
     const p = over.proposal
     expect(p?.kind).not.toBe('bridge_out')
     const spent = !p ? 0n : p.kind === 'enter_swap' && p.tokenIn === 'USDC' ? p.amountIn : p.kind === 'enter_mint' || p.kind === 'increase_liquidity' ? (p.pool.startsWith('pool:USDC/') ? p.amount0Desired : p.amount1Desired) : p.kind === 'vault_deposit' ? p.assets : 0n
-    expect(spent <= 450n * USDC).toBe(true)
-    // Far over (everything counted twice), and at the limit: no return, no bridge, no entry.
-    for (const elsewhereUsdc of [900n * USDC, 5_000n * USDC]) {
+    expect(spent <= 600n * USDC).toBe(true)
+    // At the limit, and far over (everything counted twice): no return, no bridge, no entry.
+    for (const elsewhereUsdc of [1_000n * USDC, 5_000n * USDC]) {
       const d = decide({ ...o, cap: { capUsdc: 1_000n * USDC, elsewhereUsdc } }, V6)
       expect(d.returnDue).toBeUndefined()
       expect(d.proposal).toBeNull()
