@@ -1,0 +1,83 @@
+[
+ {
+  "name": "prod-baseline",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 6500,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 3500,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 2
+   }
+  }
+ },
+ {
+  "name": "w2000-mpw2-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 6500,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 3500,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 2
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ }
+]
