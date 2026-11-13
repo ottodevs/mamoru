@@ -366,6 +366,18 @@ export type BridgeSigning = {
 const MAX_WAIT_BLOCKS = 32
 /** Live: after a bundler rejection that left the nonce unmoved, the same premise or kind+pool is not proposed again for this long. */
 export const UNINCLUDABLE_BACKOFF_SECONDS = 600n
+/**
+ * otto/mamoru#401: the most a premise the bundler keeps rejecting is held back. Each rejection in a row of the same kind
+ * and pool doubles the hold from UNINCLUDABLE_BACKOFF_SECONDS (10, 20, 40 min ...) up to this; an inclusion of that kind
+ * and pool resets it. A Monad sleeve's swap refused at validation (AA23) was sent every ~15 minutes for days.
+ */
+export const UNINCLUDABLE_BACKOFF_MAX_SECONDS = 6n * 3_600n
+
+/** otto/mamoru#401: the hold after the `n`th rejection in a row (n >= 1) of one kind and pool. */
+export function unincludableBackoff(n: number): bigint {
+  const wait = UNINCLUDABLE_BACKOFF_SECONDS * 2n ** BigInt(Math.min(Math.max(n, 1) - 1, 16))
+  return wait > UNINCLUDABLE_BACKOFF_MAX_SECONDS ? UNINCLUDABLE_BACKOFF_MAX_SECONDS : wait
+}
 
 export type EngineSession = {
   name: string
@@ -527,6 +539,12 @@ export type EngineConfig = {
    * review. Absent or undefined: no release.
    */
   release?: () => Promise<Observation['release'] | undefined>
+  /**
+   * otto/mamoru#401: the pools whose action policy still owes its deferred depth check and would refuse it now
+   * (`Observation.depthShort`), read at every review. A read that fails leaves the field absent (entries go on; the
+   * rejection backoff still bounds them). Absent: never read (every account but a remote Safe enabled at setup).
+   */
+  depthShort?: (block: bigint) => Promise<NonNullable<Observation['depthShort']>>
   /**
    * otto/mamoru#218: this account's confirmed re-ranges from before this engine started (block timestamp and pool),
    * for the weekly cap and the cooldown across a restart. The newest also seeds `lastRerangeAt`. Absent: none.
@@ -779,6 +797,8 @@ export class Engine {
   lastObservation?: Observation
   /** Live: premises the bundler rejected as unincludable, held back until `until` (block timestamp, seconds). */
   private readonly backoff: { premiseHash: string; key: string; until: bigint }[] = []
+  /** otto/mamoru#401: bundler rejections in a row per kind and pool (`proposalKey`), for the doubling backoff. */
+  private readonly rejections = new Map<string, number>()
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. */
   lastRerangeAt: bigint | null = null
   /** otto/mamoru#218: confirmed re-ranges (seeded, then appended on inclusion); handed to `decide` only when not empty. */
@@ -1026,6 +1046,15 @@ export class Engine {
       } catch (e) {
         if (e instanceof ReasonError) return { kind: 'observation-failed', code: e.code, detail: e.detail }
         return { kind: 'observation-failed', code: 'OBS_RPC_UNAVAILABLE', detail: `release: ${(e as Error).message?.split('\n')[0] ?? String(e)}` }
+      }
+    }
+    // otto/mamoru#401: a pool the policy would refuse every entry in. A failed read decides without it, as before.
+    if (this.cfg.depthShort) {
+      try {
+        const short = await this.cfg.depthShort(obs.block.number)
+        if (short.length) obs = { ...obs, depthShort: short }
+      } catch (e) {
+        console.error(`[engine] ${this.cfg.account}: policy depth not read, entries are not held for it this review: ${thrownSummary(e)}`)
       }
     }
     // Never decide on a view older than the engine's own last operation: a provider serving a head behind it shows
@@ -1308,6 +1337,7 @@ export class Engine {
     const receipt = await this.bundler.getUserOperationReceipt(hash)
     const receiptCheck = reconcileReceipt({ userOpHash: hash, sender: this.cfg.account, nonce }, ev, receipt)
     if (ev.sender.toLowerCase() !== this.cfg.account.toLowerCase() || ev.nonce !== nonce) throw new Error(`${op.opId}: UserOperationEvent of ${ev.sender} nonce ${ev.nonce} for our hash`)
+    this.rejections.delete(proposalKey(op.intent))
     j.move(
       op.opId,
       'included',
@@ -1382,6 +1412,8 @@ export class Engine {
       this.client.readContract({ address: address('SmartSession', this.registry), abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [op.permissionId, this.cfg.account], blockNumber: safe.number }),
       readUserOpEvent(this.client, op.userOpHash, op.prepareBlock, this.registry),
     ])
+    // Read before the move below: the journal may update the record in place.
+    const rejected = op.stateCode === 'BUNDLER_REJECTED'
     const verdict = settleUnincluded({
       opNonce: op.nonce,
       nonceAtSafe,
@@ -1389,16 +1421,21 @@ export class Engine {
       safeTimestamp: safe.timestamp,
       expiresAt: op.expiresAt ?? null,
       permissionEnabledAtSafe,
-      rejected: op.stateCode === 'BUNDLER_REJECTED',
+      rejected,
     })
     if (!verdict) return
     if (verdict.to === 'included') {
       if (ev!.sender.toLowerCase() !== this.cfg.account.toLowerCase() || ev!.nonce !== op.nonce) throw new Error(`${op.opId}: UserOperationEvent of ${ev!.sender} nonce ${ev!.nonce} for our hash`)
+      this.rejections.delete(proposalKey(op.intent))
       return void this.journal.move(op.opId, 'included', 'OP_INCLUDED', { included: { blockNumber: ev!.blockNumber, blockHash: ev!.blockHash, txHash: ev!.txHash, success: ev!.success, actualGasCost: ev!.actualGasCost } }, 'found on chain after the bundler did not report it')
     }
     this.journal.move(op.opId, 'failed', verdict.code, {}, verdict.detail)
     if (verdict.code === 'RECON_UNINCLUDABLE') {
-      this.backoff.push({ premiseHash: op.premiseHash, key: proposalKey(op.intent), until: safe.timestamp + UNINCLUDABLE_BACKOFF_SECONDS })
+      // otto/mamoru#401: the same kind and pool rejected again waits twice as long (up to UNINCLUDABLE_BACKOFF_MAX_SECONDS).
+      const key = proposalKey(op.intent)
+      const n = rejected ? (this.rejections.get(key) ?? 0) + 1 : 1
+      if (rejected) this.rejections.set(key, n)
+      this.backoff.push({ premiseHash: op.premiseHash, key, until: safe.timestamp + unincludableBackoff(n) })
       // Its bytes can still be included (past the expiry they revert, but they spend the nonce): watched until then.
       this.released.push(op)
     }

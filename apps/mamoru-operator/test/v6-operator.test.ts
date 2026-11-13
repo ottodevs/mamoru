@@ -309,6 +309,30 @@ describe('owner transactions of a v6 approval', () => {
     expect(t.summary.join('\n')).toContain(remote.address)
   })
 
+  test('otto/mamoru#401: a new remote Safe is sized so its daily budget fits half the Monad pool depth; a depth unread fails closed', async () => {
+    const at = async (remoteDepth?: OperatorConfig['remoteDepth']) => {
+      const w = world(0n, cfg6(fakePeer().peer, remoteDepth ? { remoteDepth } : {}))
+      running(w, v5)
+      ready(w)
+      chain(w, 7n)
+      return w.op.prepareRenew(ctx)
+    }
+    const unfitted = BigInt((await at())!.remote!.spec.capUsdc)
+    // 60 USDC deep: the budget (3x the cap) may take 30 of it, so the cap is 10 USDC.
+    const asked: [number, string, number, boolean][] = []
+    const fitted = (await quiet(() => at(async (c, pool, band, in1) => (asked.push([c, pool, band, in1]), 60_000_000n)))).out!
+    expect(asked).toEqual([[143, 'pool:WMON/USDC/3000', 100, true]])
+    expect(BigInt(fitted.remote!.spec.capUsdc)).toBe(10_000_000n)
+    expect(unfitted).toBe(50_000_000n)
+    // The cap is part of the setup, so the address follows it; it is still the one these keys and that spec give.
+    expect(fitted.remote!.address).toBe(remoteSafe(remoteInput(ctx, fitted.remote!.spec, pinnedV3)).address)
+    // Deep enough: the bridge total, as before.
+    expect(BigInt((await at(async () => 10n ** 15n))!.remote!.spec.capUsdc)).toBe(unfitted)
+    // Unread: nothing prepared.
+    const { out } = await quiet(() => at(async () => Promise.reject(new Error('rpc down'))).catch((e: unknown) => e))
+    expect(out).toMatchObject({ status: 503, code: 'REMOTE_UNAVAILABLE' })
+  })
+
   test('no Monad operator configured, or one that gives no key: 503 REMOTE_UNAVAILABLE and nothing is prepared', async () => {
     for (const p of [undefined, fakePeer({ provision: { state: 'pending', code: 'X' }, keyFails: true })]) {
       const w = world(0n, cfg6(p?.peer))

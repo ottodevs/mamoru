@@ -409,6 +409,17 @@ describe('idle USDC on the sleeve comes home (otto/mamoru#107, spec 012 HRV-R4)'
     expect(decide(at({ remote: { ...remote, idle: 0n, returnedAt: Number(NOW) - 25 * 3_600 } }), V7).proposal?.kind).toBe('bridge_out')
   })
 
+  test('the sleeve is never sent more than its own signed cap lets it place (otto/mamoru#401)', () => {
+    const free = decide(at({ remote: { value: 0n, inFlight: 0n, ready: true } }), V7)
+    expect(free.proposal?.kind).toBe('bridge_out')
+    const wanted = (free.proposal as { amount: bigint }).amount
+    const capped = decide(at({ remote: { value: 0n, inFlight: 0n, ready: true, cap: 50n * USDC } }), V7)
+    expect(capped.proposal).toMatchObject({ kind: 'bridge_out', amount: 50n * USDC })
+    expect(wanted > 50n * USDC).toBe(true)
+    // Already at its cap: nothing more goes.
+    expect(decide(at({ remote: { value: 50n * USDC, inFlight: 0n, ready: true, cap: 50n * USDC } }), V7).proposal?.kind).not.toBe('bridge_out')
+  })
+
   test('never both ways in one review: idle due home holds the bridge out, and a bridge out asks nothing back', () => {
     const d = decide(at({ remote: { value: 40n * USDC, inFlight: 0n, ready: true, idle: 30n * USDC, idleSince: Number(NOW) - 7 * 3_600 } }), V7)
     expect(d.returnDue?.amount).toBe(30n * USDC)

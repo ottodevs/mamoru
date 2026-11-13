@@ -8,7 +8,7 @@ import { baseRegistry, address, swapRouter02Abi } from '@mamoru/registry'
 import { precheck, SessionLedger } from '@mamoru/account/precheck'
 import { executeCallData, permissionIdOf, toSmartSession, useModeSignature } from '@mamoru/account/sessions'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { Engine, grantHasSwapDeadline, settleUnincluded, type EngineSession } from './engine.ts'
+import { Engine, grantHasSwapDeadline, settleUnincluded, unincludableBackoff, type EngineSession } from './engine.ts'
 import type { OpRecord } from './journal.ts'
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa' as Address
@@ -238,6 +238,16 @@ describe('a rejected or unseen userOp is settled from the chain only (otto/mamor
     expect(w.engine.journal.live).toBeNull()
     expect((w.engine as unknown as { backoff: { premiseHash: string }[] }).backoff.map((b) => b.premiseHash)).toEqual([`0x${'bb'.repeat(32)}`])
     expect(w.priv.released.map((o) => o.opId)).toEqual([op.opId])
+  })
+
+  test('otto/mamoru#401: the same kind and pool rejected again waits twice as long, up to 6 h', async () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 99].map(unincludableBackoff)).toEqual([600n, 1_200n, 2_400n, 4_800n, 9_600n, 19_200n, 21_600n, 21_600n])
+    const w = engineAt({ timestamp: 1_121n })
+    const until = () => (w.engine as unknown as { backoff: { until: bigint }[] }).backoff.map((b) => b.until)
+    await (rejectedOp(w.engine, 1_120n), w.priv.resumePending())
+    expect(until()).toEqual([1_121n + 600n])
+    await (rejectedOp(w.engine, 1_120n), w.priv.resumePending())
+    expect(until()).toEqual([1_121n + 600n, 1_121n + 1_200n])
   })
 
   /** A UserOperationEvent log of `op`, in block 160 (at or below a safe head of 160). */

@@ -317,6 +317,26 @@ describe('provision (Monad side)', () => {
     expect(m.op.enginePolicyOf(acc)).toMatchObject({ policyId: liveWmonUsdcMonadV6.policyId, allocation: 'target-weights' })
   })
 
+  test('otto/mamoru#401: its engine reads the deferred depth check; a pool short of it pages once and is listed until it clears', async () => {
+    const m = keyed()
+    await m.op.provision(m.rctx)
+    const acc = m.state.accounts[m.rctx.accountKey]!
+    type Priv = { depthShortFor(a: AccountState): { depthShort?: unknown }; noteDepthShort(a: AccountState, s: { pool: string; depth: bigint; perWindow: bigint }[]): void }
+    const p = m.op as unknown as Priv
+    expect(typeof p.depthShortFor(acc).depthShort).toBe('function')
+    // A Base account (no remote spec) never reads it.
+    expect(p.depthShortFor({ ...acc, ctx: { ...acc.ctx, remote: undefined } } as AccountState).depthShort).toBeUndefined()
+    const short = [{ pool: 'pool:WMON/USDC/3000', depth: 7_400_000_000n, perWindow: 15_000_000_000n }]
+    const { logged } = await quiet(async () => {
+      p.noteDepthShort(acc, short)
+      p.noteDepthShort(acc, short)
+    })
+    expect(logged.filter((l) => l.includes('REMOTE_DEPTH_BELOW_BUDGET'))).toHaveLength(1)
+    expect(m.op.remoteDepthHeld()).toEqual([{ account: acc.accountKey.slice(0, 8), pool: 'pool:WMON/USDC/3000', depthUsdc: '7400000000', perWindowUsdc: '15000000000', sinceS: expect.any(Number) }])
+    await quiet(async () => p.noteDepthShort(acc, []))
+    expect(m.op.remoteDepthHeld()).toEqual([])
+  })
+
   test('idempotent: already active answers active again, sends nothing and starts nothing more', async () => {
     const m = keyed()
     await m.op.provision(m.rctx)

@@ -134,7 +134,7 @@ type Journal = {
   burns: Record<string, BridgeBurn>
   mintDays: Record<string, { n: number; wei: string }>
   /** Last sleeve value read per account (raw USDC, without in flight), and its Monad block. */
-  sleeves: Record<string, { value: string; block: string; at: string; safe?: string }>
+  sleeves: Record<string, { value: string; block: string; at: string; safe?: string; /** otto/mamoru#401: the Safe's own USDC at that read, and since when (unix s) it has stayed at or above the return threshold. */ idle?: string; idleSince?: number }>
   /** Review round 2 of #144: per account, bridge-outs that failed in a row and until when the sleeve reads not ready. */
   cooldowns: Record<string, { failures: number; until: string; code: string }>
   /** otto/mamoru#269: the last good display total of each remote Safe (slot0, as funding shows it), by `${key}@${safe}`: what the money map falls back to, flagged stale, when Monad cannot be read. */
@@ -499,8 +499,8 @@ export class MonadBridge {
    * holds rather than size the account without its sleeve). A read from a block older than the last one recorded (a
    * lagging provider) is not used: the last one is. `baseBlock`: the block the engine read the local balances at.
    */
-  async remote(accountKey: string, safe: Address, twapWindowSeconds: number, baseBlock?: bigint, permissionIds: readonly Hex[] = []): Promise<{ value: bigint; inFlight: bigint; ready: boolean }> {
-    let read: { value: bigint; block: bigint; ready: boolean }
+  async remote(accountKey: string, safe: Address, twapWindowSeconds: number, baseBlock?: bigint, permissionIds: readonly Hex[] = [], idleMin?: (value: bigint) => bigint): Promise<{ value: bigint; inFlight: bigint; ready: boolean; idle?: bigint; idleSince?: number }> {
+    let read: { value: bigint; block: bigint; ready: boolean; idle: bigint }
     try {
       if (!(await this.monadVerified())) throw new Error('Monad RPC not checked yet')
       read = await this.readSleeve(safe, twapWindowSeconds, permissionIds)
@@ -513,20 +513,28 @@ export class MonadBridge {
       return { value: BigInt(last.value) + inFlight, inFlight, ready: false }
     }
     const last = this.journal.sleeves[accountKey]
+    let idleSince = last?.idleSince
     if (last && BigInt(last.block) > read.block) {
       // A lagging provider: its older read could miss a mint the journal already places at or before the last block.
-      read = { value: BigInt(last.value), block: BigInt(last.block), ready: read.ready }
-    } else if (!last || last.value !== read.value.toString() || BigInt(last.block) < read.block) {
-      this.journal.sleeves[accountKey] = { value: read.value.toString(), block: read.block.toString(), at: this.iso(), safe: safe.toLowerCase() }
-      try {
-        this.save()
-      } catch (e) {
-        logErr('[bridge-monad] journal write failed:', e)
+      read = { value: BigInt(last.value), block: BigInt(last.block), ready: read.ready, idle: BigInt(last.idle ?? '0') }
+    } else {
+      // otto/mamoru#401 (spec 012 HRV-R4): since when the Safe's own USDC has stayed at or above the return threshold, kept
+      // across restarts; it starts again whenever a read finds it below (its engine placed it).
+      read = { ...read, idle: read.idle ?? 0n }
+      idleSince = idleMin !== undefined && read.idle >= idleMin(read.value) ? (last?.idleSince ?? Math.floor(this.now() / 1000)) : undefined
+      if (!last || last.value !== read.value.toString() || BigInt(last.block) < read.block || last.idle !== read.idle.toString() || last.idleSince !== idleSince) {
+        this.journal.sleeves[accountKey] = { value: read.value.toString(), block: read.block.toString(), at: this.iso(), safe: safe.toLowerCase(), idle: read.idle.toString(), ...(idleSince !== undefined ? { idleSince } : {}) }
+        try {
+          this.save()
+        } catch (e) {
+          logErr('[bridge-monad] journal write failed:', e)
+        }
       }
     }
     const settled = await this.settledAt(accountKey, baseBlock, read.block)
     const inFlight = this.inFlight(accountKey, read.block, settled)
-    return { value: read.value + inFlight, inFlight, ready: read.ready && !settled.unsure && !this.coolingDown(accountKey) }
+    // `idle` only when a threshold was given (the caller's policy reads it); `idleSince` only while at or above it.
+    return { value: read.value + inFlight, inFlight, ready: read.ready && !settled.unsure && !this.coolingDown(accountKey), ...(idleMin !== undefined ? { idle: read.idle, ...(idleSince !== undefined ? { idleSince } : {}) } : {}) }
   }
 
   /** Whether a recent bridge-out failure of the account still holds bridging (its sleeve reads not ready). */
@@ -554,7 +562,7 @@ export class MonadBridge {
   }
 
   /** The sleeve's value at the TWAP and its readiness on Monad, at one block. */
-  async readSleeve(safe: Address, twapWindowSeconds: number, permissionIds: readonly Hex[]): Promise<{ value: bigint; block: bigint; ready: boolean }> {
+  async readSleeve(safe: Address, twapWindowSeconds: number, permissionIds: readonly Hex[]): Promise<{ value: bigint; block: bigint; ready: boolean; idle: bigint }> {
     const r = await readSafe(this.monad, safe, this.monadRegistryOf)
     const value = await sleeveValueAtTwap(this.monad, r, this.monadRegistryOf, twapWindowSeconds)
     // Ready (otto/mamoru#251): the Safe is deployed on Monad, SmartSession is installed on it, and every session its setup
@@ -565,7 +573,7 @@ export class MonadBridge {
       if (!ready) break
       ready = await this.monad.readContract({ address: smartSession, abi: smartSessionAbi, functionName: 'isPermissionEnabled', args: [id, safe], blockNumber: r.block })
     }
-    return { value, block: r.block, ready }
+    return { value, block: r.block, ready, idle: r.tokens.USDC ?? 0n }
   }
 
   /** The ops view of the burn of a userOp, if it is one. */

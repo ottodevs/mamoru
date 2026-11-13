@@ -110,6 +110,8 @@ export const REASON_CODES = [
   'DECIDE_WAIT_HARVEST_SALE',
   // otto/mamoru#107: the signed approval does not allow this step (e.g. a V3 sleeve bringing USDC home); it goes after the owner renews.
   'DECIDE_WAIT_RENEWAL',
+  // otto/mamoru#401: a remote Safe's action policy still owes its depth check and the pool is too thin for the session's daily budget: every entry would be refused at validation (AA23), so its savings wait; renewing with a smaller cap ends it.
+  'REMOTE_DEPTH_BELOW_BUDGET',
   // otto/mamoru#215: savings go to the account's own sleeve on another chain (CCTP), for the bucket served there.
   'DECIDE_BRIDGE_OUT',
   // otto/mamoru#278: the home account asked this remote Safe to send savings back; it frees them and bridges them home, nothing else.

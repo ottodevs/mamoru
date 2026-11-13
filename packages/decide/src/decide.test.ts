@@ -297,6 +297,36 @@ describe('the Monad v6 Safe places every bridge, not only the first', () => {
   })
 })
 
+// otto/mamoru#401: a remote Safe enabled at setup whose pool is thinner than its daily budget. MamoruActionPolicyV3 runs
+// its depth check at the first swap or mint and refuses it (AA23) while the depth stays under `perWindow`: the engine
+// proposed the same entry every review for days. With the depth read, the bucket waits with its own code instead.
+describe('a sleeve whose pool is thinner than its budget waits, nothing is proposed (otto/mamoru#401)', () => {
+  const anyGrant = grantKeyFor(liveWmonUsdcMonadV6, 'manage-any', MONAD_POOL)
+  const session = { grant: anyGrant, permissionId: `0x${'03'.repeat(32)}` as const, validUntil: 10_000, active: true }
+  const policy = sleeveEnginePolicy(liveWmonUsdcMonadV6)
+  const idle = (o: Partial<Observation> = {}) => monadObs({ sessions: [session], native: 3n * 10n ** 18n, balances: { USDC: 449_550_202n, WMON: 0n }, ...o })
+  const short = [{ pool: MONAD_POOL, depth: 7_400_000_000n, perWindow: 15_000_000_000n }]
+
+  test('the depth read under perWindow holds the entry with REMOTE_DEPTH_BELOW_BUDGET', () => {
+    expect(decide(idle(), policy).proposal).toMatchObject({ kind: 'enter_swap', pool: MONAD_POOL })
+    const d = decide(idle({ depthShort: short }), policy)
+    expect(d.proposal).toBeNull()
+    expect(d.reason).toBe('REMOTE_DEPTH_BELOW_BUDGET')
+    expect(d.waiting).toEqual([{ bucket: 'risk', code: 'REMOTE_DEPTH_BELOW_BUDGET', amount: 449_550_202n }])
+  })
+
+  test('idle WMON is not sold through that pool either', () => {
+    const d = decide(idle({ depthShort: short, balances: { USDC: 0n, WMON: 10n ** 21n } }), policy)
+    expect(d.proposal).toBeNull()
+  })
+
+  test('the signed (first-entry) policy holds the same way', () => {
+    const d = decide(idle({ depthShort: short }), liveWmonUsdcMonadV6)
+    expect(d.proposal).toBeNull()
+    expect(d.reason).toBe('REMOTE_DEPTH_BELOW_BUDGET')
+  })
+})
+
 // otto/mamoru#278: a remote Safe asked by its home account to send savings back frees them and bridges them home.
 describe('release: the remote Safe sends savings home', () => {
   const anyGrant = grantKeyFor(liveWmonUsdcMonadV6, 'manage-any', MONAD_POOL)

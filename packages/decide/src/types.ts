@@ -43,6 +43,11 @@ export type Observation = {
      */
     idle?: bigint
     idleSince?: number
+    /**
+     * otto/mamoru#401: the sleeve Safe's own signed cap (its spec's `capUsdc`), raw savings units: it never places more,
+     * so nothing is bridged past it. Absent: not known (the bridge-out grant bounds it alone, as before).
+     */
+    cap?: bigint
     /** otto/mamoru#107: block time (unix s) of the last return home from that chain, for the 24 h no-ping-pong hold. */
     returnedAt?: number
   }
@@ -81,6 +86,14 @@ export type Observation = {
    * the policy's vault ratio of C. Absent: not V4 (no read; the chain's own checks apply).
    */
   budget?: { room: bigint; vaultRoom?: bigint }
+  /**
+   * otto/mamoru#401: pools whose action policy (MamoruActionPolicyV3, a remote Safe enabled at setup) still owes its
+   * deferred depth check (LeftClaw M-5, `_liveChecks`) and would refuse it now: the pool's depth over the policy band, in
+   * the budget unit, is under the session's `perWindow`. Every swap, mint or increase there fails validation (AA23), so
+   * the bucket waits with REMOTE_DEPTH_BELOW_BUDGET instead of being proposed every review. Absent: none (and the
+   * observation hashes as before).
+   */
+  depthShort?: { pool: RegistryName; depth: bigint; perWindow: bigint }[]
   /** Block timestamp of the last confirmed re-range, for the policy cooldown. Absent or null: none yet. */
   lastRerangeAt?: bigint | null
   /**
@@ -470,7 +483,7 @@ export type Decision = {
    * otto/mamoru#127, #128: savings held back on purpose, per bucket, with why. Outside the premise hash and the id
    * (the amounts move with every price). Absent when nothing waits.
    */
-  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY' | 'DECIDE_WAIT_BRIDGE_LIMIT' | 'DECIDE_WAIT_BUDGET' | 'DECIDE_WAIT_RENEWAL'; amount: bigint }[]
+  waiting?: { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY' | 'DECIDE_WAIT_BRIDGE_LIMIT' | 'DECIDE_WAIT_BUDGET' | 'DECIDE_WAIT_RENEWAL' | 'REMOTE_DEPTH_BELOW_BUDGET'; amount: bigint }[]
   /**
    * otto/mamoru#278: a remote bucket's excess over its target and band, due home: the operator asks the remote Safe to
    * send it back. Outside the premise hash and the id, as `waiting`. Absent: nothing due (or the review was paused).

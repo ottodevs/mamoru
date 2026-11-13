@@ -349,6 +349,33 @@ describe('the remote value of a v6 account', () => {
   })
 })
 
+describe('the sleeve\'s idle USDC and since when (otto/mamoru#401, spec 012 HRV-R4)', () => {
+  const WINDOW = 1_800
+  test('idle at or above the threshold keeps its first time across reads and restarts; below it, the clock starts again', async () => {
+    let now = T0
+    const { bridge } = setup({ now: () => now })
+    const live = bridge as unknown as { readSleeve: () => Promise<{ value: bigint; block: bigint; ready: boolean; idle: bigint }> }
+    let block = 7_000n
+    let idle = 449_550_202n
+    live.readSleeve = async () => ({ value: idle, block: block++, ready: true, idle })
+    // No threshold given: no idle in the answer (as before).
+    expect(await bridge.remote('acc-1', ACCOUNT, WINDOW)).toEqual({ value: idle, inFlight: 0n, ready: true })
+    const since = Math.floor(T0 / 1000)
+    expect(await bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).toEqual({ value: idle, inFlight: 0n, ready: true, idle, idleSince: since })
+    now += 7 * 3_600_000
+    expect((await bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).idleSince).toBe(since)
+    const again = setup({ dir: (bridge as unknown as { stateDir: string }).stateDir, now: () => now })
+    ;(again.bridge as unknown as typeof live).readSleeve = live.readSleeve
+    expect((await again.bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).idleSince).toBe(since)
+    // Placed: below the threshold, no clock; idle again later starts a new one.
+    idle = 0n
+    expect(await again.bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).toEqual({ value: 0n, inFlight: 0n, ready: true, idle: 0n })
+    idle = 30_000_000n
+    now += 60_000
+    expect((await again.bridge.remote('acc-1', ACCOUNT, WINDOW, undefined, [], () => 100_000n)).idleSince).toBe(Math.floor(now / 1000))
+  })
+})
+
 // ---- Review of PR #144 (Claude Opus 5.5 + Gemini Argon): one regression test per finding fixed. ----
 
 describe('review of #144: settling a sending burn reads a bounded range', () => {

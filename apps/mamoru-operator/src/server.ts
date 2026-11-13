@@ -102,7 +102,9 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       // otto/mamoru#277: the native balance of each relayer key (this chain's, the bridge's on Monad) as last read on a
       // timer, with the line under which ops are paged; and the remote Safes not provisioned for over 30 min.
       relayers: op.relayersSnapshot(),
-      remote: { stuck: op.remoteStuck() },
+      // otto/mamoru#401: remote Safes waiting for their pool's depth (Monad side), and sleeves whose idle USDC is due home
+      // with no signed way back (Base side, needs a renewal).
+      remote: { stuck: op.remoteStuck(), depthHeld: op.remoteDepthHeld(), returnBlocked: op.remoteReturnBlocked() },
     },
     rpc: {
       cumulative: rpc.cumulative,

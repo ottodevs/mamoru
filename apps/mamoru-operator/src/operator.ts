@@ -6,7 +6,7 @@ import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, m
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, restoreHistoryCursor, senderNotEoa, type HistoryCursor, SIM_CALL_GAS, simulateCalls, SharedGuardReads, type SimCall, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LAB_POLICIES, POLICIES, sleeveEnginePolicy, v7EnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, registryPoolsKey, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, POLICIES, liveWmonUsdcMonadV6, sleeveEnginePolicy, v7EnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, budgetIn1, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, registryPoolsKey, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -50,8 +50,8 @@ import { BRIDGE_MONAD_CHAIN_ID, type MonadBridge } from './bridge-monad.ts'
 import { buildMoneyMap, chainLegOf, returnRows, unreadLeg, type ReturnLeg } from './money-map.ts'
 import type { GuardReadsState } from './guard-reads-state.ts'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
-import type { BridgeLimit, Observation, PeerPositionObs, Proposal } from '@mamoru/decide'
-import { capRoomOf } from '@mamoru/decide'
+import type { BridgeLimit, Decision, Observation, PeerPositionObs, Proposal } from '@mamoru/decide'
+import { capRoomOf, DEFAULT_MIN_ENTRY } from '@mamoru/decide'
 import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, POSITION_DUST_USDC, amountsForLiquidity, idleTokens, inUsdc, livePool, nativePricePool, positionUsdc, positionView, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
@@ -74,6 +74,7 @@ import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activation
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
 import { livePoolStats, monadPoolStats, type PoolStatsCache } from './pool-stats.ts'
+import { depthShortOf, fitRemoteCap } from './remote-depth.ts'
 
 /** Known/active/armed account counts plus the operator's engine health for GET /metrics. */
 export type AccountsSummary = { known: number; active: number; armed: number }
@@ -113,6 +114,8 @@ const RELAYER_BALANCE_CACHE_MS = 60_000
 const HELD_TIMER_READ_MS = 20_000
 /** otto/mamoru#277: a remote Safe still not provisioned this long after its first non-active answer pages ops once per code. */
 export const REMOTE_STUCK_ALERT_MS = 30 * 60_000
+/** otto/mamoru#401: how long a remote Safe's policy-depth read is reused across reviews. */
+const DEPTH_SHORT_TTL_MS = 60_000
 /** otto/mamoru#277 (gate): pages per account for one stuck remote Safe, whatever codes its peer cycles through. */
 const REMOTE_STUCK_PAGES = 4
 /** otto/mamoru#277 (gate): a remote's code as it may reach a page or /metrics: a code shape, never free text from the peer. */
@@ -649,6 +652,12 @@ export type OperatorConfig = {
    * and once it lands asks it to provision that Safe. Absent for a chain: no v6 approval is built for it.
    */
   remotePeers?: Partial<Record<number, Pick<RemotePeer, 'key' | 'provision'> & Partial<Pick<RemotePeer, 'migrateV4' | 'release' | 'releaseStatus' | 'announce'>>>>
+  /**
+   * otto/mamoru#401, Base side: MamoruActionPolicyV3's depth (`_depthIn`) of `pool` on `chainId` over `bandTicks`, in its
+   * budget token (token1 when `in1`), as the remote Safe's first swap will check it. A new remote Safe's cap is sized so
+   * its daily budget fits it (`fitRemoteCap`). Absent: the cap is not fitted (as before).
+   */
+  remoteDepth?: (chainId: number, pool: RegistryName, bandTicks: number, in1: boolean) => Promise<bigint>
   /** otto/mamoru#348: Circle's iris API (the readiness attestations). Absent: fetch. */
   irisFetch?: (input: string, init?: RequestInit) => Promise<Response>
   /** otto/mamoru#251: the registry a remote Safe is derived against, by chain. Absent: the pinned one (`registryFor`). */
@@ -6308,10 +6317,10 @@ export class Operator {
       const old = this.designC(acc)
       return {
         remote: async (block: bigint) => {
-          const a = this.withReturns(acc, await bridge.remote(acc.accountKey, v.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, ids))
+          const a = this.withReturns(acc, await bridge.remote(acc.accountKey, v.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, ids, this.idleMinOf(acc)))
           if (!old) return a
           const b = await bridge.remote(`${acc.accountKey}#retired`, old.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, [])
-          return { value: a.value + b.value - b.inFlight, inFlight: a.inFlight, ready: a.ready }
+          return { ...a, value: a.value + b.value - b.inFlight, inFlight: a.inFlight, ready: a.ready }
         },
       }
     }
@@ -6323,11 +6332,98 @@ export class Operator {
     // stays counted; renewing the remote sessions is otto/mamoru#253.
     // Judged at every review, not when the engine starts: an engine runs for months.
     return {
-      remote: (block: bigint) => {
+      remote: async (block: bigint) => {
         const open = Math.floor(Date.now() / 1000) < rs.spec.validUntil - REMOTE_BRIDGE_STOP_SECONDS
-        return bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, open ? rs.permissionIds : [])
+        // otto/mamoru#401: with its idle USDC (spec 012 HRV-R4) and its own signed cap (nothing is bridged past it).
+        const r = await bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, open ? rs.permissionIds : [], this.idleMinOf(acc))
+        return /^[0-9]+$/.test(rs.spec.capUsdc) ? { ...r, cap: BigInt(rs.spec.capUsdc) } : r
       },
     }
+  }
+
+  /**
+   * otto/mamoru#401 (spec 012 HRV-R4): the idle USDC of a sleeve worth `value` that its engine should have placed: at least
+   * the account's smallest entry, and more than the sleeve engine's own rebalance band of its value (inside the band it
+   * leaves USDC idle by design; that is no sign it could not place it, and a V3 home holds its bridge-outs while idle is due).
+   */
+  private idleMinOf(acc: AccountState): (value: bigint) => bigint {
+    const min = this.enginePolicyOf(acc).minEntry ?? DEFAULT_MIN_ENTRY
+    const band = BigInt(sleeveEnginePolicy(liveWmonUsdcMonadV6).rebalanceBandBps ?? 0)
+    return (value) => {
+      const inBand = (value * band) / 10_000n + 1n
+      return inBand > min ? inBand : min
+    }
+  }
+
+  /**
+   * otto/mamoru#401, remote side: for a Safe whose sessions were enabled at its setup (MamoruActionPolicyV3, a remote
+   * Safe's own policy), the pools whose deferred depth check would refuse now (`Observation.depthShort`), read at most
+   * every DEPTH_SHORT_TTL_MS. Any other account: none.
+   */
+  private depthShortFor(acc: AccountState): Pick<EngineConfig, 'depthShort'> {
+    const policy = this.enginePolicyOf(acc)
+    const ap = policy.actionPolicy
+    if (!acc.ctx.remote || this.onV4(acc) || !ap || ap.contractVersion !== 3) return {}
+    const reg = this.cfg.registry
+    const pools = policy.buckets.flatMap((b) => b.pools).map((name) => {
+      const e = entry(name, reg)
+      return { name, address: e.address as Address, token0: address(e.token0!, reg), token1: address(e.token1!, reg) }
+    })
+    let last: { at: number; short: NonNullable<Observation['depthShort']> } | undefined
+    return {
+      depthShort: async (block) => {
+        if (last && Date.now() - last.at < DEPTH_SHORT_TTL_MS) return last.short
+        const short = await depthShortOf(this.client as never, ap.address, acc.ctx.address as Address, pools, block)
+        last = { at: Date.now(), short }
+        safeMetrics(() => this.noteDepthShort(acc, short))
+        return short
+      },
+    }
+  }
+
+  /** otto/mamoru#401: remote Safes whose entries wait for their pool's depth, since when (ms). */
+  private readonly depthHeld = new Map<string, { pool: string; depth: bigint; perWindow: bigint; since: number }>()
+
+  /** Pages once when an account starts waiting on its pool's depth; cleared when it no longer does. */
+  private noteDepthShort(acc: AccountState, short: NonNullable<Observation['depthShort']>): void {
+    const s = short[0]
+    const had = this.depthHeld.get(acc.accountKey)
+    if (!s) {
+      if (had) console.log(`[remote] ${acc.accountKey}: ${had.pool} is deep enough again for this Safe's daily budget; entries resume`)
+      this.depthHeld.delete(acc.accountKey)
+      return
+    }
+    // The line is the tag (not redacted): it carries a reason code and figures only.
+    if (!had) logErr(`[alert] remote Safe ${acc.ctx.address} of ${acc.accountKey.slice(0, 8)} on chain ${this.cfg.chainId}: ${s.pool} is ${fmtUsdc(s.depth)} deep, under its daily budget of ${fmtUsdc(s.perWindow)}; its policy refuses every entry, so they wait (REMOTE_DEPTH_BELOW_BUDGET) and nothing is sent; a renewal with a smaller cap ends it`, undefined)
+    this.depthHeld.set(acc.accountKey, { pool: s.pool, depth: s.depth, perWindow: s.perWindow, since: had?.since ?? Date.now() })
+  }
+
+  /** otto/mamoru#401: for /metrics `remote.depthHeld`. */
+  remoteDepthHeld(): { account: string; pool: string; depthUsdc: string; perWindowUsdc: string; sinceS: number }[] {
+    return [...this.depthHeld].map(([k, v]) => ({ account: k.slice(0, 8), pool: v.pool, depthUsdc: v.depth.toString(), perWindowUsdc: v.perWindow.toString(), sinceS: Math.round((Date.now() - v.since) / 1000) }))
+  }
+
+  /** otto/mamoru#401 (spec 012 HRV-R4): accounts whose sleeve's idle USDC is due home but whose signed approval has no way back. */
+  private readonly returnBlocked = new Map<string, { amount: bigint; since: number }>()
+
+  /**
+   * otto/mamoru#401 (spec 012 HRV-R4, V3): a design-C sleeve's own policy has no bridge-out grant, so idle USDC due home
+   * cannot be sent: the account is recorded as needing a renewal, paged once, and listed on /metrics. V4 goes home
+   * through `askReturn`.
+   */
+  private noteReturnBlocked(acc: AccountState, due: Decision['returnDue']): void {
+    if (!due || this.onV4(acc) || !acc.remote) {
+      this.returnBlocked.delete(acc.accountKey)
+      return
+    }
+    const had = this.returnBlocked.get(acc.accountKey)
+    if (!had) logErr(`[alert] account ${acc.accountKey.slice(0, 8)}: ${fmtUsdc(due.amount)} USDC idle on its Safe ${acc.remote.address} on chain ${due.chainId} is due home (spec 012 HRV-R4), and that Safe's signed policy cannot bridge it back: needs a renewal`, undefined)
+    this.returnBlocked.set(acc.accountKey, { amount: due.amount, since: had?.since ?? Date.now() })
+  }
+
+  /** otto/mamoru#401: for /metrics `remote.returnBlocked`. */
+  remoteReturnBlocked(): { account: string; amountUsdc: string; sinceS: number }[] {
+    return [...this.returnBlocked].map(([k, v]) => ({ account: k.slice(0, 8), amountUsdc: v.amount.toString(), sinceS: Math.round((Date.now() - v.since) / 1000) }))
   }
 
   /**
@@ -7428,11 +7524,42 @@ export class Operator {
     const t = Number((await this.client.getBlock({ blockNumber: block })).timestamp)
     const remotePolicy = remoteInput(acc.ctx, { chainId: b.chainId, policyId: b.policyId, sessionKey, validAfter: 0, validUntil: 0, capUsdc: '1' }, registry).policy
     const bridgeTotal = policy.session.grants.find((g) => g.name === 'bridge-out')?.actions.flatMap((a) => a.params).find((r) => r.cumulative)?.cumulative
-    const capUsdc = bridgeTotal ? v4BudgetCaps(policy, cap)[bridgeTotal.slice(4)] : undefined
-    if (!capUsdc || capUsdc <= 0n) throw new Error(`${policy.policyId}: no bridge total to size the remote Safe at`)
+    const bridged = bridgeTotal ? v4BudgetCaps(policy, cap)[bridgeTotal.slice(4)] : undefined
+    if (!bridged || bridged <= 0n) throw new Error(`${policy.policyId}: no bridge total to size the remote Safe at`)
+    const capUsdc = await this.fitRemote(acc, b.chainId, remotePolicy, bridged)
     const spec: RemoteSpec = { chainId: b.chainId, policyId: b.policyId, sessionKey, validAfter: t - 60, validUntil: t + remotePolicy.session.validitySeconds, capUsdc: capUsdc.toString() }
     const r = remoteSafe(remoteInput(acc.ctx, spec, registry))
     return { chainId: b.chainId, address: r.address, spec, permissionIds: r.permissionIds }
+  }
+
+  /**
+   * otto/mamoru#401, Base side: the cap a new remote Safe is sized at, at most the bridge-out total, so that each pool's
+   * daily budget (`perWindow`, a multiple of the cap) fits REMOTE_DEPTH_FIT_BPS of that pool's depth now. Its
+   * MamoruActionPolicyV3 checks the depth at the first swap or mint, and refuses every one while the budget is above it.
+   * The cap is part of the Safe's setup, so of its address: it is fixed here, once, and kept with the approval. A depth
+   * that cannot be read fails closed (nothing is prepared); no reader configured: the bridge total, as before.
+   */
+  private async fitRemote(acc: AccountState, chainId: number, remotePolicy: PolicyVersion, bridged: bigint): Promise<bigint> {
+    const read = this.cfg.remoteDepth
+    if (!read) return bridged
+    const name = chainOf(chainId).name
+    let cap = bridged
+    const pools = remotePolicy.buckets.flatMap((b) => b.pools).map((n) => v4PoolOf(n, chainId))
+    for (const p of pools) {
+      if (!p) continue
+      let depth: bigint
+      try {
+        depth = await read(chainId, p.pool, p.bandTicks, budgetIn1(p))
+      } catch (e) {
+        logErr(`[remote] ${acc.accountKey} depth of ${p.pool} on chain ${chainId}:`, e)
+        throw new HttpError(503, 'REMOTE_UNAVAILABLE', `Mamoru on ${name} is not reachable right now: nothing was changed, try again in a few minutes`)
+      }
+      const fitted = fitRemoteCap(cap, depth, (c) => v4BudgetCaps(remotePolicy, c)[p.caps.budgetWindow] ?? 0n)
+      if (fitted < cap) console.log(`[remote] ${acc.accountKey}: ${p.pool} on chain ${chainId} is ${fmtUsdc(depth)} deep; the Safe there is sized at ${fmtUsdc(fitted)} USDC, not ${fmtUsdc(cap)}`)
+      cap = fitted
+    }
+    if (cap < 1_000_000n) throw new HttpError(503, 'REMOTE_UNAVAILABLE', `The ${name} pool is too thin to start Mamoru there right now: nothing was changed, try again later`)
+    return cap
   }
 
   /** Base side, a confirmed approval that provisions a remote Safe: fixed on the account, and its provisioning starts. */
@@ -7882,6 +8009,7 @@ export class Operator {
           return r.harvested
         },
         ...this.remoteOf(acc),
+        ...this.depthShortFor(acc),
         bridgeLimit: () => this.bridgeLimitFor(acc),
         spendGate: (p) => this.spendHold.admit(this.spendHoldKey(acc), p, Date.now()),
         rerangeHistory: rerangeHistoryOf(acc.ops, Math.floor(Date.now() / 1000)),
@@ -8073,6 +8201,7 @@ export class Operator {
               if (this.engineHealth.slot(acc.accountKey, d.reason === 'DECIDE_SLOT_BUSY')) logErr('[alert]', `engine ${acc.accountKey.slice(0, 8)}@${this.cfg.chainId} has held DECIDE_SLOT_BUSY for over ${SLOT_BUSY_ALERT_MS / 60_000} min: an op is neither sent nor settled (live op ${engine.journal.live ? `${engine.journal.live.opId} ${engine.journal.live.state}` : 'unknown'}); nothing else runs for this account until it clears`)
             })
             // otto/mamoru#278: Growth above its target and band on the remote Safe: ask it for the excess.
+            safeMetrics(() => this.noteReturnBlocked(acc, d.returnDue))
             if (d.returnDue) await this.askReturn(acc, d.returnDue.amount, r.observation.remote?.value ?? 0n, startedAt).catch((e) => logErr(`[return] ${acc.accountKey}:`, e))
             // otto/mamoru#8: this review's own balance read (no extra RPC call), against the account's alert threshold.
             safeMetrics(() => this.recordGasReserve(acc, r.observation.native, r.observation.gas))

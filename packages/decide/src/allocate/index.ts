@@ -49,7 +49,7 @@ export type BucketValue = {
 }
 
 /** otto/mamoru#127, #128: savings a bucket is short of its target and holds back on purpose, and why. */
-export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY' | 'DECIDE_WAIT_BRIDGE_LIMIT' | 'DECIDE_WAIT_BUDGET' | 'DECIDE_WAIT_RENEWAL'; amount: bigint }
+export type Waiting = { bucket: string; code: 'DECIDE_WAIT_DEPTH' | 'DECIDE_WAIT_GAS' | 'DECIDE_ENTRY_PAUSED_FALL' | 'DECIDE_WAIT_BRIDGE' | 'DECIDE_WAIT_VAULT_LIQUIDITY' | 'DECIDE_WAIT_BRIDGE_LIMIT' | 'DECIDE_WAIT_BUDGET' | 'DECIDE_WAIT_RENEWAL' | 'REMOTE_DEPTH_BELOW_BUDGET'; amount: bigint }
 
 export type Allocation = {
   total: bigint
@@ -190,7 +190,8 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     const purga = purgaIdentity(pool, registryOf(obs))
     if (purga.verdict !== 'GO') trail.push(purga)
     // Spec 004 FREEZE (#101): a bucket whose pool is in a fast fall gets no entry; its share waits where it is.
-    const blocked = purga.verdict !== 'GO' ? purga.reason : frozen?.has(b.id) ? ('DECIDE_ENTRY_PAUSED_FALL' as ReasonCode) : null
+    // otto/mamoru#401: a pool whose action policy would refuse any entry at validation (its deferred depth check) gets none.
+    const blocked = purga.verdict !== 'GO' ? purga.reason : frozen?.has(b.id) ? ('DECIDE_ENTRY_PAUSED_FALL' as ReasonCode) : obs.depthShort?.some((d) => d.pool === pool.name) ? ('REMOTE_DEPTH_BELOW_BUDGET' as ReasonCode) : null
     return { b, pool, vault: false, value, deployed, idleVolatile, blocked }
   })
   const executable = rowsAll.filter((r) => r.pool || r.vault)
@@ -223,7 +224,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     const waiting: Waiting[] = []
     rows.forEach((r, i) => {
       const gap = buckets[i]!.target - r.deployed
-      if (r.blocked === 'DECIDE_ENTRY_PAUSED_FALL' && gap >= minEntry && free > 0n) waiting.push({ bucket: r.b.id, code: 'DECIDE_ENTRY_PAUSED_FALL', amount: gap < free ? gap : free })
+      if ((r.blocked === 'DECIDE_ENTRY_PAUSED_FALL' || r.blocked === 'REMOTE_DEPTH_BELOW_BUDGET') && gap >= minEntry && free > 0n) waiting.push({ bucket: r.b.id, code: r.blocked, amount: gap < free ? gap : free })
       // A bucket short by more than the floor but not by enough to pay for its gas waits, and says so (#195).
       const band = gap * 10_000n > buckets[i]!.target * BigInt(policy.rebalanceBandBps ?? 0)
       const floor = r.vault ? vaultMin : entryMin
@@ -419,7 +420,9 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
     for (const rb of policy.remoteBuckets ?? []) {
       if (unsafeDeposit || free === 0n) break
       const target = prefTotal > 0n ? (total * BigInt(rb.preference)) / prefTotal : 0n
-      const gap = target - (obs.remote?.value ?? 0n)
+      // otto/mamoru#401: never more than the sleeve's own cap lets it place; past it the money would only sit there idle.
+      const cap = obs.remote?.cap
+      const gap = (cap !== undefined && cap < target ? cap : target) - (obs.remote?.value ?? 0n)
       if (gap < minEntry || gap * 10_000n <= target * BigInt(policy.rebalanceBandBps ?? 0)) continue
       let amount = gap < free ? gap : free
       // otto/mamoru#107 (spec 012 HRV-R4): no ping-pong. For 24 h after money came home from that chain nothing goes back

@@ -24,7 +24,7 @@ export { PACKAGING_STABLES_DAY_PCT, PACKAGING_TVL_DROP_PCT, PACKAGING_VOLUME_RUL
 export { eelOf, impactAt, PACKAGING_EEL_CAP_USD, PACKAGING_EEL_RULES, poolDepthShadowRisk } from './shadow-pool-depth.ts'
 export { fallBpsOf, fallFreezeOf, marketOf, type CumulativePoint } from './guard/index.ts'
 export { belowShareOf, edgeBpsOf, meanTickAt, rangeFor, realizedVolOf, regimeOf, skewedRange, spiking, volWidthTicks, widenEarly, widthFor, type Regime } from './geometry/index.ts'
-export { allocate, reusablePosition, DEFAULT_INCREASE_TOLERANCE_BPS, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
+export { allocate, reusablePosition, DEFAULT_INCREASE_TOLERANCE_BPS, DEFAULT_MIN_ENTRY, widthOf, type Allocation, type BucketValue, type Waiting } from './allocate/index.ts'
 export { depthOf, twapFloor, type Depth } from './depth/index.ts'
 export { MAX_FEE_APR_BPS, outOfRangeSinceOf, rerangeWorth, RERANGE_OPS, withOutOfRangeSince, type RerangeWorth } from './rebalance/lazy.ts'
 export { weightTargets } from './rebalance/weights.ts'
@@ -145,6 +145,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   const guards: GuardNote[] = policy.guards ? fallFreezeOf(obs, policy) : []
   const frozen = new Set(guards.filter((g) => g.code === 'DECIDE_ENTRY_PAUSED_FALL').map((g) => g.bucket))
   if (depegged) frozen.add('stables')
+  // otto/mamoru#401: pools whose action policy would refuse a swap, mint or increase at validation (deferred depth check).
+  const depthHeld = new Set((obs.depthShort ?? []).map((d) => d.pool))
 
   // Plan §9, step 7: entry, bucket by bucket.
   const entries: Proposal[] = []
@@ -193,6 +195,10 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     }
     if (frozen.has(b.id)) {
       buckets.push({ bucket: b.id, code: 'DECIDE_ENTRY_PAUSED_FALL' })
+      continue
+    }
+    if (depthHeld.has(pool.name)) {
+      buckets.push({ bucket: b.id, code: 'REMOTE_DEPTH_BELOW_BUDGET' })
       continue
     }
     const purga = purgaIdentity(pool, registryOf(obs))
@@ -247,6 +253,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     // A frozen bucket's idle token waits where it is: the guard never turns a pause into a sell-back.
     const frozenPools = guards.filter((g) => frozen.has(g.bucket)).map((g) => g.pool)
     if (depegged) frozenPools.push(depegged.name)
+    // otto/mamoru#401: a pool the policy would refuse every swap in: its idle token waits there too.
+    frozenPools.push(...depthHeld)
     const keep = frozenPools.length ? new Set([...(pendingMint ?? []), ...frozenPools]) : pendingMint
     // otto/mamoru#107: the sale of harvested volatile goes right after the harvests, before reduce, idle sales and entries,
     // never through a pool the guards hold still.

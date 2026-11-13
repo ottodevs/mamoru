@@ -15,6 +15,7 @@ import { RpcMetrics, logErr } from './metrics.ts'
 import { livePool, writeRefusal } from './chain.ts'
 import { writeRegistry } from './chain-writes.ts'
 import { Operator, type OperatorConfig } from './operator.ts'
+import { readPoolDepth } from './remote-depth.ts'
 import { Relayer } from './relayer.ts'
 import { BRIDGE_MONAD_CHAIN_ID, MonadBridge } from './bridge-monad.ts'
 import { ReturnHome } from './return-home.ts'
@@ -625,6 +626,8 @@ export async function bootOperator(o: BootOptions) {
   // sent by this same relayer key in its own nonce space there (as on Ethereum for bridge-out): not the Monad
   // operator's relayer, which is another key in another process. Fund its address with MON for the mints.
   let bridgeMonad: MonadBridge | null = null
+  // otto/mamoru#401: the depth of a Monad pool as MamoruActionPolicyV3 reads it, to size a new remote Safe's cap.
+  let remoteDepth: OperatorConfig['remoteDepth']
   // otto/mamoru#285: the Monad leg goes through its own proxy, like Base: MAMORU_MONAD_RPC_URL and any
   // MAMORU_MONAD_RPC_TRUSTED for reads, public RPCs only for sends and log witnesses. Never one RPC alone.
   let monadProxy: { url: string; stop: () => void } | null = null
@@ -659,6 +662,11 @@ export async function bootOperator(o: BootOptions) {
     const mintRefusal = monadMintRefusal({ chainId, live })
     const monadRelayer = mintRefusal === null ? new Relayer(relayerKey, monad, monadUrl, BRIDGE_MONAD_CHAIN_ID, mintRefusal) : null
     bridgeMonad = new MonadBridge(o.stateDir, client, monad, monadRelayer, fetch, Date.now, baseRegistry, monadRegistry, checked ? undefined : () => checkMonadRpc(monad))
+    remoteDepth = async (cid, pool, band, in1) => {
+      if (cid !== BRIDGE_MONAD_CHAIN_ID) throw new Error(`no depth reader for chain ${cid}`)
+      const e = entry(pool, monadRegistry)
+      return readPoolDepth(monad as never, { name: pool, address: e.address, token0: registryAddress(e.token0!, monadRegistry), token1: registryAddress(e.token1!, monadRegistry) }, band, in1)
+    }
     const bm = bridgeMonad
     setInterval(() => void bm.tick(), 60_000)
     void bm.tick()
@@ -739,6 +747,7 @@ export async function bootOperator(o: BootOptions) {
       poolStatsStateFile: join(o.stateDir, 'pool-stats.json'),
       ...(peers ? { peers } : {}),
       ...(bridgeMonad ? { bridgeMonad } : {}),
+      ...(remoteDepth ? { remoteDepth } : {}),
       ...(Object.keys(remotePeers).length ? { remotePeers } : {}),
       ...(oneAuth ? { oneAuth } : {}),
       ...(homeClient ? { homeClient } : {}),

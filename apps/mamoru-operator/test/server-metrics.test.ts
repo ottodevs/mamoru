@@ -52,6 +52,8 @@ function fakeOperator(): Operator {
       { role: 'bridge_monad', chainId: 143, address: '0x2222222222222222222222222222222222222222', wei: '1000', at: '2026-10-02T09:00:00.000Z', lowBelowWei: '200000000000000000', low: true },
     ],
     remoteStuck: () => [{ account: '3f9a7c21', chainId: 143, safe: '0x3333333333333333333333333333333333333333', code: 'REMOTE_SAFE_UNVERIFIED', sinceS: 2400 }],
+    remoteDepthHeld: () => [{ account: '4e2cf182', pool: 'pool:WMON/USDC/3000', depthUsdc: '7400000000', perWindowUsdc: '15000000000', sinceS: 600 }],
+    remoteReturnBlocked: () => [{ account: '3e4d1d49', amountUsdc: '449550202', sinceS: 21600 }],
     gasReserveSnapshot: () => [
       { account: '3f9a7c21', nativeWei: '250000000000000', thresholdWei: '500000000000000', low: true, lowSince: '2026-10-02T09:00:00.000Z' },
       { account: '9b0e41aa', nativeWei: '900000000000000', thresholdWei: '500000000000000', low: false, lowSince: null },
@@ -81,6 +83,9 @@ describe('GET /metrics auth', () => {
       expect(op.relayers.map((r) => [r.role, r.chainId, r.low])).toEqual([['operator', 8453, false], ['bridge_monad', 143, true]])
       expect(Object.keys(op.relayers[0]!).sort()).toEqual(['address', 'at', 'chainId', 'low', 'lowBelowWei', 'role', 'wei'])
       expect(op.remote.stuck).toEqual([{ account: '3f9a7c21', chainId: 143, safe: '0x3333333333333333333333333333333333333333', code: 'REMOTE_SAFE_UNVERIFIED', sinceS: 2400 }])
+      // otto/mamoru#401: entries waiting on a pool's depth (Monad side), idle due home with no signed way back (Base side).
+      expect((op.remote as unknown as { depthHeld: unknown[] }).depthHeld).toEqual([{ account: '4e2cf182', pool: 'pool:WMON/USDC/3000', depthUsdc: '7400000000', perWindowUsdc: '15000000000', sinceS: 600 }])
+      expect((op.remote as unknown as { returnBlocked: unknown[] }).returnBlocked).toEqual([{ account: '3e4d1d49', amountUsdc: '449550202', sinceS: 21600 }])
     } finally {
       server.stop(true)
     }
@@ -218,6 +223,8 @@ describe('GET /metrics never carries injected secret-shaped free text (finding #
       gasReserveLowCount: () => 0,
       relayersSnapshot: () => [],
       remoteStuck: () => [],
+      remoteDepthHeld: () => [],
+      remoteReturnBlocked: () => [],
       gasReserveSnapshot: () => [],
       authorizationsSnapshot: () => [],
     } as unknown as Operator
