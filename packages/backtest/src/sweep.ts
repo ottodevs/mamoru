@@ -96,6 +96,8 @@ const OPTIONAL: Shape = {
   // Lab round 3 (#101): given whole.
   depegGuard: { thresholdBps: 'number', holdSeconds: 'number', action: ENUMS['depegGuard.action']!, releaseBps: 'number', releaseSeconds: 'number', exitImpactBps: 'number' },
   stagedExit: { step1Bps: 'number', step2Bps: 'number', step3Bps: 'number', reentry: ENUMS['stagedExit.reentry']!, ladderGapBps: 'number' },
+  // Lab #409: given whole.
+  regimeShift: { fall7dBps: 'number', fall24hBps: 'number', belowMeanBps: 'number', defensivePreference: 'number', exitOnMean: 'boolean', exitNoLowSeconds: 'number', minDwellSeconds: 'number' },
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -177,6 +179,8 @@ export type CellMetrics = {
   resultHash: string
   /** Lab #178, under a harvest arm: its report in the savings asset. */
   harvest?: HarvestCellMetrics
+  /** Lab #409, under a regime shift: entries into the defensive state, and hours spent in it. */
+  regime?: { shifts: number; defensiveHours: number }
 }
 
 export type HarvestPoolMetrics = { fees: number; harvests: number; swaps: number; increases: number; cost: number; captured: number; unconverted: number; exposureRemoved: number; uncollected: number }
@@ -224,6 +228,7 @@ export function cellMetrics(r: RunResult, decimals: number): CellMetrics {
     gaps: r.window.gaps,
     resultHash: r.resultHash,
     ...(r.harvest ? { harvest: harvestMetrics(r, n) } : {}),
+    ...(r.regime ? { regime: { shifts: r.regime.shifts, defensiveHours: Math.round(r.regime.defensiveSeconds / 360) / 10 } } : {}),
   }
 }
 

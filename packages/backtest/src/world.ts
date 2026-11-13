@@ -1,5 +1,5 @@
 import { ReasonError } from '@mamoru/domain'
-import { amountsOf, type PegState, type Proposal, type StageState } from '@mamoru/decide'
+import { amountsOf, type PegState, type Proposal, type RegimeState, type StageState } from '@mamoru/decide'
 import { baseRegistry, entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { quoteMint, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import type { PoolSample } from './types.ts'
@@ -40,6 +40,8 @@ export type World = {
   pegDeviationBps?: number | null
   /** Lab (#101 round 3): staged-exit state per volatile bucket. */
   stages?: Record<string, StageState>
+  /** Lab (#409): the regime-shift state of the risk bucket's pool, as the engine would keep it. */
+  regime?: RegimeState
 }
 
 export function newWorld(savings: RegistryName, deposit: bigint): World {

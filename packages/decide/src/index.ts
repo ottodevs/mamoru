@@ -30,6 +30,7 @@ export { MAX_FEE_APR_BPS, outOfRangeSinceOf, rerangeWorth, RERANGE_OPS, withOutO
 export { weightTargets } from './rebalance/weights.ts'
 export { depegExitOf, depeggedPool, pegDeviationBps, pegStep, PEG_CLEAR, type PegState } from './guard/depeg.ts'
 export { fallFromBps, stageStep, thirdsOut, type StageInput, type StageState } from './rebalance/staged.ts'
+export { regimePreference, regimeStep, REGIME_BUCKET, REGIME_NORMAL, type RegimeInput, type RegimeState } from './guard/regime.ts'
 export { amountsOf, bucketValues, mergeOf, MERGES_PER_DAY, positionValue, rerangeOf, reduceOf, vaultRedeemOf, EDGE_BPS, DRIFT_BPS } from './rerange/index.ts'
 
 /** Lab (#101 round 3): drift band of a bucket under a staged exit, so the risk bucket's third (3.3 points) is reduced. */

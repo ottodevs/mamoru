@@ -1,6 +1,7 @@
 // Lab (#101, experiment 6): bucket preferences after a volatility target or CPPI. Pure; read only by a policy with
 // `volTarget` or `cppi`.
 import { preferenceTotal, type PolicyVersion } from '@mamoru/policy'
+import { regimePreference } from '../guard/regime.ts'
 import { bucketValues } from '../rerange/index.ts'
 import type { Observation } from '../types.ts'
 import { inSavings, volatileOf } from '../value.ts'
@@ -16,6 +17,7 @@ const SCALE = 1_000_000
  * - cppi: all volatile buckets share scale = min(1, multiplier * cushion / (account value * volatile share)), with
  *   cushion = value - floorBps of max(peak, value).
  * - stagedExit: times (3 - thirds out) / 3, the thirds the engine reports in `guard.stages`.
+ * - regimeShift (#409): the `risk` bucket at most `defensivePreference` while `guard.regime.risk` is set.
  */
 /**
  * A scale on the grid of `step`: the grid level nearest the current weight among those inside [lo, hi], or the level
@@ -32,7 +34,7 @@ export function levelOf(lo: number, hi: number, cur: number, step: number): numb
 }
 
 export function weightTargets(obs: Observation, policy: PolicyVersion): PolicyVersion['buckets'] | null {
-  if (!policy.volTarget && !policy.cppi && !policy.stagedExit) return null
+  if (!policy.volTarget && !policy.cppi && !policy.stagedExit && !policy.regimeShift) return null
   if (!policy.buckets.some((b) => b.id === 'stables')) return null
   let cppiScale = SCALE
   const values = bucketValues(obs, policy, new Set(policy.buckets.flatMap((b) => b.pools)))
@@ -71,7 +73,9 @@ export function weightTargets(obs: Observation, policy: PolicyVersion): PolicyVe
     }
     // Staged exits (#101 round 3): a third of the preference per step in force, on top of the other rules.
     const out3 = policy.stagedExit ? Math.max(0, Math.min(3, obs.guard?.stages?.[b.id] ?? 0)) : 0
-    const preference = Math.floor((b.preference * Math.min(scale, SCALE) * (3 - out3)) / (SCALE * 3))
+    const scaled = Math.floor((b.preference * Math.min(scale, SCALE) * (3 - out3)) / (SCALE * 3))
+    // Regime shift (#409): a cap on top of the other rules, the smaller wins.
+    const preference = regimePreference(b.id, scaled, obs.guard?.regime?.[b.id], policy.regimeShift)
     freed += b.preference - preference
     return { ...b, preference }
   })

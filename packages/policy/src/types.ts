@@ -216,6 +216,8 @@ export type PolicyVersion = {
   depegGuard?: DepegGuard
   /** Lab only (#101 round 3): staged exits of the volatile buckets on a fall from the 7-day high. Absent: off. */
   stagedExit?: StagedExit
+  /** Lab only (otto/mamoru#409): the `risk` bucket's preference lowered while its pool is in a downtrend. Absent: off. */
+  regimeShift?: RegimeShift
   /**
    * Spec 007 (#151) T3: when set, the engine (`prepareCalls`, packages/scenarios/driver/engine.ts) builds swap
    * minimums/price limits and decrease minimums with MamoruActionPolicy's own math, ported to TS
@@ -312,6 +314,18 @@ export type DepegGuard = { thresholdBps: number; holdSeconds: number; action: 'f
  * sold at (a buy order under the price); all of them when the price recovers to within `step1Bps` of the high.
  */
 export type StagedExit = { step1Bps: number; step2Bps: number; step3Bps: number; reentry: 'ema' | 'ladder'; ladderGapBps: number }
+
+/**
+ * Regime shift (otto/mamoru#409, Lab only): while the `risk` bucket's pool is "defensive" the bucket's preference is
+ * `defensivePreference` and the difference goes to `stables`, as CPPI and staged exits do (`weightTargets`); the
+ * ordinary reduce, idle sale and allocation then move the money, one operation per review.
+ * Enter (from normal, after `minDwellSeconds` in it): the TWAP fell at least `fall24hBps` over 24 h AND either at least
+ * `fall7dBps` over 7 days (`belowMeanBps` 0) or it sits at least `belowMeanBps` under the 7-day mean TWAP. Leave (after
+ * `minDwellSeconds` defensive): the TWAP is back over the 7-day mean (`exitOnMean`), or no new low for
+ * `exitNoLowSeconds`. 7-day figures use the history there is, at least 24 h. The engine keeps the state
+ * (`regimeStep`) and passes it in `Observation.guard.regime`.
+ */
+export type RegimeShift = { fall7dBps: number; fall24hBps: number; belowMeanBps: number; defensivePreference: number; exitOnMean: boolean; exitNoLowSeconds: number; minDwellSeconds: number }
 
 /**
  * Downside-skewed placement in a falling regime: the new range holds `belowShareBps` of its width below the price

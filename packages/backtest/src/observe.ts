@@ -1,5 +1,5 @@
 import type { Hex } from '@mamoru/domain'
-import { marketOf, meanTickAt, realizedVolOf, thirdsOut, type CumulativePoint, type Observation, type PoolGeometryObs, type PoolGuardObs, type PoolObs, type SessionObs } from '@mamoru/decide'
+import { marketOf, meanTickAt, realizedVolOf, REGIME_BUCKET, thirdsOut, type CumulativePoint, type Observation, type PoolGeometryObs, type PoolGuardObs, type PoolObs, type SessionObs } from '@mamoru/decide'
 import { grantKey, hasIncrease, type PolicyVersion } from '@mamoru/policy'
 import { baseRegistry, address, entry, type RegistryName } from '@mamoru/registry'
 import type { Dataset, Sample } from './types.ts'
@@ -91,11 +91,11 @@ export function feeGrowthOf(ds: Dataset, poolIndex: number, i: number): PoolGuar
 
 /** A policy that reads `Observation.guard`: loss-control guards, or a Lab rebalance rule (#101). */
 export function readsGuard(policy: PolicyVersion): boolean {
-  return !!(policy.guards || policy.range.lazy || policy.volTarget || policy.cppi || policy.depegGuard || policy.stagedExit)
+  return !!(policy.guards || policy.range.lazy || policy.volTarget || policy.cppi || policy.depegGuard || policy.stagedExit || policy.regimeShift)
 }
 
 /** Spec 004 `Observation.guard` from the dataset, as the engine would build it from its snapshot history. */
-export function guardOf(ds: Dataset, i: number, windowSeconds: number, lab?: { feeGrowth?: boolean; peakValue?: bigint; peg?: NonNullable<Observation['guard']>['peg']; stages?: NonNullable<Observation['guard']>['stages'] }): NonNullable<Observation['guard']> {
+export function guardOf(ds: Dataset, i: number, windowSeconds: number, lab?: { feeGrowth?: boolean; peakValue?: bigint; peg?: NonNullable<Observation['guard']>['peg']; stages?: NonNullable<Observation['guard']>['stages']; regime?: NonNullable<Observation['guard']>['regime'] }): NonNullable<Observation['guard']> {
   const now = ds.samples[i]!.time
   const pools: Partial<Record<RegistryName, PoolGuardObs>> = {}
   ds.pools.forEach((name, k) => {
@@ -103,7 +103,7 @@ export function guardOf(ds: Dataset, i: number, windowSeconds: number, lab?: { f
     const m: PoolGuardObs = marketOf(now, windowSeconds, (t) => cumulativeAt(ds, k, t, windowSeconds))
     pools[name] = lab?.feeGrowth ? { ...m, feeGrowth24h: feeGrowthOf(ds, k, i) } : m
   })
-  return { pools, ...(lab?.peakValue !== undefined ? { peakValue: lab.peakValue } : {}), ...(lab?.peg ? { peg: lab.peg } : {}), ...(lab?.stages ? { stages: lab.stages } : {}) }
+  return { pools, ...(lab?.peakValue !== undefined ? { peakValue: lab.peakValue } : {}), ...(lab?.peg ? { peg: lab.peg } : {}), ...(lab?.stages ? { stages: lab.stages } : {}), ...(lab?.regime ? { regime: lab.regime } : {}) }
 }
 
 const HOUR = 3_600
@@ -240,7 +240,7 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
     lastRerangeAt: w.lastRerangeAt,
     // otto/mamoru#406: what the engine passes for the weekly cap; absent with none in the last 7 days, as there.
     ...(recent.length > 0 ? { recentReranges: recent } : {}),
-    ...(readsGuard(policy) ? { guard: guardOf(ds, i, policy.execution.twapWindowSeconds, { feeGrowth: !!policy.range.lazy, ...(policy.cppi ? { peakValue: w.peakValue ?? 0n } : {}), ...(policy.depegGuard && w.peg ? { peg: { tripped: w.peg.tripped, deviationBps: w.pegDeviationBps ?? null } } : {}), ...(policy.stagedExit && w.stages ? { stages: Object.fromEntries(Object.entries(w.stages).map(([b, st]) => [b, thirdsOut(st)])) } : {}) }) } : {}),
+    ...(readsGuard(policy) ? { guard: guardOf(ds, i, policy.execution.twapWindowSeconds, { feeGrowth: !!policy.range.lazy, ...(policy.cppi ? { peakValue: w.peakValue ?? 0n } : {}), ...(policy.depegGuard && w.peg ? { peg: { tripped: w.peg.tripped, deviationBps: w.pegDeviationBps ?? null } } : {}), ...(policy.stagedExit && w.stages ? { stages: Object.fromEntries(Object.entries(w.stages).map(([b, st]) => [b, thirdsOut(st)])) } : {}), ...(policy.regimeShift && w.regime?.defensive ? { regime: { [REGIME_BUCKET]: true } } : {}) }) } : {}),
     ...(policy.geometry ? { geometry: geometryOf(ds, i, policy.execution.twapWindowSeconds) } : {}),
   }
 }

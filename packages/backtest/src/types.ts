@@ -159,6 +159,8 @@ export type RunResult = {
   capacity: { depthWaits: number; idleBps: number }
   /** Lab (#178): what the harvest arm did, when the run had one. */
   harvest?: HarvestReport
+  /** Lab (#409), under `policy.regimeShift`: entries into the defensive state and the time spent in it. */
+  regime?: { shifts: number; defensiveSeconds: number }
   /** Hash of the integer facts above. Same dataset, policy and simulator version give the same hash on any machine. */
   resultHash: Hex
 }

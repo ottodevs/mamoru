@@ -135,6 +135,8 @@ export type Observation = {
     peg?: { tripped: boolean; deviationBps: number | null }
     /** Lab (#101 round 3 staged exits): thirds each volatile bucket holds out (0-3), as the engine keeps them (`stageStep`). */
     stages?: Partial<Record<string, number>>
+    /** Lab (otto/mamoru#409 regime shift): buckets whose pool is defensive, as the engine keeps it (`regimeStep`). Absent: none. */
+    regime?: Partial<Record<string, boolean>>
   }
   /** Lab (#101): history for `policy.geometry`. Absent: geometry rules abstain (centred range, policy width). */
   geometry?: { pools: Partial<Record<RegistryName, PoolGeometryObs>> }
