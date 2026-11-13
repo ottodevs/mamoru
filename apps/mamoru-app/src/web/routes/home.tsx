@@ -117,7 +117,7 @@ export const homeCopy = {
   upToDate: (time: string) => `Nothing to do right now. Mamoru looks again at ${time}.`,
   // otto/mamoru#223: the status line when the only thing held is an out-of-range position, by its re-range code.
   upToDateHeld: (code: string, time: string) =>
-    `${code === 'DECIDE_RANGE_BELOW_COST' ? 'An out-of-range position is too small to re-centre at a profit, so Mamoru leaves it.' : code === 'DECIDE_RANGE_COOLDOWN' || code === 'DECIDE_RANGE_WAIT' || code === 'DECIDE_RANGE_WEEKLY_CAP' ? 'An out-of-range position waits a little before it is re-centred.' : 'An out-of-range position is left for now: its pool fees are not measured yet.'} Mamoru looks again at ${time}.`,
+    `${code === 'DECIDE_RANGE_BELOW_COST' ? 'An out-of-range position is too small to re-centre at a profit, so Mamoru leaves it.' : code === 'DECIDE_RANGE_COOLDOWN' ? 'An out-of-range position waits a little before it is re-centred.' : 'An out-of-range position is left for now: its pool fees are not measured yet.'} Mamoru looks again at ${time}.`,
   waitDepth: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: the ${pair} pool is not deep enough for more right now. Checked at ${time}.`,
   waitFall: (amount: string, pair: string, time: string) => `${amount} USDC is waiting: ${pair} is falling fast, so Mamoru adds nothing there until it settles. Checked at ${time}.`,
   waitMany: (amount: string, n: number, why: string, time: string) => `${amount} USDC is waiting in ${n} pools: ${why}. Checked at ${time}.`,
@@ -405,10 +405,12 @@ function pair(p: FundingView['positions'][number]): string {
   return poolTokens(p.pool, p.amounts).join('/')
 }
 
+const RANGE_HOLD_COPY_CODES: ReadonlySet<string> = new Set(['DECIDE_RANGE_COOLDOWN', 'DECIDE_RANGE_BELOW_COST', 'DECIDE_RANGE_NO_FEE_HISTORY'])
+
 /** otto/mamoru#223: the truth about an out-of-range position, from the engine's re-range code; the generic line when it says none. */
 export function rangeHoldCopy(code: string | undefined): string {
   if (code === 'DECIDE_RANGE_BELOW_COST') return homeCopy.heldBelowCost
-  if (code === 'DECIDE_RANGE_COOLDOWN' || code === 'DECIDE_RANGE_WAIT' || code === 'DECIDE_RANGE_WEEKLY_CAP') return homeCopy.heldCooldown
+  if (code === 'DECIDE_RANGE_COOLDOWN') return homeCopy.heldCooldown
   if (code === 'DECIDE_RANGE_NO_FEE_HISTORY') return homeCopy.heldNoHistory
   return homeCopy.paused
 }
@@ -652,7 +654,8 @@ export function engineLine(f: FundingView): string | null {
   if (!f.engine.nextReviewAt) return null
   const next = new Date(f.engine.nextReviewAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
   // Only a hold whose position is still out of range now: the price may have come back since the last review.
-  const hold = f.engine.rangeHolds?.find((h) => f.positions.some((p) => p.tokenId === h.tokenId && !p.inRange && holdsApply(p as { chainId?: number }, BASE_SLEEVE.chainId)))
+  // otto/mamoru#402: the precise codes DECIDE_RANGE_WAIT / _WEEKLY_CAP / _EXIT_ONLY are for logs and /ops; users see what they saw for OBS_POSITION_OUT_OF_RANGE.
+  const hold = f.engine.rangeHolds?.find((h) => RANGE_HOLD_COPY_CODES.has(h.code) && f.positions.some((p) => p.tokenId === h.tokenId && !p.inRange && holdsApply(p as { chainId?: number }, BASE_SLEEVE.chainId)))
   return hold ? homeCopy.upToDateHeld(hold.code, next) : homeCopy.upToDate(next)
 }
 

@@ -338,7 +338,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
 }
 
 /** otto/mamoru#223: the re-range codes that say why an out-of-range position waits. */
-const RANGE_HOLD_CODES: ReadonlySet<ReasonCode> = new Set(['DECIDE_RANGE_COOLDOWN', 'DECIDE_RANGE_WAIT', 'DECIDE_RANGE_WEEKLY_CAP', 'DECIDE_RANGE_BELOW_COST', 'DECIDE_RANGE_NO_FEE_HISTORY'])
+const RANGE_HOLD_CODES: ReadonlySet<ReasonCode> = new Set(['DECIDE_RANGE_COOLDOWN', 'DECIDE_RANGE_WAIT', 'DECIDE_RANGE_WEEKLY_CAP', 'DECIDE_RANGE_EXIT_ONLY', 'DECIDE_RANGE_BELOW_COST', 'DECIDE_RANGE_NO_FEE_HISTORY'])
 const BUCKET_WAIT_CODES: ReadonlySet<ReasonCode> = new Set(['DECIDE_WAIT_GAS', 'DECIDE_WAIT_DEPTH', 'DECIDE_WAIT_BUDGET', 'DECIDE_WAIT_VAULT_LIQUIDITY'])
 
 /** A rerange proposal without its display-only fields (otto/mamoru#219), as FR-LC-001 hashed it before them. */

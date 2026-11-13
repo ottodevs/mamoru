@@ -96,6 +96,14 @@ describe('rerange (manage-any)', () => {
     expect(decide(obs({ balances: BALANCED, positions: [position()] }), lazy).positions[0]!.codes).not.toContain('DECIDE_RANGE_WAIT')
   })
 
+  test('exit-only pool out of range with reduce not worth its cost: the hold is DECIDE_RANGE_EXIT_ONLY (otto/mamoru#402)', () => {
+    const exitOnly = { ...live, buckets: live.buckets.map((b) => (b.pools.includes(POOL as never) ? { ...b, preference: 0 } : b)) } as typeof live
+    const d = decide(obs({ positions: [position({ liquidity: 10n ** 6n })], pools: [pool(TICK + 1500)] }), exitOnly)
+    expect(d.positions[0]!.codes).toContain('DECIDE_RANGE_EXIT_ONLY')
+    expect(d.kind).toBe('hold')
+    expect(d.reason).toBe('DECIDE_RANGE_EXIT_ONLY')
+  })
+
   test('cooldown not passed: hold with DECIDE_RANGE_COOLDOWN; passed: rerange', () => {
     const o = obs({ balances: BALANCED, positions: [position()], pools: [pool(TICK - 1500)], lastRerangeAt: 10_000n - 600n })
     const held = decide(o, live)

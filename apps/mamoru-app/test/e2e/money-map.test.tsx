@@ -293,6 +293,11 @@ describe('review round 2', () => {
     expect(rows[0]).toContain(cooldown)
   })
 
+  test('otto/mamoru#402: the new range codes show users what OBS_POSITION_OUT_OF_RANGE showed', () => {
+    for (const code of ['DECIDE_RANGE_WAIT', 'DECIDE_RANGE_WEEKLY_CAP', 'DECIDE_RANGE_EXIT_ONLY']) expect(rangeHoldCopy(code)).toBe(rangeHoldCopy('OBS_POSITION_OUT_OF_RANGE'))
+    expect(rangeHoldCopy('DECIDE_RANGE_WAIT')).not.toBe(rangeHoldCopy('DECIDE_RANGE_COOLDOWN'))
+  })
+
   test('P1-3: money present means the separate Monad read is never used (Working ignores it, the share is the map\'s)', () => {
     const f: FundingView = { ...braisFunding('flight', NOW), approval: v6 }
     const { f: w, s } = wholeMoney(f)
