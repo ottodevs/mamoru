@@ -22,8 +22,8 @@ export function fitOpRoom(p: Proposal, obs: Observation, savings: RegistryName, 
   const pool = obs.pools.find((x) => x.name === p.pool)
   if (!pool) return p
   const value = p.kind === 'enter_swap' ? valueOf(pool, [[p.tokenIn, p.amountIn]], savings) : valueOf(pool, [[pool.token0, p.amount0Desired], [pool.token1, p.amount1Desired]], savings)
-  if (value <= room) return p
   if (room < floor || room === 0n) return null
+  if (value <= room) return p
   const cut = (a: bigint) => (a * room) / value
   if (p.kind === 'enter_swap') return { ...p, amountIn: cut(p.amountIn) }
   return { ...p, amount0Desired: cut(p.amount0Desired), amount1Desired: cut(p.amount1Desired) }

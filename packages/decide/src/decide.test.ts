@@ -444,6 +444,8 @@ describe('each priced op fits the per-op room the policy allows', () => {
     // A room under the floor holds a sale too: slivers would only spend gas.
     expect(fitOpRoom(sale, monadObs({ ...base, opRoom: room(1_000n) }), 'USDC', 100_000n)).toBeNull()
     expect(fitOpRoom(sale, monadObs({ ...base, opRoom: room(0n) }), 'USDC', 100_000n)).toBeNull()
+    // Even one that fits: a pool that thin takes no op until it refills.
+    expect(fitOpRoom({ ...sale, amountIn: 1n }, monadObs({ ...base, opRoom: room(1_000n) }), 'USDC', 100_000n)).toBeNull()
     expect(fitOpRoom(mint, monadObs({ ...base, opRoom: [{ pool: 'pool:WETH/USDC/500', room: 1n }] }), 'USDC', 100_000n)).toBe(mint)
   })
 
