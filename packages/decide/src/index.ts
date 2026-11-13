@@ -10,7 +10,7 @@ import { estimateFees, harvestOf, harvestSaleOf, principalObs } from './harvest/
 import { weightTargets } from './rebalance/weights.ts'
 import { releaseOf } from './release/index.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, mergeOf, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
-import type { Decision, GateStep, GuardNote, Observation, Proposal, RerangeProposal, ShadowNote, ShadowRisk } from './types.ts'
+import type { Decision, GateStep, GuardNote, Observation, Proposal, RerangeProposal, ShadowNote, ShadowRisk, VaultRedeemProposal } from './types.ts'
 import { capRoomOf, withinCap } from './cap.ts'
 import { poolStatsShadowRisk } from './shadow-pool-stats.ts'
 import { poolDepthShadowRisk } from './shadow-pool-depth.ts'
@@ -252,7 +252,12 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     const sale = exit || reranges.length || harvests.length || !obs.harvested ? null : harvestSaleOf(obs, policy, new Set([...frozenPools, ...policy.buckets.filter((b) => frozen.has(b.id)).flatMap((b) => b.pools)]))
     if (sale) for (const w of sale.waits) buckets.push(w)
     const sold = sale?.proposal ?? null
-    const reduce = exit || reranges.length || harvests.length || sold ? null : reduceOf(obs, policy, policyPools, lab)
+    let reduce = exit || reranges.length || harvests.length || sold ? null : reduceOf(obs, policy, policyPools, lab)
+    // otto/mamoru#400: the sweep fills the vault to just under the drain line, so its own interest (or a fall in the
+    // other buckets) crosses it within minutes. A redeem whose savings the next allocation would only put back in a vault,
+    // or leave idle, is not made: it would undo the sweep every review (b22428c7, 13 Nov: 72 vault ops in a day). A
+    // bucket being left (preference 0) still redeems.
+    if (reduce?.proposal?.kind === 'vault_redeem' && policy.allocation === 'target-weights' && redeemReturns(reduce.proposal)) reduce = { code: null, proposal: null }
     // otto/mamoru#210: a vault that cannot pay out its excess yet says so on its bucket.
     if (reduce?.code === 'DECIDE_WAIT_VAULT_LIQUIDITY') buckets.push({ bucket: 'stables', code: reduce.code })
     const idle = exit || reranges.length || harvests.length || sold || reduce?.proposal ? null : idleConvertOf(held, policy, policyPools, keep)
@@ -285,6 +290,20 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       proposal = null
       reason = gate.reason
     }
+  }
+
+  /** otto/mamoru#400: true when the savings a redeem frees would go back into a vault, or nowhere, at the next allocation. */
+  function redeemReturns(p: VaultRedeemProposal): boolean {
+    if ((policy.buckets.find((b) => b.id === p.bucket)?.preference ?? 0) === 0) return false
+    const savings = policy.savingsAsset
+    const vaults = held.vaults?.map((v) => (v.name !== p.vault ? v : { ...v, shares: v.shares - p.shares, assets: v.assets - p.assets, maxWithdraw: v.maxWithdraw > p.assets ? v.maxWithdraw - p.assets : 0n, maxRedeem: v.maxRedeem > p.shares ? v.maxRedeem - p.shares : 0n }))
+    const after: Observation = { ...held, balances: { ...held.balances, [savings]: (held.balances[savings] ?? 0n) + p.assets }, vaults }
+    const next = allocate(after, policy, unsafeDeposit, frozen, room).proposal
+    if (!next || next.kind === 'vault_deposit') return true
+    // An entry the preliminary gate would hold (no live session, an unknown pool) leaves the savings idle just the same.
+    const pool = poolless(next) ? null : obs.pools.find((x) => x.name === next.pool)
+    if (!poolless(next) && !pool) return true
+    return (pool ? ehgPreliminary(obs, policy, pool, next.grant) : ehgBridge(obs, policy, next.grant)).verdict !== 'GO'
   }
 
   /** Proposals that act on no pool of this chain: a bridge (its pool is on the other chain) and a vault op (#210). */

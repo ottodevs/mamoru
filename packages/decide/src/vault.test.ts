@@ -324,6 +324,33 @@ describe('sweep of free savings into the Stable vault (otto/mamoru#107, spec 012
     expect(d.proposal?.kind).not.toBe('vault_redeem')
   })
 
+  test('otto/mamoru#400: interest past the drain line redeems nothing the sweep would put straight back', () => {
+    const o = settled(60n * USDC)
+    const p = decide(o, BASE_ONLY).proposal as { kind: string; vault: string; assets: bigint }
+    expect(p.kind).toBe('vault_deposit')
+    // The vault earns a little after the sweep and crosses the line by it (b22428c7, 13 Nov: 72 vault ops in a day).
+    // Interest raises the total too, so the line moves by about 64 % of it: three times the gap left crosses it.
+    const swept = { ...o, balances: { ...o.balances, USDC: o.balances.USDC! - p.assets }, vaults: o.vaults!.map((v) => (v.name === p.vault ? vault(v.name, v.assets + p.assets) : v)) }
+    const gap = drainLine(swept).line - drainLine(swept).value
+    // The WETH/USDC entry cannot take the money now: its sessions are not live (the gate would hold it).
+    const open = swept.sessions
+    const earned = { ...swept, sessions: open.filter((s) => !s.grant.includes('WETH/USDC')), vaults: swept.vaults.map((v) => (v.name === p.vault ? vault(v.name, v.assets + 3n * gap + 1n) : v)) }
+    const { value, line } = drainLine(earned)
+    expect(value > line).toBe(true)
+    const d = decide(earned, BASE_ONLY)
+    expect(d.proposal?.kind).not.toBe('vault_redeem')
+    expect(d.proposal?.kind).not.toBe('vault_deposit')
+    // The same review with the entry open: the excess comes out of the vault for it.
+    expect(decide({ ...earned, sessions: open }, BASE_ONLY).proposal?.kind).toBe('vault_redeem')
+  })
+
+  test('otto/mamoru#400: an over-weight vault still redeems when another bucket takes the money', () => {
+    // The same account with its WETH/USDC position gone: the redeemed USDC goes to that bucket's entry.
+    const o = settled(60n * USDC)
+    const vaulted = { ...o, positions: [], vaults: o.vaults!.map((v) => (v.name === 'vault:gtUSDCp' ? vault(v.name, 2_200n * USDC) : v)), balances: { ...o.balances, USDC: 0n } }
+    expect(decide(vaulted, BASE_ONLY).proposal?.kind).toBe('vault_redeem')
+  })
+
   test('money another bucket waits for is never swept (HRV-S11)', () => {
     // 50 of the 60 kept for the Growth sleeve on Monad, not ready: 10 left is under the vault floor.
     const o = settled(60n * USDC, { remote: { value: 0n, inFlight: 0n, ready: false } })
