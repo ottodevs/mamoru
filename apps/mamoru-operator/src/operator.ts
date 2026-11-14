@@ -6776,11 +6776,15 @@ export class Operator {
    * account in the flag's scope where V4 is pinned. Generated once per account and kept (0600 state): the Safe's address
    * commits to it, so it never changes afterwards.
    */
-  async oneAuthKey(ctx: AccountContext): Promise<{ sessionKey: Address; capUsdc: string; remote: { domain: number; sessionKey: Address } | null }> {
+  async oneAuthKey(ctx: AccountContext): Promise<{ sessionKey: Address; capUsdc: string; remote?: { domain: number; sessionKey: Address } | null }> {
     if (!this.cfg.oneAuth || this.cfg.chainId !== BASE_CHAIN_ID && this.cfg.policy.chain !== 'fork') this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'accounts on one approval are not offered here')
     const view = this.store.state.accounts[ctx.accountKey] ?? ({ accountKey: ctx.accountKey, ctx } as AccountState)
     if (!this.inScope(view, 'one_auth_v4')) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'accounts on one approval are not offered for this account')
     const keys = (this.store.state.oneAuthKeys ??= {})
+    const remotes = (this.store.state.oneAuthRemotes ??= {})
+    // #356: a key given before the remote was fixed with it keeps the session its Safe may already commit to (no remote
+    // in the answer, as then); startOneAuth never runs that session.
+    const legacy = !!keys[ctx.accountKey] && !(ctx.accountKey in remotes)
     if (!keys[ctx.accountKey]) {
       // Review of #202 (P1-9): the head when the key is given; the Safe's address (and so any deposit to it) comes after,
       // so a Start counts deposits from here on (depositsAfter), the first one included.
@@ -6789,14 +6793,15 @@ export class Operator {
       ;(this.store.state.oneAuthKeyBlocks ??= {})[ctx.accountKey] = block.toString()
       this.store.save()
     }
+    const answer = { sessionKey: privateKeyToAccount(keys[ctx.accountKey]!).address, capUsdc: v4CapUsdOf(this.capFor(view)).toString() }
+    if (legacy) return answer
     // #356: the remote the session may register is part of the setup, so of the address: fixed the first time, like the key.
-    const remotes = (this.store.state.oneAuthRemotes ??= {})
     if (!(ctx.accountKey in remotes)) {
       remotes[ctx.accountKey] = await this.v4RemoteBinding(view, { policyId: ONE_AUTH_V4 })
       this.store.save()
     }
     const remote = remotes[ctx.accountKey]!
-    return { sessionKey: privateKeyToAccount(keys[ctx.accountKey]!).address, capUsdc: v4CapUsdOf(this.capFor(view)).toString(), remote: remote ? { domain: remote.domain, sessionKey: getAddress(remote.sessionKey) } : null }
+    return { ...answer, remote: remote ? { domain: remote.domain, sessionKey: getAddress(remote.sessionKey) } : null }
   }
 
   /**
@@ -6817,10 +6822,13 @@ export class Operator {
     if (!this.inScope(acc, 'one_auth_v4')) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'accounts on one approval are not offered for this account')
     const priv = this.store.state.oneAuthKeys?.[ctx.accountKey]
     if (!priv || privateKeyToAccount(priv).address.toLowerCase() !== ctx.oneAuth.sessionKey.toLowerCase()) throw new HttpError(409, 'REMOTE_KEY_UNKNOWN', 'this Safe names a session key this operator did not give')
-    // #356: and the remote its session may register is the one this operator fixed with that key.
-    const given = this.store.state.oneAuthRemotes?.[ctx.accountKey]
+    // #356: and the remote its session may register is the one this operator fixed with that key. A Safe whose session
+    // predates that (no remote: any key the session gives could be registered) is never run; its owner keeps it.
     const named = oneAuthRemoteOf(ctx.oneAuth)
-    if (given === undefined ? named !== null : (given?.domain ?? null) !== (named?.domain ?? null) || (given?.sessionKey ?? '').toLowerCase() !== (named?.sessionKey ?? '').toLowerCase()) {
+    if (named === undefined) throw new HttpError(409, 'ONE_AUTH_LEGACY_SESSION', "this Safe's approval lets its session key register any Safe on another chain: Mamoru does not run it, and your funds stay in your Safe")
+    const remotes = this.store.state.oneAuthRemotes ?? {}
+    const given = remotes[ctx.accountKey]
+    if (!(ctx.accountKey in remotes) || (given?.domain ?? null) !== (named?.domain ?? null) || (given?.sessionKey ?? '').toLowerCase() !== (named?.sessionKey ?? '').toLowerCase()) {
       throw new HttpError(409, 'REMOTE_KEY_UNKNOWN', 'this Safe names a remote session key this operator did not give')
     }
     const cap = BigInt(ctx.oneAuth.capUsdc)
