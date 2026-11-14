@@ -145,6 +145,19 @@ export function repeatsDiscard(last: Pick<OpRecord, 'premiseHash' | 'stateCode'>
   return !!last && last.premiseHash === premiseHash && last.stateCode !== 'OBS_RPC_UNAVAILABLE'
 }
 
+/**
+ * Why a proposal opens no op this review, or undefined when it runs: REVIEW_DEDUPED when it repeats a discard or is
+ * backed off (`repeated`) or the spend gate refuses it, RELAYER_NATIVE_LOW when the relayer cannot pay its bundle
+ * (otto/mamoru#412). The relayer is asked before the spend gate, so a held proposal takes no spending room, and the
+ * spend gate is asked last; a relayer check that throws lets the proposal through (the send then fails as before).
+ */
+export async function heldBy(proposal: Proposal | null | undefined, repeated: boolean, gates: { relayerShort?: () => Promise<string | null>; spendGate?: (p: Proposal) => boolean }): Promise<DecisionRecord['code']> {
+  if (!proposal) return undefined
+  if (repeated) return 'REVIEW_DEDUPED'
+  if (gates.relayerShort && (await gates.relayerShort().catch(() => null))) return 'RELAYER_NATIVE_LOW'
+  return gates.spendGate?.(proposal) === false ? 'REVIEW_DEDUPED' : undefined
+}
+
 /** otto/mamoru#357: a throw that is the provider not answering (anywhere in its cause chain), not a bug, a refusal or a revert. */
 export function isTransportError(e: unknown): boolean {
   const chain = causeChain(e)
@@ -529,6 +542,12 @@ export type EngineConfig = {
    * sends nothing (a spending limit the chain refused has not had time to move). Absent: every proposal may run.
    */
   spendGate?: (p: Proposal) => boolean
+  /**
+   * otto/mamoru#412: why the relayer cannot pay a bundle now, or null. Set: the review records RELAYER_NATIVE_LOW and
+   * opens no op (each would be refused at the send and settle RECON_UNINCLUDABLE). Asked before the spend gate, so a
+   * held proposal takes no spending room. A throw counts as null: the send then fails as before. Absent: never held.
+   */
+  relayerShort?: () => Promise<string | null>
   /**
    * otto/mamoru#293: under MamoruActionPolicyV4 the bridge-out recipient is not in any session rule: V4 mints only to the
    * remote it registered and the guardian marked ready. The operator passes that address (read from V4) so the engine
@@ -1124,10 +1143,10 @@ export class Engine {
     this.depositsAfter = obs.safeBlock.number > this.depositsAfter ? obs.safeBlock.number : this.depositsAfter
     const key = decision.proposal ? proposalKey(decision.proposal) : ''
     const backedOff = !!decision.proposal && this.backoff.some((b) => b.until > obs.block.timestamp && (b.premiseHash === decision.premiseHash || b.key === key))
-    // The spend gate is asked last: a proposal already deduped or backed off never reaches it.
-    const deduped = (!!decision.proposal && repeatsDiscard(this.journal.lastDiscarded(), decision.premiseHash)) || backedOff || (!!decision.proposal && this.cfg.spendGate?.(decision.proposal) === false)
-    const record = this.journal.recordDecision(decision, deduped ? 'REVIEW_DEDUPED' : undefined)
-    if (!decision.proposal || deduped) return { kind: 'decided', observation: obs, record, op: null }
+    const repeated = (!!decision.proposal && repeatsDiscard(this.journal.lastDiscarded(), decision.premiseHash)) || backedOff
+    const held = await heldBy(decision.proposal, repeated, this.cfg)
+    const record = this.journal.recordDecision(decision, held)
+    if (!decision.proposal || held) return { kind: 'decided', observation: obs, record, op: null }
     const op = this.journal.propose(record, decision.proposal.grant)
     const p = decision.proposal
     this.capFreeing = p.kind === 'rerange' || p.kind === 'reduce' || p.kind === 'harvest' || (p.kind === 'enter_swap' && p.tokenIn !== this.cfg.policy.savingsAsset)

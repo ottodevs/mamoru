@@ -60,7 +60,7 @@ export type OpRecord = {
 
 export type TransitionRecord = { opId: string; seq: number; from: OpState | null; to: OpState; code: ReasonCode; actor: 'workflow'; detail?: string }
 
-export type DecisionRecord = { decision: Decision; opId: string | null; code?: 'REVIEW_DEDUPED' }
+export type DecisionRecord = { decision: Decision; opId: string | null; code?: 'REVIEW_DEDUPED' | 'RELAYER_NATIVE_LOW' }
 
 /**
  * The diary of one account in one process: decisions, operations and an
@@ -92,7 +92,7 @@ export class MemoryJournal {
     return [...this.ops].reverse().find((o) => o.state === 'discarded')
   }
 
-  recordDecision(decision: Decision, code?: 'REVIEW_DEDUPED'): DecisionRecord {
+  recordDecision(decision: Decision, code?: DecisionRecord['code']): DecisionRecord {
     const r: DecisionRecord = { decision, opId: null, code }
     this.decisions.push(r)
     return r
