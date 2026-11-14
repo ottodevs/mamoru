@@ -513,7 +513,7 @@ describe.skipIf(!RUN)('#348 A1 end to end on Base and Monad forks (gate of T8)',
     const sk = privateKeyToAccount(SIGNUP_SESSION_KEY).address
     const session = v4HomeSession({ sessionKey: sk, deployment: D, capUsd: C, generation: 1n, admit: [], remote: null, registry: baseReg })
     const created = v4CreateSetup(owners, 349n, passkey, session, baseReg)
-    const ctx: AccountContext = { accountKey: 'signup', chainId: 8453, address: created.address, owners, saltNonce: '349', passkey: { credentialId: 'a1-e2e', x: toHex(PASSKEY.x, { size: 32 }), y: toHex(PASSKEY.y, { size: 32 }) }, oneAuth: { sessionKey: sk, capUsdc: C.toString() } }
+    const ctx: AccountContext = { accountKey: 'signup', chainId: 8453, address: created.address, owners, saltNonce: '349', passkey: { credentialId: 'a1-e2e', x: toHex(PASSKEY.x, { size: 32 }), y: toHex(PASSKEY.y, { size: 32 }) }, oneAuth: { sessionKey: sk, capUsdc: C.toString(), remote: null } }
     const live = liveAccountFromContext(ctx, baseReg)
     expect(live.safe).toBe(created.address)
     const create = deployCall(live)

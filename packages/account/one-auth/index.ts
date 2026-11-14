@@ -201,14 +201,22 @@ export function v4Session(input: V4SessionInput): SmartSessionStruct {
   }
 }
 
-/** #356: the remote binding a setup-mode account's context carries (AccountContext.oneAuth.remote; absent: none). */
-export function oneAuthRemoteOf(o: { remote?: { domain: number; sessionKey: string } | null }): V4RemoteBinding {
+/**
+ * #356: the remote binding a setup-mode account's context carries (AccountContext.oneAuth.remote). Absent (undefined): a
+ * key given before #356, whose Safe committed to the fallback-only session; the operator rebuilds it to find the Safe but
+ * never runs it (startOneAuth, ONE_AUTH_LEGACY_SESSION).
+ */
+export function oneAuthRemoteOf(o: { remote?: { domain: number; sessionKey: string } | null }): V4RemoteBinding | undefined {
+  if (o.remote === undefined) return undefined
   return o.remote ? { domain: o.remote.domain, sessionKey: getAddress(o.remote.sessionKey) } : null
 }
 
-/** The home account's session at `generation` (home = 0: this IS the home), with the one remote it may register (#356). */
-export function v4HomeSession(p: { sessionKey: Address; deployment: Pick<OneAuthV4Deployment, 'policy' | 'gasPolicy'>; capUsd: bigint; generation: bigint; admit: readonly bigint[]; remote: V4RemoteBinding; registry: Registry }): SmartSessionStruct {
-  return v4Session({ sessionKey: p.sessionKey, deployment: p.deployment, init: { capUsd: p.capUsd, generation: p.generation, home: zeroAddress, homeDomain: 0, admit: p.admit }, salt: v4HomeSessionSalt(p.generation), registry: p.registry, registerRemote: p.remote })
+/**
+ * The home account's session at `generation` (home = 0: this IS the home), with the one remote it may register (#356).
+ * `remote: undefined` rebuilds the fallback-only session of a setup-mode key given before #356 (never prepared anew).
+ */
+export function v4HomeSession(p: { sessionKey: Address; deployment: Pick<OneAuthV4Deployment, 'policy' | 'gasPolicy'>; capUsd: bigint; generation: bigint; admit: readonly bigint[]; remote: V4RemoteBinding | undefined; registry: Registry }): SmartSessionStruct {
+  return v4Session({ sessionKey: p.sessionKey, deployment: p.deployment, init: { capUsd: p.capUsd, generation: p.generation, home: zeroAddress, homeDomain: 0, admit: p.admit }, salt: v4HomeSessionSalt(p.generation), registry: p.registry, ...(p.remote !== undefined ? { registerRemote: p.remote } : {}) })
 }
 
 /**

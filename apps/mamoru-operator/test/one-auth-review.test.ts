@@ -188,6 +188,20 @@ describe('#356: the remote a V4 session may register is fixed with its key', () 
     await expect(w.op.startOneAuth(c2)).rejects.toMatchObject({ code: 'REMOTE_KEY_UNKNOWN' })
   })
 
+  test('a key given before #356 keeps its session (no remote in the answer, no peer call); that Safe is never run', async () => {
+    let asked = 0
+    const w = world(0n, { ...scoped, registry: base, remotePeers: keyPeer(async () => (asked++, REMOTE)) })
+    const st = w.state as unknown as { oneAuthKeys?: Record<string, Hex> }
+    st.oneAuthKeys = { k: '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d' }
+    const key = await w.op.oneAuthKey({ ...ctx, accountKey: 'k' })
+    expect('remote' in key).toBe(false)
+    expect(asked).toBe(0)
+    const session = v4HomeSession({ sessionKey: key.sessionKey, deployment: D, capUsd: BigInt(key.capUsdc), generation: 1n, admit: [], remote: undefined, registry: base })
+    const created = v4CreateSetup(ctx.owners as Address[], BigInt(ctx.saltNonce), webAuthnSigner(passkey.x, passkey.y, base), session, base)
+    const c2: AccountContext = { ...ctx, address: created.address, oneAuth: { sessionKey: key.sessionKey, capUsdc: key.capUsdc } }
+    await expect(w.op.startOneAuth(c2)).rejects.toMatchObject({ code: 'ONE_AUTH_LEGACY_SESSION' })
+  })
+
   test('the Monad operator down: an account with a remote bucket waits (503); a Base-only one pins none and goes on', async () => {
     const w = world(0n, { ...scoped, registry: base, remotePeers: keyPeer(async () => Promise.reject(new Error('down'))) })
     const p = w.op as unknown as { v4RemoteBinding: (a: AccountState) => Promise<unknown>; v4PolicyOf: (a: unknown) => unknown }

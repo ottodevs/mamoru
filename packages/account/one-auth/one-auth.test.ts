@@ -169,8 +169,9 @@ describe('otto/mamoru#356: a home session registers only the remote the owner si
     expect(v4Session({ sessionKey: KEY, deployment: D, init, salt: id(1), registry: baseRegistry }).actions).toHaveLength(1)
   })
 
-  test('a setup-mode context without `remote` registers none', () => {
-    expect(oneAuthRemoteOf({})).toBeNull()
+  test('a setup-mode context: null registers none; absent is a key given before #356, the fallback-only session', () => {
+    expect(oneAuthRemoteOf({})).toBeUndefined()
+    expect(v4HomeSession({ sessionKey: KEY, deployment: D, capUsd: 1n, generation: 1n, admit: [], remote: undefined, registry: baseRegistry }).actions).toHaveLength(1)
     expect(oneAuthRemoteOf({ remote: null })).toBeNull()
     expect(oneAuthRemoteOf({ remote: { domain: 15, sessionKey: REMOTE_KEY.toUpperCase().replace('0X', '0x') } })).toEqual({ domain: 15, sessionKey: getAddress(REMOTE_KEY) })
   })
