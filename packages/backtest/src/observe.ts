@@ -211,6 +211,8 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
   })
   const eth = s.pools[ds.pools.indexOf(ETH_PRICE_POOL)]
   if (!eth) throw new Error(`sample ${i} (block ${s.block}) has no ${ETH_PRICE_POOL}: gas cannot be priced`)
+  const weekAgo = BigInt(s.time) - 7n * 86_400n
+  const recent = (w.reranges ?? []).filter((r) => r.at > weekAgo)
   const balances: Record<RegistryName, bigint> = { ...w.balances }
   return {
     chainId: ds.chainId,
@@ -236,6 +238,8 @@ export function observe(ds: Dataset, i: number, w: World, policy: PolicyVersion,
     intents: { paused: false, exitRequested: false },
     slot: null,
     lastRerangeAt: w.lastRerangeAt,
+    // otto/mamoru#406: what the engine passes for the weekly cap; absent with none in the last 7 days, as there.
+    ...(recent.length > 0 ? { recentReranges: recent } : {}),
     ...(readsGuard(policy) ? { guard: guardOf(ds, i, policy.execution.twapWindowSeconds, { feeGrowth: !!policy.range.lazy, ...(policy.cppi ? { peakValue: w.peakValue ?? 0n } : {}), ...(policy.depegGuard && w.peg ? { peg: { tripped: w.peg.tripped, deviationBps: w.pegDeviationBps ?? null } } : {}), ...(policy.stagedExit && w.stages ? { stages: Object.fromEntries(Object.entries(w.stages).map(([b, st]) => [b, thirdsOut(st)])) } : {}) }) } : {}),
     ...(policy.geometry ? { geometry: geometryOf(ds, i, policy.execution.twapWindowSeconds) } : {}),
   }

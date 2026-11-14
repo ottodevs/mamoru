@@ -1,6 +1,6 @@
 // Lab sweep (spec 004, #101): one policy variant over every Lab window and deposit, metrics per cell, TRAIN and TEST
 // reported apart. Pure parts live here (overrides, metrics, tables); cli/sweep.ts runs the cells in parallel.
-import { POLICIES, type PolicyVersion } from '@mamoru/policy'
+import { DEFAULT_ENGINE_SETTINGS, POLICIES, validateEngineSettings, withEngineSettings, type EngineSettings, type PolicyVersion } from '@mamoru/policy'
 import { baseRegistry, entry } from '@mamoru/registry'
 import type { HarvestArm } from './harvest.ts'
 import type { RunResult } from './types.ts'
@@ -9,11 +9,17 @@ import type { LabWindow, Split } from './windows.ts'
 const DAY = 86_400
 
 /**
+ * otto/mamoru#406: `engine` is what /ops stores as engine settings (rerange mode, `maxPerWeek`, `edgeBufferBps`,
+ * `maxWaitSeconds`, `costTest`, the fall-freeze `guard` with its thresholds). It goes through the production
+ * `validateEngineSettings` and `withEngineSettings`, so the policy a variant runs is the one the operator builds from
+ * the same settings (fail-closed cost estimate included), not a reimplementation. Keys not given are the defaults
+ * (guard off, eager). Applied after `overrides`.
+ *
  * A policy of `POLICIES` with parameters replaced. Its id is `<base>+<name>` so a result names the variant. Lab #178:
  * `harvest` runs the variant under a harvest arm instead; with no overrides the policy is then the base one, unchanged,
  * and the arm is named by the result hash.
  */
-export type Variant = { name: string; policy: string; overrides?: Record<string, unknown>; harvest?: HarvestArm }
+export type Variant = { name: string; policy: string; overrides?: Record<string, unknown>; harvest?: HarvestArm; engine?: Partial<EngineSettings> }
 
 /**
  * Deep merge for parameter overrides: objects merge key by key, anything else (arrays included) replaces. A string
@@ -34,7 +40,7 @@ export function applyOverrides<T>(base: T, overrides: Record<string, unknown>, p
     if (isPlainObject(v)) {
       // A parameter the base lacks is given whole: every key of its shape, unless it is keyed by pool or bucket.
       if (cur === undefined && isShapeNode(sub) && !('*' in sub) && !CONTAINERS.has(at)) {
-        const left = Object.keys(sub).filter((x) => !(x in v))
+        const left = Object.keys(sub).filter((x) => !(x in v) && !OPTIONAL_KEYS.has(`${at}.${x}`))
         if (left.length > 0) throw new Error(`override ${at}: the policy has no ${k} to merge into; give ${left.join(', ')} too`)
       }
       out[k] = applyOverrides(cur ?? {}, v, at, sub)
@@ -55,7 +61,7 @@ type Shape = Leaf | { [key: string]: Shape }
 function isShapeNode(s: Shape | undefined): s is { [key: string]: Shape } {
   return typeof s === 'object' && !Array.isArray(s)
 }
-const ENUMS: Record<string, readonly string[]> = { allocation: ['first-entry', 'target-weights'], 'range.adjust': ['off', 'on_out_of_range'], 'geometry.skew.regime': ['ret24h', 'ema7d'], 'depegGuard.action': ['freeze', 'exit'], 'stagedExit.reentry': ['ema', 'ladder'] }
+const ENUMS: Record<string, readonly string[]> = { allocation: ['first-entry', 'target-weights'], 'range.adjust': ['off', 'on_out_of_range'], 'geometry.skew.regime': ['ret24h', 'ema7d'], 'range.lazy.costTest': ['veto', 'off'], 'depegGuard.action': ['freeze', 'exit'], 'stagedExit.reentry': ['ema', 'ladder'] }
 const BUCKET_IDS = ['stables', 'btc-usdc', 'risk'] as const
 /** Maps keyed by name: which keys they take (undefined: any, e.g. a pool name). */
 const MAP_KEYS: Record<string, readonly string[]> = { 'guards.byBucket': BUCKET_IDS }
@@ -66,13 +72,19 @@ const ARRAYS = new Set(['buckets'])
 function validBuckets(v: unknown[]): boolean {
   return v.every((b) => isPlainObject(b) && BUCKET_IDS.includes(b.id as never) && typeof b.preference === 'number' && Array.isArray(b.pools) && b.pools.every((p) => typeof p === 'string'))
 }
+/** Keys a rule need not be given with: absent means the rule without them (#406). */
+const OPTIONAL_KEYS = new Set(['range.lazy.edgeBufferBps', 'range.lazy.maxWaitSeconds', 'range.lazy.costTest', 'range.lazy.requireCostEstimate'])
 const BUCKET_RULES: Shape = { fallFreeze: { fallBps: 'number', volBps: 'number' } }
 /** Optional parameters of `PolicyVersion` an override may add although the base policy does not set them. `*`: any pool. */
 const OPTIONAL: Shape = {
   allocation: ENUMS.allocation!,
   minEntry: 'bigint',
   rebalanceBandBps: 'number',
-  range: { widthTicksByPool: { '*': 'number' }, lazy: { edgeBufferTicks: 'number', minDwellSeconds: 'number', horizonSeconds: 'number', lvrWeightBps: 'number' } },
+  range: {
+    widthTicksByPool: { '*': 'number' },
+    maxPerWeek: 'number',
+    lazy: { edgeBufferTicks: 'number', minDwellSeconds: 'number', horizonSeconds: 'number', lvrWeightBps: 'number', edgeBufferBps: 'number', maxWaitSeconds: 'number', costTest: ['veto', 'off'], requireCostEstimate: 'boolean' },
+  },
   guards: { byBucket: { '*': BUCKET_RULES } },
   // Lab range geometry (#101): given whole, every key of the rule.
   geometry: {
@@ -93,8 +105,18 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 export function policyOf(v: Variant): PolicyVersion {
   const base = POLICIES[v.policy]
   if (!base) throw new Error(`unknown policy ${v.policy}; known: ${Object.keys(POLICIES).join(', ')}`)
-  if (!v.overrides || Object.keys(v.overrides).length === 0) return v.name === v.policy || v.harvest ? base : { ...base, policyId: `${base.policyId}+${v.name}` }
-  return { ...applyOverrides(base, v.overrides), policyId: `${base.policyId}+${v.name}` }
+  const plain = !v.overrides || Object.keys(v.overrides).length === 0
+  if (plain && !v.engine) return v.name === v.policy || v.harvest ? base : { ...base, policyId: `${base.policyId}+${v.name}` }
+  const set = plain ? base : applyOverrides(base, v.overrides!)
+  return { ...(v.engine ? withEngineSettings(set, engineSettingsOf(v)) : set), policyId: `${base.policyId}+${v.name}` }
+}
+
+/** The settings of a variant's `engine`: the defaults, then the keys given, refused unless the operator would accept them. */
+export function engineSettingsOf(v: Variant): EngineSettings {
+  const s = { ...DEFAULT_ENGINE_SETTINGS, ...v.engine } as EngineSettings
+  const errors = validateEngineSettings(JSON.parse(JSON.stringify(s)))
+  if (errors.length > 0) throw new Error(`variant ${v.name}: engine settings refused: ${errors.join('; ')}`)
+  return s
 }
 
 /** `a.b.c=value` into `{ a: { b: { c: value } } }`; the value is JSON when it parses, a string otherwise. */

@@ -1,0 +1,1351 @@
+[
+ {
+  "name": "w2000-mpw1-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 1
+   }
+  }
+ },
+ {
+  "name": "w2000-mpw1-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 1
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "prod-baseline",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 2
+   }
+  }
+ },
+ {
+  "name": "w2000-mpw2-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 2
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "w2000-mpw3-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 3
+   }
+  }
+ },
+ {
+  "name": "w2000-mpw3-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 3
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "w2000-mpw5-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 5
+   }
+  }
+ },
+ {
+  "name": "w2000-mpw5-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 5
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "w2000-mpwinf-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off"
+   }
+  }
+ },
+ {
+  "name": "w2000-mpwinf-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off"
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "wvol-mpw1-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 1
+   }
+  }
+ },
+ {
+  "name": "wvol-mpw1-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 1
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "wvol-mpw2-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 2
+   }
+  }
+ },
+ {
+  "name": "wvol-mpw2-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 2
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "wvol-mpw3-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 3
+   }
+  }
+ },
+ {
+  "name": "wvol-mpw3-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 3
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "wvol-mpw5-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 5
+   }
+  }
+ },
+ {
+  "name": "wvol-mpw5-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 5
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "wvol-mpwinf-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off"
+   }
+  }
+ },
+ {
+  "name": "wvol-mpwinf-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "geometry": {
+    "volWidth": {
+     "k": 3,
+     "horizonSeconds": 259200,
+     "minTicks": 600,
+     "maxTicks": 6000,
+     "earlyRatio": 1.5
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off"
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "w4000-mpw1-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "range": {
+    "widthTicksByPool": {
+     "pool:WETH/USDC/3000": 4000
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 1
+   }
+  }
+ },
+ {
+  "name": "w4000-mpw1-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "range": {
+    "widthTicksByPool": {
+     "pool:WETH/USDC/3000": 4000
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 1
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "w4000-mpw2-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "range": {
+    "widthTicksByPool": {
+     "pool:WETH/USDC/3000": 4000
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 2
+   }
+  }
+ },
+ {
+  "name": "w4000-mpw2-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "range": {
+    "widthTicksByPool": {
+     "pool:WETH/USDC/3000": 4000
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 2
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "w4000-mpw3-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "range": {
+    "widthTicksByPool": {
+     "pool:WETH/USDC/3000": 4000
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 3
+   }
+  }
+ },
+ {
+  "name": "w4000-mpw3-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "range": {
+    "widthTicksByPool": {
+     "pool:WETH/USDC/3000": 4000
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 3
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "w4000-mpw5-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "range": {
+    "widthTicksByPool": {
+     "pool:WETH/USDC/3000": 4000
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 5
+   }
+  }
+ },
+ {
+  "name": "w4000-mpw5-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "range": {
+    "widthTicksByPool": {
+     "pool:WETH/USDC/3000": 4000
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off",
+    "maxPerWeek": 5
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ },
+ {
+  "name": "w4000-mpwinf-guardoff",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "range": {
+    "widthTicksByPool": {
+     "pool:WETH/USDC/3000": 4000
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off"
+   }
+  }
+ },
+ {
+  "name": "w4000-mpwinf-guardon",
+  "policy": "conservador-lab-geometry-v1",
+  "overrides": {
+   "range": {
+    "widthTicksByPool": {
+     "pool:WETH/USDC/3000": 4000
+    }
+   },
+   "buckets": [
+    {
+     "id": "stables",
+     "preference": 9000,
+     "pools": [
+      "pool:USDC/USDT/100"
+     ]
+    },
+    {
+     "id": "risk",
+     "preference": 1000,
+     "pools": [
+      "pool:WETH/USDC/3000"
+     ]
+    }
+   ]
+  },
+  "engine": {
+   "rerange": {
+    "mode": "lazy",
+    "edgeBufferTicks": 100,
+    "minDwellSeconds": 1800,
+    "horizonSeconds": 86400,
+    "lvrWeightBps": 10000,
+    "edgeBufferBps": 2500,
+    "maxWaitSeconds": 21600,
+    "costTest": "off"
+   },
+   "guard": {
+    "enabled": true,
+    "btc": {
+     "fallBps": 700,
+     "volBps": 8000
+    },
+    "eth": {
+     "fallBps": 900,
+     "volBps": 10000
+    }
+   }
+  }
+ }
+]
