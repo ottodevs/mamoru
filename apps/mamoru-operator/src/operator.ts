@@ -6782,24 +6782,22 @@ export class Operator {
     if (!this.inScope(view, 'one_auth_v4')) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'accounts on one approval are not offered for this account')
     const keys = (this.store.state.oneAuthKeys ??= {})
     const remotes = (this.store.state.oneAuthRemotes ??= {})
-    // #356: a key given before the remote was fixed with it keeps the session its Safe may already commit to (no remote
-    // in the answer, as then); startOneAuth never runs that session.
-    const legacy = !!keys[ctx.accountKey] && !(ctx.accountKey in remotes)
     if (!keys[ctx.accountKey]) {
+      // #356: the remote the session may register is part of the setup, so of the address. It is resolved first and saved
+      // with the key in one write: a failed resolution gives no key, and a key is never saved without its remote.
+      const remote = await this.v4RemoteBinding(view, { policyId: ONE_AUTH_V4 })
       // Review of #202 (P1-9): the head when the key is given; the Safe's address (and so any deposit to it) comes after,
       // so a Start counts deposits from here on (depositsAfter), the first one included.
       const block = await this.client.getBlockNumber()
       keys[ctx.accountKey] = generatePrivateKey()
       ;(this.store.state.oneAuthKeyBlocks ??= {})[ctx.accountKey] = block.toString()
+      remotes[ctx.accountKey] = remote
       this.store.save()
     }
     const answer = { sessionKey: privateKeyToAccount(keys[ctx.accountKey]!).address, capUsdc: v4CapUsdOf(this.capFor(view)).toString() }
-    if (legacy) return answer
-    // #356: the remote the session may register is part of the setup, so of the address: fixed the first time, like the key.
-    if (!(ctx.accountKey in remotes)) {
-      remotes[ctx.accountKey] = await this.v4RemoteBinding(view, { policyId: ONE_AUTH_V4 })
-      this.store.save()
-    }
+    // #356: so a key with no remote entry was given before the remote was fixed with it: it keeps the session its Safe may
+    // already commit to (no remote in the answer, as then), and startOneAuth never runs that session.
+    if (!(ctx.accountKey in remotes)) return answer
     const remote = remotes[ctx.accountKey]!
     return { ...answer, remote: remote ? { domain: remote.domain, sessionKey: getAddress(remote.sessionKey) } : null }
   }
