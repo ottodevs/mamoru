@@ -4,7 +4,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { Decision } from '@mamoru/decide'
 import { BaseError, ExecutionRevertedError, InternalRpcError, InvalidInputRpcError, ResourceUnavailableRpcError, RpcRequestError, TimeoutError } from 'viem'
-import { Engine, isTransportError, repeatsDiscard, thrownSummary } from './engine.ts'
+import { Engine, heldBy, isTransportError, repeatsDiscard, thrownSummary } from './engine.ts'
 import { MemoryJournal, type OpRecord } from './journal.ts'
 
 const timeout = () => new TimeoutError({ body: { method: 'eth_simulateV1', params: [] }, url: 'https://rpc.monad.example' })
@@ -161,5 +161,29 @@ describe('thrownSummary (otto/mamoru#357)', () => {
     const r = Proxy.revocable({}, {})
     r.revoke()
     for (const odd of [{ get message() { throw new Error('getter') } }, r.proxy, Object.create(null)]) expect(thrownSummary(odd)).toBe('an unreadable thrown value')
+  })
+})
+
+// otto/mamoru#412: live 13 Nov on Monad, the relayer at 0.07 MON: every harvest was refused at the send and settled
+// RECON_UNINCLUDABLE, review after review. A relayer that cannot pay holds the proposal before any op opens.
+describe('a relayer that cannot pay holds the proposal (otto/mamoru#412)', () => {
+  const p = harvest.proposal!
+  test('short: RELAYER_NATIVE_LOW, and the spend gate is never asked', async () => {
+    let asked = 0
+    expect(await heldBy(p, false, { relayerShort: async () => 'relayer has 0.07 MON', spendGate: () => (asked++, true) })).toBe('RELAYER_NATIVE_LOW')
+    expect(asked).toBe(0)
+  })
+  test('funded: the proposal runs; the spend gate still decides', async () => {
+    expect(await heldBy(p, false, { relayerShort: async () => null, spendGate: () => true })).toBeUndefined()
+    expect(await heldBy(p, false, { relayerShort: async () => null, spendGate: () => false })).toBe('REVIEW_DEDUPED')
+  })
+  test('a relayer check that throws lets the proposal through (never held on a guess)', async () => {
+    expect(await heldBy(p, false, { relayerShort: async () => { throw new Error('timeout') } })).toBeUndefined()
+  })
+  test('a repeat is deduped before the relayer is asked; no proposal, nothing held', async () => {
+    let asked = 0
+    expect(await heldBy(p, true, { relayerShort: async () => (asked++, 'short') })).toBe('REVIEW_DEDUPED')
+    expect(await heldBy(null, false, { relayerShort: async () => (asked++, 'short') })).toBeUndefined()
+    expect(asked).toBe(0)
   })
 })

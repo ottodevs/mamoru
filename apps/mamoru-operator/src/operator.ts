@@ -110,6 +110,12 @@ export type AuthorizationSnapshot = {
   deactivated: string | null
 }
 const RELAYER_BALANCE_CACHE_MS = 60_000
+/**
+ * otto/mamoru#412: the gas one engine bundle may take, for the relayer check before an op opens. Above the largest bundle
+ * measured on a gas-limit chain (an enter_mint on Monad: handleOps 1.6M with its margin), so a relayer that passes can
+ * pay any of them at the fee read.
+ */
+const RELAYER_BUNDLE_GAS = 2_000_000n
 /** otto/mamoru#367: how long the minute timer reads one engine's held history (the review's own read is longer). */
 const HELD_TIMER_READ_MS = 20_000
 /** otto/mamoru#277: a remote Safe still not provisioned this long after its first non-active answer pages ops once per code. */
@@ -1031,6 +1037,9 @@ export class Operator {
   private readonly refillHeld = new Map<string, string>()
   private readonly gasReserveAlertOverride = gasReserveAlertOverrideFromEnv()
   private relayerBalanceCache: { at: number; value: bigint } | null = null
+  /** otto/mamoru#412: the maxFeePerGas the relayer check last read (RELAYER_BALANCE_CACHE_MS), and when it last logged a hold. */
+  private relayerGasPriceCache: { at: number; value: bigint } | null = null
+  private relayerShortLoggedAt = 0
   /** otto/mamoru#135: one readSafe shared by every open tab and poll of the same account; dropped whenever the account moves (fundingMoved). */
   private readonly fundingCache = new FundingCache<SafeRead>(Date.now, FUNDING_STALE_MS)
   /** otto/mamoru#340: per account, the last look for a deposit (watchDeposits): when, how far, and the one in flight. */
@@ -1194,6 +1203,28 @@ export class Operator {
       this.relayerBalanceCache = { at: now, value }
     }
     return { wei: this.relayerBalanceCache.value.toString(), cachedAgeMs: now - this.relayerBalanceCache.at }
+  }
+
+  /**
+   * otto/mamoru#412: why the relayer cannot pay one engine bundle now (RELAYER_BUNDLE_GAS at the maxFeePerGas the relayer
+   * signs with, what the node checks the balance against), or null.
+   * Live 13 Nov on Monad: the relayer fell to 0.07 MON and every harvest of seven accounts was refused at the send
+   * ("Signer had insufficient balance") and settled RECON_UNINCLUDABLE, review after review. Balance and price are cached
+   * RELAYER_BALANCE_CACHE_MS, so the engines' reviews add at most one read of each per minute; a refill lifts the hold
+   * within that. A read that fails throws, and the engine then lets the op go as before (never held on a guess).
+   */
+  async relayerShortNow(): Promise<string | null> {
+    const have = BigInt((await this.relayerBalance()).wei)
+    const now = Date.now()
+    if (!this.relayerGasPriceCache || now - this.relayerGasPriceCache.at >= RELAYER_BALANCE_CACHE_MS) this.relayerGasPriceCache = { at: now, value: (await this.client.estimateFeesPerGas()).maxFeePerGas }
+    const need = RELAYER_BUNDLE_GAS * this.relayerGasPriceCache.value
+    if (have >= need) return null
+    const why = `relayer ${this.relayer.address} on chain ${this.cfg.chainId} has ${have} wei, under one bundle (${need}): engine ops wait`
+    if (now - this.relayerShortLoggedAt >= RELAYER_LOW_LOG_MS) {
+      this.relayerShortLoggedAt = now
+      logErr('[alert]', `${why}; fund it`)
+    }
+    return why
   }
 
   /**
@@ -8086,6 +8117,7 @@ export class Operator {
         ...this.opRoomFor(acc),
         bridgeLimit: () => this.bridgeLimitFor(acc),
         spendGate: (p) => this.spendHold.admit(this.spendHoldKey(acc), p, Date.now()),
+        relayerShort: () => this.relayerShortNow(),
         rerangeHistory: rerangeHistoryOf(acc.ops, Math.floor(Date.now() / 1000)),
         ...(outOfRangeSeedOf(acc.outOfRange) ? { outOfRangeSeed: outOfRangeSeedOf(acc.outOfRange)! } : {}),
         ...(heldHistorySeedOf(acc.heldHistory) ? { heldHistorySeed: heldHistorySeedOf(acc.heldHistory)! } : {}),
@@ -8266,7 +8298,7 @@ export class Operator {
             // otto/mamoru#384: a hold for want of capital says what the cap left, so a cap hold reads without a replay.
             const cap = d.reason === 'DECIDE_NO_CAPITAL' ? r.observation.cap : undefined
             const capNote = cap ? ` (cap ${fmtUsdc(cap.capUsdc)}, elsewhere ${cap.elsewhereUsdc === null ? 'unread' : fmtUsdc(cap.elsewhereUsdc)}${cap.chainCapUsdc !== undefined ? `, this Safe ${fmtUsdc(cap.chainCapUsdc)}` : ''}, room ${fmtUsdc(capRoomOf(r.observation, this.enginePolicyOf(acc)) ?? 0n)})` : ''
-            const prefix = `[engine ${acc.accountKey}] block ${d.observationRef.block} ${d.kind} ${d.reason}${capNote}${o ? ` -> ${o.opId} ${o.state} ${o.stateCode}` : ''}`
+            const prefix = `[engine ${acc.accountKey}] block ${d.observationRef.block} ${d.kind} ${d.reason}${capNote}${o ? ` -> ${o.opId} ${o.state} ${o.stateCode}` : r.record.code === 'RELAYER_NATIVE_LOW' ? ' -> held RELAYER_NATIVE_LOW' : ''}`
             if (last?.detail) logErr(prefix, last.detail)
             else console.log(prefix)
             safeMetrics(() => this.engineHealth.record(acc.accountKey, true, d.code, undefined))
