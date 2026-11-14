@@ -251,7 +251,9 @@ re-parameterize an entry.
    `registerRemote` may then compute a new remote. The old remote's own V4 sends its funds back only to the home
    account, its fixed `homeOf`. The result is a Safe with the same code as every Mamoru Safe, owned by the user's
    current keys. Its one session is bound by the same V4. `registerRemote(domain, sessionKey)` is only callable
-   through the account's own session.
+   through the account's own session or its owners, and the session only for the domain and remote session key the
+   owner signed: the home session's own `(V4, registerRemote)` action pins both with UniActionPolicy (otto/mamoru#356,
+   R7; a leaked session key could otherwise register a remote whose session is its own).
 5. **Budget.** Per chain, one value bucket for the account, in USD-stable units, refilled each window, with:
    - **Per asset and per vault:** at most the class's or vault's `ratioBps` of the bucket (the per-asset sub-bucket
      of "Eligibility rules").
@@ -319,7 +321,8 @@ re-parameterize an entry.
 - **No pause check, no PauseGate** (A1). A breach of a limit is a refusal of that call, never a state that someone
   must clear.
 - **One session per account and chain:**
-  - A single fallback action whose only policy is V4.
+  - A fallback action whose only policy is V4. A home session also has a `(V4, registerRemote)` action: V4 and
+    UniActionPolicy pinning the domain and remote session key (none: a rule no call meets). otto/mamoru#356.
   - The userOp policy is `MamoruGasPolicyV2` only.
   - T1 (fork probe) confirmed the deployed SmartSession supports this. No TimeFramePolicy: if one is ever kept, it
     needs `validUntil = 0` with `validAfter ≠ 0` (T1).

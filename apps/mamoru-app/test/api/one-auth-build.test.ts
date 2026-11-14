@@ -19,8 +19,10 @@ const OPERATOR_SECRET = 'operator-secret-for-tests-only-0123456789'
 const ZERO = '0x0000000000000000000000000000000000000000' as const
 const KEY = '0x000000000000000000000000000000000000dEaD' as const
 
-const home = (b: AccountRow): MigrateV4Input => ({ chainId: 8453, safe: b.address as `0x${string}`, safeNonce: '0', step: 0, capUsdc: '1000000000', sessionKey: KEY, generation: '1', admit: [], oldPermissionIds: [], removeIds: [], noncesBefore: [], home: ZERO, homeDomain: 0 })
-const sibling = (b: AccountRow): MigrateV4Input => ({ ...home(b), chainId: 1, step: 1, home: b.address as `0x${string}`, homeDomain: 6 })
+// #356: step 0 pins the one remote its session may register; a remote's step names none.
+const homeOf = (b: AccountRow): MigrateV4Input => ({ chainId: 8453, safe: b.address as `0x${string}`, safeNonce: '0', step: 0, capUsdc: '1000000000', sessionKey: KEY, generation: '1', admit: [], oldPermissionIds: [], removeIds: [], noncesBefore: [], home: ZERO, homeDomain: 0 })
+const home = (b: AccountRow): MigrateV4Input => ({ ...homeOf(b), remote: { domain: 15, sessionKey: '0x000000000000000000000000000000000000f00d' } })
+const sibling = (b: AccountRow): MigrateV4Input => ({ ...homeOf(b), chainId: 1, step: 1, home: b.address as `0x${string}`, homeDomain: 6 })
 const offer = (input: MigrateV4Input, tamper: Partial<{ safeTxHash: string }> = {}) => {
   const built = buildMigrateV4(input, registryFor(input.chainId))
   return { safe: input.safe, chainId: input.chainId, safeTxHash: tamper.safeTxHash ?? built.safeTxHash, summary: [], expiresAt: 'x', prepareId: 'p1', input }
@@ -103,7 +105,7 @@ describe('one-authorization prepares are rebuilt by the Worker (#311)', () => {
   }
 
   test('migrate-v4/prepare step 1 through the Base account: a Safe on Monad its keys do not give is refused', async () => {
-    const t = await world((b) => offer({ ...home(b), chainId: 143, step: 1, safe: '0x00000000000000000000000000000000000b0b00', home: b.address as `0x${string}`, homeDomain: 6 }))
+    const t = await world((b) => offer({ ...homeOf(b), chainId: 143, step: 1, safe: '0x00000000000000000000000000000000000b0b00', home: b.address as `0x${string}`, homeDomain: 6 }))
     const res = await t.call('/migrate-v4/prepare', { method: 'POST', body: '{"step":1}' })
     expect(res.status).toBe(502)
   })
@@ -139,7 +141,7 @@ describe('one-authorization prepares are rebuilt by the Worker (#311)', () => {
   test("review r1 of #239: step 1 through the Base account on its stored Monad Safe passes; funds moved to an unverified address do not", async () => {
     let moveTo: `0x${string}` | undefined
     let sleeve: () => `0x${string}` | undefined = () => undefined
-    const step1 = (b: AccountRow): MigrateV4Input => ({ ...home(b), chainId: 143, step: 1, safe: sleeve()!, home: b.address as `0x${string}`, homeDomain: 6, ...(moveTo ? { moveTo, transfers: [{ token: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603', amount: '1' }] } : {}) })
+    const step1 = (b: AccountRow): MigrateV4Input => ({ ...homeOf(b), chainId: 143, step: 1, safe: sleeve()!, home: b.address as `0x${string}`, homeDomain: 6, ...(moveTo ? { moveTo, transfers: [{ token: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603', amount: '1' }] } : {}) })
     const t = await world((b) => offer(step1(b)), { sleeve: true })
     sleeve = t.sleeveAddress
     expect(sleeve()).toBeDefined()

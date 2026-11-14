@@ -32,7 +32,7 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
-import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
+import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, readSessionState, sessionCreatedIds, oneAuthRemoteOf, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReportedRelease, ReturnHome } from './return-home.ts'
 import { beforeSign as releaseBeforeSign, cancelRelease, homeOf as releaseHomeOf, releaseObs, ReleaseRefused, releasesToCount, releaseView, requestRelease, applySettle, nonceUsedAtHead, settleOutcome, unsigned as releaseUnsigned, type ReleaseView } from './release.ts'
@@ -3852,8 +3852,9 @@ export class Operator {
     const newKey = acc.sessionKey ? undefined : generatePrivateKey()
     const sessionKey = privateKeyToAccount((acc.sessionKey ?? newKey)!).address
     const v4Cap = v4CapUsdOf(cap)
+    const remote = await this.v4RemoteBinding(acc)
     const { nonce: safeNonce } = await readSafeNonce(this.client, live.safe)
-    const input: MigrateV4Input = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: safeNonce.toString(), step: 0, capUsdc: v4Cap.toString(), sessionKey, generation: '1', admit: [], oldPermissionIds: [], removeIds: [], noncesBefore: [], home: '0x0000000000000000000000000000000000000000', homeDomain: 0 }
+    const input: MigrateV4Input = { remote, chainId: this.cfg.chainId, safe: live.safe, safeNonce: safeNonce.toString(), step: 0, capUsdc: v4Cap.toString(), sessionKey, generation: '1', admit: [], oldPermissionIds: [], removeIds: [], noncesBefore: [], home: '0x0000000000000000000000000000000000000000', homeDomain: 0 }
     const tx = buildMigrateV4(input, this.cfg.registry)
     const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey, permissionId: tx.permissionId, salt: v4HomeSessionSalt(1n), deployment: d, registry: this.cfg.registry }), permissionId: tx.permissionId }
     const remoteChain = this.v4PolicyOf(acc).remoteBuckets?.length ? 'Monad' : undefined
@@ -6823,7 +6824,7 @@ export class Operator {
       console.log(`[v4] deploy ${live.safe} tx ${hash} ${receipt.status}`)
       if (receipt.status !== 'success') throw new HttpError(502, 'DEPLOY_FAILED', 'the Safe could not be created just now: it is retried')
     }
-    const session = v4HomeSession({ sessionKey: ctx.oneAuth.sessionKey as Address, deployment: d, capUsd: cap, generation: 1n, admit: [], registry: this.cfg.registry })
+    const session = v4HomeSession({ sessionKey: ctx.oneAuth.sessionKey as Address, deployment: d, capUsd: cap, generation: 1n, admit: [], remote: oneAuthRemoteOf(ctx.oneAuth), registry: this.cfg.registry })
     const pid = permissionIdOf(session)
     const block = await this.client.getBlockNumber()
     const [on, cfg] = await Promise.all([
@@ -6992,6 +6993,25 @@ export class Operator {
     if (p) this.refuseMigrate('ONE_AUTH_PAUSED', 'Mamoru is paused on your Safe: the update waits until the pause ends')
   }
 
+  /**
+   * otto/mamoru#356 (R7): the one remote the account's V4 session may register, pinned in the session the owner signs:
+   * the Monad operator's remote session key for this account (stable: it keeps the key it gave, `remoteKey`), whenever
+   * that operator is configured, so a remote bucket added later needs no new signature; null without it. A leaked
+   * session key can then register no remote of its own (V4.registerRemote derives the remote from the key it is given).
+   */
+  private async v4RemoteBinding(acc: AccountState): Promise<{ domain: number; sessionKey: Address } | null> {
+    const peer = this.cfg.remotePeers?.[BRIDGE_MONAD_CHAIN_ID]
+    if (!peer) {
+      if (this.v4PolicyOf(acc).remoteBuckets?.length) throw new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru on Monad is not reachable right now: nothing was changed, try again in a few minutes')
+      return null
+    }
+    const sessionKey = await peer.key(acc.ctx).catch((e) => {
+      logErr(`[v4] ${acc.accountKey} remote key:`, e)
+      throw new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru on Monad is not reachable right now: nothing was changed, try again in a few minutes')
+    })
+    return { domain: V4_DOMAIN_BY_CHAIN[BRIDGE_MONAD_CHAIN_ID]!, sessionKey }
+  }
+
   private async planMigration(ctx: AccountContext): Promise<OwnerTxToSign> {
     this.assertLive()
     const { acc, live } = this.account(ctx, { readOnly: true })
@@ -7007,9 +7027,10 @@ export class Operator {
     const admit = this.sizingPositions(acc, r).map((p) => p.tokenId).slice(0, V4_MAX_ADMIT)
     const cap = v4CapUsdOf(this.capFor(acc)) // the cap D1 holds for the account: the Worker derives the same C (review of #202)
     const { nonces } = await readSessionState(this.client, this.cfg.registry, live.safe, inv.revoke, r.block)
+    const remote = await this.v4RemoteBinding(acc)
     const { nonce: safeNonce } = await readSafeNonce(this.client, live.safe)
     // The one builder the Worker rebuilds with (packages/account/one-auth buildMigrateV4): explicit inputs only.
-    const input: MigrateV4Input = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: safeNonce.toString(), step: 0, capUsdc: cap.toString(), sessionKey: privateKeyToAccount(acc.sessionKey).address, generation: '1', admit: admit.map(String), oldPermissionIds: inv.revoke, removeIds: inv.remove, noncesBefore: nonces.map(String), home: '0x0000000000000000000000000000000000000000', homeDomain: 0 }
+    const input: MigrateV4Input = { remote, chainId: this.cfg.chainId, safe: live.safe, safeNonce: safeNonce.toString(), step: 0, capUsdc: cap.toString(), sessionKey: privateKeyToAccount(acc.sessionKey).address, generation: '1', admit: admit.map(String), oldPermissionIds: inv.revoke, removeIds: inv.remove, noncesBefore: nonces.map(String), home: '0x0000000000000000000000000000000000000000', homeDomain: 0 }
     const tx = buildMigrateV4(input, this.cfg.registry)
     const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey: privateKeyToAccount(acc.sessionKey).address, permissionId: tx.permissionId, salt: v4HomeSessionSalt(1n), deployment: d, registry: this.cfg.registry }), permissionId: tx.permissionId, ...(admit.length ? { admit: admit.map(String) } : {}) }
     const summary = baseStepLines({ remove: inv.remove.length, revoke: inv.revoke.length, capUsd: cap, admitted: admit.length, ...(this.v4PolicyOf(acc).remoteBuckets?.length ? { remoteChain: 'Monad' } : {}) })

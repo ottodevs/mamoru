@@ -159,7 +159,7 @@ describe('P1-9: an account created on V4 counts its first deposit and needs the 
   test('deployed with no USDC: waits (BELOW_DEPLOY_MINIMUM); deposits are counted from the block the key was given', async () => {
     const w = world(0n, { ...scoped, registry: base })
     const key = await w.op.oneAuthKey({ ...ctx, accountKey: 'k' })
-    const session = v4HomeSession({ sessionKey: key.sessionKey, deployment: D, capUsd: BigInt(key.capUsdc), generation: 1n, admit: [], registry: base })
+    const session = v4HomeSession({ sessionKey: key.sessionKey, deployment: D, capUsd: BigInt(key.capUsdc), generation: 1n, admit: [], remote: null, registry: base })
     const created = v4CreateSetup(ctx.owners as Address[], BigInt(ctx.saltNonce), webAuthnSigner(passkey.x, passkey.y, base), session, base)
     const c2: AccountContext = { ...ctx, address: created.address, oneAuth: { sessionKey: key.sessionKey, capUsdc: key.capUsdc } }
     w.chain.deployed = true

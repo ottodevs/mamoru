@@ -10,13 +10,13 @@
 //    enumeration and the operator's records; any disagreement fails closed.
 // Owner signatures stay Safe transaction hashes only (SECURITY.md: Mamoru never asks the passkey to sign a SmartSession
 // ENABLE payload; packages/account/sessions/no-enable-mode.test.ts).
-import { concat, encodeAbiParameters, encodeFunctionData, encodePacked, getAddress, getContractAddress, hashTypedData, isAddressEqual, keccak256, pad, parseAbi, parseAbiItem, size, toHex, zeroAddress, type Hex, type PublicClient } from 'viem'
+import { concat, encodeAbiParameters, encodeFunctionData, encodePacked, getAddress, getContractAddress, hashTypedData, isAddressEqual, keccak256, pad, parseAbi, parseAbiItem, size, toFunctionSelector, toHex, zeroAddress, type Hex, type PublicClient } from 'viem'
 import type { Address, MigrateV4Input } from '@mamoru/domain'
 import { address, moduleRegistryAbi, multiSendCallOnlyAbi, safeAbi, safeProxyFactoryAbi, safeWebAuthnSharedSignerAbi, smartSessionAbi, type Registry } from '@mamoru/registry'
 import { encodeGasCapsV2, encodeInitV4, GAS_CAPS_V2_BY_CHAIN, oneAuthV4Deployment, V4_CHAIN_BY_DOMAIN, V4_HOME_CHAINS, type GasCapsV2, type InitV4, type OneAuthV4Deployment } from '@mamoru/policy'
 import { accountSetup, counterfactualAddress, SAFE_PROXY_141_CREATION_CODE } from '../recovery/index.ts'
 import { multiSendCallOnly, OPERATION_DELEGATECALL, safeTxTypedData, type MultiSendCall, type SafeSetup, type WebAuthnSigner } from '../safe/index.ts'
-import { ATTESTATION_SCHEMA_UID, ownableValidatorInitData, permissionIdOf, type SmartSessionStruct } from '../sessions/index.ts'
+import { ATTESTATION_SCHEMA_UID, ownableValidatorInitData, permissionIdOf, uniActionRules, type SmartSessionStruct } from '../sessions/index.ts'
 
 // otto/mamoru#348: the one builder (and validator) of a V4 session batch, A1 shape.
 export * from './batch.ts'
@@ -126,6 +126,17 @@ const erc20TransferAbi = parseAbi(['function transfer(address to, uint256 amount
 
 // ---- the session ------------------------------------------------------------------------------------------------
 
+/**
+ * otto/mamoru#356 (R7): the one remote a home session's key may register (V4.registerRemote), owner-signed with the
+ * session: the CCTP domain and the remote session key the remote chain's operator gave for this account. `null`: none,
+ * the session registers no remote (the owners still can, by a Safe tx). V4 lets the account's session call
+ * registerRemote and derives the remote from the CURRENT owners and the key it is given, so with the fallback alone a
+ * leaked session key registers a remote whose session is its own and bridges the balance there.
+ */
+export type V4RemoteBinding = { domain: number; sessionKey: Address } | null
+
+export const REGISTER_REMOTE_SELECTOR: Hex = toFunctionSelector('registerRemote(uint32,address)')
+
 export type V4SessionInput = {
   sessionKey: Address
   deployment: Pick<OneAuthV4Deployment, 'policy' | 'gasPolicy'>
@@ -134,6 +145,42 @@ export type V4SessionInput = {
   gasCaps?: GasCapsV2
   salt: Hex
   registry: Registry
+  /**
+   * #356: a home session's (V4, registerRemote) action (v4RegisterRemoteAction). Absent: the fallback alone, as V4's
+   * helper builds a remote's session on chain (MamoruV4Helper.sessions; a remote cannot register remotes, BadBridge(4)).
+   */
+  registerRemote?: V4RemoteBinding
+}
+
+/**
+ * #356: the home session's own action for V4.registerRemote. SmartSession checks a call against its (target, selector)
+ * action when the session has one and never against the fallback, so this action alone decides registerRemote:
+ *  - V4, with the session's Init (no admit: positions are admitted once, by the fallback's Init), keeps every check V4
+ *    runs at validation, the generation retirement of a renewal included;
+ *  - UniActionPolicy pins the domain and the remote session key (EQUAL); with no binding, `domain < 0`, which no call
+ *    meets. No native value (valueLimitPerUse 0).
+ */
+export function v4RegisterRemoteAction(binding: V4RemoteBinding, init: InitV4, deployment: Pick<OneAuthV4Deployment, 'policy'>, registry: Registry): SmartSessionStruct['actions'][number] {
+  if (BigInt(init.home) !== 0n) throw new Error('v4RegisterRemoteAction: only a home session registers remotes')
+  if (binding) {
+    const chainId = V4_CHAIN_BY_DOMAIN[binding.domain]
+    if (chainId === undefined || chainId === registry.chainId) throw new Error(`v4RegisterRemoteAction: domain ${binding.domain} is not another chain of V4's table`)
+    if (BigInt(binding.sessionKey) === 0n) throw new Error('v4RegisterRemoteAction: no remote session key (V4 BadBridge(5))')
+  }
+  const rules = binding
+    ? uniActionRules([
+        { index: 0, condition: 'EQUAL', ref: BigInt(binding.domain) },
+        { index: 1, condition: 'EQUAL', ref: BigInt(getAddress(binding.sessionKey)) },
+      ])
+    : uniActionRules([{ index: 0, condition: 'LESS_THAN', ref: 0n }])
+  return {
+    actionTargetSelector: REGISTER_REMOTE_SELECTOR,
+    actionTarget: deployment.policy,
+    actionPolicies: [
+      { policy: deployment.policy, initData: encodeInitV4({ ...init, admit: [] }) },
+      { policy: address('UniActionPolicy', registry), initData: rules },
+    ],
+  }
 }
 
 /** The one V4 session: fallback action, V4 the only action policy (InitV4), MamoruGasPolicyV2 the only userOp policy. */
@@ -146,14 +193,22 @@ export function v4Session(input: V4SessionInput): SmartSessionStruct {
     salt: input.salt,
     userOpPolicies: [{ policy: input.deployment.gasPolicy, initData: encodeGasCapsV2(caps) }],
     erc7739Policies: { allowedERC7739Content: [], erc1271Policies: [] },
-    actions: [{ actionTargetSelector: FALLBACK_SELECTOR, actionTarget: FALLBACK_TARGET, actionPolicies: [{ policy: input.deployment.policy, initData: encodeInitV4(input.init) }] }],
+    actions: [
+      { actionTargetSelector: FALLBACK_SELECTOR, actionTarget: FALLBACK_TARGET, actionPolicies: [{ policy: input.deployment.policy, initData: encodeInitV4(input.init) }] },
+      ...(input.registerRemote !== undefined ? [v4RegisterRemoteAction(input.registerRemote, input.init, input.deployment, input.registry)] : []),
+    ],
     permitERC4337Paymaster: false,
   }
 }
 
-/** The home account's session at `generation` (home = 0: this IS the home). */
-export function v4HomeSession(p: { sessionKey: Address; deployment: Pick<OneAuthV4Deployment, 'policy' | 'gasPolicy'>; capUsd: bigint; generation: bigint; admit: readonly bigint[]; registry: Registry }): SmartSessionStruct {
-  return v4Session({ sessionKey: p.sessionKey, deployment: p.deployment, init: { capUsd: p.capUsd, generation: p.generation, home: zeroAddress, homeDomain: 0, admit: p.admit }, salt: v4HomeSessionSalt(p.generation), registry: p.registry })
+/** #356: the remote binding a setup-mode account's context carries (AccountContext.oneAuth.remote; absent: none). */
+export function oneAuthRemoteOf(o: { remote?: { domain: number; sessionKey: string } | null }): V4RemoteBinding {
+  return o.remote ? { domain: o.remote.domain, sessionKey: getAddress(o.remote.sessionKey) } : null
+}
+
+/** The home account's session at `generation` (home = 0: this IS the home), with the one remote it may register (#356). */
+export function v4HomeSession(p: { sessionKey: Address; deployment: Pick<OneAuthV4Deployment, 'policy' | 'gasPolicy'>; capUsd: bigint; generation: bigint; admit: readonly bigint[]; remote: V4RemoteBinding; registry: Registry }): SmartSessionStruct {
+  return v4Session({ sessionKey: p.sessionKey, deployment: p.deployment, init: { capUsd: p.capUsd, generation: p.generation, home: zeroAddress, homeDomain: 0, admit: p.admit }, salt: v4HomeSessionSalt(p.generation), registry: p.registry, registerRemote: p.remote })
 }
 
 /**
@@ -418,9 +473,13 @@ export function buildMigrateV4(input: MigrateV4Input, registry: Registry): { saf
   if (input.step === 1 && (!remote || !V4_HOME_CHAINS.includes(V4_CHAIN_BY_DOMAIN[input.homeDomain]!) || V4_CHAIN_BY_DOMAIN[input.homeDomain] === input.chainId)) throw new Error('buildMigrateV4: step 1 names its home on another chain')
   if (!!input.transfers?.length !== !!input.moveTo) throw new Error('buildMigrateV4: transfers and moveTo go together')
   if (input.oldPermissionIds.length !== input.noncesBefore.length) throw new Error('buildMigrateV4: one nonce per old id')
+  // #356: a home session always says which remote its key may register (null: none); a remote's session never does.
+  if (!remote && input.remote === undefined) throw new Error('buildMigrateV4: step 0 names the remote its session may register (or null)')
+  if (remote && input.remote !== undefined) throw new Error('buildMigrateV4: a remote Safe registers no remotes')
   const safe = getAddress(input.safe)
   const init = { capUsd: dec(input.capUsdc, 'capUsdc'), generation: dec(input.generation, 'generation'), home: getAddress(input.home), homeDomain: input.homeDomain, admit: input.admit.map((a) => dec(a, 'admit')) }
-  const session = v4Session({ sessionKey: getAddress(input.sessionKey), deployment, init, salt: remote ? V4_REMOTE_SESSION_SALT : v4HomeSessionSalt(init.generation), registry })
+  const registerRemote = remote ? undefined : input.remote ? { domain: input.remote.domain, sessionKey: getAddress(input.remote.sessionKey) } : null
+  const session = v4Session({ sessionKey: getAddress(input.sessionKey), deployment, init, salt: remote ? V4_REMOTE_SESSION_SALT : v4HomeSessionSalt(init.generation), registry, ...(registerRemote !== undefined ? { registerRemote } : {}) })
   const extra = (input.transfers ?? []).map((t) => {
     if (!registry.entries.some((e) => e.kind === 'token' && isAddressEqual(e.address, t.token))) throw new Error(`buildMigrateV4: ${t.token} is not a token of the ${registry.chain} registry`)
     return { to: getAddress(t.token), value: 0n, data: encodeFunctionData({ abi: erc20TransferAbi, functionName: 'transfer', args: [getAddress(input.moveTo!), dec(t.amount, 'amount')] }) }
