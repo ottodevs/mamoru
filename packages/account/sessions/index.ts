@@ -14,7 +14,7 @@ import {
 import { getUserOperationHash, toPackedUserOperation, type UserOperation } from 'viem/account-abstraction'
 import { ReasonError, type Address, type Hex } from '@mamoru/domain'
 import { baseRegistry, address, entry, isDeployed, entryPointV07Abi, moduleRegistryAbi, safe7579Abi, smartSessionAbi, type Registry } from '@mamoru/registry'
-import { PARAM_CONDITIONS, POLICY_INCREASE_SIG, decodeGasCaps, decodeMamoruInitAny, decodeVaultFamilyInit, encodeGasCaps, encodeMamoruInit, encodeMamoruInitAtSetup, encodeVaultFamilyInit, mamoruInitFor, v4PoolOf, validGasCaps, type GasCaps, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { PARAM_CONDITIONS, POLICY_INCREASE_SIG, decodeGasCaps, decodeMamoruInitAny, decodeVaultFamilyInit, encodeGasCaps, encodeMamoruInit, encodeMamoruInitAtSetup, encodeVaultFamilyInit, mamoruInitFor, v4PoolOf, validGasCaps, type GasCaps, type ParamCondition, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   CALLTYPE_BATCH,
   CALLTYPE_SINGLE,
@@ -85,7 +85,16 @@ const EMPTY_RULE: EncodedRule = { condition: 0, offset: 0n, isLimited: false, re
 /** UniActionPolicy init data: value limit per use 0 and one ParamRule per rule of the grant. */
 export function uniActionInitData(action: SessionGrant['actions'][number]): Hex {
   if (action.params.length > MAX_PARAM_RULES) throw new Error(`${action.signature} has more than ${MAX_PARAM_RULES} rules`)
-  const rules: EncodedRule[] = action.params.map((p) => ({
+  return uniActionRules(action.params)
+}
+
+/**
+ * UniActionPolicy init data from bare rules (word `index` of the static arguments, `ref` as a uint256): value limit per
+ * use 0. otto/mamoru#356: the V4 home session's (V4, registerRemote) action uses it outside a SessionGrant.
+ */
+export function uniActionRules(params: readonly { index: number; condition: Exclude<ParamCondition, 'IN_RANGE'>; ref: bigint; cumulativeLimit?: bigint }[]): Hex {
+  if (params.length > MAX_PARAM_RULES) throw new Error(`more than ${MAX_PARAM_RULES} UniActionPolicy rules`)
+  const rules: EncodedRule[] = params.map((p) => ({
     condition: PARAM_CONDITIONS.indexOf(p.condition),
     offset: BigInt(p.index * 32),
     isLimited: p.cumulativeLimit !== undefined,

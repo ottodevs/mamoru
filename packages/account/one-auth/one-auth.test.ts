@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { decodeFunctionData, getAddress, keccak256, toHex, zeroAddress, type Hex } from 'viem'
+import { decodeAbiParameters, decodeFunctionData, getAddress, keccak256, toHex, zeroAddress, type Hex } from 'viem'
 import { address, baseRegistry, ethereumRegistry, monadRegistry, moduleRegistryAbi, multiSendCallOnlyAbi, smartSessionAbi } from '@mamoru/registry'
 import { decodeGasCapsV2, decodeInitV4, GAS_CAPS_V2_BY_CHAIN, ONE_AUTH_V4_CONTRACTS, oneAuthV4Deployment } from '@mamoru/policy'
 import { permissionIdOf } from '../sessions/index.ts'
 import { webAuthnSigner } from '../safe/index.ts'
 import { FIXTURE_PATH, fixtureJson } from './fixture.ts'
-import { buildMigrateV4, FALLBACK_SELECTOR, FALLBACK_TARGET, inventoryOf, migrationCalls, migrationCheckAbi, migrationTx, ownerStateOf, smartSessionV4Abi, v4Children, v4CreateSetup, v4HomeSession, V4_REMOTE_SESSION_SALT } from './index.ts'
+import { buildMigrateV4, FALLBACK_SELECTOR, FALLBACK_TARGET, inventoryOf, oneAuthRemoteOf, REGISTER_REMOTE_SELECTOR, v4RegisterRemoteAction, v4RemoteSession, v4Session, migrationCalls, migrationCheckAbi, migrationTx, ownerStateOf, smartSessionV4Abi, v4Children, v4CreateSetup, v4HomeSession, V4_REMOTE_SESSION_SALT } from './index.ts'
 
 const D = { table: '0x00000000000000000000000000000000000000a1', policy: '0x00000000000000000000000000000000000000a2', gasPolicy: '0x00000000000000000000000000000000000000a3', migrationCheck: '0x00000000000000000000000000000000000000a4' } as const
 const KEY = '0x00000000000000000000000000000000005e55e5' as const
@@ -34,10 +34,10 @@ describe('V4 remote initializer (otto/mamoru#293)', () => {
 })
 
 describe('the V4 session', () => {
-  const s = v4HomeSession({ sessionKey: KEY, deployment: D, capUsd: 10_000_000_000n, generation: 1n, admit: [5n], registry: baseRegistry })
+  const s = v4HomeSession({ sessionKey: KEY, deployment: D, capUsd: 10_000_000_000n, generation: 1n, admit: [5n], remote: null, registry: baseRegistry })
 
   test('one fallback action, V4 its only action policy, MamoruGasPolicyV2 the only userOp policy', () => {
-    expect(s.actions).toHaveLength(1)
+    expect(s.actions).toHaveLength(2) // the fallback, and #356's (V4, registerRemote)
     expect(s.actions[0]!.actionTarget).toBe(FALLBACK_TARGET)
     expect(s.actions[0]!.actionTargetSelector).toBe(FALLBACK_SELECTOR)
     expect(s.actions[0]!.actionPolicies.map((p) => p.policy)).toEqual([D.policy])
@@ -52,7 +52,7 @@ describe('the V4 session', () => {
     const owners = [address('SafeWebAuthnSharedSigner', baseRegistry), '0x000000000000000000000000000000000000bacc' as const]
     const w = webAuthnSigner(1n, 2n, baseRegistry)
     const a = v4CreateSetup(owners, 42n, w, s, baseRegistry)
-    const b = v4CreateSetup(owners, 42n, w, v4HomeSession({ sessionKey: KEY, deployment: D, capUsd: 10_000_000_001n, generation: 1n, admit: [5n], registry: baseRegistry }), baseRegistry)
+    const b = v4CreateSetup(owners, 42n, w, v4HomeSession({ sessionKey: KEY, deployment: D, capUsd: 10_000_000_001n, generation: 1n, admit: [5n], remote: null, registry: baseRegistry }), baseRegistry)
     expect(a.permissionId).toBe(permissionIdOf(s))
     expect(a.address).not.toBe(b.address) // the Init is part of the address
   })
@@ -74,7 +74,7 @@ describe('the V4 session', () => {
 })
 
 describe('migration transaction (results section 7)', () => {
-  const session = v4HomeSession({ sessionKey: KEY, deployment: D, capUsd: 1_000_000_000n, generation: 1n, admit: [], registry: baseRegistry })
+  const session = v4HomeSession({ sessionKey: KEY, deployment: D, capUsd: 1_000_000_000n, generation: 1n, admit: [], remote: null, registry: baseRegistry })
   const m = { account: SAFE, remove: [id(1), id(2)], revoke: [id(1), id(2), id(3)], noncesBefore: [0n, 0n, 4n], session, deployment: D, attestData: '0xabcd' as Hex, registry: baseRegistry }
 
   test('removeSession each enabled id, revokeEnableSignature each id, trust + attest, enable V4, assertMigrated last', () => {
@@ -127,10 +127,60 @@ describe('inventory (spec 010 r1 finding 4)', () => {
   })
 })
 
+const REMOTE_KEY = '0x000000000000000000000000000000000000f00d' as const
+/** UniActionPolicy ActionConfig: the rules in use, as (condition, offset, ref). */
+const uniRules = (initData: Hex) => {
+  const [c] = decodeAbiParameters(
+    [{ type: 'tuple', components: [{ name: 'valueLimitPerUse', type: 'uint256' }, { name: 'paramRules', type: 'tuple', components: [{ name: 'length', type: 'uint256' }, { name: 'rules', type: 'tuple[16]', components: [{ name: 'condition', type: 'uint8' }, { name: 'offset', type: 'uint64' }, { name: 'isLimited', type: 'bool' }, { name: 'ref', type: 'bytes32' }, { name: 'usage', type: 'tuple', components: [{ name: 'limit', type: 'uint256' }, { name: 'used', type: 'uint256' }] }] }] }] }],
+    initData,
+  )
+  return { value: c.valueLimitPerUse, rules: c.paramRules.rules.slice(0, Number(c.paramRules.length)).map((r) => ({ condition: r.condition, offset: r.offset, isLimited: r.isLimited, ref: BigInt(r.ref) })) }
+}
+
+describe('otto/mamoru#356: a home session registers only the remote the owner signed', () => {
+  const init = { capUsd: 10_000_000_000n, generation: 1n, home: zeroAddress, homeDomain: 0, admit: [5n] }
+
+  test('pinned: (V4, registerRemote) with V4 (Init, no admit) and UniActionPolicy domain EQUAL, key EQUAL, no value', () => {
+    const s = v4HomeSession({ sessionKey: KEY, deployment: D, capUsd: init.capUsd, generation: 1n, admit: [5n], remote: { domain: 15, sessionKey: REMOTE_KEY }, registry: baseRegistry })
+    const a = s.actions[1]!
+    expect(a.actionTarget).toBe(D.policy)
+    expect(a.actionTargetSelector).toBe(REGISTER_REMOTE_SELECTOR)
+    expect(a.actionPolicies.map((p) => p.policy)).toEqual([D.policy, address('UniActionPolicy', baseRegistry)])
+    expect(decodeInitV4(a.actionPolicies[0]!.initData)).toEqual({ ...init, admit: [] })
+    expect(uniRules(a.actionPolicies[1]!.initData)).toEqual({ value: 0n, rules: [{ condition: 0, offset: 0n, isLimited: false, ref: 15n }, { condition: 0, offset: 32n, isLimited: false, ref: BigInt(REMOTE_KEY) }] })
+    // the permission id is the validator's and the salt's only: pinning moves the action, never the id
+    expect(permissionIdOf(s)).toBe(permissionIdOf(v4HomeSession({ sessionKey: KEY, deployment: D, capUsd: init.capUsd, generation: 1n, admit: [5n], remote: null, registry: baseRegistry })))
+  })
+
+  test('none: one rule no call meets (domain < 0)', () => {
+    const a = v4RegisterRemoteAction(null, init, D, baseRegistry)
+    expect(uniRules(a.actionPolicies[1]!.initData)).toEqual({ value: 0n, rules: [{ condition: 2, offset: 0n, isLimited: false, ref: 0n }] })
+  })
+
+  test('refuses a binding V4 would refuse, and a remote session', () => {
+    expect(() => v4RegisterRemoteAction({ domain: 6, sessionKey: REMOTE_KEY }, init, D, baseRegistry)).toThrow() // its own chain
+    expect(() => v4RegisterRemoteAction({ domain: 99, sessionKey: REMOTE_KEY }, init, D, baseRegistry)).toThrow() // not in the table
+    expect(() => v4RegisterRemoteAction({ domain: 15, sessionKey: zeroAddress }, init, D, baseRegistry)).toThrow()
+    expect(() => v4RegisterRemoteAction(null, { ...init, home: SAFE, homeDomain: 15 }, D, baseRegistry)).toThrow()
+  })
+
+  test("a remote's session stays the fallback alone (MamoruV4Helper.sessions builds it on chain)", () => {
+    expect(v4RemoteSession({ home: SAFE, homeDomain: 6, sessionKey: KEY, capUsd: 1n, deployment: D, registry: monadRegistry, chainId: 143 }).actions).toHaveLength(1)
+    expect(v4Session({ sessionKey: KEY, deployment: D, init, salt: id(1), registry: baseRegistry }).actions).toHaveLength(1)
+  })
+
+  test('a setup-mode context: null registers none; absent is a key given before #356, the fallback-only session', () => {
+    expect(oneAuthRemoteOf({})).toBeUndefined()
+    expect(v4HomeSession({ sessionKey: KEY, deployment: D, capUsd: 1n, generation: 1n, admit: [], remote: undefined, registry: baseRegistry }).actions).toHaveLength(1)
+    expect(oneAuthRemoteOf({ remote: null })).toBeNull()
+    expect(oneAuthRemoteOf({ remote: { domain: 15, sessionKey: REMOTE_KEY.toUpperCase().replace('0X', '0x') } })).toEqual({ domain: 15, sessionKey: getAddress(REMOTE_KEY) })
+  })
+})
+
 describe('buildMigrateV4 (the builder the operator prepares with and the Worker rebuilds with)', () => {
   const at = { MamoruActionPolicyV4: D.policy, MamoruGasPolicyV2: D.gasPolicy, MamoruMigrationCheck: D.migrationCheck, MamoruV4Table: D.table } as const
   const pinnedBase = { ...baseRegistry, undeployed: [], entries: [...baseRegistry.entries.filter((e) => !(ONE_AUTH_V4_CONTRACTS as readonly string[]).includes(e.name)), ...ONE_AUTH_V4_CONTRACTS.map((name) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: at[name], codeHash: null }) as never)] }
-  const input = { chainId: 8453, safe: SAFE, safeNonce: '4', step: 0 as const, capUsdc: '300000000', sessionKey: KEY, generation: '1', admit: ['7'], oldPermissionIds: [id(1), id(2)], removeIds: [id(1)], noncesBefore: ['0', '3'], home: zeroAddress, homeDomain: 0 }
+  const input = { remote: { domain: 15, sessionKey: REMOTE_KEY } as { domain: number; sessionKey: `0x${string}` } | null, chainId: 8453, safe: SAFE, safeNonce: '4', step: 0 as const, capUsdc: '300000000', sessionKey: KEY, generation: '1', admit: ['7'], oldPermissionIds: [id(1), id(2)], removeIds: [id(1)], noncesBefore: ['0', '3'], home: zeroAddress, homeDomain: 0 }
 
   test('deterministic, refund fields zero, the hash is the SafeTx EIP-712 hash of its fields', () => {
     const a = buildMigrateV4(input, pinnedBase)
@@ -146,5 +196,14 @@ describe('buildMigrateV4 (the builder the operator prepares with and the Worker 
     expect(() => buildMigrateV4({ ...input, noncesBefore: ['0'] }, pinnedBase)).toThrow()
     expect(() => buildMigrateV4({ ...input, step: 1 }, pinnedBase)).toThrow() // step 1 names a home
     expect(() => buildMigrateV4({ ...input, safeNonce: '0x4' }, pinnedBase)).toThrow()
+  })
+
+  test('#356: step 0 names the remote its session may register; the key is in the signed bytes', () => {
+    const { remote: _r, ...without } = input
+    expect(() => buildMigrateV4(without, pinnedBase)).toThrow() // step 0 must say (null: none)
+    const a = buildMigrateV4(input, pinnedBase).safeTxHash
+    expect(buildMigrateV4({ ...input, remote: null }, pinnedBase).safeTxHash).not.toBe(a)
+    expect(buildMigrateV4({ ...input, remote: { domain: 15, sessionKey: KEY } }, pinnedBase).safeTxHash).not.toBe(a)
+    expect(() => buildMigrateV4({ ...input, remote: { domain: 6, sessionKey: REMOTE_KEY } }, pinnedBase)).toThrow()
   })
 })

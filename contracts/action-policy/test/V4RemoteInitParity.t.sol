@@ -6,6 +6,7 @@ import {MamoruActionPolicyV4, MamoruV4Helper, InitV4} from "../src/MamoruActionP
 import {MamoruGasPolicyV2} from "../src/MamoruGasPolicyV2.sol";
 import {MamoruV4Table} from "../src/MamoruV4Table.sol";
 import {MamoruRemoteSafe, ISharedSignerV4} from "../src/MamoruRemoteSafe.sol";
+import {RegisterRemoteRules} from "./RegisterRemoteRules.sol";
 
 interface ISafeOwnersParity {
     function getOwners() external view returns (address[] memory);
@@ -107,6 +108,21 @@ contract V4RemoteInitParityTest is Test {
         assertEq(keccak256(init), keccak256(vm.parseJsonBytes(j, ".homeSession.init")), "InitV4");
         bytes memory caps = abi.encode(MamoruGasPolicyV2.Caps(10_000_000, 3_000_000, 2_000_000, 200_000, 100_000_000, 0));
         assertEq(keccak256(caps), keccak256(vm.parseJsonBytes(j, ".homeSession.gasInit")), "MamoruGasPolicyV2.Caps (Base)");
+    }
+
+    /// otto/mamoru#356: the home session's (V4, registerRemote) action the TypeScript builds: V4 with the session's Init
+    /// (no admit) and UniActionPolicy pinning the domain and the remote session key, or refusing every call (none).
+    function test_homeRegisterRemoteActionMatchesTheTypeScript() public view {
+        assertEq(vm.parseJsonAddress(j, ".homeSession.registerRemote.target"), vm.parseJsonAddress(j, ".policy"), "target V4");
+        assertEq(bytes4(vm.parseJsonBytes(j, ".homeSession.registerRemote.selector")), MamoruActionPolicyV4.registerRemote.selector, "selector");
+        bytes memory init = abi.encode(InitV4(uint128(vm.parseJsonUint(j, ".capUsd")), 1, address(0), 0, new uint256[](0)));
+        assertEq(keccak256(init), keccak256(vm.parseJsonBytes(j, ".homeSession.registerRemote.policyInit")), "V4 Init, no admit");
+        assertEq(vm.parseJsonAddress(j, ".homeSession.registerRemote.uniActionPolicy"), 0x0000006DDA6c463511C4e9B05CFc34C1247fCF1F, "UniActionPolicy");
+        bytes memory pinned = RegisterRemoteRules.pinned(
+            uint32(vm.parseJsonUint(j, ".homeSession.registerRemote.domain")), vm.parseJsonAddress(j, ".homeSession.registerRemote.sessionKey")
+        );
+        assertEq(keccak256(pinned), keccak256(vm.parseJsonBytes(j, ".homeSession.registerRemote.uniInit")), "pinned rules");
+        assertEq(keccak256(RegisterRemoteRules.none()), keccak256(vm.parseJsonBytes(j, ".homeSession.registerRemote.noneUniInit")), "no-remote rule");
     }
 
     /// MamoruV4Chains.byChainId(143), as the helper's public `sessions` takes it.
