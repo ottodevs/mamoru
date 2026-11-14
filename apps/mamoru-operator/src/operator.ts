@@ -6776,7 +6776,7 @@ export class Operator {
    * account in the flag's scope where V4 is pinned. Generated once per account and kept (0600 state): the Safe's address
    * commits to it, so it never changes afterwards.
    */
-  async oneAuthKey(ctx: AccountContext): Promise<{ sessionKey: Address; capUsdc: string }> {
+  async oneAuthKey(ctx: AccountContext): Promise<{ sessionKey: Address; capUsdc: string; remote: { domain: number; sessionKey: Address } | null }> {
     if (!this.cfg.oneAuth || this.cfg.chainId !== BASE_CHAIN_ID && this.cfg.policy.chain !== 'fork') this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'accounts on one approval are not offered here')
     const view = this.store.state.accounts[ctx.accountKey] ?? ({ accountKey: ctx.accountKey, ctx } as AccountState)
     if (!this.inScope(view, 'one_auth_v4')) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'accounts on one approval are not offered for this account')
@@ -6789,7 +6789,14 @@ export class Operator {
       ;(this.store.state.oneAuthKeyBlocks ??= {})[ctx.accountKey] = block.toString()
       this.store.save()
     }
-    return { sessionKey: privateKeyToAccount(keys[ctx.accountKey]!).address, capUsdc: v4CapUsdOf(this.capFor(view)).toString() }
+    // #356: the remote the session may register is part of the setup, so of the address: fixed the first time, like the key.
+    const remotes = (this.store.state.oneAuthRemotes ??= {})
+    if (!(ctx.accountKey in remotes)) {
+      remotes[ctx.accountKey] = await this.v4RemoteBinding(view, { policyId: ONE_AUTH_V4 })
+      this.store.save()
+    }
+    const remote = remotes[ctx.accountKey]!
+    return { sessionKey: privateKeyToAccount(keys[ctx.accountKey]!).address, capUsdc: v4CapUsdOf(this.capFor(view)).toString(), remote: remote ? { domain: remote.domain, sessionKey: getAddress(remote.sessionKey) } : null }
   }
 
   /**
@@ -6810,6 +6817,12 @@ export class Operator {
     if (!this.inScope(acc, 'one_auth_v4')) this.refuseMigrate('ONE_AUTH_NOT_OFFERED', 'accounts on one approval are not offered for this account')
     const priv = this.store.state.oneAuthKeys?.[ctx.accountKey]
     if (!priv || privateKeyToAccount(priv).address.toLowerCase() !== ctx.oneAuth.sessionKey.toLowerCase()) throw new HttpError(409, 'REMOTE_KEY_UNKNOWN', 'this Safe names a session key this operator did not give')
+    // #356: and the remote its session may register is the one this operator fixed with that key.
+    const given = this.store.state.oneAuthRemotes?.[ctx.accountKey]
+    const named = oneAuthRemoteOf(ctx.oneAuth)
+    if (given === undefined ? named !== null : (given?.domain ?? null) !== (named?.domain ?? null) || (given?.sessionKey ?? '').toLowerCase() !== (named?.sessionKey ?? '').toLowerCase()) {
+      throw new HttpError(409, 'REMOTE_KEY_UNKNOWN', 'this Safe names a remote session key this operator did not give')
+    }
     const cap = BigInt(ctx.oneAuth.capUsdc)
     if (cap !== v4CapUsdOf(this.capFor(acc))) throw new HttpError(409, 'REMOTE_SAFE_MISMATCH', "this Safe's approval names another limit than this account's: nothing runs on it")
     const refusal = this.writeRefusal()
@@ -6995,21 +7008,31 @@ export class Operator {
 
   /**
    * otto/mamoru#356 (R7): the one remote the account's V4 session may register, pinned in the session the owner signs:
-   * the Monad operator's remote session key for this account (stable: it keeps the key it gave, `remoteKey`), whenever
-   * that operator is configured, so a remote bucket added later needs no new signature; null without it. A leaked
-   * session key can then register no remote of its own (V4.registerRemote derives the remote from the key it is given).
+   * the Monad operator's remote session key for this account (stable: that operator keeps the key it gave, `remoteKey`).
+   * A leaked session key can then register no remote of its own (V4.registerRemote derives the remote from the key it is
+   * given). An account whose policy has a remote bucket waits for it (503 while that operator does not answer: signing
+   * without it would leave the bucket unusable until another signature). Any other account gets it when that operator
+   * answers, so a remote bucket added later needs no new signature, and none when it does not (logged): a Base-only
+   * Start never waits on Monad.
    */
-  private async v4RemoteBinding(acc: AccountState): Promise<{ domain: number; sessionKey: Address } | null> {
+  private async v4RemoteBinding(acc: AccountState, policyOf: Pick<AccountState, 'policyId'> = acc): Promise<{ domain: number; sessionKey: Address } | null> {
     const peer = this.cfg.remotePeers?.[BRIDGE_MONAD_CHAIN_ID]
+    let needed = true
+    try {
+      needed = !!this.v4PolicyOf(policyOf).remoteBuckets?.length
+    } catch {}
+    const unreachable = () => new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru on Monad is not reachable right now: nothing was changed, try again in a few minutes')
     if (!peer) {
-      if (this.v4PolicyOf(acc).remoteBuckets?.length) throw new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru on Monad is not reachable right now: nothing was changed, try again in a few minutes')
+      if (needed) throw unreachable()
       return null
     }
-    const sessionKey = await peer.key(acc.ctx).catch((e) => {
-      logErr(`[v4] ${acc.accountKey} remote key:`, e)
-      throw new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru on Monad is not reachable right now: nothing was changed, try again in a few minutes')
-    })
-    return { domain: V4_DOMAIN_BY_CHAIN[BRIDGE_MONAD_CHAIN_ID]!, sessionKey }
+    try {
+      return { domain: V4_DOMAIN_BY_CHAIN[BRIDGE_MONAD_CHAIN_ID]!, sessionKey: await peer.key(acc.ctx) }
+    } catch (e) {
+      logErr(`[v4] ${acc.accountKey} remote key${needed ? '' : ' (no remote bucket: the session registers none)'}:`, e)
+      if (needed) throw unreachable()
+      return null
+    }
   }
 
   private async planMigration(ctx: AccountContext): Promise<OwnerTxToSign> {

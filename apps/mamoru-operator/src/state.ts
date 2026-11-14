@@ -241,6 +241,11 @@ export type OperatorState = {
   oneAuthKeys?: Record<string, Hex>
   /** otto/mamoru#293: the block each of those keys was given at (the account's deposits are counted from there). */
   oneAuthKeyBlocks?: Record<string, string>
+  /**
+   * otto/mamoru#356: the remote each of those sessions may register (null: none), fixed with the key: the Safe's address
+   * commits to it, so it never changes afterwards. Public data (a domain and an address).
+   */
+  oneAuthRemotes?: Record<string, { domain: number; sessionKey: Hex } | null>
 }
 
 const BIG = '$big'
