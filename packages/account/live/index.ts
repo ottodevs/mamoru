@@ -17,7 +17,7 @@ import {
 } from '../safe/index.ts'
 import { accountSetup, counterfactualAddress } from '../recovery/index.ts'
 import { isV4RemoteSpec, remoteInput, remoteSafe, v4RemoteFromSpec } from '../remote/index.ts'
-import { v4CreateSetup, v4HomeSession } from '../one-auth/index.ts'
+import { oneAuthRemoteOf, v4CreateSetup, v4HomeSession } from '../one-auth/index.ts'
 import { oneAuthV4Deployment } from '@mamoru/policy'
 import { activationCall, registryTrustCalls, revocationCalls, selfAttestCall, selfRevokeAttestationCall, type SessionPolicies } from '../sessions/index.ts'
 
@@ -70,7 +70,7 @@ export function liveAccountFromContext(ctx: AccountContext, registry?: Registry)
   if (ctx.oneAuth) {
     const d = oneAuthV4Deployment(reg)
     if (!d) throw new Error(`a V4 account on ${reg.chain}, where the V4 stack is not pinned`)
-    const session = v4HomeSession({ sessionKey: ctx.oneAuth.sessionKey as Address, deployment: d, capUsd: BigInt(ctx.oneAuth.capUsdc), generation: 1n, admit: [], registry: reg })
+    const session = v4HomeSession({ sessionKey: ctx.oneAuth.sessionKey as Address, deployment: d, capUsd: BigInt(ctx.oneAuth.capUsdc), generation: 1n, admit: [], remote: oneAuthRemoteOf(ctx.oneAuth), registry: reg })
     const created = v4CreateSetup(owners, saltNonce, webauthn, session, reg)
     if (created.address.toLowerCase() !== ctx.address.toLowerCase()) throw new Error(`V4 setup address ${created.address} does not match context ${ctx.address}`)
     return { safe: created.address, chainId: ctx.chainId, owners, saltNonce, webauthn, ...(registry ? { registry } : {}), setup: created.setup }

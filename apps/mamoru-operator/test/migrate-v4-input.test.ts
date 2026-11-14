@@ -33,7 +33,9 @@ const base6 = pinned(reg6)
 
 describe('the migrate-v4 prepare is exactly buildMigrateV4(input), and input is derivable by the Worker', () => {
   test('step 0 (Base): the real prepare of a v6 account', async () => {
-    const w = world(0n, { registry: base6, v6Policy: v6, oneAuth: D, opsFlags: () => ({}), opsScopedFlags: () => ({ one_auth_v4: ['k'] }) })
+    // #356: the Monad operator's remote session key for this account, pinned in the session
+    const REMOTE = '0x000000000000000000000000000000000000f00d' as const
+    const w = world(0n, { registry: base6, v6Policy: v6, oneAuth: D, opsFlags: () => ({}), opsScopedFlags: () => ({ one_auth_v4: ['k'] }), remotePeers: { 143: { key: async () => REMOTE, provision: async () => ({ state: 'pending', code: 'TEST' }) } } })
     const grants = v6.session.grants.filter((g) => !g.perPosition).map((g, i) => ({ name: grantKey(g), permissionId: `0x${(i + 1).toString(16).padStart(64, '0')}` as Hex, grant: { policyId: v6.policyId, userOp: { validUntil: 2_000_000_000, validAfter: 0, usageLimit: 1 } } }))
     const acc = { accountKey: 'k', ctx, active: true, trusted: true, policyId: v6.policyId, sessionKey: KEY, signedCapUsdc: '1500000000', grants, ops: [], revoked: [], managedTokenIds: [], admittedTokenIds: [], depositsAfter: '1', historyFromBlock: '1', epoch: 1, seq: 0 } as unknown as AccountState
     w.state.accounts.k = acc
@@ -62,6 +64,7 @@ describe('the migrate-v4 prepare is exactly buildMigrateV4(input), and input is 
     expect(input.homeDomain).toBe(0)
     expect(input.moveTo).toBeUndefined()
     expect(input.sessionKey).toBe(privateKeyToAccount(KEY).address) // the operator's own key
+    expect(input.remote).toEqual({ domain: 15, sessionKey: REMOTE }) // #356: the only remote its session may register
     expect(input.safeNonce).toBe(tx.safeTx!.nonce)
     expect(tx.safeTx).toMatchObject({ safeTxGas: '0', baseGas: '0', gasPrice: '0', gasToken: '0x0000000000000000000000000000000000000000', refundReceiver: '0x0000000000000000000000000000000000000000' })
     // one changed field gives another hash

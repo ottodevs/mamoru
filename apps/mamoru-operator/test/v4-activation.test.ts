@@ -15,7 +15,10 @@ const pinned = (r: Registry): Registry => {
   return { ...r, undeployed: [], entries: [...r.entries.filter((e) => !(names as readonly string[]).includes(e.name)), ...names.map((name, i) => ({ name, kind: 'smart-sessions-policy', role: 'test', address: at[i]!, codeHash: null }) as never)] }
 }
 const base = pinned(baseRegistry)
-const scoped = { oneAuth: D, registry: base, opsFlags: () => ({}), opsScopedFlags: () => ({ one_auth_v4: ['k'] }) }
+// #356: the Monad operator gives the remote session key the V4 session is pinned to register.
+const REMOTE = '0x000000000000000000000000000000000000f00d' as const
+const remotePeers = { 143: { key: async () => REMOTE, provision: async () => ({ state: 'pending' as const, code: 'TEST' }) } }
+const scoped = { oneAuth: D, registry: base, opsFlags: () => ({}), opsScopedFlags: () => ({ one_auth_v4: ['k'] }), remotePeers }
 
 function inactive(w: ReturnType<typeof world>) {
   w.state.accounts.k = { accountKey: 'k', ctx, active: false, trusted: false, grants: [], ops: [], revoked: [] } as unknown as AccountState
