@@ -113,7 +113,7 @@ const RELAYER_BALANCE_CACHE_MS = 60_000
 /**
  * otto/mamoru#412: the gas one engine bundle may take, for the relayer check before an op opens. Above the largest bundle
  * measured on a gas-limit chain (an enter_mint on Monad: handleOps 1.6M with its margin), so a relayer that passes can
- * pay any of them at the gas price read.
+ * pay any of them at the fee read.
  */
 const RELAYER_BUNDLE_GAS = 2_000_000n
 /** otto/mamoru#367: how long the minute timer reads one engine's held history (the review's own read is longer). */
@@ -1037,7 +1037,7 @@ export class Operator {
   private readonly refillHeld = new Map<string, string>()
   private readonly gasReserveAlertOverride = gasReserveAlertOverrideFromEnv()
   private relayerBalanceCache: { at: number; value: bigint } | null = null
-  /** otto/mamoru#412: the gas price the relayer check last read (RELAYER_BALANCE_CACHE_MS), and when it last logged a hold. */
+  /** otto/mamoru#412: the maxFeePerGas the relayer check last read (RELAYER_BALANCE_CACHE_MS), and when it last logged a hold. */
   private relayerGasPriceCache: { at: number; value: bigint } | null = null
   private relayerShortLoggedAt = 0
   /** otto/mamoru#135: one readSafe shared by every open tab and poll of the same account; dropped whenever the account moves (fundingMoved). */
@@ -1206,7 +1206,8 @@ export class Operator {
   }
 
   /**
-   * otto/mamoru#412: why the relayer cannot pay one engine bundle now (RELAYER_BUNDLE_GAS at the gas price), or null.
+   * otto/mamoru#412: why the relayer cannot pay one engine bundle now (RELAYER_BUNDLE_GAS at the maxFeePerGas the relayer
+   * signs with, what the node checks the balance against), or null.
    * Live 13 Nov on Monad: the relayer fell to 0.07 MON and every harvest of seven accounts was refused at the send
    * ("Signer had insufficient balance") and settled RECON_UNINCLUDABLE, review after review. Balance and price are cached
    * RELAYER_BALANCE_CACHE_MS, so the engines' reviews add at most one read of each per minute; a refill lifts the hold
@@ -1215,7 +1216,7 @@ export class Operator {
   async relayerShortNow(): Promise<string | null> {
     const have = BigInt((await this.relayerBalance()).wei)
     const now = Date.now()
-    if (!this.relayerGasPriceCache || now - this.relayerGasPriceCache.at >= RELAYER_BALANCE_CACHE_MS) this.relayerGasPriceCache = { at: now, value: await this.client.getGasPrice() }
+    if (!this.relayerGasPriceCache || now - this.relayerGasPriceCache.at >= RELAYER_BALANCE_CACHE_MS) this.relayerGasPriceCache = { at: now, value: (await this.client.estimateFeesPerGas()).maxFeePerGas }
     const need = RELAYER_BUNDLE_GAS * this.relayerGasPriceCache.value
     if (have >= need) return null
     const why = `relayer ${this.relayer.address} on chain ${this.cfg.chainId} has ${have} wei, under one bundle (${need}): engine ops wait`

@@ -14,14 +14,14 @@ function operator(balance: () => bigint, gasPrice: () => bigint) {
     relayerShortLoggedAt: Date.now(),
     client: {
       getBalance: async () => (reads++, balance()),
-      getGasPrice: async () => (reads++, gasPrice()),
+      estimateFeesPerGas: async () => (reads++, { maxFeePerGas: gasPrice(), maxPriorityFeePerGas: 0n }),
     },
   }) as Operator
   return { op, reads: () => reads }
 }
 
 describe('the relayer check before an engine op (otto/mamoru#412)', () => {
-  test('under one bundle at the gas price: a reason naming the relayer and the chain', async () => {
+  test('under one bundle at the signed max fee: a reason naming the relayer and the chain', async () => {
     const { op } = operator(() => 74_736_754_138_936_107n, () => 102_000_000_000n)
     const why = await op.relayerShortNow()
     expect(why).toContain('0xE41175b9CEBD25b9F45B745C922002BC052B5C88')
@@ -34,7 +34,7 @@ describe('the relayer check before an engine op (otto/mamoru#412)', () => {
     expect(await op.relayerShortNow()).toBeNull()
   })
 
-  test('balance and gas price are cached: many reviews in a minute read each once', async () => {
+  test('balance and fee are cached: many reviews in a minute read each once', async () => {
     const { op, reads } = operator(() => 1n, () => 1_000n)
     for (let i = 0; i < 5; i++) await op.relayerShortNow()
     expect(reads()).toBe(2)
