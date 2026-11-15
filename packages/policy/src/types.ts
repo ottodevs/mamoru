@@ -203,6 +203,11 @@ export type PolicyVersion = {
   /** Spec 004 loss control. Absent: today's behaviour byte for byte (FR-LC-001). */
   guards?: { byBucket: Partial<Record<BucketId, { fallFreeze?: FallFreezeRule }>> }
   /**
+   * otto/mamoru#415: buckets (local ids, or a remote bucket's id) that take no new money until this unix second, set from
+   * the engine settings' `entryPause` (`withEngineSettings`). Absent: none. Never part of a grant or a policy hash.
+   */
+  entryPauseUntil?: Partial<Record<string, number>>
+  /**
    * Lab only (#101, range geometry): where a new range sits around the price and how wide it is. Absent: the
    * centred range of `range.widthTicks` / `widthTicksByPool`, byte for byte. A pool with a `widthTicksByPool` entry
    * (the stables pool) keeps that width and is never skewed.

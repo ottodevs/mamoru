@@ -37,7 +37,18 @@ export type EngineSettings = {
    * (DEFAULT_BRIDGE_STUCK_AFTER_MIN), so older versions keep their hash.
    */
   bridge?: { stuckAfterMin: BridgeStuckAfterMin }
+  /**
+   * otto/mamoru#415: no new money into a chain's volatile buckets until `until` (unix seconds), ahead of a known market
+   * event (Monad's MON unlock of 24 Nov 2026). On that chain every bucket but the stable and vault ones takes no entry; a
+   * policy elsewhere bridges nothing to its bucket on that chain. Positions, re-ranges, harvests and sales back to
+   * savings go on, and the pause lifts by itself at `until`. At most one entry per chain. Absent = none, so older
+   * versions keep their hash.
+   */
+  entryPause?: EntryPause[]
 }
+
+/** otto/mamoru#415: one chain's pause of new money into its volatile buckets. */
+export type EntryPause = { chainId: number; until: number }
 
 /** otto/mamoru#245: per journal state, minutes until a burn to Monad is flagged stuck. */
 export type BridgeStuckAfterMin = { sending: number; burned: number }
@@ -87,6 +98,9 @@ export const ENGINE_SETTINGS_BOUNDS = {
   maxWaitSeconds: { min: 1_800, max: 604_800 },
   // otto/mamoru#245: never under Standard finality (13-19 min), never past a day without a page.
   stuckAfterMin: { min: 20, max: 1_440 },
+  // otto/mamoru#415: an end in unix seconds from 2026-01-01 to 2100-01-01 (a value in ms is refused), on at most 4 chains.
+  pauseUntil: { min: 1_767_225_600, max: 4_102_444_800 },
+  pauseChains: { min: 1, max: 4 },
 } as const
 
 export const DEFAULT_ENGINE_SETTINGS: EngineSettings = {
@@ -156,7 +170,7 @@ export function validateEngineSettings(s: unknown): string[] {
   const errors: string[] = []
   if (!s || typeof s !== 'object' || Array.isArray(s)) return ['settings must be an object']
   const o = s as Record<string, unknown>
-  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard', 'rerange', 'bridgeOut', 'minEntry', 'bridge'].includes(k)) errors.push(`unknown setting ${k}`)
+  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard', 'rerange', 'bridgeOut', 'minEntry', 'bridge', 'entryPause'].includes(k)) errors.push(`unknown setting ${k}`)
   if (o.bridgeOut !== undefined) {
     const b = o.bridgeOut as Record<string, unknown> | null
     if (!b || typeof b !== 'object' || Array.isArray(b) || Object.keys(b).some((k) => k !== 'enabled') || typeof b.enabled !== 'boolean') errors.push('bridgeOut must be { enabled: true | false }')
@@ -170,6 +184,21 @@ export function validateEngineSettings(s: unknown): string[] {
     else {
       inRange(errors, 'bridge.stuckAfterMin.sending', m.sending, B.stuckAfterMin)
       inRange(errors, 'bridge.stuckAfterMin.burned', m.burned, B.stuckAfterMin)
+    }
+  }
+  if (o.entryPause !== undefined) {
+    const list = o.entryPause
+    if (!Array.isArray(list) || list.length < B.pauseChains.min || list.length > B.pauseChains.max) errors.push(`entryPause must be a list of ${B.pauseChains.min} to ${B.pauseChains.max} { chainId, until }`)
+    else {
+      const seen = new Set<unknown>()
+      list.forEach((e: unknown, i) => {
+        const r = e as Record<string, unknown> | null
+        if (!r || typeof r !== 'object' || Array.isArray(r) || Object.keys(r).some((k) => k !== 'chainId' && k !== 'until')) return void errors.push(`entryPause[${i}] must be { chainId, until }`)
+        if (!isInt(r.chainId) || r.chainId < 1) errors.push(`entryPause[${i}].chainId must be a chain id`)
+        else if (seen.has(r.chainId)) errors.push(`entryPause names chain ${r.chainId} twice`)
+        seen.add(r.chainId)
+        inRange(errors, `entryPause[${i}].until`, r.until, B.pauseUntil)
+      })
     }
   }
   if (o.minEntry !== undefined) {
@@ -285,6 +314,11 @@ export function riskyChanges(from: EngineSettings, to: EngineSettings): string[]
   const sf = bridgeStuckAfterOf(from)
   const st = bridgeStuckAfterOf(to)
   if (st.sending > sf.sending || st.burned > sf.burned) out.push('a stuck bridge to Monad is flagged and paged later')
+  // otto/mamoru#415: a pause removed or ended sooner lets new money into that chain's volatile pools earlier.
+  for (const f of from.entryPause ?? []) {
+    const t = (to.entryPause ?? []).find((e) => e.chainId === f.chainId)
+    if (!t || t.until < f.until) out.push(`new money goes into the volatile pools on chain ${f.chainId} sooner`)
+  }
   if (!from.bridgeOut?.enabled && to.bridgeOut?.enabled) out.push('owners can move USDC from Ethereum to Base, and the relayer pays the Ethereum gas')
   if (from.depth && to.depth) {
     if (to.depth.impactBps > from.depth.impactBps) out.push('entries may move the pool price more')
@@ -366,6 +400,11 @@ export function withEngineSettings(p: PolicyVersion, s: EngineSettings): PolicyV
       },
     }
   }
+  // otto/mamoru#415: the pause names chains; the policy gets the buckets it pauses here, its own volatile ones on its chain
+  // and its remote ones on a paused chain. Off means none, even if a base policy ever carried one.
+  const paused = entryPauseFor(p, s)
+  if (paused) out = { ...out, entryPauseUntil: paused }
+  else if (out.entryPauseUntil) out = { ...out, entryPauseUntil: undefined }
   if (s.guard.enabled) {
     const ids = new Set(p.buckets.map((b) => b.id))
     const byBucket: NonNullable<PolicyVersion['guards']>['byBucket'] = {}
@@ -374,4 +413,25 @@ export function withEngineSettings(p: PolicyVersion, s: EngineSettings): PolicyV
     out = { ...out, guards: { byBucket } }
   }
   return out
+}
+
+/** Base (8453): the chain of every policy without `sourceChainId`. */
+const HOME_CHAIN_ID = 8453
+
+/**
+ * otto/mamoru#415: bucket id to the end of its pause for policy `p` under these settings, or null for none. A local
+ * bucket pauses when the policy's own chain is paused and it is a volatile bucket that takes money (not stable, vault
+ * or being left); a remote bucket when its chain is.
+ */
+export function entryPauseFor(p: PolicyVersion, s: EngineSettings): Record<string, number> | null {
+  if (!s.entryPause?.length) return null
+  const until = new Map(s.entryPause.map((e) => [e.chainId, e.until]))
+  const out: Record<string, number> = {}
+  const local = until.get(p.sourceChainId ?? HOME_CHAIN_ID)
+  if (local !== undefined) for (const b of p.buckets) if (b.preference > 0 && b.id !== 'stables' && b.id !== 'stables-lp' && !b.vaults?.length) out[b.id] = local
+  for (const rb of p.remoteBuckets ?? []) {
+    const end = until.get(rb.chainId)
+    if (end !== undefined) out[rb.id] = end
+  }
+  return Object.keys(out).length ? out : null
 }

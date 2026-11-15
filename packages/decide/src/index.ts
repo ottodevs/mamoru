@@ -5,6 +5,7 @@ import { allocate, DEFAULT_MIN_ENTRY, type Waiting } from './allocate/index.ts'
 import { enterBucket, safeSavings } from './enter/index.ts'
 import { ehgBridge, ehgPreliminary, purgaIdentity, registryOf } from './gates/index.ts'
 import { fallFreezeOf } from './guard/index.ts'
+import { pausedBuckets } from './guard/pause.ts'
 import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf, harvestSaleOf, principalObs } from './harvest/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
@@ -149,6 +150,9 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   if (depegged) frozen.add('stables')
   // otto/mamoru#401: pools whose action policy would refuse a swap, mint or increase at validation (deferred depth check).
   const depthHeld = new Set((obs.depthShort ?? []).map((d) => d.pool))
+  // otto/mamoru#415: buckets ops paused for new money until a set time. Entries and bridges to them only: unlike a fall,
+  // their pools are not held still, so re-ranges, merges, harvests and the harvest sale go on.
+  const paused = pausedBuckets(obs, policy)
 
   // Plan §9, step 7: entry, bucket by bucket.
   const entries: Proposal[] = []
@@ -197,6 +201,10 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     }
     if (frozen.has(b.id)) {
       buckets.push({ bucket: b.id, code: 'DECIDE_ENTRY_PAUSED_FALL' })
+      continue
+    }
+    if (paused.has(b.id)) {
+      buckets.push({ bucket: b.id, code: 'DECIDE_ENTRY_PAUSED_SCHEDULED' })
       continue
     }
     if (depthHeld.has(pool.name)) {
@@ -370,7 +378,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
 
 /** otto/mamoru#223: the re-range codes that say why an out-of-range position waits. */
 const RANGE_HOLD_CODES: ReadonlySet<ReasonCode> = new Set(['DECIDE_RANGE_COOLDOWN', 'DECIDE_RANGE_WAIT', 'DECIDE_RANGE_WEEKLY_CAP', 'DECIDE_RANGE_EXIT_ONLY', 'DECIDE_RANGE_BELOW_COST', 'DECIDE_RANGE_NO_FEE_HISTORY'])
-const BUCKET_WAIT_CODES: ReadonlySet<ReasonCode> = new Set(['DECIDE_WAIT_GAS', 'DECIDE_WAIT_DEPTH', 'DECIDE_WAIT_BUDGET', 'DECIDE_WAIT_VAULT_LIQUIDITY'])
+const BUCKET_WAIT_CODES: ReadonlySet<ReasonCode> = new Set(['DECIDE_WAIT_GAS', 'DECIDE_WAIT_DEPTH', 'DECIDE_WAIT_BUDGET', 'DECIDE_WAIT_VAULT_LIQUIDITY', 'DECIDE_ENTRY_PAUSED_SCHEDULED'])
 
 /** A rerange proposal without its display-only fields (otto/mamoru#219), as FR-LC-001 hashed it before them. */
 function premiseOf(p: RerangeProposal): RerangeProposal {

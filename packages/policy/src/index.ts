@@ -23,6 +23,7 @@ export {
   DEFAULT_ENGINE_SETTINGS,
   ENGINE_SETTINGS_BOUNDS,
   ENGINE_SETTINGS_TEMPLATES,
+  entryPauseFor,
   lazyOf,
   parseEngineSettings,
   riskyChanges,
@@ -32,6 +33,7 @@ export {
   withEngineSettings,
   type BridgeStuckAfterMin,
   type EngineSettings,
+  type EntryPause,
   type RerangeSetting,
 } from './engine-settings.ts'
 export { OPS_FLAGS, type OpsFlagName } from './ops-flags.ts'

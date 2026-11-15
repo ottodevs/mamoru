@@ -141,6 +141,8 @@ export const REASON_CODES = [
   // otto/mamoru#172: live lazy re-range without the fee or volatility history the cost test needs: it holds (fail closed).
   'DECIDE_RANGE_NO_FEE_HISTORY',
   'DECIDE_ENTRY_PAUSED_FALL',
+  // otto/mamoru#415: ops paused new money into a chain's volatile buckets until a set time (a known market event); positions, harvests and sales run.
+  'DECIDE_ENTRY_PAUSED_SCHEDULED',
   // Lab (#101 round 3): the stables pool is off peg past the guard; nothing moves in it, or it is being left.
   'RISK_DEPEG_PAIRED',
   // Lab (#101 round 3): a volatile bucket gave up thirds of its weight on a fall from its 7-day high.
