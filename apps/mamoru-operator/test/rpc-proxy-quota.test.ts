@@ -33,6 +33,8 @@ describe('quota refusals', () => {
     expect(quotaExhausted(200, { code: -32007, message: 'credit limit exceeded for this endpoint' })).toBe(true)
     expect(quotaExhausted(429, { code: 429, message: 'Your app has exceeded its compute units per second capacity' })).toBe(false)
     expect(quotaExhausted(429, { code: -32005, message: 'too many requests' })).toBe(false)
+    // A send's balance error is about the sender, not the plan.
+    expect(quotaExhausted(200, { code: -32000, message: 'insufficient balance for transfer' })).toBe(false)
     // A contract's revert reason is its own text, whatever it says.
     expect(quotaExhausted(200, { code: 3, message: 'execution reverted: out of credits' })).toBe(false)
     expect(quotaExhausted(200, { code: -32000, message: 'execution reverted: quota exceeded' })).toBe(false)
@@ -99,5 +101,23 @@ describe('a provider out of quota (otto/mamoru#418)', () => {
     expect(raw).not.toContain('alchemy.com/v2')
     expect(new QuotaBook(dir).down(ALCHEMY)).toBe(true)
     expect(new QuotaBook(dir).down(QUICKNODE)).toBe(false)
+  })
+
+  test('past the recheck time only one request asks the spent provider; the rest keep passing it over', () => {
+    const quota = new QuotaBook(undefined, 1_000)
+    quota.mark(ALCHEMY, 'alchemy.com', 'Monthly capacity limit exceeded', 0)
+    expect(quota.skip(ALCHEMY, 500)).toBe(true)
+    expect(quota.skip(ALCHEMY, 1_000)).toBe(false)
+    expect(quota.skip(ALCHEMY, 1_001)).toBe(true)
+    expect(quota.skip(ALCHEMY, 1_002)).toBe(true)
+  })
+
+  test('a good answer to a request sent before the latest refusal does not clear the mark', () => {
+    const quota = new QuotaBook()
+    quota.mark(ALCHEMY, 'alchemy.com', 'Monthly capacity limit exceeded', 2_000)
+    quota.clear(ALCHEMY, 1_000)
+    expect(quota.snapshot()).toHaveLength(1)
+    quota.clear(ALCHEMY, 3_000)
+    expect(quota.snapshot()).toEqual([])
   })
 })

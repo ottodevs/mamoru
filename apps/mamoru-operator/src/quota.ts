@@ -10,13 +10,15 @@ import { logErr } from './metrics.ts'
 
 /** How long a spent provider is passed over before one request asks it again. */
 export const QUOTA_RECHECK_MS = 60 * 60_000
+/** While that one request is out, everyone else still passes the provider over; past this it may be asked again. */
+export const QUOTA_PROBE_MS = 60_000
 
 /**
  * A refusal that says the plan's quota is spent, not that the provider is busy for a second: Alchemy's "Monthly
  * capacity limit exceeded", QuickNode's credit errors, a 402, and the usual quota and credit wordings. A burst limit
  * ("too many requests", "exceeded its throughput") is not one of them.
  */
-const QUOTA_RE = /monthly capacity|capacity limit exceeded|monthly (request |compute unit |cu )?(limit|quota)|quota (exceeded|exhausted|reached)|out of (credits|compute units)|(credit|credits) (limit|exhausted|exceeded)|insufficient (credits|balance)|upgrade your (plan|scaling policy)|payment required/i
+const QUOTA_RE = /monthly capacity|capacity limit exceeded|monthly (request |compute unit |cu )?(limit|quota)|quota (exceeded|exhausted|reached)|out of (credits|compute units)|(credit|credits) (limit|exhausted|exceeded)|insufficient credits|upgrade your (plan|scaling policy)|payment required/i
 
 export function quotaExhausted(status: number | undefined, err: { code?: unknown; message?: unknown } | null | undefined): boolean {
   if (status === 402 || err?.code === 402) return true
@@ -26,7 +28,8 @@ export function quotaExhausted(status: number | undefined, err: { code?: unknown
   return QUOTA_RE.test(message)
 }
 
-type Entry = { label: string; since: number; until: number }
+/** `markedAt`: the last refusal. An answer to a request sent before it says nothing about the plan now. */
+type Entry = { label: string; since: number; markedAt: number; until: number }
 
 export type QuotaSnapshot = { label: string; state: 'exhausted'; since: string; recheckAt: string }[]
 
@@ -47,26 +50,38 @@ export class QuotaBook {
     return createHash('sha256').update(url).digest('hex').slice(0, 16)
   }
 
-  /** True while `url` is marked spent and its recheck time has not come. From then on it is asked again, and the first refusal marks it for another period. */
+  /** True while `url` is marked spent and its recheck time has not come. */
   down(url: string, now: number = Date.now()): boolean {
     const e = this.entries.get(QuotaBook.key(url))
     return !!e && now < e.until
+  }
+
+  /**
+   * Whether this request should pass `url` over. Past the recheck time the first caller gets false and is the one
+   * recheck; for QUOTA_PROBE_MS everyone else still passes it over, so a burst at the hour does not all land on it.
+   */
+  skip(url: string, now: number = Date.now()): boolean {
+    const e = this.entries.get(QuotaBook.key(url))
+    if (!e) return false
+    if (now < e.until) return true
+    e.until = now + QUOTA_PROBE_MS
+    return false
   }
 
   /** Marks `url` spent. Alerts on the first refusal only; a recheck that is refused again pushes the next one out quietly. */
   mark(url: string, label: string, words: string, now: number = Date.now()): void {
     const k = QuotaBook.key(url)
     const was = this.entries.get(k)
-    this.entries.set(k, { label, since: was?.since ?? now, until: now + this.recheckMs })
+    this.entries.set(k, { label, since: was?.since ?? now, markedAt: now, until: now + this.recheckMs })
     if (!was) logErr('[alert]', `RPC provider ${label} is out of quota (${words}): passed over, asked again every ${Math.round(this.recheckMs / 60_000)} min`)
     this.save()
   }
 
-  /** A good answer from `url`: whatever mark it had is gone. */
-  clear(url: string): void {
+  /** A good answer from `url` to a request sent at `sentAt`: the mark is gone, unless a refusal came in after it was sent. */
+  clear(url: string, sentAt: number): void {
     const k = QuotaBook.key(url)
     const was = this.entries.get(k)
-    if (!was) return
+    if (!was || sentAt < (was.markedAt ?? was.since)) return
     this.entries.delete(k)
     logErr('[rpc]', `RPC provider ${was.label} answers again after running out of quota`)
     this.save()

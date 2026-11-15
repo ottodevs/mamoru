@@ -364,13 +364,13 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const metrics = opts.metrics
   const quota = opts.quota ?? new QuotaBook()
   /** otto/mamoru#418: a refusal that says the quota is spent marks the provider; any good answer clears it. */
-  const noteQuota = (url: string, status: number | undefined, err: any) => {
-    if (!err) quota.clear(url)
+  const noteQuota = (url: string, sentAt: number, status: number | undefined, err: any) => {
+    if (!err) quota.clear(url, sentAt)
     else if (quotaExhausted(status, err)) quota.mark(url, labelOf(url), providerWords(err?.message).slice(0, 60))
   }
   /** The providers of `list` not out of quota; all of them when every one is (a spent provider still beats none). */
   const live = <T>(list: T[], urlOf: (x: T) => string): T[] => {
-    const up = list.filter((x) => !quota.down(urlOf(x)))
+    const up = list.filter((x) => !quota.skip(urlOf(x)))
     return up.length ? up : list
   }
   /** The component that made the request being served: the path the proxy was called on (`/c/<component>`), for the counters only. */
@@ -433,11 +433,12 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       if (pi === list.length) await Bun.sleep(250)
       for (let attempt = 0; attempt < tries; attempt++) {
         try {
+          const sentAt = Date.now()
           const r = await post(url, body)
           if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk, Date.now(), caller.getStore()))
           const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
           if (errObj && metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(r.status, errObj)))
-          noteQuota(url, r.status, errObj)
+          noteQuota(url, sentAt, r.status, errObj)
           if (wellFormed(r.json) && !retriable(r.status, r.json)) {
             if (body.method === 'eth_getBlockByNumber') remember(url, r.json.result)
             return r.json
@@ -473,6 +474,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   async function ask(url: string, method: string, params: unknown[], isChunk = false, timeoutMs = providerTimeoutMs): Promise<any> {
     const label = labelOf(url)
     let r: { status: number; json: any }
+    const sentAt = Date.now()
     try {
       r = await post(url, { jsonrpc: '2.0', id: ++id, method, params }, timeoutMs)
     } catch (e) {
@@ -482,7 +484,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     }
     if (metrics) safeMetrics(() => metrics.recordRequest(label, method, isChunk, Date.now(), caller.getStore()))
     const rpc = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
-    noteQuota(url, r.status, rpc)
+    noteQuota(url, sentAt, r.status, rpc)
     if (!rpc) return r.json.result
     if (metrics) safeMetrics(() => metrics.recordError(label, method, classifyRpcError(r.status, rpc)))
     throw Object.assign(new Error(String(rpc.message)), { rpc, status: r.status })
@@ -568,9 +570,9 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       seen.set(String(n), { url: cached.url, hash: cached.hash })
       return cached.hash
     }
-    for (const w of logProviders) {
-      // Independence is by operator, not by URL: another key or another spelling of the same provider is no witness.
-      if (sameOperator(w.url, p.url) || quota.down(w.url)) continue
+    // Independence is by operator, not by URL: another key or another spelling of the same provider is no witness.
+    // Witnesses out of quota are passed over, unless every one is (#418, as for the providers of the range).
+    for (const w of live(logProviders.filter((x) => !sameOperator(x.url, p.url)), (x) => x.url)) {
       const hash = await blockHash(w.url, n, deadline).catch(() => null)
       if (!hash) continue
       seen.set(String(n), { url: w.url, hash })
