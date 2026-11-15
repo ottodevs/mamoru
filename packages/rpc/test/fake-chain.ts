@@ -50,6 +50,8 @@ export class FakeChain {
   chainId = 8453
   head = 1000n
   safe = 900n
+  /** otto/mamoru#419: the `finalized` tag. */
+  finalized = 800n
   /** Blocks whose hash differs from the default (a reorg). */
   readonly forked = new Set<bigint>()
   readonly code = new Map<string, Hex>()
@@ -127,7 +129,7 @@ export class FakeChain {
   }
 
   private block(tag: string) {
-    const n = tag === 'latest' ? this.head : tag === 'safe' ? this.safe : BigInt(tag)
+    const n = tag === 'latest' ? this.head : tag === 'safe' ? this.safe : tag === 'finalized' ? this.finalized : BigInt(tag)
     if (n > this.head) return null
     return {
       number: numberToHex(n),

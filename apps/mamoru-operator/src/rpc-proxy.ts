@@ -1,5 +1,6 @@
 import type { Server } from 'bun'
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { ReadCache, type ReadCacheStats } from './read-cache.ts'
 import { classifyRpcError, componentOf, redactSecrets, safeMetrics, type Component, type LogRangeOutcome, type RpcMetrics } from './metrics.ts'
 import { QuotaBook, quotaExhausted } from './quota.ts'
 
@@ -287,6 +288,8 @@ export type RpcProxyOptions = {
   witnessTtlMs?: number
   /** otto/mamoru#418: providers out of quota, shared by every proxy of the operator; unset: a book of this proxy only, kept in memory. */
   quota?: QuotaBook
+  /** otto/mamoru#419: share identical reads in flight and keep pinned reads under the finalized block (default off; the operator's boot turns it on). */
+  readCache?: boolean
   /** Tests: the upstream transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
@@ -331,7 +334,7 @@ const LOGS_REQUEST_MS = 50_000
 /** An answer about the range itself, never a rate: asking again gets the same refusal. */
 const RANGE_REFUSAL = /result|response size|block range|range (is )?too|exceeds/i
 
-export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { url: string; stop: () => void } {
+export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { url: string; stop: () => void; cacheStats: () => ReadCacheStats | null } {
   const providerTimeoutMs = opts.providerTimeoutMs ?? 30_000
   const rawSend = opts.fetch ?? fetch
   // otto/mamoru#285: with `chainId`, every provider proves its chain before its first use. Another chain shuts it
@@ -665,11 +668,31 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   // to it on another gives "0x", null fields or "block not found". Serve `latest` a few blocks behind the tip.
   const lag = opts.headLag ?? BigInt(process.env.MAMORU_HEAD_LAG ?? 3)
   async function head(): Promise<bigint> {
-    const n = BigInt(await one('eth_blockNumber', [])) - lag
-    return n
+    const tip = BigInt(await one('eth_blockNumber', []))
+    cache?.noteHead(tip)
+    return tip - lag
+  }
+  const cache = opts.readCache !== true ? null : new ReadCache(() => one('eth_getBlockByNumber', ['finalized', false]))
+  // otto/mamoru#419: MAMORU_RPC_TRACE_SAMPLE=N logs one request in N with its component, method, block tag and, for a
+  // call, its target and selector: enough to name the code that makes it, never a URL, a key or calldata past 4 bytes.
+  const traceEvery = Number(process.env.MAMORU_RPC_TRACE_SAMPLE ?? 0)
+  let traced = 0
+  const trace = (msg: Req) => {
+    if (!(traceEvery > 0) || ++traced % traceEvery !== 0) return
+    const p = msg.params ?? []
+    const call = msg.method === 'eth_call' || msg.method === 'eth_estimateGas' ? (p[0] as { to?: unknown; data?: unknown; input?: unknown } | undefined) : undefined
+    const data = String(call?.data ?? call?.input ?? '')
+    const tag = typeof p[1] === 'string' && !p[1].startsWith('0x') ? p[1] : msg.method === 'eth_getBlockByNumber' && typeof p[0] === 'string' && !p[0].startsWith('0x') ? p[0] : 'n'
+    console.log(`[rpc-trace] ${caller.getStore() ?? 'unlabelled'} ${msg.method} ${tag}${call ? ` ${String(call.to ?? '').toLowerCase()} ${data.slice(0, 10)}` : ''}`)
   }
   async function handle(msg: Req, seen: Witnessed): Promise<unknown> {
-    const r = await handleInner(msg, seen)
+    trace(msg)
+    // otto/mamoru#419: every provider this proxy uses proved `chainId` before its first request (see onChain): the
+    // answer is known, and asking for it again (observe() does on every review) proves nothing more.
+    if (msg.method === 'eth_chainId' && opts.chainId !== undefined && cache) return { jsonrpc: '2.0', id: msg.id, result: `0x${opts.chainId.toString(16)}` }
+    const kept = cache?.hit(msg)
+    if (kept !== undefined) return { ...(kept as object), id: msg.id }
+    const r = cache ? { ...((await cache.run(msg, () => handleInner(msg, seen))) as object), id: msg.id } : await handleInner(msg, seen)
     // Name the call behind an invalid-params refusal: the engine only sees the message.
     const e = (r as any)?.error
     if (e && msg.method === 'eth_sendRawTransaction') {
@@ -714,5 +737,5 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       return Response.json(await caller.run(componentOf(new URL(req.url).pathname), answer))
     },
   })
-  return { url: `http://127.0.0.1:${server.port}/`, stop: () => server.stop(true) }
+  return { url: `http://127.0.0.1:${server.port}/`, stop: () => server.stop(true), cacheStats: (): ReadCacheStats | null => cache?.snapshot() ?? null }
 }

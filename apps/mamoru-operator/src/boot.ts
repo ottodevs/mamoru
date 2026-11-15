@@ -573,7 +573,7 @@ export async function bootOperator(o: BootOptions) {
   // otto/mamoru#367, #388: the 10-block keyed fallback serves no log range that takes it more than 4 requests, on any
   // chain. On Base an archive range fell through to it after the upstream (QuickNode since 2 Nov) failed: 8,172 chunks
   // and about 617k Alchemy CU in one hour on 11 Nov, against a 40k budget, and still no answer.
-  const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics, quota, chainId: chain.chainId, proven: chain.proven, keyedLogMaxRequests: 4n })
+  const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics, quota, readCache: true, chainId: chain.chainId, proven: chain.proven, keyedLogMaxRequests: 4n })
   // One path per component, for the counters only: the proxy serves them all the same way.
   const via = (component: string) => `${proxy.url}c/${component}`
   o = { ...o, rpcUrl: via('engine') }
@@ -633,7 +633,7 @@ export async function bootOperator(o: BootOptions) {
   let remoteDepth: OperatorConfig['remoteDepth']
   // otto/mamoru#285: the Monad leg goes through its own proxy, like Base: MAMORU_MONAD_RPC_URL and any
   // MAMORU_MONAD_RPC_TRUSTED for reads, public RPCs only for sends and log witnesses. Never one RPC alone.
-  let monadProxy: { url: string; stop: () => void } | null = null
+  let monadProxy: ReturnType<typeof startRpcProxy> | null = null
   if (o.monadRpcUrl) {
     // A configured RPC on another chain is a misconfiguration and refuses the boot; one that is down is not.
     if ((await wrongChainCount([o.monadRpcUrl, ...urlsFromEnv('MAMORU_MONAD_RPC_TRUSTED', '')], BRIDGE_MONAD_CHAIN_ID)) > 0)
@@ -649,6 +649,7 @@ export async function bootOperator(o: BootOptions) {
       idleTimeoutSec: SIDE_IDLE_TIMEOUT_SEC,
       chainId: BRIDGE_MONAD_CHAIN_ID,
       quota,
+      readCache: true,
     })
     const monadUrl = `${monadProxy.url}c/bridge-monad`
     const monad = createPublicClient({ transport: http(monadUrl, { batch: true, timeout: SIDE_CLIENT_TIMEOUT_MS }) })
@@ -858,7 +859,7 @@ export async function bootOperator(o: BootOptions) {
   // (keyed, another provider) for reads and logs, public RPCs only for sends and log witnesses. Unreachable at boot is
   // an alert, not a stop: bridge-out is built all the same, so moves in flight keep counting toward the cap and its
   // minute tick finishes them once Ethereum answers again. A wrong chain still refuses the boot.
-  let l1Proxy: { url: string; stop: () => void } | null = null
+  let l1Proxy: ReturnType<typeof startRpcProxy> | null = null
   if (o.l1RpcUrl) {
     // A configured RPC on another chain is a misconfiguration and refuses the boot; one that is down is not.
     if ((await wrongChainCount([o.l1RpcUrl, ...urlsFromEnv('MAMORU_L1_RPC_TRUSTED', '')], ETHEREUM_CHAIN_ID)) > 0)
@@ -874,6 +875,7 @@ export async function bootOperator(o: BootOptions) {
       idleTimeoutSec: SIDE_IDLE_TIMEOUT_SEC,
       chainId: ETHEREUM_CHAIN_ID,
       quota,
+      readCache: true,
     })
     const l1Url = `${l1Proxy.url}c/bridge-out`
     // Nothing reaches Ethereum before the RPC said it is Ethereum: the check runs before the first request and again
@@ -941,7 +943,7 @@ export async function bootOperator(o: BootOptions) {
     if (bo.pendingCctp() > 0) console.log(`[operator] bridge-out: ${bo.pendingCctp()} CCTP move(s) to finish on Base`)
     console.log(`[operator] bridge-out from Ethereum available (on per account from /ops), relayer ${relayer.address} (${wei ?? 'unknown'} wei on Ethereum)`)
   }
-  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, quota, gitSha, bootedAt, snapshot: snapshot ?? monadSnapshot, bridgeOut })
+  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, quota, rpcCache: () => ({ chain: proxy.cacheStats(), monad: monadProxy?.cacheStats() ?? null, l1: l1Proxy?.cacheStats() ?? null }), gitSha, bootedAt, snapshot: snapshot ?? monadSnapshot, bridgeOut })
   const eth = await client.getBalance({ address: relayer.address })
   console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) sha ${gitSha} on http://${server.hostname}:${server.port}`)
   // Base keeps its boot line byte for byte; any other chain says whose contracts it reads and the relayer's unit.
