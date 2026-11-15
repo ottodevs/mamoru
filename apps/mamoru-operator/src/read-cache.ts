@@ -2,16 +2,19 @@
 //
 // Two layers, both behind the proxy's own provider rules (an answer is only ever one a trusted provider gave to the same
 // request, and eth_getLogs, sends and filters never pass through here):
-// - In flight: identical read requests that arrive while the first is still out share its answer. Nothing is kept
-//   after it lands, so this is the same as one request answered to every asker at once.
-// - Final: an answer pinned to an explicit block number at or below the chain's finalized block, as a trusted provider
-//   last reported it, is kept and served again. Reorg safety: a finalized block is never replaced unless the chain's
-//   finality itself fails (an L1 finality violation for Base, a BFT safety failure for Monad), so a pinned read there has
-//   one right answer forever, the one any honest provider gives. Blocks above it are never kept, however short the
-//   time: the engine's hash checks (the pinned block read again at the end of an observation, a cursor's block re-read)
-//   always reach a provider, and a reorg under them is seen as before. The finalized head is learned from answers to
-//   the `finalized` tag that pass through, and asked for at most every FINAL_REFRESH_MS, only when a pinned read is
-//   likely to fall under it.
+// Both layers serve only reads pinned to an explicit block number that was already at or below the chain's finalized
+// block (as a trusted provider last reported it) when the request was sent:
+// - In flight: an identical such read that arrives while the first is still out shares its answer.
+// - Kept: its good answer is served again for FINAL_KEEP_MS.
+// Reorg safety: a finalized block is never replaced unless the chain's finality itself fails (an L1 finality violation for
+// Base, a BFT safety failure for Monad), so a read pinned there has one right answer, the one any honest provider gives.
+// The check is made when the request is sent, never when its answer lands: an answer computed on a fork that lost before
+// the block was finalized is never kept. Nothing above the finalized block is shared or kept, however briefly: the
+// engine's hash checks (the pinned block read again at the end of an observation, a cursor's block re-read) and every
+// `latest` read always reach a provider, so a reorg under them is seen as before. The keep time bounds how long a
+// provider that broke finality could be repeated. Receipts are never kept (their block hash is not checked here). The
+// finalized head is learned from answers to the `finalized` tag that pass through, and asked for at most every
+// FINAL_REFRESH_MS, only when a pinned read is likely to fall under it.
 
 /** Methods whose answer depends only on their params (no sends, no filters, no logs). */
 const READS = new Set([
@@ -38,11 +41,19 @@ const BLOCK_PARAM: Record<string, number> = { eth_call: 1, eth_getCode: 1, eth_g
 
 export const FINAL_REFRESH_MS = 60_000
 export const READ_CACHE_MAX = 5_000
+/** How long a kept answer is served. */
+export const FINAL_KEEP_MS = 10 * 60_000
 
 type Req = { method: string; params?: unknown[] }
 
 export function isRead(method: string): boolean {
   return READS.has(method)
+}
+
+/** The raw block param of a method that has one (eth_getBlockByNumber's first, a call's second...), else undefined. */
+export function blockParam(msg: Req): unknown {
+  const i = BLOCK_PARAM[msg.method]
+  return i === undefined ? undefined : msg.params?.[i]
 }
 
 /** The explicit block a request is pinned to, or null (a tag, a hash, an object, or none). */
@@ -61,7 +72,7 @@ export type ReadCacheStats = { inflightShared: number; finalHits: number; kept: 
 
 export class ReadCache {
   private readonly inflight = new Map<string, Promise<unknown>>()
-  private readonly kept = new Map<string, unknown>()
+  private readonly kept = new Map<string, { r: unknown; at: number }>()
   private final: bigint | null = null
   /** The head known when `final` was learned: how far finality has likely moved since is the head's move. */
   private headAtFinal: bigint | null = null
@@ -73,6 +84,7 @@ export class ReadCache {
     private readonly askFinalized: () => Promise<unknown>,
     private readonly max = READ_CACHE_MAX,
     private readonly refreshMs = FINAL_REFRESH_MS,
+    private readonly keepMs = FINAL_KEEP_MS,
   ) {}
 
   /** The provider's tip as the proxy last read it. */
@@ -97,11 +109,15 @@ export class ReadCache {
     if (k === null) return undefined
     const v = this.kept.get(k)
     if (v === undefined) return undefined
+    if (Date.now() - v.at >= this.keepMs) {
+      this.kept.delete(k)
+      return undefined
+    }
     // Most recently used last: the oldest falls out first.
     this.kept.delete(k)
     this.kept.set(k, v)
     this.stats.finalHits++
-    return v
+    return v.r
   }
 
   /**
@@ -111,18 +127,23 @@ export class ReadCache {
    */
   async run(msg: Req, ask: () => Promise<any>): Promise<any> {
     if (!isRead(msg.method)) return ask()
-    const k = keyOf(msg)
+    // Decided now, at send time: a block finalized only after this request went out does not make its answer keepable.
+    const k = this.cacheable(msg)
+    if (k === null) {
+      this.maybeRefresh(msg)
+      const r = await ask()
+      if (msg.method === 'eth_getBlockByNumber' && msg.params?.[0] === 'finalized' && r && !r.error) this.noteFinal(r.result)
+      return r
+    }
     const pending = this.inflight.get(k)
     if (pending) {
       this.stats.inflightShared++
       return pending
     }
-    this.maybeRefresh(msg)
     const p = ask().finally(() => this.inflight.delete(k))
     this.inflight.set(k, p)
     const r = await p
-    if (msg.method === 'eth_getBlockByNumber' && msg.params?.[0] === 'finalized' && r && !r.error) this.noteFinal(r.result)
-    if (r && !r.error && r.result !== null && r.result !== undefined && this.cacheable(msg, r.result) !== null) this.keep(k, r)
+    if (r && !r.error && r.result !== null && r.result !== undefined) this.keep(k, r)
     return r
   }
 
@@ -130,21 +151,16 @@ export class ReadCache {
     return { ...this.stats, kept: this.kept.size, finalized: this.final === null ? null : this.final.toString() }
   }
 
-  /** The key under which this request may be kept, or null. A receipt counts once its own block is final. */
-  private cacheable(msg: Req, result?: unknown): string | null {
+  /** The key under which this request may be shared and kept, or null: pinned at or below the finalized block. */
+  private cacheable(msg: Req): string | null {
     if (this.final === null) return null
-    if (msg.method === 'eth_getTransactionReceipt') {
-      if (result === undefined) return keyOf(msg)
-      const b = (result as { blockNumber?: unknown } | null)?.blockNumber
-      return typeof b === 'string' && BigInt(b) <= this.final ? keyOf(msg) : null
-    }
     const n = pinnedBlock(msg)
     return n !== null && n <= this.final ? keyOf(msg) : null
   }
 
   private keep(k: string, r: unknown): void {
     this.kept.delete(k)
-    this.kept.set(k, r)
+    this.kept.set(k, { r, at: Date.now() })
     while (this.kept.size > this.max) this.kept.delete(this.kept.keys().next().value as string)
   }
 

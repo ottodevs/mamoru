@@ -1,6 +1,8 @@
 import type { Server } from 'bun'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { ReadCache, type ReadCacheStats } from './read-cache.ts'
+import { ReadCache, blockParam as pinnedBlockParam, type ReadCacheStats } from './read-cache.ts'
+
+const TRACE_TAGS = new Set(['latest', 'pending', 'safe', 'finalized', 'earliest'])
 import { classifyRpcError, componentOf, redactSecrets, safeMetrics, type Component, type LogRangeOutcome, type RpcMetrics } from './metrics.ts'
 import { QuotaBook, quotaExhausted } from './quota.ts'
 
@@ -682,8 +684,13 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const p = msg.params ?? []
     const call = msg.method === 'eth_call' || msg.method === 'eth_estimateGas' ? (p[0] as { to?: unknown; data?: unknown; input?: unknown } | undefined) : undefined
     const data = String(call?.data ?? call?.input ?? '')
-    const tag = typeof p[1] === 'string' && !p[1].startsWith('0x') ? p[1] : msg.method === 'eth_getBlockByNumber' && typeof p[0] === 'string' && !p[0].startsWith('0x') ? p[0] : 'n'
-    console.log(`[rpc-trace] ${caller.getStore() ?? 'unlabelled'} ${msg.method} ${tag}${call ? ` ${String(call.to ?? '').toLowerCase()} ${data.slice(0, 10)}` : ''}`)
+    // Only a block param, and only as one of the named tags or "n" (a number): nothing else a request carries is logged.
+    const b = pinnedBlockParam(msg)
+    const tag = b === undefined ? '-' : typeof b === 'string' && TRACE_TAGS.has(b) ? b : 'n'
+    const to = typeof call?.to === 'string' && /^0x[0-9a-fA-F]{40}$/.test(call.to) ? call.to.toLowerCase() : '?'
+    const sel = /^0x[0-9a-fA-F]{8}/.test(data) ? data.slice(0, 10) : '?'
+    const method = /^[a-zA-Z0-9_]{1,40}$/.test(msg.method) ? msg.method : '?'
+    console.log(`[rpc-trace] ${caller.getStore() ?? 'unlabelled'} ${method} ${tag}${call ? ` ${to} ${sel}` : ''}`)
   }
   async function handle(msg: Req, seen: Witnessed): Promise<unknown> {
     trace(msg)

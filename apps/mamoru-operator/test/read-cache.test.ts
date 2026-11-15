@@ -34,7 +34,7 @@ describe('read cache rules', () => {
     expect(asked).toBe(3)
   })
 
-  test('errors, null blocks and logs are never kept; a receipt is kept once its block is final', async () => {
+  test('errors, null blocks, receipts and logs are never kept', async () => {
     const c = new ReadCache(async () => null)
     c.noteFinal({ number: hex(100n) })
     const err = { method: 'eth_call', params: [{}, hex(50n)] }
@@ -43,12 +43,9 @@ describe('read cache rules', () => {
     const missing = { method: 'eth_getBlockByNumber', params: [hex(50n), false] }
     await c.run(missing, async () => ({ jsonrpc: '2.0', id: 1, result: null }))
     expect(c.hit(missing)).toBeUndefined()
-    const recent = { method: 'eth_getTransactionReceipt', params: ['0x01'] }
-    await c.run(recent, async () => ({ jsonrpc: '2.0', id: 1, result: { blockNumber: hex(150n) } }))
-    expect(c.hit(recent)).toBeUndefined()
     const old = { method: 'eth_getTransactionReceipt', params: ['0x02'] }
     await c.run(old, async () => ({ jsonrpc: '2.0', id: 1, result: { blockNumber: hex(90n) } }))
-    expect(c.hit(old)).toBeDefined()
+    expect(c.hit(old)).toBeUndefined()
     const logs = { method: 'eth_getLogs', params: [{ fromBlock: hex(1n), toBlock: hex(2n) }] }
     let n = 0
     await c.run(logs, async () => (n++, { jsonrpc: '2.0', id: 1, result: [] }))
@@ -56,19 +53,38 @@ describe('read cache rules', () => {
     expect(n).toBe(2)
   })
 
-  test('identical reads in flight share one answer, then nothing is kept above the finalized block', async () => {
+  test('identical final reads in flight share one answer; a head or latest read is never shared', async () => {
     const c = new ReadCache(async () => null)
+    c.noteFinal({ number: hex(100n) })
     let asked = 0
     let release!: () => void
     const gate = new Promise<void>((r) => (release = r))
     const ask = async () => (asked++, await gate, { jsonrpc: '2.0', id: 1, result: '0x1' })
-    const msg = { method: 'eth_blockNumber', params: [] }
-    const all = Promise.all([c.run(msg, ask), c.run(msg, ask), c.run(msg, ask)])
+    const final = { method: 'eth_getBalance', params: ['0x1', hex(90n)] }
+    const head = { method: 'eth_blockNumber', params: [] }
+    const latest = { method: 'eth_getBalance', params: ['0x1', 'latest'] }
+    const all = Promise.all([c.run(final, ask), c.run(final, ask), c.run(head, ask), c.run(head, ask), c.run(latest, ask), c.run(latest, ask)])
     release()
-    expect((await all).map((r) => r.result)).toEqual(['0x1', '0x1', '0x1'])
-    expect(asked).toBe(1)
-    await c.run(msg, ask)
-    expect(asked).toBe(2)
+    expect((await all).map((r) => r.result)).toEqual(['0x1', '0x1', '0x1', '0x1', '0x1', '0x1'])
+    expect(asked).toBe(5)
+  })
+
+  test('a block finalized only after the request went out does not make its answer keepable', async () => {
+    const c = new ReadCache(async () => null)
+    c.noteFinal({ number: hex(99n) })
+    const msg = { method: 'eth_call', params: [{ to: '0x1' }, hex(100n)] }
+    await c.run(msg, async () => (c.noteFinal({ number: hex(120n) }), { jsonrpc: '2.0', id: 1, result: '0xfork' }))
+    expect(c.hit(msg)).toBeUndefined()
+  })
+
+  test('a kept answer is served for the keep time only', async () => {
+    const c = new ReadCache(async () => null, 10, 60_000, 5)
+    c.noteFinal({ number: hex(100n) })
+    const msg = { method: 'eth_call', params: [{ to: '0x1' }, hex(50n)] }
+    await c.run(msg, async () => ({ jsonrpc: '2.0', id: 1, result: '0x1' }))
+    expect(c.hit(msg)).toBeDefined()
+    await Bun.sleep(10)
+    expect(c.hit(msg)).toBeUndefined()
   })
 
   test('the finalized block is asked at most once per period, and only when a read may fall under it', async () => {
