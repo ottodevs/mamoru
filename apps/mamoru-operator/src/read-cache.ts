@@ -41,6 +41,12 @@ const BLOCK_PARAM: Record<string, number> = { eth_call: 1, eth_getCode: 1, eth_g
 
 export const FINAL_REFRESH_MS = 60_000
 export const READ_CACHE_MAX = 5_000
+/**
+ * Blocks under the finalized head a read must be to be kept: a load-balanced provider's node can trail the one that
+ * reported finality, and answer a block it does not have yet with "0x" or zero. Larger than any node spread seen
+ * (a few blocks on Base, a few dozen on Monad's 0.4 s blocks).
+ */
+export const FINAL_MARGIN = 64n
 /** How long a kept answer is served. */
 export const FINAL_KEEP_MS = 10 * 60_000
 
@@ -62,6 +68,15 @@ export function pinnedBlock(msg: Req): bigint | null {
   if (i === undefined) return null
   const p = msg.params?.[i]
   return typeof p === 'string' && /^0x[0-9a-fA-F]+$/.test(p) ? BigInt(p) : null
+}
+
+/**
+ * An answer a node that lacks the block could also give: null, "0x" (no code, an empty return), or a zero quantity
+ * (a balance or nonce of 0). Served once, never kept: the next read asks a provider again.
+ */
+export function emptyLooking(result: unknown): boolean {
+  if (result === null || result === undefined) return true
+  return typeof result === 'string' && /^0x0*$/.test(result)
 }
 
 export function keyOf(msg: Req): string {
@@ -143,7 +158,7 @@ export class ReadCache {
     const p = ask().finally(() => this.inflight.delete(k))
     this.inflight.set(k, p)
     const r = await p
-    if (r && !r.error && r.result !== null && r.result !== undefined) this.keep(k, r)
+    if (r && !r.error && !emptyLooking(r.result)) this.keep(k, r)
     return r
   }
 
@@ -155,7 +170,7 @@ export class ReadCache {
   private cacheable(msg: Req): string | null {
     if (this.final === null) return null
     const n = pinnedBlock(msg)
-    return n !== null && n <= this.final ? keyOf(msg) : null
+    return n !== null && n + FINAL_MARGIN <= this.final ? keyOf(msg) : null
   }
 
   private keep(k: string, r: unknown): void {
