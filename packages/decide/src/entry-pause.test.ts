@@ -74,12 +74,12 @@ describe('entry pause by chain (otto/mamoru#415)', () => {
     expect(decide(at(ready, BigInt(UNTIL)), paused).proposal).toMatchObject({ kind: 'bridge_out', bucket: 'growth' })
   })
 
-  test('Base paused: the WETH/USDC bucket takes no entry and says why; stables still fill; the Monad bridge is untouched', () => {
+  test('Base paused: the Base pool buckets take no entry and say why; the Monad bridge is untouched', () => {
     const paused = withEngineSettings(V6, settings([{ chainId: 8453, until: UNTIL }]))
     const d = decide(obs(), paused)
     expect(d.buckets.find((b) => b.bucket === 'risk')?.code).toBe('DECIDE_ENTRY_PAUSED_SCHEDULED')
-    expect(d.buckets.find((b) => b.bucket === 'stables')?.code).not.toBe('DECIDE_ENTRY_PAUSED_SCHEDULED')
-    expect(d.proposal?.pool).toBe('pool:USDC/USDT/100')
+    expect(d.buckets.find((b) => b.bucket === 'stables')?.code).toBe('DECIDE_ENTRY_PAUSED_SCHEDULED')
+    expect(d.proposal?.kind === 'enter_swap' || d.proposal?.kind === 'enter_mint').toBe(false)
     expect(decide(ready, paused).proposal).toMatchObject({ kind: 'bridge_out', bucket: 'growth' })
   })
 
@@ -93,6 +93,7 @@ describe('entry pause by chain (otto/mamoru#415)', () => {
   })
 
   test('a pause on another chain changes nothing', () => {
+    // Settings validation refuses a chain Mamoru does not run; the mapping alone still ignores it.
     const other = withEngineSettings(V6, settings([{ chainId: 10, until: UNTIL }]))
     expect(other.entryPauseUntil).toBeUndefined()
     expect(decide(ready, other).premiseHash).toBe(decide(ready, V6).premiseHash)

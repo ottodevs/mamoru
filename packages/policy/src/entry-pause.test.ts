@@ -17,9 +17,11 @@ describe('entryPause settings (otto/mamoru#415)', () => {
     expect(validateEngineSettings(s([{ chainId: 143, until: UNTIL }, { chainId: 143, until: UNTIL + 1 }])).join()).toContain('chain 143 twice')
     expect(validateEngineSettings(s([{ chainId: 143, until: UNTIL, bucket: 'risk' }])).join()).toContain('entryPause[0] must be')
     expect(validateEngineSettings(s([])).join()).toContain('entryPause must be a list')
-    expect(validateEngineSettings(s([1, 2, 3, 4, 5].map((chainId) => ({ chainId, until: UNTIL })))).join()).toContain('entryPause must be a list')
+    expect(validateEngineSettings(s([8453, 143, 8453, 143, 8453].map((chainId) => ({ chainId, until: UNTIL })))).join()).toContain('entryPause must be a list')
     expect(validateEngineSettings(s({ chainId: 143, until: UNTIL })).join()).toContain('entryPause must be a list')
     expect(validateEngineSettings(s([{ chainId: 0, until: UNTIL }])).join()).toContain('chainId')
+    // A typo of Monad's id would pause nothing: refused.
+    expect(validateEngineSettings(s([{ chainId: 144, until: UNTIL }])).join()).toContain('entryPause[0].chainId must be a chain Mamoru runs on')
   })
 
   test('absent keeps every older version byte for byte (same canonical JSON, no policy field)', () => {
@@ -38,9 +40,14 @@ describe('entryPause settings (otto/mamoru#415)', () => {
     expect(p.buckets).toBe(conservadorLiveV6.buckets)
   })
 
-  test('Base paused: only Base volatile buckets that take money; never stables, vaults or a bucket at preference 0', () => {
-    const paused = entryPauseFor(conservadorLiveV6, s([{ chainId: 8453, until: UNTIL }]))
-    expect(paused).toEqual({ risk: UNTIL })
+  test('Base paused: every Base pool bucket that takes money, by what it holds and not by its name; vaults and buckets at 0 go on', () => {
+    expect(entryPauseFor(conservadorLiveV6, s([{ chainId: 8453, until: UNTIL }]))).toEqual({ stables: UNTIL, risk: UNTIL })
+    // A volatile pool in a bucket named 'stables' cannot escape the pause.
+    const renamed = { ...conservadorLiveV6, buckets: [{ id: 'stables' as const, preference: 10_000, pools: ['pool:WETH/USDC/3000'] }] }
+    expect(entryPauseFor(renamed, s([{ chainId: 8453, until: UNTIL }]))).toEqual({ stables: UNTIL })
+    // v7's stables bucket is a vault bucket: savings, no pool, never paused.
+    const vault = { ...conservadorLiveV6, buckets: [{ id: 'stables' as const, preference: 5_000, pools: [], vaults: ['vault:x'] }, { id: 'risk' as const, preference: 5_000, pools: ['pool:WETH/USDC/3000'] }] }
+    expect(entryPauseFor(vault, s([{ chainId: 8453, until: UNTIL }]))).toEqual({ risk: UNTIL })
   })
 
   test('removing a pause or ending it sooner needs a confirm on /ops; adding or extending one does not', () => {

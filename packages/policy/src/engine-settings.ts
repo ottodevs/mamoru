@@ -1,3 +1,4 @@
+import { isChainId } from '@mamoru/domain'
 import { FALL_FREEZE_DEFAULTS } from './policies.ts'
 import type { LazyRerange, PolicyVersion } from './types.ts'
 
@@ -39,7 +40,7 @@ export type EngineSettings = {
   bridge?: { stuckAfterMin: BridgeStuckAfterMin }
   /**
    * otto/mamoru#415: no new money into a chain's volatile buckets until `until` (unix seconds), ahead of a known market
-   * event (Monad's MON unlock of 24 Nov 2026). On that chain every bucket but the stable and vault ones takes no entry; a
+   * event (Monad's MON unlock of 24 Nov 2026). On that chain every pool bucket takes no entry (vault buckets go on); a
    * policy elsewhere bridges nothing to its bucket on that chain. Positions, re-ranges, harvests and sales back to
    * savings go on, and the pause lifts by itself at `until`. At most one entry per chain. Absent = none, so older
    * versions keep their hash.
@@ -194,7 +195,8 @@ export function validateEngineSettings(s: unknown): string[] {
       list.forEach((e: unknown, i) => {
         const r = e as Record<string, unknown> | null
         if (!r || typeof r !== 'object' || Array.isArray(r) || Object.keys(r).some((k) => k !== 'chainId' && k !== 'until')) return void errors.push(`entryPause[${i}] must be { chainId, until }`)
-        if (!isInt(r.chainId) || r.chainId < 1) errors.push(`entryPause[${i}].chainId must be a chain id`)
+        // A chain Mamoru does not run (a typo such as 144) would pause nothing: refused, never silently ignored.
+        if (!isInt(r.chainId) || !isChainId(r.chainId)) errors.push(`entryPause[${i}].chainId must be a chain Mamoru runs on (8453 or 143)`)
         else if (seen.has(r.chainId)) errors.push(`entryPause names chain ${r.chainId} twice`)
         seen.add(r.chainId)
         inRange(errors, `entryPause[${i}].until`, r.until, B.pauseUntil)
@@ -420,15 +422,17 @@ const HOME_CHAIN_ID = 8453
 
 /**
  * otto/mamoru#415: bucket id to the end of its pause for policy `p` under these settings, or null for none. A local
- * bucket pauses when the policy's own chain is paused and it is a volatile bucket that takes money (not stable, vault
- * or being left); a remote bucket when its chain is.
+ * bucket pauses when the policy's own chain is paused and it is a pool bucket that takes money (not a vault bucket or
+ * one being left); a remote bucket when its chain is.
  */
 export function entryPauseFor(p: PolicyVersion, s: EngineSettings): Record<string, number> | null {
   if (!s.entryPause?.length) return null
   const until = new Map(s.entryPause.map((e) => [e.chainId, e.until]))
   const out: Record<string, number> = {}
   const local = until.get(p.sourceChainId ?? HOME_CHAIN_ID)
-  if (local !== undefined) for (const b of p.buckets) if (b.preference > 0 && b.id !== 'stables' && b.id !== 'stables-lp' && !b.vaults?.length) out[b.id] = local
+  // By what the bucket holds, never by its name: every pool bucket that takes money pauses, stable pairs included (fail
+  // closed: a bucket id never lets a volatile pool through). Only vault buckets (ERC-4626 vaults of the savings asset) go on.
+  if (local !== undefined) for (const b of p.buckets) if (b.preference > 0 && b.pools.length > 0) out[b.id] = local
   for (const rb of p.remoteBuckets ?? []) {
     const end = until.get(rb.chainId)
     if (end !== undefined) out[rb.id] = end
