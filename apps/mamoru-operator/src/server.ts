@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
+import type { QuotaBook } from './quota.ts'
 import type { Server } from 'bun'
 import type { AccountContext } from '@mamoru/domain'
 import { verifyMetricsSignature } from '@mamoru/operator-auth'
@@ -79,7 +80,7 @@ function json(status: number, body: unknown): Response {
  * no session keys, no full account keys, no RPC URLs, no grants, no signatures, no salts, no userOps.
  * See docs/operator-metrics.md.
  */
-async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha: string, bootedAt: number): Promise<unknown> {
+async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha: string, bootedAt: number, quota?: QuotaBook | null): Promise<unknown> {
   const rpc = rpcMetrics.snapshot()
   const relayerBalance = await op.relayerBalance()
   return {
@@ -114,6 +115,8 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       logRanges: rpc.logRanges,
       // The same requests by component (engine reviews, armed watcher, operator, relayer) and method.
       byComponent: rpc.byComponent,
+      // otto/mamoru#418: providers passed over because their quota is spent, with when they are asked again.
+      quota: quota?.snapshot() ?? [],
       note: 'cuEstimate is a static per-method estimate (see metrics.ts CU_TABLE), not Alchemy\'s billed figure',
     },
     engines: op.engineHealthSnapshot(),
@@ -131,7 +134,7 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
 const STOP_BODY_BYTES = 4 * 1024
 const STOP_BODY_MS = 2_000
 
-export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; gitSha: string; bootedAt: number; snapshot?: SnapshotLoop | null; /** Ethereum → Base moves (#133); routes answer 404 without it. */ bridgeOut?: BridgeOut | null; admission?: Partial<AdmissionLimits>; /** Tests only: the legacy cutoff (default LEGACY_HMAC_UNTIL). */ legacyHmacUntil?: number }): Server<undefined> {
+export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; /** otto/mamoru#418 */ quota?: QuotaBook | null; gitSha: string; bootedAt: number; snapshot?: SnapshotLoop | null; /** Ethereum → Base moves (#133); routes answer 404 without it. */ bridgeOut?: BridgeOut | null; admission?: Partial<AdmissionLimits>; /** Tests only: the legacy cutoff (default LEGACY_HMAC_UNTIL). */ legacyHmacUntil?: number }): Server<undefined> {
   const legacyUntil = opts.legacyHmacUntil ?? LEGACY_HMAC_UNTIL
   const admission = new Admission({ ...DEFAULT_ADMISSION, ...opts.admission })
   return Bun.serve({
@@ -150,7 +153,7 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
         if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
         const sig = req.headers.get('x-mamoru-sig')
         if (!(await verifyMetricsSignature(opts.secret, 'GET', '/metrics', sig))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
-        return json(200, await buildMetricsPayload(op, opts.rpcMetrics, opts.gitSha, opts.bootedAt))
+        return json(200, await buildMetricsPayload(op, opts.rpcMetrics, opts.gitSha, opts.bootedAt, opts.quota))
       }
       if (url.pathname === '/pool-stats') {
         // otto/mamoru#248: the hourly pool stats (TVL, daily volumes) the app turns into the plan APY. Signed like

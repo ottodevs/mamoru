@@ -22,6 +22,7 @@ import { ReturnHome } from './return-home.ts'
 import { CCTP_DOMAIN_MONAD, MESSAGE_TRANSMITTER_V2 } from './cctp.ts'
 import { BridgeOut, ETHEREUM_CHAIN_ID, L1_BUNDLER_TIMEOUT_MS, L1_HANDLE_OPS_GAS, L1_USDC } from './bridge-out.ts'
 import { L1Bundler, paymasterFromEnv } from './paymaster.ts'
+import { QuotaBook } from './quota.ts'
 import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, proveChain, startRpcProxy, trustedFromEnv, urlsFromEnv, wrongChainCount } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
 import { readSnapshot, SnapshotLoop, snapshotIntervalMs, withBridges, type Snapshot } from './snapshot.ts'
@@ -561,6 +562,8 @@ export async function bootOperator(o: BootOptions) {
   const bootedAt = Date.now()
   const gitSha = await gitShaOnce(process.cwd())
   const rpcMetrics = new RpcMetrics(o.stateDir)
+  // otto/mamoru#418: one book of providers out of quota for every proxy of this operator, kept across restarts.
+  const quota = new QuotaBook(o.stateDir)
   // Every RPC call of the operator, engine and bundler goes through the loopback proxy (getLogs splitting, no keyed URL in errors).
   // otto/mamoru#261: the proxy knows its chain before it starts, so its public fallbacks are that chain's and every
   // provider proves the chain before its first use. Asked of the RPCs the operator trusts, never of a public one;
@@ -570,7 +573,7 @@ export async function bootOperator(o: BootOptions) {
   // otto/mamoru#367, #388: the 10-block keyed fallback serves no log range that takes it more than 4 requests, on any
   // chain. On Base an archive range fell through to it after the upstream (QuickNode since 2 Nov) failed: 8,172 chunks
   // and about 617k Alchemy CU in one hour on 11 Nov, against a 40k budget, and still no answer.
-  const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics, chainId: chain.chainId, proven: chain.proven, keyedLogMaxRequests: 4n })
+  const proxy = startRpcProxy(o.rpcUrl, { metrics: rpcMetrics, quota, chainId: chain.chainId, proven: chain.proven, keyedLogMaxRequests: 4n })
   // One path per component, for the counters only: the proxy serves them all the same way.
   const via = (component: string) => `${proxy.url}c/${component}`
   o = { ...o, rpcUrl: via('engine') }
@@ -645,6 +648,7 @@ export async function bootOperator(o: BootOptions) {
       headLag: 0n,
       idleTimeoutSec: SIDE_IDLE_TIMEOUT_SEC,
       chainId: BRIDGE_MONAD_CHAIN_ID,
+      quota,
     })
     const monadUrl = `${monadProxy.url}c/bridge-monad`
     const monad = createPublicClient({ transport: http(monadUrl, { batch: true, timeout: SIDE_CLIENT_TIMEOUT_MS }) })
@@ -869,6 +873,7 @@ export async function bootOperator(o: BootOptions) {
       headLag: 0n,
       idleTimeoutSec: SIDE_IDLE_TIMEOUT_SEC,
       chainId: ETHEREUM_CHAIN_ID,
+      quota,
     })
     const l1Url = `${l1Proxy.url}c/bridge-out`
     // Nothing reaches Ethereum before the RPC said it is Ethereum: the check runs before the first request and again
@@ -936,7 +941,7 @@ export async function bootOperator(o: BootOptions) {
     if (bo.pendingCctp() > 0) console.log(`[operator] bridge-out: ${bo.pendingCctp()} CCTP move(s) to finish on Base`)
     console.log(`[operator] bridge-out from Ethereum available (on per account from /ops), relayer ${relayer.address} (${wei ?? 'unknown'} wei on Ethereum)`)
   }
-  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, gitSha, bootedAt, snapshot: snapshot ?? monadSnapshot, bridgeOut })
+  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, quota, gitSha, bootedAt, snapshot: snapshot ?? monadSnapshot, bridgeOut })
   const eth = await client.getBalance({ address: relayer.address })
   console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) sha ${gitSha} on http://${server.hostname}:${server.port}`)
   // Base keeps its boot line byte for byte; any other chain says whose contracts it reads and the relayer's unit.

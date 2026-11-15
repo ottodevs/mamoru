@@ -1,6 +1,7 @@
 import type { Server } from 'bun'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { classifyRpcError, componentOf, redactSecrets, safeMetrics, type Component, type LogRangeOutcome, type RpcMetrics } from './metrics.ts'
+import { QuotaBook, quotaExhausted } from './quota.ts'
 
 type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
 
@@ -284,6 +285,8 @@ export type RpcProxyOptions = {
   providerTimeoutMs?: number
   /** How long a trusted block hash may witness a log range; default WITNESS_TTL_MS. Tests shorten it. */
   witnessTtlMs?: number
+  /** otto/mamoru#418: providers out of quota, shared by every proxy of the operator; unset: a book of this proxy only, kept in memory. */
+  quota?: QuotaBook
   /** Tests: the upstream transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
@@ -359,6 +362,17 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const fallbacks = opts.fallbacks ?? fallbacksFromEnv(process.env, opts.chainId)
   const maxLogRange = opts.maxLogRange ?? Number(process.env.MAMORU_LOG_RANGE ?? 10)
   const metrics = opts.metrics
+  const quota = opts.quota ?? new QuotaBook()
+  /** otto/mamoru#418: a refusal that says the quota is spent marks the provider; any good answer clears it. */
+  const noteQuota = (url: string, status: number | undefined, err: any) => {
+    if (!err) quota.clear(url)
+    else if (quotaExhausted(status, err)) quota.mark(url, labelOf(url), providerWords(err?.message).slice(0, 60))
+  }
+  /** The providers of `list` not out of quota; all of them when every one is (a spent provider still beats none). */
+  const live = <T>(list: T[], urlOf: (x: T) => string): T[] => {
+    const up = list.filter((x) => !quota.down(urlOf(x)))
+    return up.length ? up : list
+  }
   /** The component that made the request being served: the path the proxy was called on (`/c/<component>`), for the counters only. */
   const caller = new AsyncLocalStorage<Component>()
   let id = 0
@@ -409,7 +423,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    */
   async function raw(body: any, isChunk = false, start = 0): Promise<any> {
     let last: any = null
-    const base = ANY_PROVIDER.has(body?.method) ? providers : trusted
+    const base = live(ANY_PROVIDER.has(body?.method) ? providers : trusted, (u) => u)
     // `start` rotates the list: a retry asks the next provider first.
     const list = [...base.slice(start % base.length), ...base.slice(0, start % base.length)]
     const all = [...list, ...list]
@@ -423,6 +437,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
           if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk, Date.now(), caller.getStore()))
           const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
           if (errObj && metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(r.status, errObj)))
+          noteQuota(url, r.status, errObj)
           if (wellFormed(r.json) && !retriable(r.status, r.json)) {
             if (body.method === 'eth_getBlockByNumber') remember(url, r.json.result)
             return r.json
@@ -467,6 +482,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     }
     if (metrics) safeMetrics(() => metrics.recordRequest(label, method, isChunk, Date.now(), caller.getStore()))
     const rpc = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
+    noteQuota(url, r.status, rpc)
     if (!rpc) return r.json.result
     if (metrics) safeMetrics(() => metrics.recordError(label, method, classifyRpcError(r.status, rpc)))
     throw Object.assign(new Error(String(rpc.message)), { rpc, status: r.status })
@@ -554,7 +570,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     }
     for (const w of logProviders) {
       // Independence is by operator, not by URL: another key or another spelling of the same provider is no witness.
-      if (sameOperator(w.url, p.url)) continue
+      if (sameOperator(w.url, p.url) || quota.down(w.url)) continue
       const hash = await blockHash(w.url, n, deadline).catch(() => null)
       if (!hash) continue
       seen.set(String(n), { url: w.url, hash })
@@ -613,7 +629,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       .map((p, i) => { const n = requests(p); return { p, i, n, t: tier(p, n) } })
     // Where set, never the keyed fallback for a range that takes it many requests (#367).
     const cap = opts.keyedLogMaxRequests
-    const order = (cap === undefined ? allowed : allowed.filter((x) => !trustedFallbacks.includes(x.p.url) || x.n <= cap)).sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
+    const order = live(cap === undefined ? allowed : allowed.filter((x) => !trustedFallbacks.includes(x.p.url) || x.n <= cap), (x) => x.p.url).sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
     let last: any = null
     // What the caller is told when nothing is accepted: a range that was read but not witnessed says more than a provider being down.
     let unwitnessed: any = null
