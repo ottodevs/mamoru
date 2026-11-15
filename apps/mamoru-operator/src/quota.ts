@@ -81,7 +81,8 @@ export class QuotaBook {
   clear(url: string, sentAt: number): void {
     const k = QuotaBook.key(url)
     const was = this.entries.get(k)
-    if (!was || sentAt < (was.markedAt ?? was.since)) return
+    // Same millisecond as the refusal: no telling which came first, so the mark stays.
+    if (!was || sentAt <= (was.markedAt ?? was.since)) return
     this.entries.delete(k)
     logErr('[rpc]', `RPC provider ${was.label} answers again after running out of quota`)
     this.save()

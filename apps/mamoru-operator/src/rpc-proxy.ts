@@ -368,7 +368,11 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     if (!err) quota.clear(url, sentAt)
     else if (quotaExhausted(status, err)) quota.mark(url, labelOf(url), providerWords(err?.message).slice(0, 60))
   }
-  /** The providers of `list` not out of quota; all of them when every one is (a spent provider still beats none). */
+  /**
+   * The providers of `list` not out of quota; all of them when every one is (a spent provider still beats none). Then
+   * there is no recheck gate on purpose: every request needs an answer and none can come from elsewhere, and a refused
+   * request spends no quota; the first good answer clears the mark and the normal path is back.
+   */
   const live = <T>(list: T[], urlOf: (x: T) => string): T[] => {
     const up = list.filter((x) => !quota.skip(urlOf(x)))
     return up.length ? up : list

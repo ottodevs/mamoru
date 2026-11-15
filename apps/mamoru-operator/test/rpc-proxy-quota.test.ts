@@ -68,6 +68,8 @@ describe('a provider out of quota (otto/mamoru#418)', () => {
       await call(proxy.url)
       expect(quota.snapshot()).toHaveLength(1)
       spent.clear()
+      // An answer sent in the refusal's own millisecond keeps the mark.
+      await Bun.sleep(2)
       w.calls.length = 0
       expect((await call(proxy.url)).result).toBe('0x10')
       expect(w.calls).toEqual(['base-mainnet.g.alchemy.com'])
@@ -116,6 +118,7 @@ describe('a provider out of quota (otto/mamoru#418)', () => {
     const quota = new QuotaBook()
     quota.mark(ALCHEMY, 'alchemy.com', 'Monthly capacity limit exceeded', 2_000)
     quota.clear(ALCHEMY, 1_000)
+    quota.clear(ALCHEMY, 2_000)
     expect(quota.snapshot()).toHaveLength(1)
     quota.clear(ALCHEMY, 3_000)
     expect(quota.snapshot()).toEqual([])
