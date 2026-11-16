@@ -1,0 +1,64 @@
+[
+  {
+    "name": "baseline",
+    "policy": "conservador-live-v2"
+  },
+  {
+    "name": "ff-trend",
+    "policy": "conservador-live-v2",
+    "overrides": {
+      "guards": {
+        "byBucket": {
+          "btc-usdc": {
+            "fallFreeze": {
+              "fallBps": 700,
+              "volBps": 0
+            }
+          },
+          "risk": {
+            "fallFreeze": {
+              "fallBps": 900,
+              "volBps": 0
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "cppi85-m2",
+    "policy": "conservador-live-v2",
+    "overrides": {
+      "cppi": {
+        "floorBps": 8500,
+        "multiplier": 2
+      }
+    }
+  },
+  {
+    "name": "cppi85-m2+ff-trend5",
+    "policy": "conservador-live-v2",
+    "overrides": {
+      "cppi": {
+        "floorBps": 8500,
+        "multiplier": 2
+      },
+      "guards": {
+        "byBucket": {
+          "btc-usdc": {
+            "fallFreeze": {
+              "fallBps": 500,
+              "volBps": 0
+            }
+          },
+          "risk": {
+            "fallFreeze": {
+              "fallBps": 500,
+              "volBps": 0
+            }
+          }
+        }
+      }
+    }
+  }
+]
