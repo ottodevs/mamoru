@@ -260,20 +260,45 @@ export type DayReceiptWire = {
 }
 
 /**
+ * otto/mamoru#423: one collect's id across stored ops: several ops can carry facts of the same transaction (retries
+ * stored apart, an op stored without its userOp hash). Facts with no txHash are counted as they are.
+ */
+export function feeKey(f: OpFacts, fee: FeeFact): string | undefined {
+  if (!f.txHash) return undefined
+  return `${f.txHash.toLowerCase()}:${fee.logIndex ?? `t${fee.tokenId}`}`
+}
+
+/**
  * Per-day totals of one account's ops, oldest day first, the whole history: the Worker writes only the days whose
  * digest changed, so a day recovered late (a receipt read after an outage) is still delivered. Days with no op
  * that reached the chain are absent.
  */
 export function dayReceipts(ops: readonly StoredOp[]): DayReceiptWire[] {
   const days = new Map<string, { gas: bigint; usdc: bigint; priced: boolean; positions: Map<string, { c0: bigint; c1: bigint; usdc: bigint; priced: boolean }> }>()
+  const seen = new Set<string>()
+  const txGas = new Map<string, bigint>()
   for (const op of ops) {
     const f = op.facts
     if (!f) continue
     const day = f.at.slice(0, 10)
     const d = days.get(day) ?? { gas: 0n, usdc: 0n, priced: true, positions: new Map() }
     days.set(day, d)
-    d.gas += BigInt(f.gasWei)
+    // otto/mamoru#423: a transaction's gas counts once, at the most any of its ops read (an op stored without its
+    // userOp hash reads the whole transaction's).
+    const gas = BigInt(f.gasWei)
+    const tx = f.txHash?.toLowerCase()
+    const before = tx ? (txGas.get(tx) ?? 0n) : 0n
+    if (gas > before) {
+      d.gas += gas - before
+      if (tx) txGas.set(tx, gas)
+    }
     for (const fee of f.fees) {
+      // otto/mamoru#423: a fee read on several stored ops (retries of one transaction) counts once.
+      const key = feeKey(f, fee)
+      if (key) {
+        if (seen.has(key)) continue
+        seen.add(key)
+      }
       const p = d.positions.get(fee.tokenId) ?? { c0: 0n, c1: 0n, usdc: 0n, priced: true }
       d.positions.set(fee.tokenId, p)
       p.c0 += BigInt(fee.fee0)

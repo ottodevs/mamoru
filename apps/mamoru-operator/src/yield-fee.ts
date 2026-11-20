@@ -13,6 +13,7 @@
 // confirmed or on its way (one in flight counts, so two withdrawals never charge the same yield twice).
 
 import type { StoredOp } from './state.ts'
+import { feeKey } from './yield-receipts.ts'
 
 /** 10 % of the yield, in basis points. */
 export const YIELD_FEE_BPS = 1_000n
@@ -48,9 +49,16 @@ export function yieldFee(ops: readonly StoredOp[], bps: bigint = YIELD_FEE_BPS, 
   let collectedUsdc = 0n
   let unpriced = 0
   let chargedUsdc = 0n
+  const seen = new Set<string>()
   for (const op of ops) {
     if (op.facts?.feeable && Date.parse(op.facts.at) >= since) {
       for (const f of op.facts.fees) {
+        // otto/mamoru#423: a collect read on several stored ops is charged once.
+        const key = feeKey(op.facts, f)
+        if (key) {
+          if (seen.has(key)) continue
+          seen.add(key)
+        }
         if (f.usdc === undefined) unpriced++
         else collectedUsdc += BigInt(f.usdc)
       }

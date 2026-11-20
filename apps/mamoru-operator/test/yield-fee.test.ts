@@ -18,6 +18,14 @@ const withdrawal = (state: StoredOp['state'], feeUsdc?: string, txHash?: string)
   ({ opId: `own-${state}-${feeUsdc}-${txHash}`, kind: 'transfer', state, updatedAt: '2026-11-06T00:00:00Z', amountUsdc: '1000000', ...(feeUsdc ? { feeUsdc } : {}), ...(txHash ? { txHash } : {}) }) as StoredOp
 
 describe('yieldFee (otto/mamoru#371)', () => {
+  test('otto/mamoru#423: a collect read on several stored ops is charged once', () => {
+    const retry = (i: number, txHash = '0xAB'): StoredOp =>
+      ({ opId: `eng-r${i}`, kind: 'reduce', state: 'confirmed', updatedAt: '2026-11-15T21:07:00.000Z', txHash, facts: { txHash, at: '2026-11-15T21:07:00.000Z', gasWei: '1', fees: [{ ...fee('5670000'), logIndex: 121 }], feeable: true } }) as StoredOp
+    const ops = [...Array.from({ length: 130 }, (_, i) => retry(i)), retry(999, '0xab')]
+    expect(yieldFee(ops).collectedUsdc).toBe(5_670_000n)
+    expect(yieldFee([...ops, retry(1000, '0xcd')]).collectedUsdc).toBe(11_340_000n)
+  })
+
   test('10 % of the priced yield collected since the fee started; nothing before', () => {
     const f = yieldFee([harvest('2026-11-04T23:59:59.000Z', '5000000'), harvest('2026-11-05T10:00:00.000Z', '2000000', '1000000')])
     expect(f).toEqual({ collectedUsdc: 3_000_000n, unpriced: 0, feeUsdc: 300_000n, chargedUsdc: 0n, owedUsdc: 300_000n })

@@ -91,6 +91,19 @@ describe('priceFees and dayReceipts', () => {
     expect(days[1]!.collectedUsdc).toBeUndefined()
     expect(days[1]!.positions[0]!.collectedUsdc).toBeUndefined()
   })
+
+  test('otto/mamoru#423: ops that read the same transaction count its fees and its gas once', () => {
+    const facts = (gasWei: string): OpFacts => ({ txHash: '0xAA', at: '2026-11-15T21:07:00.000Z', gasWei, v: FACTS_VERSION, fees: [{ tokenId: '7', pool: LIVE_POOL, fee0: '2727077', fee1: '190', usdc: '5670000', logIndex: 121 }] })
+    const retries = Array.from({ length: 130 }, (_, i) => op(`eng-${i}`, facts('40')))
+    // An op stored without its userOp hash reads the whole transaction's gas: the most read counts, once.
+    retries.push(op('own-x', { ...facts('55'), txHash: '0xaa' }))
+    const [day] = dayReceipts(retries)
+    expect(day).toEqual({ day: '2026-11-15', gasWei: '55', collectedUsdc: '5670000', positions: [{ tokenId: '7', collected0: '2727077', collected1: '190', collectedUsdc: '5670000' }] })
+    // Another transaction the same day still adds up.
+    const other = op('eng-y', { ...facts('10'), txHash: '0xbb' })
+    expect(dayReceipts([...retries, other])[0]!.collectedUsdc).toBe('11340000')
+    expect(dayReceipts([...retries, other])[0]!.gasWei).toBe('65')
+  })
 })
 
 describe('needsFacts', () => {
