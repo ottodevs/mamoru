@@ -29,27 +29,23 @@ describe('yieldFee (otto/mamoru#371)', () => {
   test('otto/mamoru#423: an out-of-scope or unpriced copy does not hide the charged one', () => {
     const copy = (id: string, feeable: boolean, usdc?: string): StoredOp =>
       ({ opId: id, kind: 'reduce', state: 'confirmed', updatedAt: '2026-11-15T21:07:00.000Z', txHash: '0xef', facts: { txHash: '0xef', v: 2, at: '2026-11-15T21:07:00.000Z', gasWei: '1', fees: [{ ...fee(usdc), logIndex: 3 }], ...(feeable ? { feeable: true } : {}) } }) as StoredOp
-    expect(yieldFee([copy('eng-a', false, '5000000'), copy('eng-b', true, '5000000')]).collectedUsdc).toBe(5_000_000n)
+    // A collect is charged only when every copy of it was read in scope: when in doubt, the owner is not charged.
+    expect(yieldFee([copy('eng-a', false, '5000000'), copy('eng-b', true, '5000000')]).collectedUsdc).toBe(0n)
+    expect(yieldFee([copy('eng-a', true), copy('eng-b', false, '5000000')])).toMatchObject({ collectedUsdc: 0n, unpriced: 0 })
+    // An unpriced copy does not hide a priced one.
     expect(yieldFee([copy('eng-a', true), copy('eng-b', true, '5000000')])).toMatchObject({ collectedUsdc: 5_000_000n, unpriced: 0 })
-    expect(yieldFee([copy('eng-a', true), copy('eng-b', false, '5000000')])).toMatchObject({ collectedUsdc: 5_000_000n, unpriced: 0 })
-    // A legacy whole-transaction read next to a current read of its userOp counts once; the legacy scope carries over.
+    // A current read next to an older-layout copy of the same receipt is the read: counted once, in scope only if it is.
     const legacy = { ...copy('own-l', true, '5000000'), facts: { txHash: '0xef', at: '2026-11-15T21:07:00.000Z', gasWei: '1', fees: [fee('5000000')], feeable: true } } as StoredOp
-    const current = { ...copy('eng-c', false, '5000000'), userOpHash: '0x01' } as StoredOp
-    expect(yieldFee([legacy, current]).collectedUsdc).toBe(5_000_000n)
-    // Two legacy reads of one transaction, whole and per userOp, count once; the userOp's scope carries if the whole one is out of scope.
+    const current = (feeable: boolean) => ({ ...copy('eng-c', feeable, '5000000'), userOpHash: '0x01' }) as StoredOp
+    expect(yieldFee([legacy, current(true)]).collectedUsdc).toBe(5_000_000n)
+    expect(yieldFee([legacy, current(false)]).collectedUsdc).toBe(0n)
+    // Two older-layout reads, whole and per userOp: the whole one is the read.
     const legacyOwn = { ...legacy, opId: 'eng-l2', userOpHash: '0x01' } as StoredOp
     expect(yieldFee([legacy, legacyOwn]).collectedUsdc).toBe(5_000_000n)
-    const wholeOut = { ...legacy, facts: { ...legacy.facts!, feeable: undefined } } as StoredOp
-    expect(yieldFee([wholeOut, legacyOwn]).collectedUsdc).toBe(5_000_000n)
-    // A bundle of two userOps of this Safe: a current read of one does not cover the legacy whole read, and one userOp's
-    // fee scope never spreads to the other's collect.
-    const both = { ...legacy, facts: { ...legacy.facts!, fees: [fee('5000000'), { ...fee('3000000'), tokenId: '2' }] } } as StoredOp
-    const u1 = { ...copy('eng-u1', false, '5000000'), userOpHash: '0x01' } as StoredOp
-    const u2 = { ...copy('eng-u2', false), userOpHash: '0x02', facts: { ...copy('eng-u2', false).facts!, v: 1, fees: [{ ...fee('3000000'), tokenId: '2' }] } } as StoredOp
-    expect(yieldFee([both, u1, u2]).collectedUsdc).toBe(8_000_000n)
-    const scoped1 = { ...u1, facts: { ...u1.facts!, v: 1, fees: [fee('5000000')], feeable: true } } as StoredOp
-    const whole = { ...both, facts: { ...both.facts!, feeable: undefined } } as StoredOp
-    expect(yieldFee([whole, scoped1, u2]).collectedUsdc).toBe(0n)
+    expect(yieldFee([{ ...legacy, facts: { ...legacy.facts!, feeable: undefined } } as StoredOp, legacyOwn]).collectedUsdc).toBe(0n)
+    // Older-layout reads of two userOps of one bundle are distinct collects, each in its own scope.
+    const own = (id: string, hash: string, usdc: string, feeable: boolean) => ({ ...legacy, opId: id, userOpHash: hash, facts: { ...legacy.facts!, fees: [fee(usdc)], ...(feeable ? {} : { feeable: undefined }) } }) as StoredOp
+    expect(yieldFee([own('eng-u1', '0x01', '5000000', true), own('eng-u2', '0x02', '3000000', false)]).collectedUsdc).toBe(5_000_000n)
     // A collect with an unreadable time is never charged.
     expect(yieldFee([{ ...copy('eng-n', true, '5000000'), facts: { ...copy('eng-n', true, '5000000').facts!, at: 'bad' } } as StoredOp]).collectedUsdc).toBe(0n)
   })

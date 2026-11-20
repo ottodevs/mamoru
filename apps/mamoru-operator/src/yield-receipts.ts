@@ -265,74 +265,69 @@ export type DayReceiptWire = {
  */
 const txOf = (op: StoredOp): string | undefined => (op.facts?.txHash ?? op.txHash)?.toLowerCase()
 
-/** `feeable`: any copy of the collect was read in the yield fee's scope (#371). */
-export type CountedFee = { facts: OpFacts; fee: FeeFact; feeable: boolean }
+/** `feeable`: every copy of the collect was read in the yield fee's scope (#371): when in doubt, the owner is not charged. */
+export type CountedFee = { op: StoredOp; facts: OpFacts; fee: FeeFact; feeable: boolean }
 
 /** The userOp an op read alone (an engine op with its hash), or the whole transaction. */
 const scopeOf = (op: StoredOp): string => (op.opId.startsWith('eng-') && op.userOpHash ? op.userOpHash.toLowerCase() : 'tx')
 
+/** A collect's id inside its transaction: the log index, or for facts of the older layout its userOp, position, amounts and order. */
+function collectIds(op: StoredOp): string[] {
+  const facts = op.facts as OpFacts
+  const legacy = (facts.v ?? 1) < FACTS_VERSION
+  const nth = new Map<string, number>()
+  return facts.fees.map((fee) => {
+    if (!legacy && fee.logIndex !== undefined) return `${fee.logIndex}`
+    const id = `${scopeOf(op)}:t${fee.tokenId}:${fee.fee0}:${fee.fee1}`
+    const n = nth.get(id) ?? 0
+    nth.set(id, n + 1)
+    return `${id}:${n}`
+  })
+}
+
 /**
- * The collects of `ops`, one per collect: id `<tx>:<logIndex>`. Facts of an older layout hold the same collects without
- * a log index: they are dropped where a current-layout read covers the same userOp (or the whole transaction), and
- * otherwise told apart by userOp, position, amounts and their order inside the op. Of two copies, a priced one wins.
+ * The collects of `ops`, each once. Copies of one transaction are taken as one read:
+ * - Current-layout copies are the read; older-layout ones next to them are the same receipt read before.
+ * - Only older-layout copies: a whole-transaction one holds what any userOp's own read found, so it is the read; else
+ *   one copy per userOp.
+ * - Each collect's amounts and price come from one copy, the read's copies ranked by how many fees they price, so a
+ *   price spread over a position's collects by an older layout (keepPrices) is never mixed with another copy's.
  */
 export function distinctFees(ops: readonly StoredOp[]): CountedFee[] {
-  const withFacts = ops.filter((op) => op.facts)
-  const current = withFacts.filter((op) => (op.facts!.v ?? 1) >= FACTS_VERSION)
-  const covered = new Set(current.map((op) => `${txOf(op)}:${scopeOf(op)}`))
-  const currentTx = new Set(current.map(txOf))
-  // The userOps of this Safe the stored ops name per transaction. bundler.ts sends one per bundle; a transaction where
-  // the ops name two is a bundle someone else built, and a current read of one userOp does not cover the others.
-  const userOps = new Map<string, Set<string>>()
-  for (const op of withFacts) {
+  const groups = new Map<string, StoredOp[]>()
+  const out: CountedFee[] = []
+  for (const op of ops) {
+    if (!op.facts) continue
     const tx = txOf(op)
-    if (tx && scopeOf(op) !== 'tx') userOps.set(tx, (userOps.get(tx) ?? new Set()).add(scopeOf(op)))
-  }
-  const oneUserOp = (tx: string) => (userOps.get(tx)?.size ?? 0) <= 1
-  // A legacy read is covered by a current read of its userOp, or of the whole transaction; a legacy whole-transaction
-  // read also by a current read of the transaction's only userOp.
-  const coveredBy = (op: StoredOp, tx: string) => covered.has(`${tx}:tx`) || (scopeOf(op) === 'tx' ? currentTx.has(tx) && oneUserOp(tx) : covered.has(`${tx}:${scopeOf(op)}`))
-  const isLegacy = (op: StoredOp) => (op.facts!.v ?? 1) < FACTS_VERSION
-  const legacyWholeTx = new Set(withFacts.filter((op) => isLegacy(op) && scopeOf(op) === 'tx' && txOf(op) && !coveredBy(op, txOf(op)!)).map(txOf))
-  // A whole-transaction read holds what any userOp's own read found: those are dropped, current ones too when it is a
-  // bundle of several (their collects are in the legacy read).
-  const dropped = (op: StoredOp, tx: string) => (isLegacy(op) ? coveredBy(op, tx) || (scopeOf(op) !== 'tx' && legacyWholeTx.has(tx)) : scopeOf(op) !== 'tx' && legacyWholeTx.has(tx) && !oneUserOp(tx))
-  // The fee scope of a dropped copy holds for the read that replaces it: a whole-transaction copy's for every collect of
-  // the transaction, a userOp's for a read of that same userOp (of the whole transaction too when it is the only one).
-  // Anything less certain is not charged.
-  const feeableScope = new Set(
-    withFacts
-      .filter((op) => op.facts!.feeable && txOf(op) && dropped(op, txOf(op)!))
-      .map((op) => (scopeOf(op) !== 'tx' && oneUserOp(txOf(op)!) ? `${txOf(op)}:tx` : `${txOf(op)}:${scopeOf(op)}`)),
-  )
-  const out = new Map<string, CountedFee>()
-  const loose: CountedFee[] = []
-  for (const op of withFacts) {
-    const facts = op.facts!
-    const tx = txOf(op)
-    const legacy = (facts.v ?? 1) < FACTS_VERSION
-    // Covered by a current read, or (two legacy reads left) by a whole-transaction one, which holds what a userOp's own read found.
-    if (tx && dropped(op, tx)) continue
-    const nth = new Map<string, number>()
-    for (const fee of facts.fees) {
-      const feeable = facts.feeable === true || (!!tx && (feeableScope.has(`${tx}:tx`) || (scopeOf(op) !== 'tx' && feeableScope.has(`${tx}:${scopeOf(op)}`))))
-      if (!tx) {
-        loose.push({ facts, fee, feeable })
-        continue
-      }
-      let key = `${tx}:${fee.logIndex}`
-      if (legacy || fee.logIndex === undefined) {
-        const id = `${tx}:${scopeOf(op)}:t${fee.tokenId}:${fee.fee0}:${fee.fee1}`
-        const n = nth.get(id) ?? 0
-        nth.set(id, n + 1)
-        key = `${id}:${n}`
-      }
-      const prev = out.get(key)
-      if (!prev) out.set(key, { facts, fee, feeable })
-      else out.set(key, { ...(prev.fee.usdc === undefined && fee.usdc !== undefined ? { facts, fee } : prev), feeable: prev.feeable || feeable })
+    if (!tx) {
+      for (const fee of op.facts.fees) out.push({ op, facts: op.facts, fee, feeable: op.facts.feeable === true })
+      continue
     }
+    groups.set(tx, [...(groups.get(tx) ?? []), op])
   }
-  return [...out.values(), ...loose]
+  const priced = (op: StoredOp) => op.facts!.fees.filter((f) => f.usdc !== undefined).length
+  for (const group of groups.values()) {
+    const current = group.filter((op) => (op.facts!.v ?? 1) >= FACTS_VERSION)
+    let read = current
+    if (!read.length) {
+      const whole = group.filter((op) => scopeOf(op) === 'tx')
+      read = whole.length ? whole : group
+    }
+    // Older-layout reads of distinct userOps hold distinct collects; any other two copies are the same collects.
+    const ranked = [...read].sort((a, b) => priced(b) - priced(a))
+    const byId = new Map<string, CountedFee>()
+    const allFeeable = new Map<string, boolean>()
+    for (const op of ranked) {
+      const ids = collectIds(op)
+      op.facts!.fees.forEach((fee, i) => {
+        const id = ids[i]!
+        allFeeable.set(id, (allFeeable.get(id) ?? true) && op.facts!.feeable === true)
+        if (!byId.has(id)) byId.set(id, { op, facts: op.facts!, fee, feeable: false })
+      })
+    }
+    for (const [id, c] of byId) out.push({ ...c, feeable: allFeeable.get(id)! })
+  }
+  return out
 }
 
 /**
@@ -436,21 +431,15 @@ export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[]; events
 
 /** The fee events of stored ops with facts of the current layout; an op's step says whether it was a harvest. */
 export function incomeEvents(ops: readonly StoredOp[]): IncomeEventWire[] {
-  // One event per id: two stored ops can read the same transaction (an op stored without its userOp hash).
-  const out = new Map<string, IncomeEventWire & { block: number; logIndex: number }>()
-  for (const op of ops) {
-    const f = op.facts
-    if (!f?.txHash || (f.v ?? 1) < FACTS_VERSION) continue
+  // otto/mamoru#423: one event per collect, from the same copy the day receipts count (a retry or an op stored without
+  // its userOp hash reads the same transaction).
+  const out: (IncomeEventWire & { block: number; logIndex: number })[] = []
+  for (const { op, facts: f, fee } of distinctFees(ops)) {
+    if (!f.txHash || (f.v ?? 1) < FACTS_VERSION || fee.logIndex === undefined) continue
     const t = Math.floor(Date.parse(f.at) / 1000)
-    for (const fee of f.fees) {
-      if (fee.logIndex === undefined) continue
-      const id = `${f.txHash.toLowerCase()}:${fee.logIndex}`
-      // otto/mamoru#423: of two copies, a priced one wins (an unpriced event holds that day's backfill as it was).
-      const prev = out.get(id)
-      if (!prev || (prev.usdc === undefined && fee.usdc !== undefined)) out.set(id, { id, t, source: op.step === 'harvest' ? 'harvest' : 're-range', ...(fee.usdc !== undefined ? { usdc: fee.usdc } : {}), block: Number(f.block ?? 0), logIndex: fee.logIndex })
-    }
+    out.push({ id: `${f.txHash.toLowerCase()}:${fee.logIndex}`, t, source: op.step === 'harvest' ? 'harvest' : 're-range', ...(fee.usdc !== undefined ? { usdc: fee.usdc } : {}), block: Number(f.block ?? 0), logIndex: fee.logIndex })
   }
-  return [...out.values()].sort((a, b) => a.t - b.t || a.block - b.block || a.logIndex - b.logIndex).map(({ block: _b, logIndex: _l, ...e }) => e)
+  return out.sort((a, b) => a.t - b.t || a.block - b.block || a.logIndex - b.logIndex).map(({ block: _b, logIndex: _l, ...e }) => e)
 }
 
 /** spec 012 HRV-R5: the account's vault flows, oldest first, and the shares they explain per vault. */

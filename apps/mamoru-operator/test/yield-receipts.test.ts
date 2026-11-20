@@ -124,9 +124,16 @@ describe('priceFees and dayReceipts', () => {
     const u = (id: string, hash: Hex, gasWei: string) => ({ ...op(id, { txHash: '0xc5', at, gasWei, v: FACTS_VERSION, fees: [] }, '0xc5'), userOpHash: hash }) as StoredOp
     expect(dayReceipts([u('eng-1', '0x01', '40'), u('eng-2', '0x02', '55'), u('eng-3', '0x01', '40')])[0]!.gasWei).toBe('95')
     expect(dayReceipts([u('eng-1', '0x01', '40'), u('eng-2', '0x02', '55'), op('own-w', { txHash: '0xc5', at, gasWei: '95', fees: [] }, '0xc5')])[0]!.gasWei).toBe('95')
-    // Older-layout reads of two userOps of one transaction keep their own collects, even next to a current read of a third.
-    const l = (id: string, hash: Hex, v?: number) => ({ ...op(id, { txHash: '0xc6', at, gasWei: '0', ...(v ? { v, fees: [] } : { fees: [piece(undefined, '1')] }) }, '0xc6'), userOpHash: hash }) as StoredOp
-    expect(dayReceipts([l('eng-1', '0x01'), l('eng-2', '0x02'), l('eng-3', '0x03', FACTS_VERSION)])[0]!.collectedUsdc).toBe('2')
+    // Older-layout reads of two userOps of one transaction keep their own collects; next to a current read, that read is it.
+    const l = (id: string, hash: Hex, v?: number) => ({ ...op(id, { txHash: '0xc6', at, gasWei: '0', ...(v ? { v, fees: [piece(4, '1')] } : { fees: [piece(undefined, '1')] }) }, '0xc6'), userOpHash: hash }) as StoredOp
+    expect(dayReceipts([l('eng-1', '0x01'), l('eng-2', '0x02')])[0]!.collectedUsdc).toBe('2')
+    expect(dayReceipts([l('eng-1', '0x01'), l('eng-2', '0x02'), l('eng-3', '0x03', FACTS_VERSION)])[0]!.collectedUsdc).toBe('1')
+    // A price an older layout put whole on a position's first collect is never mixed with another copy's split.
+    const migrated = op('own-m', { txHash: '0xc8', at, gasWei: '0', v: FACTS_VERSION, fees: [{ ...piece(1, '8') }, { ...piece(2, '0'), fee0: '6' }] }, '0xc8')
+    const split1 = { ...op('eng-s1', { txHash: '0xc8', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(1, '5')] }, '0xc8'), userOpHash: '0x01' } as StoredOp
+    const split2 = { ...op('eng-s2', { txHash: '0xc8', at, gasWei: '0', v: FACTS_VERSION, fees: [{ ...piece(2, '3'), fee0: '6' }] }, '0xc8'), userOpHash: '0x02' } as StoredOp
+    expect(dayReceipts([split1, split2, migrated])[0]!.collectedUsdc).toBe('8')
+    expect(dayReceipts([migrated, split1, split2])[0]!.collectedUsdc).toBe('8')
     // incomeEvents keeps the priced copy of a collect.
     const ev = (id: string, usdc?: string) => op(id, { txHash: '0xc7', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(9, usdc)] }, '0xc7')
     expect(incomeEvents([ev('eng-1'), ev('eng-2', '6')])[0]!.usdc).toBe('6')
