@@ -169,6 +169,18 @@ export function gaveUp(op: StoredOp): boolean {
 }
 
 /**
+ * otto/mamoru#405: a submitted op that never got its transaction stored, for GIVE_UP_MS, while a later op of the account
+ * landed (the Safe's nonce moved past it). It may have landed unseen, so like a receipt given up on it no longer holds
+ * the vault state as unknown: the account's vault yield is partial instead. One such op from 26 Sep kept every vault
+ * yield row of an account unpriced from 12 Nov, which withheld every Stats series.
+ */
+export function lostSubmit(op: StoredOp, ops: readonly StoredOp[]): boolean {
+  if (!(op.opId.startsWith('eng-') || op.opId.startsWith('own-')) || op.txHash || op.state !== 'submitted') return false
+  const at = Date.parse(op.updatedAt)
+  return Number.isFinite(at) && Date.now() - at >= GIVE_UP_MS && ops.some((o) => o.state === 'confirmed' && Date.parse(o.updatedAt) > at)
+}
+
+/**
  * An engine or owner op on its way (no receipt read can exist yet): what it moves is not in any flow until it lands.
  * An engine proposal never sent is dropped by the next engine tick, which proposes a new op: once a later op of the
  * account has landed, the old proposal is not on its way. Kept unknown forever it held one beta account's vault yield
@@ -176,7 +188,7 @@ export function gaveUp(op: StoredOp): boolean {
  */
 const inFlight = (op: StoredOp, ops: readonly StoredOp[]): boolean => {
   if (!(op.opId.startsWith('eng-') || op.opId.startsWith('own-')) || op.txHash) return false
-  if (op.state === 'submitted') return true
+  if (op.state === 'submitted') return !lostSubmit(op, ops)
   if (op.state !== 'proposed') return false
   // Times compared as instants: stored ops mix second and millisecond precision, so their strings do not sort.
   const at = Date.parse(op.updatedAt)
@@ -469,7 +481,7 @@ export function vaultWire(ops: readonly StoredOp[]): AccountVaultWire | undefine
   const flows = [...byId.values()]
   // Unknown while a receipt is due (not given up on) or an engine op is on its way; a receipt given up on makes it partial.
   const pending = ops.some((o) => (needsFacts(o) && !gaveUp(o)) || inFlight(o, ops))
-  const incomplete = ops.some((o) => needsFacts(o) && gaveUp(o))
+  const incomplete = ops.some((o) => (needsFacts(o) && gaveUp(o)) || lostSubmit(o, ops))
   // No flow read yet but receipts still due: say "unknown", not "none", or a vault held since before would count as unexplained-zero.
   if (!flows.length) return pending ? { flows, explained: null } : incomplete ? { flows, explained: {}, incomplete: true } : undefined
   flows.sort((a, b) => a.t - b.t || (a.block ?? 0) - (b.block ?? 0) || a.logIndex - b.logIndex)

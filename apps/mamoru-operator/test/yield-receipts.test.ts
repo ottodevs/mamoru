@@ -394,11 +394,21 @@ describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
     expect(vaultWire([landed, proposal('eng-2', '2026-11-02T18:53:33Z')])?.explained).toEqual({ 'vault:gtUSDCp': '90' })
     // The newest proposal, a submitted op and an owner proposal (it may still be signed) are still on their way.
     expect(vaultWire([landed, proposal('eng-3', '2026-11-08T00:00:00Z')])?.explained).toBeNull()
-    expect(vaultWire([landed, proposal('eng-4', '2026-11-02T18:53:33Z', 'submitted')])?.explained).toBeNull()
+    const recent = new Date(Date.now() - 60_000).toISOString()
+    expect(vaultWire([{ ...landed, updatedAt: new Date().toISOString() } as StoredOp, proposal('eng-4', recent, 'submitted')])?.explained).toBeNull()
     expect(vaultWire([landed, proposal('own-5', '2026-11-02T18:53:33Z')])?.explained).toBeNull()
     // Mixed precision: a proposal half a second after the landed op is still on its way, whatever the string order.
     expect(vaultWire([landed, proposal('eng-6', '2026-11-07T00:38:36.500Z')])?.explained).toBeNull()
     expect(vaultWire([landed, proposal('eng-7', 'not a time')])?.explained).toBeNull()
+  })
+
+  test('otto/mamoru#405: a submit never given its transaction, a day old with a later op landed, makes the vault partial instead of unknown', () => {
+    const d = op('eng-9', { txHash: '0xaa', at: '2026-11-12T00:00:00.000Z', gasWei: '1', fees: [], v: FACTS_VERSION, vaultFlows: [{ vault: 'vault:gtUSDCp', kind: 'deposit', assets: '1422986', shares: '90', logIndex: 13 }] })
+    const landed = { ...d, updatedAt: '2026-11-12T20:20:00Z' } as StoredOp
+    const lost = { opId: 'eng-1-1-op-6-enter_mint', kind: 'enter', state: 'submitted', updatedAt: '2026-09-26T23:49:44.979Z' } as StoredOp
+    expect(vaultWire([lost, landed])).toEqual({ flows: expect.any(Array), explained: { 'vault:gtUSDCp': '90' }, incomplete: true })
+    // No later op landed: still on its way.
+    expect(vaultWire([{ ...lost, updatedAt: '2026-11-13T00:00:00Z' } as StoredOp, landed])?.explained).toBeNull()
   })
 })
 

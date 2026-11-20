@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { memoryD1 } from './d1.ts'
-import { vaultYield, writeDayBackfill, writeIncome, type VaultFlowWire } from '../../src/api/income-ledger.ts'
+import { REPAIR_PER_PULL, vaultYield, writeDayBackfill, writeIncome, type VaultFlowWire } from '../../src/api/income-ledger.ts'
 import { earnedFrom, loadEarned } from '../../src/api/earned.ts'
 import type { SnapshotWire } from '../../src/api/yield-ledger.ts'
 
@@ -79,6 +79,19 @@ describe('writeIncome and writeDayBackfill', () => {
     expect(income().map((r) => r.usd)).toEqual([null, null, null])
     await writeIncome(db, snap(T0 + 1200, [{ shares: 100n * E18, value: 102_000_000n }], [{ safe: SAFE, days: [], vault: { flows: [dep], explained: { 'vault:gtUSDCp': (100n * E18).toString() } } }]), new Date(), resolve)
     expect(income().map((r) => [r.source, r.from_s, r.usd])).toEqual([['backfill', null, 1_000_000], ['backfill', null, 0], ['vault-yield', T0, 500_000], ['vault-yield', T0 + 600, 500_000]])
+  })
+
+  test('otto/mamoru#405: a long unread period is repaired REPAIR_PER_PULL rows per pull', async () => {
+    const dep = flow('deposit', 100_000_000n, 100n * E18, T0 - 3600)
+    const n = REPAIR_PER_PULL + 30
+    for (let i = 0; i < n; i++) await writeIncome(db, snap(T0 + i * 600, [{ shares: 100n * E18, value: 101_000_000n + BigInt(i) * 1000n }], [{ safe: SAFE, days: [], vault: { flows: [], explained: null } }]), new Date(), resolve)
+    const nulls = () => income().filter((r) => r.source !== 'backfill' || !r.event_id.startsWith('vault-pending')).filter((r) => r.usd === null).length
+    expect(nulls()).toBe(n)
+    const known = { flows: [dep], explained: { 'vault:gtUSDCp': (100n * E18).toString() } }
+    await writeIncome(db, snap(T0 + n * 600, [{ shares: 100n * E18, value: 101_000_000n + BigInt(n) * 1000n }], [{ safe: SAFE, days: [], vault: known }]), new Date(), resolve)
+    expect(nulls()).toBe(30)
+    await writeIncome(db, snap(T0 + (n + 1) * 600, [{ shares: 100n * E18, value: 101_000_000n + BigInt(n + 1) * 1000n }], [{ safe: SAFE, days: [], vault: known }]), new Date(), resolve)
+    expect(nulls()).toBe(0)
   })
 
   test('while a receipt is unread a not-counted row stands for vaults this pull cannot see, closed at 0 once flows are known', async () => {

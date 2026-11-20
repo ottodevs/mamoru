@@ -176,15 +176,20 @@ export async function writeIncome(db: Db, snapshot: SnapshotWire & { receipts?: 
   return { events, samples }
 }
 
+/** otto/mamoru#405: rows repaired per account and pull at most; each reads up to two samples, and a Worker invocation has a D1 query budget. */
+export const REPAIR_PER_PULL = 100
+
 /**
  * Vault income rows stored as not counted (null) are measured again from the stored samples once every flow of the
  * account is known: an interval from its two samples, a first sample from its own. Rows that stay unmeasurable stay null.
+ * REPAIR_PER_PULL at a time, picked at random so rows that stay unmeasurable never hold the rest back: a long unread
+ * period (1,183 rows for one account) drains over a few pulls.
  */
 async function repairVaultRows(db: Db, chainId: number, accountKey: string, flows: readonly VaultFlowWire[], at: string) {
   const nulls = (
     await db
-      .prepare("SELECT event_id, source, t_s, from_s FROM yield_ledger_income WHERE chain_id = ? AND account_key = ? AND usd IS NULL AND (event_id LIKE 'vault:%' OR event_id LIKE 'vault-backfill:%')")
-      .bind(chainId, accountKey)
+      .prepare("SELECT event_id, source, t_s, from_s FROM yield_ledger_income WHERE chain_id = ? AND account_key = ? AND usd IS NULL AND (event_id LIKE 'vault:%' OR event_id LIKE 'vault-backfill:%') ORDER BY RANDOM() LIMIT ?")
+      .bind(chainId, accountKey, REPAIR_PER_PULL)
       .all<{ event_id: string; source: string; t_s: number; from_s: number | null }>()
   ).results
   const out = []
