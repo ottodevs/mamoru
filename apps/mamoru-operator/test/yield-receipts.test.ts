@@ -110,10 +110,11 @@ describe('priceFees and dayReceipts', () => {
     const piece = (logIndex?: number, usdc?: string) => ({ tokenId: '7', pool: LIVE_POOL, fee0: '10', fee1: '0', ...(logIndex !== undefined ? { logIndex } : {}), ...(usdc !== undefined ? { usdc } : {}) })
     // Two collects of one position in an older-layout read stay two.
     expect(dayReceipts([op('eng-a', { at, gasWei: '0', fees: [piece(undefined, '1'), piece(undefined, '1')] }, '0xc1')])[0]!.collectedUsdc).toBe('2')
-    // An older-layout copy of a transaction that also has a current read counts nothing.
+    // Copies of both layouts (the receipt is being read again): the current collect once, unpriced until it is.
     const legacy = op('eng-l', { txHash: '0xc2', at, gasWei: '0', fees: [piece(undefined, '1')] }, '0xc2')
     const current = op('eng-c', { txHash: '0xc2', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(121, '1')] }, '0xc2')
-    expect(dayReceipts([legacy, current])[0]!.collectedUsdc).toBe('1')
+    expect(dayReceipts([legacy, current])[0]).toEqual({ day: '2026-11-15', gasWei: '0', positions: [{ tokenId: '7', collected0: '10', collected1: '0' }] })
+    expect(dayReceipts([current])[0]!.collectedUsdc).toBe('1')
     // An unpriced copy does not hide a priced one.
     const unpriced = op('eng-u', { txHash: '0xc3', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(5)] }, '0xc3')
     const priced = op('eng-p', { txHash: '0xc3', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(5, '4')] }, '0xc3')
@@ -124,10 +125,10 @@ describe('priceFees and dayReceipts', () => {
     const u = (id: string, hash: Hex, gasWei: string) => ({ ...op(id, { txHash: '0xc5', at, gasWei, v: FACTS_VERSION, fees: [] }, '0xc5'), userOpHash: hash }) as StoredOp
     expect(dayReceipts([u('eng-1', '0x01', '40'), u('eng-2', '0x02', '55'), u('eng-3', '0x01', '40')])[0]!.gasWei).toBe('95')
     expect(dayReceipts([u('eng-1', '0x01', '40'), u('eng-2', '0x02', '55'), op('own-w', { txHash: '0xc5', at, gasWei: '95', fees: [] }, '0xc5')])[0]!.gasWei).toBe('95')
-    // Older-layout reads of two userOps of one transaction keep their own collects; next to a current read, that read is it.
+    // Older-layout reads of two userOps of one transaction keep their own collects; next to a current read, the day waits for the re-read.
     const l = (id: string, hash: Hex, v?: number) => ({ ...op(id, { txHash: '0xc6', at, gasWei: '0', ...(v ? { v, fees: [piece(4, '1')] } : { fees: [piece(undefined, '1')] }) }, '0xc6'), userOpHash: hash }) as StoredOp
     expect(dayReceipts([l('eng-1', '0x01'), l('eng-2', '0x02')])[0]!.collectedUsdc).toBe('2')
-    expect(dayReceipts([l('eng-1', '0x01'), l('eng-2', '0x02'), l('eng-3', '0x03', FACTS_VERSION)])[0]!.collectedUsdc).toBe('1')
+    expect(dayReceipts([l('eng-1', '0x01'), l('eng-2', '0x02'), l('eng-3', '0x03', FACTS_VERSION)])[0]!.collectedUsdc).toBeUndefined()
     // A price an older layout put whole on a position's first collect is never mixed with another copy's split.
     const migrated = op('own-m', { txHash: '0xc8', at, gasWei: '0', v: FACTS_VERSION, fees: [{ ...piece(1, '8') }, { ...piece(2, '0'), fee0: '6' }] }, '0xc8')
     const split1 = { ...op('eng-s1', { txHash: '0xc8', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(1, '5')] }, '0xc8'), userOpHash: '0x01' } as StoredOp

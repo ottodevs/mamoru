@@ -265,7 +265,7 @@ export type DayReceiptWire = {
  */
 const txOf = (op: StoredOp): string | undefined => (op.facts?.txHash ?? op.txHash)?.toLowerCase()
 
-/** `feeable`: every copy of the collect was read in the yield fee's scope (#371): when in doubt, the owner is not charged. */
+/** `feeable`: every copy of the transaction was read in the yield fee's scope (#371): when in doubt, the owner is not charged. */
 export type CountedFee = { op: StoredOp; facts: OpFacts; fee: FeeFact; feeable: boolean }
 
 /** The userOp an op read alone (an engine op with its hash), or the whole transaction. */
@@ -287,7 +287,8 @@ function collectIds(op: StoredOp): string[] {
 
 /**
  * The collects of `ops`, each once. Copies of one transaction are taken as one read:
- * - Current-layout copies are the read; older-layout ones next to them are the same receipt read before.
+ * - Copies of both layouts: the receipt is being read again (needsFacts re-reads every older-layout op), so until it
+ *   is, the current copies count with no price and no fee: the day stays as the Worker has it, nothing is charged.
  * - Only older-layout copies: a whole-transaction one holds what any userOp's own read found, so it is the read; else
  *   one copy per userOp.
  * - Each collect's amounts and price come from one copy, the read's copies ranked by how many fees they price, so a
@@ -308,24 +309,23 @@ export function distinctFees(ops: readonly StoredOp[]): CountedFee[] {
   const priced = (op: StoredOp) => op.facts!.fees.filter((f) => f.usdc !== undefined).length
   for (const group of groups.values()) {
     const current = group.filter((op) => (op.facts!.v ?? 1) >= FACTS_VERSION)
+    const mixed = current.length > 0 && current.length < group.length
     let read = current
     if (!read.length) {
       const whole = group.filter((op) => scopeOf(op) === 'tx')
       read = whole.length ? whole : group
     }
-    // Older-layout reads of distinct userOps hold distinct collects; any other two copies are the same collects.
-    const ranked = [...read].sort((a, b) => priced(b) - priced(a))
+    const feeable = !mixed && group.every((op) => op.facts!.feeable === true)
     const byId = new Map<string, CountedFee>()
-    const allFeeable = new Map<string, boolean>()
-    for (const op of ranked) {
+    for (const op of [...read].sort((a, b) => priced(b) - priced(a))) {
       const ids = collectIds(op)
       op.facts!.fees.forEach((fee, i) => {
-        const id = ids[i]!
-        allFeeable.set(id, (allFeeable.get(id) ?? true) && op.facts!.feeable === true)
-        if (!byId.has(id)) byId.set(id, { op, facts: op.facts!, fee, feeable: false })
+        if (byId.has(ids[i]!)) return
+        const { usdc: _u, ...unpriced } = fee
+        byId.set(ids[i]!, { op, facts: op.facts!, fee: mixed ? unpriced : fee, feeable })
       })
     }
-    for (const [id, c] of byId) out.push({ ...c, feeable: allFeeable.get(id)! })
+    out.push(...byId.values())
   }
   return out
 }
