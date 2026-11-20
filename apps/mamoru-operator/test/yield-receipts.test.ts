@@ -127,6 +127,9 @@ describe('priceFees and dayReceipts', () => {
     // Older-layout reads of two userOps of one transaction keep their own collects, even next to a current read of a third.
     const l = (id: string, hash: Hex, v?: number) => ({ ...op(id, { txHash: '0xc6', at, gasWei: '0', ...(v ? { v, fees: [] } : { fees: [piece(undefined, '1')] }) }, '0xc6'), userOpHash: hash }) as StoredOp
     expect(dayReceipts([l('eng-1', '0x01'), l('eng-2', '0x02'), l('eng-3', '0x03', FACTS_VERSION)])[0]!.collectedUsdc).toBe('2')
+    // incomeEvents keeps the priced copy of a collect.
+    const ev = (id: string, usdc?: string) => op(id, { txHash: '0xc7', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(9, usdc)] }, '0xc7')
+    expect(incomeEvents([ev('eng-1'), ev('eng-2', '6')])[0]!.usdc).toBe('6')
   })
 })
 

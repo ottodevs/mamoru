@@ -281,14 +281,30 @@ export function distinctFees(ops: readonly StoredOp[]): CountedFee[] {
   const current = withFacts.filter((op) => (op.facts!.v ?? 1) >= FACTS_VERSION)
   const covered = new Set(current.map((op) => `${txOf(op)}:${scopeOf(op)}`))
   const currentTx = new Set(current.map(txOf))
+  // The userOps of this Safe the stored ops name per transaction. bundler.ts sends one per bundle; a transaction where
+  // the ops name two is a bundle someone else built, and a current read of one userOp does not cover the others.
+  const userOps = new Map<string, Set<string>>()
+  for (const op of withFacts) {
+    const tx = txOf(op)
+    if (tx && scopeOf(op) !== 'tx') userOps.set(tx, (userOps.get(tx) ?? new Set()).add(scopeOf(op)))
+  }
+  const oneUserOp = (tx: string) => (userOps.get(tx)?.size ?? 0) <= 1
   // A legacy read is covered by a current read of its userOp, or of the whole transaction; a legacy whole-transaction
-  // read by any current read of it (bundler.ts sends one userOp per bundle, so the transaction holds only that one).
-  const coveredBy = (op: StoredOp, tx: string) => covered.has(`${tx}:tx`) || (scopeOf(op) === 'tx' ? currentTx.has(tx) : covered.has(`${tx}:${scopeOf(op)}`))
+  // read also by a current read of the transaction's only userOp.
+  const coveredBy = (op: StoredOp, tx: string) => covered.has(`${tx}:tx`) || (scopeOf(op) === 'tx' ? currentTx.has(tx) && oneUserOp(tx) : covered.has(`${tx}:${scopeOf(op)}`))
   const isLegacy = (op: StoredOp) => (op.facts!.v ?? 1) < FACTS_VERSION
   const legacyWholeTx = new Set(withFacts.filter((op) => isLegacy(op) && scopeOf(op) === 'tx' && txOf(op) && !coveredBy(op, txOf(op)!)).map(txOf))
-  const dropped = (op: StoredOp, tx: string) => isLegacy(op) && (coveredBy(op, tx) || (scopeOf(op) !== 'tx' && legacyWholeTx.has(tx)))
-  // The fee scope of a dropped legacy copy still holds for the read that replaces it.
-  const feeableTx = new Set(withFacts.filter((op) => op.facts!.feeable && txOf(op) && dropped(op, txOf(op)!)).map(txOf))
+  // A whole-transaction read holds what any userOp's own read found: those are dropped, current ones too when it is a
+  // bundle of several (their collects are in the legacy read).
+  const dropped = (op: StoredOp, tx: string) => (isLegacy(op) ? coveredBy(op, tx) || (scopeOf(op) !== 'tx' && legacyWholeTx.has(tx)) : scopeOf(op) !== 'tx' && legacyWholeTx.has(tx) && !oneUserOp(tx))
+  // The fee scope of a dropped copy holds for the read that replaces it: a whole-transaction copy's for every collect of
+  // the transaction, a userOp's for a read of that same userOp (of the whole transaction too when it is the only one).
+  // Anything less certain is not charged.
+  const feeableScope = new Set(
+    withFacts
+      .filter((op) => op.facts!.feeable && txOf(op) && dropped(op, txOf(op)!))
+      .map((op) => (scopeOf(op) !== 'tx' && oneUserOp(txOf(op)!) ? `${txOf(op)}:tx` : `${txOf(op)}:${scopeOf(op)}`)),
+  )
   const out = new Map<string, CountedFee>()
   const loose: CountedFee[] = []
   for (const op of withFacts) {
@@ -299,7 +315,7 @@ export function distinctFees(ops: readonly StoredOp[]): CountedFee[] {
     if (tx && dropped(op, tx)) continue
     const nth = new Map<string, number>()
     for (const fee of facts.fees) {
-      const feeable = facts.feeable === true || (!!tx && feeableTx.has(tx))
+      const feeable = facts.feeable === true || (!!tx && (feeableScope.has(`${tx}:tx`) || (scopeOf(op) !== 'tx' && feeableScope.has(`${tx}:${scopeOf(op)}`))))
       if (!tx) {
         loose.push({ facts, fee, feeable })
         continue
@@ -429,7 +445,9 @@ export function incomeEvents(ops: readonly StoredOp[]): IncomeEventWire[] {
     for (const fee of f.fees) {
       if (fee.logIndex === undefined) continue
       const id = `${f.txHash.toLowerCase()}:${fee.logIndex}`
-      if (!out.has(id)) out.set(id, { id, t, source: op.step === 'harvest' ? 'harvest' : 're-range', ...(fee.usdc !== undefined ? { usdc: fee.usdc } : {}), block: Number(f.block ?? 0), logIndex: fee.logIndex })
+      // otto/mamoru#423: of two copies, a priced one wins (an unpriced event holds that day's backfill as it was).
+      const prev = out.get(id)
+      if (!prev || (prev.usdc === undefined && fee.usdc !== undefined)) out.set(id, { id, t, source: op.step === 'harvest' ? 'harvest' : 're-range', ...(fee.usdc !== undefined ? { usdc: fee.usdc } : {}), block: Number(f.block ?? 0), logIndex: fee.logIndex })
     }
   }
   return [...out.values()].sort((a, b) => a.t - b.t || a.block - b.block || a.logIndex - b.logIndex).map(({ block: _b, logIndex: _l, ...e }) => e)
