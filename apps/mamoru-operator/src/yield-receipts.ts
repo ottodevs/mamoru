@@ -265,38 +265,44 @@ export type DayReceiptWire = {
  */
 const txOf = (op: StoredOp): string | undefined => (op.facts?.txHash ?? op.txHash)?.toLowerCase()
 
-export type CountedFee = { op: StoredOp; facts: OpFacts; fee: FeeFact }
+/** `feeable`: any copy of the collect was read in the yield fee's scope (#371). */
+export type CountedFee = { facts: OpFacts; fee: FeeFact; feeable: boolean }
+
+/** The userOp an op read alone (an engine op with its hash), or the whole transaction. */
+const scopeOf = (op: StoredOp): string => (op.opId.startsWith('eng-') && op.userOpHash ? op.userOpHash.toLowerCase() : 'tx')
 
 /**
- * The collects of `ops` (those `keep` accepts), one per collect: id `<tx>:<logIndex>`. A transaction with facts of the
- * current layout drops its older-layout copies (they hold the same collects without a log index); an older-layout
- * collect is told apart by position, amounts and its order inside the op. Of two copies, a priced one wins.
+ * The collects of `ops`, one per collect: id `<tx>:<logIndex>`. Facts of an older layout hold the same collects without
+ * a log index: they are dropped where a current-layout read covers the same userOp (or the whole transaction), and
+ * otherwise told apart by userOp, position, amounts and their order inside the op. Of two copies, a priced one wins.
  */
-export function distinctFees(ops: readonly StoredOp[], keep: (op: StoredOp) => boolean = () => true): CountedFee[] {
-  const kept = ops.filter((op) => op.facts && keep(op))
-  const indexed = new Set(kept.filter((op) => (op.facts!.v ?? 1) >= FACTS_VERSION).map(txOf))
+export function distinctFees(ops: readonly StoredOp[]): CountedFee[] {
+  const withFacts = ops.filter((op) => op.facts)
+  const covered = new Set(withFacts.filter((op) => (op.facts!.v ?? 1) >= FACTS_VERSION).map((op) => `${txOf(op)}:${scopeOf(op)}`))
   const out = new Map<string, CountedFee>()
   const loose: CountedFee[] = []
-  for (const op of kept) {
+  for (const op of withFacts) {
     const facts = op.facts!
     const tx = txOf(op)
     const legacy = (facts.v ?? 1) < FACTS_VERSION
-    if (tx && legacy && indexed.has(tx)) continue
+    if (tx && legacy && (covered.has(`${tx}:${scopeOf(op)}`) || covered.has(`${tx}:tx`))) continue
     const nth = new Map<string, number>()
     for (const fee of facts.fees) {
+      const feeable = facts.feeable === true
       if (!tx) {
-        loose.push({ op, facts, fee })
+        loose.push({ facts, fee, feeable })
         continue
       }
-      let id = fee.logIndex !== undefined && !legacy ? `${fee.logIndex}` : `t${fee.tokenId}:${fee.fee0}:${fee.fee1}`
-      if (fee.logIndex === undefined || legacy) {
+      let key = `${tx}:${fee.logIndex}`
+      if (legacy || fee.logIndex === undefined) {
+        const id = `${tx}:${scopeOf(op)}:t${fee.tokenId}:${fee.fee0}:${fee.fee1}`
         const n = nth.get(id) ?? 0
         nth.set(id, n + 1)
-        id = `${id}:${n}`
+        key = `${id}:${n}`
       }
-      const key = `${tx}:${id}`
       const prev = out.get(key)
-      if (!prev || (prev.fee.usdc === undefined && fee.usdc !== undefined)) out.set(key, { op, facts, fee })
+      if (!prev) out.set(key, { facts, fee, feeable })
+      else out.set(key, { ...(prev.fee.usdc === undefined && fee.usdc !== undefined ? { facts, fee } : prev), feeable: prev.feeable || feeable })
     }
   }
   return [...out.values(), ...loose]
@@ -323,7 +329,10 @@ function dayGas(ops: readonly StoredOp[]): Map<string, bigint> {
     const t = txs.get(tx) ?? { day, whole: 0n, userOps: new Map() }
     txs.set(tx, t)
     const own = op.opId.startsWith('eng-') ? op.userOpHash?.toLowerCase() : undefined
-    if (own) t.userOps.set(own, gas > (t.userOps.get(own) ?? 0n) ? gas : t.userOps.get(own)!)
+    if (own) {
+      const seen = t.userOps.get(own) ?? 0n
+      t.userOps.set(own, gas > seen ? gas : seen)
+    }
     else if (gas > t.whole) t.whole = gas
   }
   for (const t of txs.values()) {

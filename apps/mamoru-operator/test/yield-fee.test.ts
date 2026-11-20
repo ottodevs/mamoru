@@ -31,6 +31,7 @@ describe('yieldFee (otto/mamoru#371)', () => {
       ({ opId: id, kind: 'reduce', state: 'confirmed', updatedAt: '2026-11-15T21:07:00.000Z', txHash: '0xef', facts: { txHash: '0xef', v: 2, at: '2026-11-15T21:07:00.000Z', gasWei: '1', fees: [{ ...fee(usdc), logIndex: 3 }], ...(feeable ? { feeable: true } : {}) } }) as StoredOp
     expect(yieldFee([copy('eng-a', false, '5000000'), copy('eng-b', true, '5000000')]).collectedUsdc).toBe(5_000_000n)
     expect(yieldFee([copy('eng-a', true), copy('eng-b', true, '5000000')])).toMatchObject({ collectedUsdc: 5_000_000n, unpriced: 0 })
+    expect(yieldFee([copy('eng-a', true), copy('eng-b', false, '5000000')])).toMatchObject({ collectedUsdc: 5_000_000n, unpriced: 0 })
   })
 
   test('10 % of the priced yield collected since the fee started; nothing before', () => {

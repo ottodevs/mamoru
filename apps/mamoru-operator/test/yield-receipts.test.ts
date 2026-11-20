@@ -124,6 +124,9 @@ describe('priceFees and dayReceipts', () => {
     const u = (id: string, hash: Hex, gasWei: string) => ({ ...op(id, { txHash: '0xc5', at, gasWei, v: FACTS_VERSION, fees: [] }, '0xc5'), userOpHash: hash }) as StoredOp
     expect(dayReceipts([u('eng-1', '0x01', '40'), u('eng-2', '0x02', '55'), u('eng-3', '0x01', '40')])[0]!.gasWei).toBe('95')
     expect(dayReceipts([u('eng-1', '0x01', '40'), u('eng-2', '0x02', '55'), op('own-w', { txHash: '0xc5', at, gasWei: '95', fees: [] }, '0xc5')])[0]!.gasWei).toBe('95')
+    // Older-layout reads of two userOps of one transaction keep their own collects, even next to a current read of a third.
+    const l = (id: string, hash: Hex, v?: number) => ({ ...op(id, { txHash: '0xc6', at, gasWei: '0', ...(v ? { v, fees: [] } : { fees: [piece(undefined, '1')] }) }, '0xc6'), userOpHash: hash }) as StoredOp
+    expect(dayReceipts([l('eng-1', '0x01'), l('eng-2', '0x02'), l('eng-3', '0x03', FACTS_VERSION)])[0]!.collectedUsdc).toBe('2')
   })
 })
 
