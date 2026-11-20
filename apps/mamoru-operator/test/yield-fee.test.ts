@@ -8,7 +8,7 @@ import { YIELD_FEE_FROM, YIELD_FEE_MIN, yieldFee } from '../src/yield-fee.ts'
 
 const fee = (usdc?: string) => ({ tokenId: '1', pool: 'pool:WETH/USDC/3000', fee0: '1', fee1: '1', ...(usdc === undefined ? {} : { usdc }) })
 const harvest = (at: string, ...usdc: (string | undefined)[]): StoredOp =>
-  ({ opId: `eng-${at}`, kind: 'reduce', state: 'confirmed', updatedAt: at, txHash: '0xaa', facts: { at, gasWei: '1', fees: usdc.map(fee), feeable: true } }) as StoredOp
+  ({ opId: `eng-${at}`, kind: 'reduce', state: 'confirmed', updatedAt: at, txHash: `0x${Buffer.from(at).toString('hex')}`, facts: { at, gasWei: '1', fees: usdc.map(fee), feeable: true } }) as StoredOp
 const outOfScope = (at: string, usdc: string): StoredOp => {
   const op = harvest(at, usdc)
   delete (op.facts as { feeable?: true }).feeable
@@ -24,6 +24,13 @@ describe('yieldFee (otto/mamoru#371)', () => {
     const ops = [...Array.from({ length: 130 }, (_, i) => retry(i)), retry(999, '0xab')]
     expect(yieldFee(ops).collectedUsdc).toBe(5_670_000n)
     expect(yieldFee([...ops, retry(1000, '0xcd')]).collectedUsdc).toBe(11_340_000n)
+  })
+
+  test('otto/mamoru#423: an out-of-scope or unpriced copy does not hide the charged one', () => {
+    const copy = (id: string, feeable: boolean, usdc?: string): StoredOp =>
+      ({ opId: id, kind: 'reduce', state: 'confirmed', updatedAt: '2026-11-15T21:07:00.000Z', txHash: '0xef', facts: { txHash: '0xef', v: 2, at: '2026-11-15T21:07:00.000Z', gasWei: '1', fees: [{ ...fee(usdc), logIndex: 3 }], ...(feeable ? { feeable: true } : {}) } }) as StoredOp
+    expect(yieldFee([copy('eng-a', false, '5000000'), copy('eng-b', true, '5000000')]).collectedUsdc).toBe(5_000_000n)
+    expect(yieldFee([copy('eng-a', true), copy('eng-b', true, '5000000')])).toMatchObject({ collectedUsdc: 5_000_000n, unpriced: 0 })
   })
 
   test('10 % of the priced yield collected since the fee started; nothing before', () => {

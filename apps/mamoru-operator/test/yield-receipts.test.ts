@@ -85,7 +85,7 @@ describe('priceFees and dayReceipts', () => {
     expect(facts.fees[0]!.usdc).toBe(priced)
 
     const unpriced: OpFacts = { at: '2026-10-22T01:00:00.000Z', gasWei: '2', fees: [{ tokenId: '2', pool: 'pool:none', fee0: '1', fee1: '1' }] }
-    const days = dayReceipts([op('eng-a', facts), op('eng-b', { at: '2026-10-21T23:59:59.000Z', gasWei: '3', fees: [] }), op('eng-c', unpriced), op('eng-d')])
+    const days = dayReceipts([op('eng-a', facts, '0xa1'), op('eng-b', { at: '2026-10-21T23:59:59.000Z', gasWei: '3', fees: [] }, '0xa2'), op('eng-c', unpriced, '0xa3'), op('eng-d')])
     expect(days.map((d) => d.day)).toEqual(['2026-10-21', '2026-10-22'])
     expect(days[0]).toEqual({ day: '2026-10-21', gasWei: '8', collectedUsdc: priced!, positions: [{ tokenId: '1', collected0: '10', collected1: '0', collectedUsdc: priced! }] })
     expect(days[1]!.collectedUsdc).toBeUndefined()
@@ -103,6 +103,27 @@ describe('priceFees and dayReceipts', () => {
     const other = op('eng-y', { ...facts('10'), txHash: '0xbb' })
     expect(dayReceipts([...retries, other])[0]!.collectedUsdc).toBe('11340000')
     expect(dayReceipts([...retries, other])[0]!.gasWei).toBe('65')
+  })
+
+  test('otto/mamoru#423 review: copies across layouts, prices and userOps', () => {
+    const at = '2026-11-15T21:07:00.000Z'
+    const piece = (logIndex?: number, usdc?: string) => ({ tokenId: '7', pool: LIVE_POOL, fee0: '10', fee1: '0', ...(logIndex !== undefined ? { logIndex } : {}), ...(usdc !== undefined ? { usdc } : {}) })
+    // Two collects of one position in an older-layout read stay two.
+    expect(dayReceipts([op('eng-a', { at, gasWei: '0', fees: [piece(undefined, '1'), piece(undefined, '1')] }, '0xc1')])[0]!.collectedUsdc).toBe('2')
+    // An older-layout copy of a transaction that also has a current read counts nothing.
+    const legacy = op('eng-l', { txHash: '0xc2', at, gasWei: '0', fees: [piece(undefined, '1')] }, '0xc2')
+    const current = op('eng-c', { txHash: '0xc2', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(121, '1')] }, '0xc2')
+    expect(dayReceipts([legacy, current])[0]!.collectedUsdc).toBe('1')
+    // An unpriced copy does not hide a priced one.
+    const unpriced = op('eng-u', { txHash: '0xc3', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(5)] }, '0xc3')
+    const priced = op('eng-p', { txHash: '0xc3', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(5, '4')] }, '0xc3')
+    expect(dayReceipts([unpriced, priced])[0]!.collectedUsdc).toBe('4')
+    // Facts without a txHash fall back to the op's.
+    expect(dayReceipts([op('eng-x', { at, gasWei: '0', fees: [piece(undefined, '3')] }, '0xc4'), op('eng-y', { at, gasWei: '0', fees: [piece(undefined, '3')] }, '0xc4')])[0]!.collectedUsdc).toBe('3')
+    // Two userOps in one transaction each pay their gas; a whole-transaction read is not added on top.
+    const u = (id: string, hash: Hex, gasWei: string) => ({ ...op(id, { txHash: '0xc5', at, gasWei, v: FACTS_VERSION, fees: [] }, '0xc5'), userOpHash: hash }) as StoredOp
+    expect(dayReceipts([u('eng-1', '0x01', '40'), u('eng-2', '0x02', '55'), u('eng-3', '0x01', '40')])[0]!.gasWei).toBe('95')
+    expect(dayReceipts([u('eng-1', '0x01', '40'), u('eng-2', '0x02', '55'), op('own-w', { txHash: '0xc5', at, gasWei: '95', fees: [] }, '0xc5')])[0]!.gasWei).toBe('95')
   })
 })
 

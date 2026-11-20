@@ -260,12 +260,78 @@ export type DayReceiptWire = {
 }
 
 /**
- * otto/mamoru#423: one collect's id across stored ops: several ops can carry facts of the same transaction (retries
- * stored apart, an op stored without its userOp hash). Facts with no txHash are counted as they are.
+ * otto/mamoru#423: several stored ops can carry facts of the same transaction (retries stored apart, an op stored without
+ * its userOp hash, facts of an older layout next to a re-read). Each collect counts once, from its best copy.
  */
-export function feeKey(f: OpFacts, fee: FeeFact): string | undefined {
-  if (!f.txHash) return undefined
-  return `${f.txHash.toLowerCase()}:${fee.logIndex ?? `t${fee.tokenId}`}`
+const txOf = (op: StoredOp): string | undefined => (op.facts?.txHash ?? op.txHash)?.toLowerCase()
+
+export type CountedFee = { op: StoredOp; facts: OpFacts; fee: FeeFact }
+
+/**
+ * The collects of `ops` (those `keep` accepts), one per collect: id `<tx>:<logIndex>`. A transaction with facts of the
+ * current layout drops its older-layout copies (they hold the same collects without a log index); an older-layout
+ * collect is told apart by position, amounts and its order inside the op. Of two copies, a priced one wins.
+ */
+export function distinctFees(ops: readonly StoredOp[], keep: (op: StoredOp) => boolean = () => true): CountedFee[] {
+  const kept = ops.filter((op) => op.facts && keep(op))
+  const indexed = new Set(kept.filter((op) => (op.facts!.v ?? 1) >= FACTS_VERSION).map(txOf))
+  const out = new Map<string, CountedFee>()
+  const loose: CountedFee[] = []
+  for (const op of kept) {
+    const facts = op.facts!
+    const tx = txOf(op)
+    const legacy = (facts.v ?? 1) < FACTS_VERSION
+    if (tx && legacy && indexed.has(tx)) continue
+    const nth = new Map<string, number>()
+    for (const fee of facts.fees) {
+      if (!tx) {
+        loose.push({ op, facts, fee })
+        continue
+      }
+      let id = fee.logIndex !== undefined && !legacy ? `${fee.logIndex}` : `t${fee.tokenId}:${fee.fee0}:${fee.fee1}`
+      if (fee.logIndex === undefined || legacy) {
+        const n = nth.get(id) ?? 0
+        nth.set(id, n + 1)
+        id = `${id}:${n}`
+      }
+      const key = `${tx}:${id}`
+      const prev = out.get(key)
+      if (!prev || (prev.fee.usdc === undefined && fee.usdc !== undefined)) out.set(key, { op, facts, fee })
+    }
+  }
+  return [...out.values(), ...loose]
+}
+
+/**
+ * otto/mamoru#423: gas per UTC day, each transaction once. Inside a transaction each userOp counts once (an engine op
+ * reads only its own); an op that read the whole transaction (no userOp hash) holds all of the Safe's userOps, so the
+ * transaction counts the larger of the two.
+ */
+function dayGas(ops: readonly StoredOp[]): Map<string, bigint> {
+  const days = new Map<string, bigint>()
+  const txs = new Map<string, { day: string; whole: bigint; userOps: Map<string, bigint> }>()
+  for (const op of ops) {
+    const f = op.facts
+    if (!f) continue
+    const day = f.at.slice(0, 10)
+    const gas = BigInt(f.gasWei)
+    const tx = txOf(op)
+    if (!tx) {
+      days.set(day, (days.get(day) ?? 0n) + gas)
+      continue
+    }
+    const t = txs.get(tx) ?? { day, whole: 0n, userOps: new Map() }
+    txs.set(tx, t)
+    const own = op.opId.startsWith('eng-') ? op.userOpHash?.toLowerCase() : undefined
+    if (own) t.userOps.set(own, gas > (t.userOps.get(own) ?? 0n) ? gas : t.userOps.get(own)!)
+    else if (gas > t.whole) t.whole = gas
+  }
+  for (const t of txs.values()) {
+    let sum = 0n
+    for (const g of t.userOps.values()) sum += g
+    days.set(t.day, (days.get(t.day) ?? 0n) + (sum > t.whole ? sum : t.whole))
+  }
+  return days
 }
 
 /**
@@ -275,41 +341,24 @@ export function feeKey(f: OpFacts, fee: FeeFact): string | undefined {
  */
 export function dayReceipts(ops: readonly StoredOp[]): DayReceiptWire[] {
   const days = new Map<string, { gas: bigint; usdc: bigint; priced: boolean; positions: Map<string, { c0: bigint; c1: bigint; usdc: bigint; priced: boolean }> }>()
-  const seen = new Set<string>()
-  const txGas = new Map<string, bigint>()
-  for (const op of ops) {
-    const f = op.facts
-    if (!f) continue
-    const day = f.at.slice(0, 10)
-    const d = days.get(day) ?? { gas: 0n, usdc: 0n, priced: true, positions: new Map() }
-    days.set(day, d)
-    // otto/mamoru#423: a transaction's gas counts once, at the most any of its ops read (an op stored without its
-    // userOp hash reads the whole transaction's).
-    const gas = BigInt(f.gasWei)
-    const tx = f.txHash?.toLowerCase()
-    const before = tx ? (txGas.get(tx) ?? 0n) : 0n
-    if (gas > before) {
-      d.gas += gas - before
-      if (tx) txGas.set(tx, gas)
-    }
-    for (const fee of f.fees) {
-      // otto/mamoru#423: a fee read on several stored ops (retries of one transaction) counts once.
-      const key = feeKey(f, fee)
-      if (key) {
-        if (seen.has(key)) continue
-        seen.add(key)
-      }
-      const p = d.positions.get(fee.tokenId) ?? { c0: 0n, c1: 0n, usdc: 0n, priced: true }
-      d.positions.set(fee.tokenId, p)
-      p.c0 += BigInt(fee.fee0)
-      p.c1 += BigInt(fee.fee1)
-      if (fee.usdc === undefined) {
-        p.priced = false
-        d.priced = false
-      } else {
-        p.usdc += BigInt(fee.usdc)
-        d.usdc += BigInt(fee.usdc)
-      }
+  const day = (d: string) => {
+    const x = days.get(d) ?? { gas: 0n, usdc: 0n, priced: true, positions: new Map() }
+    days.set(d, x)
+    return x
+  }
+  for (const [d, gas] of dayGas(ops)) day(d).gas = gas
+  for (const { facts, fee } of distinctFees(ops)) {
+    const d = day(facts.at.slice(0, 10))
+    const p = d.positions.get(fee.tokenId) ?? { c0: 0n, c1: 0n, usdc: 0n, priced: true }
+    d.positions.set(fee.tokenId, p)
+    p.c0 += BigInt(fee.fee0)
+    p.c1 += BigInt(fee.fee1)
+    if (fee.usdc === undefined) {
+      p.priced = false
+      d.priced = false
+    } else {
+      p.usdc += BigInt(fee.usdc)
+      d.usdc += BigInt(fee.usdc)
     }
   }
   return [...days.entries()]
