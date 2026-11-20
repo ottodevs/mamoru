@@ -81,6 +81,11 @@ describe('writeIncome and writeDayBackfill', () => {
     expect(income().map((r) => [r.source, r.from_s, r.usd])).toEqual([['backfill', null, 1_000_000], ['backfill', null, 0], ['vault-yield', T0, 500_000], ['vault-yield', T0 + 600, 500_000]])
   })
 
+  test('otto/mamoru#405: explained shares above the held ones count only the held ones', () => {
+    // 100 explained by the flows, 50 held (a withdrawal lost with its receipt): yield on 50.
+    expect(vaultYield({ t: T0, shares: 50n * E18, value: 50_000_000n, explained: 100n * E18 }, { t: T0 + 600, shares: 50n * E18, value: 51_000_000n, explained: 100n * E18 }, [])).toBe(1_000_000n)
+  })
+
   test('otto/mamoru#405: a long unread period is repaired REPAIR_PER_PULL rows per pull', async () => {
     const dep = flow('deposit', 100_000_000n, 100n * E18, T0 - 3600)
     const n = REPAIR_PER_PULL + 30

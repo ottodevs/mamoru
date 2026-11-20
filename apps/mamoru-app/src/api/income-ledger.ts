@@ -39,7 +39,8 @@ export function vaultYield(prev: VaultPoint, now: VaultPoint, flows: readonly Va
   const moved = inside.reduce((n, f) => n + (f.kind === 'deposit' ? BigInt(f.shares) : -BigInt(f.shares)), 0n)
   const gap = prev.shares + moved - now.shares
   if (gap > 1n || gap < -1n) return null
-  let e = prev.explained
+  // otto/mamoru#405: never more explained shares than held (a flow lost with its receipt may have taken some out).
+  let e = prev.explained < prev.shares ? prev.explained : prev.shares
   let pps = ppsOf(prev.value, prev.shares)
   let usd = 0n
   for (const f of inside) {

@@ -170,7 +170,7 @@ export function gaveUp(op: StoredOp): boolean {
 
 /**
  * otto/mamoru#405: an op sent that never got its transaction stored, for GIVE_UP_MS: an engine op submitted while a
- * later op of the account landed (the Safe's nonce moved past it), or an owner op the owner signed (a stored owner op
+ * later engine op of the account landed (the EntryPoint nonce moved past it), or an owner op the owner signed (a stored owner op
  * is always signed: Operator.newOp). It may have landed unseen, so like a receipt given up on it no longer holds the
  * vault state as unknown: the account's vault yield is partial instead. One such engine op from 26 Sep kept every
  * vault yield row of an account unpriced from 12 Nov, which withheld every Stats series.
@@ -180,7 +180,8 @@ export function lostSubmit(op: StoredOp, ops: readonly StoredOp[]): boolean {
   const at = Date.parse(op.updatedAt)
   if (!Number.isFinite(at) || Date.now() - at < GIVE_UP_MS) return false
   if (op.opId.startsWith('own-')) return op.state === 'submitted' || op.state === 'proposed'
-  return op.opId.startsWith('eng-') && op.state === 'submitted' && ops.some((o) => o.state === 'confirmed' && Date.parse(o.updatedAt) > at)
+  // The engine's own later op: owner transactions use the Safe's nonce, not the engine's EntryPoint nonce.
+  return op.opId.startsWith('eng-') && op.state === 'submitted' && ops.some((o) => o.opId.startsWith('eng-') && o.state === 'confirmed' && !!o.txHash && Date.parse(o.updatedAt) > at)
 }
 
 /**

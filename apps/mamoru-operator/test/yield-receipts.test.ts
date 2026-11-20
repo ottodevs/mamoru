@@ -407,6 +407,9 @@ describe('spec 012 HRV-R5: income events and vault flows (HT6)', () => {
   test('otto/mamoru#405: a submit never given its transaction, a day old with a later op landed, makes the vault partial instead of unknown', () => {
     const d = op('eng-9', { txHash: '0xaa', at: '2026-11-12T00:00:00.000Z', gasWei: '1', fees: [], v: FACTS_VERSION, vaultFlows: [{ vault: 'vault:gtUSDCp', kind: 'deposit', assets: '1422986', shares: '90', logIndex: 13 }] })
     const landed = { ...d, updatedAt: '2026-11-12T20:20:00Z' } as StoredOp
+    // An owner transaction landing later does not move the engine's nonce.
+    const ownLanded = { ...landed, opId: 'own-9' } as StoredOp
+    expect(vaultWire([{ opId: 'eng-x', kind: 'enter', state: 'submitted', updatedAt: '2026-09-26T23:49:44.979Z' } as StoredOp, ownLanded])?.explained).toBeNull()
     const lost = { opId: 'eng-1-1-op-6-enter_mint', kind: 'enter', state: 'submitted', updatedAt: '2026-09-26T23:49:44.979Z' } as StoredOp
     expect(vaultWire([lost, landed])).toEqual({ flows: expect.any(Array), explained: { 'vault:gtUSDCp': '90' }, incomplete: true })
     // No later op landed: still on its way.
