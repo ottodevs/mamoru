@@ -51,7 +51,7 @@ export function yieldFee(ops: readonly StoredOp[], bps: bigint = YIELD_FEE_BPS, 
   let chargedUsdc = 0n
   // otto/mamoru#423: a collect read on several stored ops is charged once.
   for (const { facts, fee, feeable } of distinctFees(ops)) {
-    if (!feeable || Date.parse(facts.at) < since) continue
+    if (!feeable || !(Date.parse(facts.at) >= since)) continue
     if (fee.usdc === undefined) unpriced++
     else collectedUsdc += BigInt(fee.usdc)
   }

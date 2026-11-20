@@ -278,17 +278,28 @@ const scopeOf = (op: StoredOp): string => (op.opId.startsWith('eng-') && op.user
  */
 export function distinctFees(ops: readonly StoredOp[]): CountedFee[] {
   const withFacts = ops.filter((op) => op.facts)
-  const covered = new Set(withFacts.filter((op) => (op.facts!.v ?? 1) >= FACTS_VERSION).map((op) => `${txOf(op)}:${scopeOf(op)}`))
+  const current = withFacts.filter((op) => (op.facts!.v ?? 1) >= FACTS_VERSION)
+  const covered = new Set(current.map((op) => `${txOf(op)}:${scopeOf(op)}`))
+  const currentTx = new Set(current.map(txOf))
+  // A legacy read is covered by a current read of its userOp, or of the whole transaction; a legacy whole-transaction
+  // read by any current read of it (bundler.ts sends one userOp per bundle, so the transaction holds only that one).
+  const coveredBy = (op: StoredOp, tx: string) => covered.has(`${tx}:tx`) || (scopeOf(op) === 'tx' ? currentTx.has(tx) : covered.has(`${tx}:${scopeOf(op)}`))
+  const isLegacy = (op: StoredOp) => (op.facts!.v ?? 1) < FACTS_VERSION
+  const legacyWholeTx = new Set(withFacts.filter((op) => isLegacy(op) && scopeOf(op) === 'tx' && txOf(op) && !coveredBy(op, txOf(op)!)).map(txOf))
+  const dropped = (op: StoredOp, tx: string) => isLegacy(op) && (coveredBy(op, tx) || (scopeOf(op) !== 'tx' && legacyWholeTx.has(tx)))
+  // The fee scope of a dropped legacy copy still holds for the read that replaces it.
+  const feeableTx = new Set(withFacts.filter((op) => op.facts!.feeable && txOf(op) && dropped(op, txOf(op)!)).map(txOf))
   const out = new Map<string, CountedFee>()
   const loose: CountedFee[] = []
   for (const op of withFacts) {
     const facts = op.facts!
     const tx = txOf(op)
     const legacy = (facts.v ?? 1) < FACTS_VERSION
-    if (tx && legacy && (covered.has(`${tx}:${scopeOf(op)}`) || covered.has(`${tx}:tx`))) continue
+    // Covered by a current read, or (two legacy reads left) by a whole-transaction one, which holds what a userOp's own read found.
+    if (tx && dropped(op, tx)) continue
     const nth = new Map<string, number>()
     for (const fee of facts.fees) {
-      const feeable = facts.feeable === true
+      const feeable = facts.feeable === true || (!!tx && feeableTx.has(tx))
       if (!tx) {
         loose.push({ facts, fee, feeable })
         continue

@@ -32,6 +32,17 @@ describe('yieldFee (otto/mamoru#371)', () => {
     expect(yieldFee([copy('eng-a', false, '5000000'), copy('eng-b', true, '5000000')]).collectedUsdc).toBe(5_000_000n)
     expect(yieldFee([copy('eng-a', true), copy('eng-b', true, '5000000')])).toMatchObject({ collectedUsdc: 5_000_000n, unpriced: 0 })
     expect(yieldFee([copy('eng-a', true), copy('eng-b', false, '5000000')])).toMatchObject({ collectedUsdc: 5_000_000n, unpriced: 0 })
+    // A legacy whole-transaction read next to a current read of its userOp counts once; the legacy scope carries over.
+    const legacy = { ...copy('own-l', true, '5000000'), facts: { txHash: '0xef', at: '2026-11-15T21:07:00.000Z', gasWei: '1', fees: [fee('5000000')], feeable: true } } as StoredOp
+    const current = { ...copy('eng-c', false, '5000000'), userOpHash: '0x01' } as StoredOp
+    expect(yieldFee([legacy, current]).collectedUsdc).toBe(5_000_000n)
+    // Two legacy reads of one transaction, whole and per userOp, count once; the userOp's scope carries if the whole one is out of scope.
+    const legacyOwn = { ...legacy, opId: 'eng-l2', userOpHash: '0x01' } as StoredOp
+    expect(yieldFee([legacy, legacyOwn]).collectedUsdc).toBe(5_000_000n)
+    const wholeOut = { ...legacy, facts: { ...legacy.facts!, feeable: undefined } } as StoredOp
+    expect(yieldFee([wholeOut, legacyOwn]).collectedUsdc).toBe(5_000_000n)
+    // A collect with an unreadable time is never charged.
+    expect(yieldFee([{ ...copy('eng-n', true, '5000000'), facts: { ...copy('eng-n', true, '5000000').facts!, at: 'bad' } } as StoredOp]).collectedUsdc).toBe(0n)
   })
 
   test('10 % of the priced yield collected since the fee started; nothing before', () => {
