@@ -286,57 +286,57 @@ function collectIds(op: StoredOp): string[] {
 }
 
 /**
- * The collects of `ops`, each once. Copies of one transaction are taken as one read:
- * - Copies of both layouts: the receipt is being read again (needsFacts re-reads every older-layout op), so until it
- *   is, the current copies count with no price and no fee: the day stays as the Worker has it, nothing is charged.
+ * The collects of `ops`, each once, and the days a transaction's copies leave unsettled. Copies of one transaction are
+ * taken as one read:
+ * - Copies of both layouts: the receipt is being read again (needsFacts re-reads every older-layout op).
  * - Only older-layout copies: a whole-transaction one holds what any userOp's own read found, so it is the read; else
  *   one copy per userOp.
- * - Per position, one copy's collects count: the copy holding most of them (then most priced), plus any other copy whose
- *   collects it does not hold (another userOp of a bundle). A price an older layout spread over a position's collects
- *   (keepPrices) is never mixed with another copy's, and each position takes its own best copy.
+ * - The read's copies are merged by collect, the price from the first copy that has one (each copy froze its own
+ *   snapshot's price; the first is the closest to the transaction). Copies that disagree on a collect's amounts, or
+ *   where one holds the 0 an older layout put on a position's later collects (keepPrices) and another a price, leave
+ *   the transaction unsettled too.
+ * An unsettled transaction counts its collects with no price and no fee, and its day is `pending`: the Worker keeps the
+ * day as it has it and nothing is charged until the copies agree.
  */
-export function distinctFees(ops: readonly StoredOp[]): CountedFee[] {
+export function distinctFees(ops: readonly StoredOp[]): { fees: CountedFee[]; pending: Set<string> } {
   const groups = new Map<string, StoredOp[]>()
-  const out: CountedFee[] = []
+  const fees: CountedFee[] = []
+  const pending = new Set<string>()
   for (const op of ops) {
     if (!op.facts) continue
     const tx = txOf(op)
     if (!tx) {
-      for (const fee of op.facts.fees) out.push({ op, facts: op.facts, fee, feeable: op.facts.feeable === true })
+      for (const fee of op.facts.fees) fees.push({ op, facts: op.facts, fee, feeable: op.facts.feeable === true })
       continue
     }
     groups.set(tx, [...(groups.get(tx) ?? []), op])
   }
   for (const group of groups.values()) {
     const current = group.filter((op) => (op.facts!.v ?? 1) >= FACTS_VERSION)
-    const mixed = current.length > 0 && current.length < group.length
+    let unsettled = current.length > 0 && current.length < group.length
     let read = current
     if (!read.length) {
       const whole = group.filter((op) => scopeOf(op) === 'tx')
       read = whole.length ? whole : group
     }
-    const feeable = !mixed && group.every((op) => op.facts!.feeable === true)
-    const pieces = read.map((op) => {
+    const byId = new Map<string, CountedFee>()
+    for (const op of read) {
       const ids = collectIds(op)
-      return { op, fees: op.facts!.fees.map((fee, i) => ({ fee, id: ids[i]! })) }
-    })
-    for (const tokenId of new Set(pieces.flatMap((c) => c.fees.map((f) => f.fee.tokenId)))) {
-      const copies = pieces
-        .map((c) => ({ op: c.op, fees: c.fees.filter((f) => f.fee.tokenId === tokenId) }))
-        .filter((c) => c.fees.length)
-        .sort((a, b) => b.fees.length - a.fees.length || b.fees.filter((f) => f.fee.usdc !== undefined).length - a.fees.filter((f) => f.fee.usdc !== undefined).length)
-      const taken = new Set<string>()
-      for (const c of copies) {
-        if (c.fees.some((f) => taken.has(f.id))) continue
-        for (const { fee, id } of c.fees) {
-          taken.add(id)
-          const { usdc: _u, ...unpriced } = fee
-          out.push({ op: c.op, facts: c.op.facts!, fee: mixed ? unpriced : fee, feeable })
-        }
-      }
+      op.facts!.fees.forEach((fee, i) => {
+        const prev = byId.get(ids[i]!)
+        if (!prev) return void byId.set(ids[i]!, { op, facts: op.facts!, fee, feeable: false })
+        if (prev.fee.fee0 !== fee.fee0 || prev.fee.fee1 !== fee.fee1 || (prev.fee.usdc !== undefined && fee.usdc !== undefined && (prev.fee.usdc === '0') !== (fee.usdc === '0'))) unsettled = true
+        else if (prev.fee.usdc === undefined && fee.usdc !== undefined) byId.set(ids[i]!, { op, facts: op.facts!, fee, feeable: false })
+      })
+    }
+    if (unsettled) pending.add(group[0]!.facts!.at.slice(0, 10))
+    const feeable = !unsettled && group.every((op) => op.facts!.feeable === true)
+    for (const c of byId.values()) {
+      const { usdc: _u, ...unpriced } = c.fee
+      fees.push({ ...c, fee: unsettled ? unpriced : c.fee, feeable })
     }
   }
-  return out
+  return { fees, pending }
 }
 
 /**
@@ -387,7 +387,9 @@ export function dayReceipts(ops: readonly StoredOp[]): DayReceiptWire[] {
     return x
   }
   for (const [d, gas] of dayGas(ops)) day(d).gas = gas
-  for (const { facts, fee } of distinctFees(ops)) {
+  const { fees, pending } = distinctFees(ops)
+  for (const d of pending) day(d).priced = false
+  for (const { facts, fee } of fees) {
     const d = day(facts.at.slice(0, 10))
     const p = d.positions.get(fee.tokenId) ?? { c0: 0n, c1: 0n, usdc: 0n, priced: true }
     d.positions.set(fee.tokenId, p)
@@ -443,7 +445,7 @@ export function incomeEvents(ops: readonly StoredOp[]): IncomeEventWire[] {
   // otto/mamoru#423: one event per collect, from the same copy the day receipts count (a retry or an op stored without
   // its userOp hash reads the same transaction).
   const out: (IncomeEventWire & { block: number; logIndex: number })[] = []
-  for (const { op, facts: f, fee } of distinctFees(ops)) {
+  for (const { op, facts: f, fee } of distinctFees(ops).fees) {
     if (!f.txHash || (f.v ?? 1) < FACTS_VERSION || fee.logIndex === undefined) continue
     const t = Math.floor(Date.parse(f.at) / 1000)
     out.push({ id: `${f.txHash.toLowerCase()}:${fee.logIndex}`, t, source: op.step === 'harvest' ? 'harvest' : 're-range', ...(fee.usdc !== undefined ? { usdc: fee.usdc } : {}), block: Number(f.block ?? 0), logIndex: fee.logIndex })

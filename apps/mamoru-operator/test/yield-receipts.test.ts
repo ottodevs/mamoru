@@ -4,6 +4,7 @@ import { address, baseRegistry, entryPointV07Abi, monadRegistry } from '@mamoru/
 import { livePool } from '../src/chain.ts'
 import type { StoredOp } from '../src/state.ts'
 import type { Snapshot } from '../src/snapshot.ts'
+import { yieldFee } from '../src/yield-fee.ts'
 import { dayReceipts, factsFromLogs, FACTS_PER_TICK, FACTS_VERSION, incomeEvents, keepPrices, needsFacts, priceFees, vaultWire, withReceipts, type OpFacts } from '../src/yield-receipts.ts'
 
 const SAFE = '0x1111111111111111111111111111111111111111' as Address
@@ -129,12 +130,26 @@ describe('priceFees and dayReceipts', () => {
     const l = (id: string, hash: Hex, v?: number) => ({ ...op(id, { txHash: '0xc6', at, gasWei: '0', ...(v ? { v, fees: [piece(4, '1')] } : { fees: [piece(undefined, '1')] }) }, '0xc6'), userOpHash: hash }) as StoredOp
     expect(dayReceipts([l('eng-1', '0x01'), l('eng-2', '0x02')])[0]!.collectedUsdc).toBe('2')
     expect(dayReceipts([l('eng-1', '0x01'), l('eng-2', '0x02'), l('eng-3', '0x03', FACTS_VERSION)])[0]!.collectedUsdc).toBeUndefined()
-    // A price an older layout put whole on a position's first collect is never mixed with another copy's split.
+    // A price an older layout put whole on a position's first collect is never mixed with another copy's split: copies
+    // that disagree leave the day pending.
     const migrated = op('own-m', { txHash: '0xc8', at, gasWei: '0', v: FACTS_VERSION, fees: [{ ...piece(1, '8') }, { ...piece(2, '0'), fee0: '6' }] }, '0xc8')
     const split1 = { ...op('eng-s1', { txHash: '0xc8', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(1, '5')] }, '0xc8'), userOpHash: '0x01' } as StoredOp
     const split2 = { ...op('eng-s2', { txHash: '0xc8', at, gasWei: '0', v: FACTS_VERSION, fees: [{ ...piece(2, '3'), fee0: '6' }] }, '0xc8'), userOpHash: '0x02' } as StoredOp
-    expect(dayReceipts([split1, split2, migrated])[0]!.collectedUsdc).toBe('8')
-    expect(dayReceipts([migrated, split1, split2])[0]!.collectedUsdc).toBe('8')
+    expect(dayReceipts([split1, split2, migrated])[0]!.collectedUsdc).toBeUndefined()
+    expect(dayReceipts([migrated, split1, split2])[0]!.collectedUsdc).toBeUndefined()
+    expect(yieldFee([split1, split2, migrated].map((o) => ({ ...o, facts: { ...o.facts!, feeable: true } }) as StoredOp)).collectedUsdc).toBe(0n)
+    // Retries priced at different snapshots: the first copy's price.
+    const r1 = op('eng-r1', { txHash: '0xcd', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(5, '567')] }, '0xcd')
+    const r2 = op('eng-r2', { txHash: '0xcd', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(5, '570')] }, '0xcd')
+    expect(dayReceipts([r1, r2])[0]!.collectedUsdc).toBe('567')
+    // Copies that agree are merged by collect, partial overlaps included.
+    const o12 = op('own-o', { txHash: '0xcb', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(1, '1'), piece(2, '2')] }, '0xcb')
+    const o23 = { ...op('eng-o', { txHash: '0xcb', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(2, '2'), piece(3, '3')] }, '0xcb'), userOpHash: '0x09' } as StoredOp
+    expect(dayReceipts([o12, o23])[0]!.collectedUsdc).toBe('6')
+    // A current read with no collect next to a priced older one: the day waits for the re-read instead of writing 0.
+    const empty = op('eng-e', { txHash: '0xcc', at, gasWei: '0', v: FACTS_VERSION, fees: [] }, '0xcc')
+    const old1 = op('eng-f', { txHash: '0xcc', at, gasWei: '0', fees: [piece(undefined, '4')] }, '0xcc')
+    expect(dayReceipts([empty, old1])[0]!.collectedUsdc).toBeUndefined()
     // A per-userOp read priced more than the migrated whole one still takes the whole one's allocation for that position.
     const m4 = op('own-m4', { txHash: '0xc9', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(1, '8'), { ...piece(2, '0'), fee0: '6' }, { ...piece(3), fee0: '7' }, { ...piece(4), fee0: '8' }] }, '0xc9')
     const s3 = { ...op('eng-s3', { txHash: '0xc9', at, gasWei: '0', v: FACTS_VERSION, fees: [{ ...piece(2, '3'), fee0: '6' }, { ...piece(3, '1'), fee0: '7' }, { ...piece(4, '1'), fee0: '8' }] }, '0xc9'), userOpHash: '0x02' } as StoredOp
