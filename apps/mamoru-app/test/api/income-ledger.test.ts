@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { memoryD1 } from './d1.ts'
-import { REPAIR_PER_PULL, vaultYield, writeDayBackfill, writeIncome, type VaultFlowWire } from '../../src/api/income-ledger.ts'
+import { firstVaultIncome, REPAIR_PER_PULL, vaultYield, writeDayBackfill, writeIncome, type VaultFlowWire } from '../../src/api/income-ledger.ts'
 import { earnedFrom, loadEarned } from '../../src/api/earned.ts'
 import type { SnapshotWire } from '../../src/api/yield-ledger.ts'
 
@@ -84,6 +84,13 @@ describe('writeIncome and writeDayBackfill', () => {
   test('otto/mamoru#405: explained shares above the held ones count only the held ones', () => {
     // 100 explained by the flows, 50 held (a withdrawal lost with its receipt): yield on 50.
     expect(vaultYield({ t: T0, shares: 50n * E18, value: 50_000_000n, explained: 100n * E18 }, { t: T0 + 600, shares: 50n * E18, value: 51_000_000n, explained: 100n * E18 }, [])).toBe(1_000_000n)
+  })
+
+  test('otto/mamoru#405: a first sample holding fewer shares than the flows explain is not counted', () => {
+    const dep = flow('deposit', 100_000_000n, 100n * E18, T0 - 3600)
+    expect(firstVaultIncome(50n * E18, 55_000_000n, 100n * E18, [dep], T0)).toBeNull()
+    expect(firstVaultIncome(0n, 0n, 100n * E18, [dep], T0)).toBeNull()
+    expect(firstVaultIncome(100n * E18, 101_000_000n, 100n * E18, [dep], T0)).toBe(1_000_000n)
   })
 
   test('otto/mamoru#405: a long unread period is repaired REPAIR_PER_PULL rows per pull', async () => {

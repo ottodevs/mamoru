@@ -68,10 +68,11 @@ const netIn = (flows: readonly VaultFlowWire[], t: number): bigint => flows.filt
 
 /**
  * A vault's first sample: the explained shares' value now minus what the flows put in (net of what came out). A vault
- * left before any sample (0 shares now) earned what came out above what went in. Null when explained is unknown.
+ * left before any sample (0 shares now) earned what came out above what went in. Null when explained is unknown, or
+ * above the shares held (otto/mamoru#405: a flow lost with its receipt took some out, so the principal is not known).
  */
 export function firstVaultIncome(shares: bigint, value: bigint, e: bigint | null, flows: readonly VaultFlowWire[], t: number): bigint | null {
-  if (e === null) return null
+  if (e === null || e - shares > 1n) return null
   if (shares === 0n) return flows.length ? -netIn(flows, t) : null
   if (e === 0n) return null
   return (e * ppsOf(value, shares)!) / ONE - netIn(flows, t)
