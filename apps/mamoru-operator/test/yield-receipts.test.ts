@@ -135,6 +135,15 @@ describe('priceFees and dayReceipts', () => {
     const split2 = { ...op('eng-s2', { txHash: '0xc8', at, gasWei: '0', v: FACTS_VERSION, fees: [{ ...piece(2, '3'), fee0: '6' }] }, '0xc8'), userOpHash: '0x02' } as StoredOp
     expect(dayReceipts([split1, split2, migrated])[0]!.collectedUsdc).toBe('8')
     expect(dayReceipts([migrated, split1, split2])[0]!.collectedUsdc).toBe('8')
+    // A per-userOp read priced more than the migrated whole one still takes the whole one's allocation for that position.
+    const m4 = op('own-m4', { txHash: '0xc9', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(1, '8'), { ...piece(2, '0'), fee0: '6' }, { ...piece(3), fee0: '7' }, { ...piece(4), fee0: '8' }] }, '0xc9')
+    const s3 = { ...op('eng-s3', { txHash: '0xc9', at, gasWei: '0', v: FACTS_VERSION, fees: [{ ...piece(2, '3'), fee0: '6' }, { ...piece(3, '1'), fee0: '7' }, { ...piece(4, '1'), fee0: '8' }] }, '0xc9'), userOpHash: '0x02' } as StoredOp
+    expect(dayReceipts([s3, m4])[0]!.collectedUsdc).toBeUndefined()
+    expect(dayReceipts([s3, m4])[0]!.positions).toEqual([{ tokenId: '7', collected0: '31', collected1: '0' }])
+    // Independent positions each take their own priced copy.
+    const pa = op('own-pa', { txHash: '0xca', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(1, '1'), { ...piece(2, '1'), tokenId: '8' }, { ...piece(3), tokenId: '9' }] }, '0xca')
+    const pb = op('own-pb', { txHash: '0xca', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(1), { ...piece(2), tokenId: '8' }, { ...piece(3, '5'), tokenId: '9' }] }, '0xca')
+    expect(dayReceipts([pa, pb])[0]!.collectedUsdc).toBe('7')
     // incomeEvents keeps the priced copy of a collect.
     const ev = (id: string, usdc?: string) => op(id, { txHash: '0xc7', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(9, usdc)] }, '0xc7')
     expect(incomeEvents([ev('eng-1'), ev('eng-2', '6')])[0]!.usdc).toBe('6')

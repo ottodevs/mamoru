@@ -291,8 +291,9 @@ function collectIds(op: StoredOp): string[] {
  *   is, the current copies count with no price and no fee: the day stays as the Worker has it, nothing is charged.
  * - Only older-layout copies: a whole-transaction one holds what any userOp's own read found, so it is the read; else
  *   one copy per userOp.
- * - Each collect's amounts and price come from one copy, the read's copies ranked by how many fees they price, so a
- *   price spread over a position's collects by an older layout (keepPrices) is never mixed with another copy's.
+ * - Per position, one copy's collects count: the copy holding most of them (then most priced), plus any other copy whose
+ *   collects it does not hold (another userOp of a bundle). A price an older layout spread over a position's collects
+ *   (keepPrices) is never mixed with another copy's, and each position takes its own best copy.
  */
 export function distinctFees(ops: readonly StoredOp[]): CountedFee[] {
   const groups = new Map<string, StoredOp[]>()
@@ -306,7 +307,6 @@ export function distinctFees(ops: readonly StoredOp[]): CountedFee[] {
     }
     groups.set(tx, [...(groups.get(tx) ?? []), op])
   }
-  const priced = (op: StoredOp) => op.facts!.fees.filter((f) => f.usdc !== undefined).length
   for (const group of groups.values()) {
     const current = group.filter((op) => (op.facts!.v ?? 1) >= FACTS_VERSION)
     const mixed = current.length > 0 && current.length < group.length
@@ -316,16 +316,25 @@ export function distinctFees(ops: readonly StoredOp[]): CountedFee[] {
       read = whole.length ? whole : group
     }
     const feeable = !mixed && group.every((op) => op.facts!.feeable === true)
-    const byId = new Map<string, CountedFee>()
-    for (const op of [...read].sort((a, b) => priced(b) - priced(a))) {
+    const pieces = read.map((op) => {
       const ids = collectIds(op)
-      op.facts!.fees.forEach((fee, i) => {
-        if (byId.has(ids[i]!)) return
-        const { usdc: _u, ...unpriced } = fee
-        byId.set(ids[i]!, { op, facts: op.facts!, fee: mixed ? unpriced : fee, feeable })
-      })
+      return { op, fees: op.facts!.fees.map((fee, i) => ({ fee, id: ids[i]! })) }
+    })
+    for (const tokenId of new Set(pieces.flatMap((c) => c.fees.map((f) => f.fee.tokenId)))) {
+      const copies = pieces
+        .map((c) => ({ op: c.op, fees: c.fees.filter((f) => f.fee.tokenId === tokenId) }))
+        .filter((c) => c.fees.length)
+        .sort((a, b) => b.fees.length - a.fees.length || b.fees.filter((f) => f.fee.usdc !== undefined).length - a.fees.filter((f) => f.fee.usdc !== undefined).length)
+      const taken = new Set<string>()
+      for (const c of copies) {
+        if (c.fees.some((f) => taken.has(f.id))) continue
+        for (const { fee, id } of c.fees) {
+          taken.add(id)
+          const { usdc: _u, ...unpriced } = fee
+          out.push({ op: c.op, facts: c.op.facts!, fee: mixed ? unpriced : fee, feeable })
+        }
+      }
     }
-    out.push(...byId.values())
   }
   return out
 }
