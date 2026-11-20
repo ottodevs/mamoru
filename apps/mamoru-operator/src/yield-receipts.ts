@@ -169,15 +169,18 @@ export function gaveUp(op: StoredOp): boolean {
 }
 
 /**
- * otto/mamoru#405: a submitted op that never got its transaction stored, for GIVE_UP_MS, while a later op of the account
- * landed (the Safe's nonce moved past it). It may have landed unseen, so like a receipt given up on it no longer holds
- * the vault state as unknown: the account's vault yield is partial instead. One such op from 26 Sep kept every vault
- * yield row of an account unpriced from 12 Nov, which withheld every Stats series.
+ * otto/mamoru#405: an op sent that never got its transaction stored, for GIVE_UP_MS: an engine op submitted while a
+ * later op of the account landed (the Safe's nonce moved past it), or an owner op the owner signed (a stored owner op
+ * is always signed: Operator.newOp). It may have landed unseen, so like a receipt given up on it no longer holds the
+ * vault state as unknown: the account's vault yield is partial instead. One such engine op from 26 Sep kept every
+ * vault yield row of an account unpriced from 12 Nov, which withheld every Stats series.
  */
 export function lostSubmit(op: StoredOp, ops: readonly StoredOp[]): boolean {
-  if (!(op.opId.startsWith('eng-') || op.opId.startsWith('own-')) || op.txHash || op.state !== 'submitted') return false
+  if (op.txHash) return false
   const at = Date.parse(op.updatedAt)
-  return Number.isFinite(at) && Date.now() - at >= GIVE_UP_MS && ops.some((o) => o.state === 'confirmed' && Date.parse(o.updatedAt) > at)
+  if (!Number.isFinite(at) || Date.now() - at < GIVE_UP_MS) return false
+  if (op.opId.startsWith('own-')) return op.state === 'submitted' || op.state === 'proposed'
+  return op.opId.startsWith('eng-') && op.state === 'submitted' && ops.some((o) => o.state === 'confirmed' && Date.parse(o.updatedAt) > at)
 }
 
 /**
@@ -188,7 +191,8 @@ export function lostSubmit(op: StoredOp, ops: readonly StoredOp[]): boolean {
  */
 const inFlight = (op: StoredOp, ops: readonly StoredOp[]): boolean => {
   if (!(op.opId.startsWith('eng-') || op.opId.startsWith('own-')) || op.txHash) return false
-  if (op.state === 'submitted') return !lostSubmit(op, ops)
+  if (lostSubmit(op, ops)) return false
+  if (op.state === 'submitted') return true
   if (op.state !== 'proposed') return false
   // Times compared as instants: stored ops mix second and millisecond precision, so their strings do not sort.
   const at = Date.parse(op.updatedAt)
