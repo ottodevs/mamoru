@@ -6357,7 +6357,7 @@ export class Operator {
   /**
    * Revokes in the engine's ledger every session named `manage`, the per-position baseline grant the engine requests through
    * `requestManageGrant` when a policy has no manage-any grant. Harvest has two paths (packages/decide): a policy with
-   * manage-any harvests under it and convert-any, which this does not touch; a policy without manage-any harvests under the
+   * manage-any harvests under convert-any when it has one, otherwise under manage-any, which this does not touch; a policy without manage-any harvests under the
    * per-position `manage` grant, so for that policy this method does stop harvest. What an activation keeps within the gas
    * limit (otto/mamoru#5) limits harvest and re-range for the pools that have manage-any.
    */
