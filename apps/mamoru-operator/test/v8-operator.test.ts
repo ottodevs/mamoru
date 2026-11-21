@@ -206,6 +206,40 @@ describe('review r1: the move waits for a bridge to Monad still in flight', () =
   })
 })
 
+describe('review r2: nothing is bridged to Monad for an account in base_v8 scope', () => {
+  test('the remote read gets no bridge permission in scope, its permission ids out of scope', async () => {
+    const asked: (readonly Hex[])[] = []
+    const bridgeMonad = { pending: () => undefined, remote: async (_k: string, _s: string, _t: number, _b: bigint, ids: readonly Hex[]) => (asked.push(ids), { value: 0n, inFlight: 0n, ready: true }) } as unknown as OperatorConfig['bridgeMonad']
+    const read = async (scoped: Scoped) => {
+      const w = world(0n, cfg7({}, scoped, { bridgeMonad }))
+      const a = running(w, v7)
+      ;(a as unknown as { remote: unknown }).remote = { chainId: 143, address: `0x${'cd'.repeat(20)}`, spec: { validUntil: 4_000_000_000, capUsdc: '1000000000' }, permissionIds: [`0x${'0e'.repeat(32)}`], ready: true }
+      const r = (w.op as unknown as { remoteOf(a: AccountState): { remote?: (b: bigint) => Promise<unknown> } }).remoteOf(a)
+      await r.remote!(1n)
+    }
+    await read({})
+    await read({ base_v8: ['k'] })
+    expect(asked).toEqual([[`0x${'0e'.repeat(32)}`], []])
+  })
+})
+
+describe('review r2: a v2 account moves to v8 in one owner transaction', () => {
+  test('v2 -> v8: every v8 session on V3 alone, every v2 grant revoked in the same transaction', async () => {
+    const v2 = (await import('@mamoru/policy')).POLICIES['conservador-live-v2']!
+    const w = world(0n, cfg7({}, { base_v8: ['k'] }))
+    const a = running(w, v2)
+    ready(w)
+    chain(w, 7n)
+    const t = await w.op.prepareRenew(ctx)
+    expect(t.policyId).toBe('conservador-live-v8')
+    const held = priv(w.op).prepared.get(t.prepareId)!
+    expect([...held.grants!.map((g) => g.name)].sort()).toEqual(v8.session.grants.filter((g) => !g.perPosition).map(grantKey).sort())
+    for (const s of sessionsOf(held.tx)) for (const policies of s.perAction) expect(policies).toEqual([V3])
+    expect(held.revokes!.length).toBe(a.grants.length)
+    expect(t.summary.join('\n')).not.toContain('Monad')
+  })
+})
+
 describe('a Start activates on v8 wherever base_v8 is in scope', () => {
   async function start(flags: Flags, scoped: Scoped) {
     const w = world(0n, { policy: v5, ...cfg7(flags, scoped) })

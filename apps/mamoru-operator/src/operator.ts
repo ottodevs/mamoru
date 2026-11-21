@@ -6427,7 +6427,10 @@ export class Operator {
     if (this.unfundable(acc, rs)) return { remote: async () => ({ value: 0n, inFlight: 0n, ready: false, cap: 0n }) }
     return {
       remote: async (block: bigint, local?: Observation) => {
-        const open = Math.floor(Date.now() / 1000) < rs.spec.validUntil - REMOTE_BRIDGE_STOP_SECONDS
+        // otto/mamoru#428 (review r2): no new capital to Monad for an account in the `base_v8` scope, from the moment the
+        // flag applies: nothing is bridged while it waits to move to v8, so no burn can start between that move's prepare
+        // and its landing (what it holds there stays counted).
+        const open = Math.floor(Date.now() / 1000) < rs.spec.validUntil - REMOTE_BRIDGE_STOP_SECONDS && !this.inScope(acc, 'base_v8')
         // otto/mamoru#401: with its idle USDC (spec 012 HRV-R4) and its own signed cap (nothing is bridged past it).
         const r = await bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, open ? rs.permissionIds : [], this.idleMinOf(acc, local))
         return /^[0-9]+$/.test(rs.spec.capUsdc) ? { ...r, cap: BigInt(rs.spec.capUsdc) } : r
