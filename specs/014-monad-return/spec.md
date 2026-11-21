@@ -1,4 +1,4 @@
-# 014: Leave Monad, bring the money home, place it in USDC/cbBTC
+# 014: Every account on the Base-only policy; Monad money home, placed in USDC/cbBTC
 
 Ticket: otto/mamoru#428 (milestone "Feedback Monad"). Related: #415 (entry pause, live), #427 (unwind to USDC on Monad,
 no signature), spec 002 (multichain), spec 010 (one authorization, the two-step "What's new" flow this reuses).
@@ -12,6 +12,11 @@ Status: draft r1, 21 Nov 2026.
   signature).
 - Each Monad user is then asked for one authorization that brings that USDC back to their Base Safe and puts it into
   USDC/cbBTC.
+- **Scope addition (owner, 21 Nov):** every account, new and old, ends on the newest policy version wherever possible.
+  - The Base-only policy (`conservador-live-v8`, below) is the default for every new Start.
+  - Every existing Base account (v2-v7) is offered the same one-signature upgrade to it.
+  - A Monad account also signs the Monad leg (CCTP back to Base and session revoke). That is a second passkey prompt,
+    not the same signature: one assertion cannot cover two chains on these Safes (next section).
 
 ## State on 21 Nov 2026 (read in code at 66f881d1)
 
@@ -56,7 +61,7 @@ One owner Safe transaction on the Monad Safe, built by the Monad operator:
 1. It removes and revokes every session on the Monad Safe. The set is the same as Stop's (`stopRevokes`).
 2. If anything is still in a position (if #427 has not run for this account): it closes and burns each position and
    sells the WMON to USDC, at the band's minimums. It is the same plan as Stop.
-3. `approve(TokenMessengerV2, amount)` then `depositForBurn(amount, domain 6, mintRecipient = the account's Base Safe,
+3. If the Safe holds USDC: `approve(TokenMessengerV2, amount)` then `depositForBurn(amount, domain 6, mintRecipient = the account's Base Safe,
    USDC, destinationCaller = 0, maxFee = 0, minFinalityThreshold = 2000)`.
    - `amount` is the Safe's USDC now, plus the minimum outputs of step 2. Anything above it (slippage gained) stays as
      dust on the Monad Safe.
@@ -105,7 +110,42 @@ WebAuthn call. Withdrawals stay as they are, one signature each.
   touched, so there are no swaps beyond placing what comes home.
 - The pre-Monad v5 weights (50 % USDC/USDT, 40 % cbBTC, 10 % WETH) would also be possible. They mean selling about 25 %
   of each account out of WETH/USDC. They are not chosen; the owner can ask for them, and it is one constant.
-- `V8_MIGRATES_FROM`: v6 and v7 only, the accounts that have a Monad leg. Accounts on v2-v5 are not offered it.
+- `V8_MIGRATES_FROM`: every earlier Base conservador version, v2 to v7 (and their lab twins). It is offered ahead of
+  every other move, so an account in scope is never offered v6 or v7, which open a Monad leg.
+- The move waits for any bridge to Monad still in flight (`BRIDGE_IN_FLIGHT`), so that money is counted until it lands.
+  The mint on Monad runs from the bridge journal whatever the policy is.
+
+## Prod accounts and the path each takes (read 21 Nov 2026 13:00Z)
+
+Source: the operator's own signed metrics as the Worker stored them (`operator_metrics_latest`, generated 13:00:15Z),
+joined with D1 `accounts` and `account_snapshot_latest`. This is a read only. D1's `policy_version` column is `1.0.0`
+on every row, so the policy comes from the metrics.
+
+| Account | Env | Policy now | Signed cap | Base USD | Monad USD | Path |
+|---|---|---|---|---|---|---|
+| 3e4d1d49 | prod | v7 | 10,000 | 2,438.71 | 449.55 | step 0 + step 1 (2 prompts) |
+| 63b06f5b | prod | v7 | 10,000 | 1,251.11 | 224.16 | step 0 + step 1 |
+| c9d4179b | prod | v7 | 10,000 | 790.48 | 133.89 | step 0 + step 1 (canary settings v16) |
+| b22428c7 | prod | v7 | 1,000 | 766.30 | 127.47 | step 0 + step 1 |
+| 909fa964 | prod | v7 | 1,000 | 166.49 | 29.84 | step 0 + step 1 |
+| 4e2cf182 | prod | v7 | 10,000 | 149.82 | 28.86 | step 0 + step 1 |
+| 88264d2f | prod | v7 | 10,000 | 120.35 | 21.72 | step 0 + step 1 |
+| c23e94e1 | prod | v7 | 10,000 | 76.35 | 13.68 | step 0 + step 1 |
+| 8b0b4d7f | prod | v7 | 10,000 | 2.28 | 0.38 | step 0 + step 1 |
+| 307146b5 | prod | v7 | 1,000 | 0.72 | 0.15 | step 0 + step 1 |
+| b913a2b0 | prod | v7 | 10,000 | 0.69 | 0.14 | step 0 + step 1 |
+| 189692ff | prod | v2 | 100 | 0.87 | — | step 0 only (1 prompt) |
+| b54dda3a | beta | v7 | 10,000 | 806.52 | 144.18 | step 0 + step 1 |
+| 00a7a1df | beta | v7 | 10,000 | 3.84 | 0.61 | step 0 + step 1 |
+
+- **39 more accounts** (v2) are not active and hold nothing. There is nothing to migrate: their next Start activates v8.
+- **No account on v4, v5 or v6** today. **None on V4** (`one_auth_v4` is off).
+- **Cannot migrate:** none is blocked by its policy.
+  - An owner who lost their passkey cannot sign. That is not visible from here.
+  - Three Monad Safes hold under 0.40 USD. Step 1 still revokes their sessions, and it burns whatever USDC they hold
+    (Mamoru pays the gas).
+  - A step 1 with no USDC at all is a revoke only. The builder takes that case (no burn).
+- The monad column is the latest snapshot. After #427 runs it is all USDC.
 
 ### New accounts
 
@@ -117,7 +157,7 @@ ahead of v7. The flag is scoped like `vaults_v7` (`*` = everyone).
 | What | Result |
 |---|---|
 | Step 0 refused or failed | Nothing changed, the step reopens. The account stays v7, its Monad money stays in USDC on Monad (paused, #415) |
-| Step 0 confirmed, step 1 never signed | Base on v8, no bridge-out grant. The Monad Safe keeps its USDC and its V3 session, which can only manage the growth pool; the entry pause keeps it out. The Monad row keeps offering step 1 and Withdraw. The account cap still counts the Monad value (peer exposure reads `acc.remote` whatever the policy) |
+| Step 0 confirmed, step 1 never signed | Base on v8, no bridge-out grant. The Monad Safe keeps its USDC and its V3 session, which can only manage the growth pool; the entry pause keeps it out. The Monad operator keeps running that Safe's own engine under its own policy, whatever the Base policy is. The Monad row keeps offering step 1 and Withdraw. The account cap still counts the Monad value (peer exposure reads `acc.remote` whatever the policy), so Base never places more than the cap across both chains |
 | Step 1 reverts on chain | The Safe tx is atomic: nothing moved, nothing revoked. The step reopens |
 | Burn landed, attestation slow | Counted as in flight on Base (ReturnHome `burned`), so the totals do not dip. The app shows it as in transit |
 | Mint reverts | Retried with backoff, then alerts after 3 reverts. The money is safe in the message: anyone can mint it to the same recipient |
