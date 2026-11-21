@@ -1,6 +1,6 @@
 // otto/mamoru#428 (spec 014): conservador-live-v8 on the Base operator, step 0 of leaving Monad. Behind the scoped flag
-// `base_v8` a Start activates it (no Safe on Monad, no bridge) and a v6/v7 account is offered the move to it, ahead of
-// every other offer. One approval is ONE owner transaction, every grant on MamoruActionPolicyV3 alone.
+// `base_v8` a Start activates it (no Safe on Monad, no bridge) and every earlier Base account is offered the move to it,
+// ahead of every other offer. One approval is ONE owner transaction, every grant on MamoruActionPolicyV3 alone.
 // Fake deployed addresses; V3 and the gate are the registry pins withPinnedV6Base() gives.
 import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, pad, parseAbi, slice, type Hex } from 'viem'
@@ -137,7 +137,7 @@ describe('boot wiring', () => {
   })
 })
 
-describe('the renew row offers v8 to v6/v7 accounts behind base_v8, ahead of everything', () => {
+describe('the renew row offers v8 to every earlier Base version behind base_v8, ahead of everything', () => {
   const target = (flags: Flags, scoped: Scoped, from = v7) => {
     const w = world(0n, cfg7(flags, scoped))
     return w.op.renewTarget(running(w, from))
@@ -149,9 +149,9 @@ describe('the renew row offers v8 to v6/v7 accounts behind base_v8, ahead of eve
     expect(target({}, { base_v8: ['k'] })).toBe('conservador-live-v8')
   })
 
-  test('accounts without a Monad leg are not offered it: v5 still goes to v7 where v7 is offered', () => {
-    expect(target({ base_v8: true, vaults_v7: true }, { base_v8: null, vaults_v7: null }, v5)).toBe('conservador-live-v7')
-    expect(target({ base_v8: true }, { base_v8: null }, v5)).toBe('conservador-live-v5')
+  test('every earlier Base version moves to it too (owner, 21 Nov): v4 and v5 go to v8, ahead of v7', () => {
+    expect(target({ base_v8: true, vaults_v7: true }, { base_v8: null, vaults_v7: null }, v5)).toBe('conservador-live-v8')
+    expect(target({ base_v8: true }, { base_v8: null }, v4)).toBe('conservador-live-v8')
   })
 
   test('out of scope, off, or v8 not configured: as before', () => {
@@ -188,6 +188,21 @@ describe('owner transaction of the move to v8', () => {
     const text = t.summary.join('\n')
     expect(text).toContain('Mamoru stops sending money to Monad: 15% goes into USDC/cbBTC on Base instead')
     expect(text).toContain(`Your Safe on Monad 0x${'cd'.repeat(20)} keeps what it holds`)
+  })
+})
+
+describe('review r1: the move waits for a bridge to Monad still in flight', () => {
+  test('a pending burn refuses the v7 -> v8 prepare (BRIDGE_IN_FLIGHT); none: prepared', async () => {
+    let pending: unknown = { id: 'b1', state: 'burned' }
+    const bridgeMonad = { pending: () => pending } as unknown as OperatorConfig['bridgeMonad']
+    const w = world(0n, cfg7({}, { base_v8: ['k'] }, { bridgeMonad }))
+    running(w, v7)
+    ready(w)
+    chain(w, 7n)
+    const e = await w.op.prepareRenew(ctx).catch((x: unknown) => x)
+    expect((e as { code?: string }).code).toBe('BRIDGE_IN_FLIGHT')
+    pending = undefined
+    expect((await w.op.prepareRenew(ctx)).policyId).toBe('conservador-live-v8')
   })
 })
 
