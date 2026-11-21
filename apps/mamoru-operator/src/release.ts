@@ -35,6 +35,11 @@ export type ReleaseState = {
   sending?: { nonceKey: string; nonce: string; fromBlock: string; tries: Try[] }
   /** Once burned: what landed. */
   burn?: { userOpHash: Hex; amount: string; txHash: Hex; block: number }
+  /**
+   * otto/mamoru#428 (spec 014): a burn the owner signed on a design-C Safe (return-home, step 1 of leaving Monad), not a
+   * V4 release: its mint recipient, the owner's Base Safe. The home mints it with this Safe as the CCTP message sender.
+   */
+  owner?: { home: Address }
   at: string
   updatedAt: string
 }
@@ -247,7 +252,7 @@ export async function nonceUsedAtHead(acc: AccountState, chain: Pick<PublicClien
 }
 
 /** otto/mamoru#355: one release a cap counts (releasesToCount). */
-export type ReleaseCount = { id: string; amount: bigint; chainId: number; home?: Address; at: string; block?: number; tx?: Hex; sending?: { nonceKey: bigint; nonce: bigint } }
+export type ReleaseCount = { id: string; amount: bigint; chainId: number; home?: Address; at: string; block?: number; tx?: Hex; sending?: { nonceKey: bigint; nonce: bigint }; /** otto/mamoru#428: an owner-signed return to this home. */ owner?: Address }
 
 /**
  * otto/mamoru#355: the requests of this Safe a cap counts until the home holds them: sending (a burn may have landed
@@ -266,7 +271,7 @@ export function releasesToCount(acc: Pick<AccountState, 'release' | 'releasesDon
     if (!r || (r.state !== 'burned' && r.state !== 'sending')) continue
     // Only one try can land, and none for more than asked: the largest try (or the request) bounds what leaves.
     const bound = (r.sending?.tries ?? []).reduce((m, t) => (BigInt(t.amount) > m ? BigInt(t.amount) : m), 0n) || BigInt(r.amount)
-    const base = { id: r.id, chainId: r.chainId, at: r.at, ...(home ? { home } : {}) }
+    const base = { id: r.id, chainId: r.chainId, at: r.at, ...(r.owner ? { home: r.owner.home, owner: r.owner.home } : home ? { home } : {}) }
     if (r.state === 'burned') out.push(r.burn ? { ...base, amount: BigInt(r.burn.amount), block: r.burn.block, tx: r.burn.txHash } : { ...base, amount: bound })
     else out.push({ ...base, amount: bound, ...(r.sending ? { sending: { nonceKey: BigInt(r.sending.nonceKey), nonce: BigInt(r.sending.nonce) } } : {}) })
   }
