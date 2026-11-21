@@ -305,13 +305,16 @@ describe('return home (otto/mamoru#278, Base side)', () => {
   })
 })
 
-describe('otto/mamoru#428: an owner-signed return (spec 014 step 1) reported by the remote is minted here', () => {
+describe('otto/mamoru#428: an owner-signed return (spec 014 step 1) reported by the remote is minted here once proven', () => {
   const SAFE = REMOTE.address as Address
-  const reported = (o: { owner?: string; id?: string } = {}) => [{ id: o.id ?? 'home-abc', amount: AMOUNT.toString(), block: '777', tx: BURN_TX, owner: o.owner ?? HOME }]
+  const reported = (o: { owner?: string; id?: string; amount?: bigint } = {}) => [{ id: o.id ?? 'home-abc', amount: (o.amount ?? AMOUNT).toString(), block: '777', tx: BURN_TX, owner: o.owner ?? HOME }]
 
-  test('to one of the account\'s homes: taken as burned with the Safe as sender, then minted from its attested burn', async () => {
+  test('to one of the account\'s homes: nothing on disk until its attested burn proves it; then burned (sender: the Safe) and minted', async () => {
     const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
     s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    expect(s.r.returns()).toHaveLength(0)
+    expect(s.r.holds('home-abc', [HOME])).toBe(false)
+    await s.r.tick(() => null)
     expect(s.j().returns['home-abc']).toMatchObject({ state: 'burned', home: getAddress(HOME), sender: getAddress(SAFE), burn: { amount: AMOUNT.toString(), txHash: BURN_TX, block: 777 } })
     expect(s.r.holds('home-abc', [HOME])).toBe(true)
     s.advance(RETURN_ATTEST_FIRST_POLL_MS)
@@ -320,28 +323,47 @@ describe('otto/mamoru#428: an owner-signed return (spec 014 step 1) reported by 
     expect(s.j().returns['home-abc']!.state).toBe('minted')
   })
 
-  test('a message sent by V4 (or anyone but this Safe) is not this return: never minted', async () => {
-    const s = setup({ iris: [await attest(message())] })
+  test.each([
+    ['sent by V4, not this Safe', () => message()],
+    ['another amount than reported', () => message({ sender: REMOTE.address as Hex, amount: AMOUNT + 1n })],
+    ['to another recipient', () => message({ sender: REMOTE.address as Hex, recipient: `0x${'99'.repeat(20)}` })],
+  ])('a forged report (attestation %s): never on disk, never counted, never minted', async (_why, m) => {
+    const s = setup({ iris: [await attest(m())] })
     s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
-    s.advance(RETURN_ATTEST_FIRST_POLL_MS)
-    await s.r.tick(() => null)
+    for (let i = 0; i < 3; i++) {
+      await s.r.tick(() => null)
+      s.advance(RETURN_ATTEST_FIRST_POLL_MS)
+    }
+    expect(s.r.returns()).toHaveLength(0)
+    expect(s.r.holds('home-abc', [HOME])).toBe(false)
+    expect(s.r.inFlight('acc-1')).toBe(0n)
     expect(s.rel!.sent).toHaveLength(0)
-    expect(s.j().returns['home-abc']!.state).toBe('burned')
   })
 
-  test('to an address that is not one of the account\'s homes: not adopted (followed as an unknown release, never minted)', async () => {
+  test('no attestation at all (a tx that never burned): never on disk; no longer reported: dropped', async () => {
+    const s = setup()
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    await s.r.tick(() => null)
+    expect(s.r.returns()).toHaveLength(0)
+    s.r.noteReported(SAFE, [], 'acc-1', [HOME])
+    s.advance(RETURN_ATTEST_FIRST_POLL_MS)
+    await s.r.tick(() => null)
+    expect(s.r.returns()).toHaveLength(0)
+  })
+
+  test('to an address that is not one of the account\'s homes: not even followed', async () => {
     const s = setup({ iris: [await attest(message({ sender: SAFE, recipient: `0x${'99'.repeat(20)}` }))] })
     s.r.noteReported(SAFE, reported({ owner: `0x${'99'.repeat(20)}` }), 'acc-1', [HOME])
-    expect(s.r.returns()).toHaveLength(0)
-    s.advance(RETURN_ATTEST_FIRST_POLL_MS)
     await s.r.tick(() => null)
-    expect(s.rel!.sent).toHaveLength(0)
+    expect(s.r.returns()).toHaveLength(0)
   })
 
-  test('reported again: one entry, one mint', async () => {
+  test('the same burn reported under two ids: one entry', async () => {
     const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
-    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
-    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    s.r.noteReported(SAFE, [...reported(), ...reported({ id: 'home-dup' })], 'acc-1', [HOME])
+    await s.r.tick(() => null)
+    s.advance(60_000)
+    await s.r.tick(() => null)
     expect(s.r.returns()).toHaveLength(1)
   })
 })

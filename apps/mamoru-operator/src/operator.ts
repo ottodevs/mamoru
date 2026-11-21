@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto'
-import { decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, pad, parseAbi, parseAbiItem, parseEventLogs, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type ReturnHomeInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
-import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
+import { address, baseRegistry, tokenMessengerV2Abi, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, restoreHistoryCursor, senderNotEoa, type HistoryCursor, SIM_CALL_GAS, simulateCalls, SharedGuardReads, type SimCall, type SimCallResult } from '@mamoru/rpc'
@@ -32,7 +32,7 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
-import { buildReturnHome } from '@mamoru/account/return-home'
+import { buildReturnHome, RETURN_HOME_DOMAIN, TOKEN_MESSENGER_V2 as RETURN_TOKEN_MESSENGER } from '@mamoru/account/return-home'
 import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReportedRelease, ReturnHome } from './return-home.ts'
@@ -749,6 +749,28 @@ function migrateFields(tx: SafeTx, step: 0 | 1, moveTo: Address | undefined): Pa
       nonce: tx.nonce.toString(),
     },
   }
+}
+
+/**
+ * otto/mamoru#428: why `receipt` is not the burn return-home `rh` signed, or null when it is: a successful transaction with
+ * exactly one DepositForBurn from TokenMessengerV2 of `usdc`, depositor the Safe, the signed amount, mint recipient the
+ * home, destination Base, open caller, no fee, Standard finality, no hook.
+ */
+export function returnBurnMismatch(receipt: Pick<TransactionReceipt, 'status' | 'logs'>, rh: ReturnHomeInput, usdc: Address): string | null {
+  if (receipt.status !== 'success') return 'RETURN_TX_REVERTED'
+  const evs = parseEventLogs({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', logs: receipt.logs.filter((l) => l.address.toLowerCase() === RETURN_TOKEN_MESSENGER.toLowerCase()) })
+  if (evs.length !== 1) return `RETURN_BURNS_${evs.length}`
+  const a = evs[0]!.args
+  const ok =
+    a.burnToken.toLowerCase() === usdc.toLowerCase() &&
+    a.depositor.toLowerCase() === rh.safe.toLowerCase() &&
+    a.amount === BigInt(rh.amountUsdc) &&
+    a.mintRecipient.toLowerCase() === pad(rh.home, { size: 32 }).toLowerCase() &&
+    a.destinationDomain === RETURN_HOME_DOMAIN &&
+    BigInt(a.destinationCaller) === 0n &&
+    a.maxFee === 0n &&
+    a.hookData === '0x'
+  return ok ? null : 'RETURN_BURN_MISMATCH'
 }
 
 /** otto/mamoru#428: WMON a return home leaves behind (0.01 WMON); above it, #427 has not finished selling it. */
@@ -1887,6 +1909,8 @@ export class Operator {
     const burns = this.burnsCoveredBy(safe, covered)
     // otto/mamoru#355 (home): the returns to this Safe not in this very read, as idle USDC on its way, and the ids this
     // answer holds (on their way or in the read): the remote operator stops counting exactly those.
+    // otto/mamoru#428: a return home whose burn is not recorded yet is read from its receipt first, so it is reported now.
+    if (acc && this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID) await this.recordReturnBurns(acc).catch((e: unknown) => logErr(`[return] ${acc.accountKey} burn not recorded yet:`, e))
     const returns = this.cfg.returnHome?.capUsdc([safe], (home) => (home.toLowerCase() === safe.toLowerCase() ? r.block : undefined))
     // otto/mamoru#355 (remote): this Safe's releases sending or burned, not in `idleUsdc`: the home counts those it does not hold.
     // A sending one whose nonce is used at this read's block has landed by then: that block, so a display can tell
@@ -5760,6 +5784,7 @@ export class Operator {
     if ((p.kind === 'activate' || p.kind === 'renew') && p.remote) o.ownerRemote = p.remote
     if ((p.kind === 'activate' || p.kind === 'renew') && p.capUsdc) o.capUsdc = p.capUsdc
     if ((p.kind === 'stop' || p.kind === 'renew') && p.revokes) o.revokes = p.revokes
+    if (p.kind === 'stop' && p.returnHome) o.returnHome = p.returnHome.input
     if (p.kind === 'renew' && p.extend) o.extend = true
     // otto/mamoru#293: what a late receipt of a migration needs to apply it.
     if (p.kind === 'migrate-v4') {
@@ -6099,13 +6124,8 @@ export class Operator {
     } else if (p.kind === 'stop') {
       this.stopLoop(acc.accountKey)
       this.disarm(acc, 'STOPPED')
-      // otto/mamoru#428: a return home burned the Safe's USDC to the owner's Base Safe in this very transaction: kept as a
-      // burned release (owner-signed), so this Safe's answers count it until the home holds it, and the home mints it.
-      if (p.returnHome && BigInt(p.returnHome.input.amountUsdc) > 0n) {
-        const at = new Date().toISOString()
-        const rh = p.returnHome.input
-        acc.releasesDone = [...(acc.releasesDone ?? []), { id: `home-${receipt.transactionHash.slice(2, 26)}`, amount: rh.amountUsdc, chainId: BASE_CHAIN_ID, state: 'burned' as const, burn: { userOpHash: ZERO_HASH, amount: rh.amountUsdc, txHash: receipt.transactionHash, block: Number(receipt.blockNumber) }, owner: { home: getAddress(rh.home) }, at, updatedAt: at }]
-      }
+      // otto/mamoru#428: a return home's burn is recorded from its own receipt (recordReturnBurns), whichever path settled it.
+      queueMicrotask(() => void this.recordReturnBurns(acc).catch((e: unknown) => logErr(`[return] ${acc.accountKey} burn not recorded yet:`, e)))
       acc.active = false
       acc.revoked.push(...(p.revokes ?? []))
       acc.superseded = unrevoked(acc, p.revokes ?? [])
@@ -7241,6 +7261,37 @@ export class Operator {
       'The MON left for gas stays in this Safe',
     ]
     return this.hold(acc, live, 'stop', tx.calls, summary, { revokes, returnHome: { input, safeTxHash: tx.safeTxHash } })
+  }
+
+  /**
+   * otto/mamoru#428 (review r1): every confirmed return home of this account whose burn is not recorded yet, read from its
+   * own transaction's receipt: kept as a burned owner-signed release only when that receipt holds exactly one
+   * DepositForBurn of the signed amount, from this Safe, of this chain's USDC, to the signed home on Base, open caller, no
+   * fee. Anything else is recorded as why not (nothing reported home, an alert): the USDC then shows on this Safe again.
+   */
+  private async recordReturnBurns(acc: AccountState): Promise<void> {
+    for (const op of acc.ops as StoredOp[]) {
+      const rh = op.returnHome
+      if (!rh || op.returnRecorded || op.state !== 'confirmed' || !op.txHash) continue
+      if (BigInt(rh.amountUsdc) === 0n) {
+        op.returnRecorded = 'NOTHING_BURNED'
+        this.store.save()
+        continue
+      }
+      const receipt = await this.client.getTransactionReceipt({ hash: op.txHash as Hex })
+      const why = returnBurnMismatch(receipt, rh, address('USDC', this.cfg.registry))
+      if (why) {
+        op.returnRecorded = why
+        logErr(`[alert] ${acc.accountKey} return home ${op.opId} (tx ${op.txHash}): ${why}; no release recorded`, undefined)
+        this.store.save()
+        continue
+      }
+      const at = new Date().toISOString()
+      acc.releasesDone = [...(acc.releasesDone ?? []), { id: `home-${op.txHash.slice(2, 26)}`, amount: rh.amountUsdc, chainId: BASE_CHAIN_ID, state: 'burned', burn: { userOpHash: ZERO_HASH, amount: rh.amountUsdc, txHash: op.txHash as Hex, block: Number(receipt.blockNumber) }, owner: { home: getAddress(rh.home) }, at, updatedAt: at }]
+      op.returnRecorded = 'burned'
+      this.store.save()
+      console.log(`[return] ${acc.accountKey} ${op.opId}: ${rh.amountUsdc} USDC burned home to ${rh.home} (tx ${op.txHash})`)
+    }
   }
 
   /** Monad side (`POST migrate-v4/status`, from the Base operator): whether step 1 is confirmed on this Safe. */
