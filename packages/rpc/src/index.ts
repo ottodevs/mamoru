@@ -19,6 +19,7 @@ import {
 import { ReasonError, type Address } from '@mamoru/domain'
 import { poolTvlInSavings, type DepositObs, type Observation, type PoolObs, type PositionObs, type SessionObs, type VaultObs } from '@mamoru/decide'
 import { Batch, balanceRead, chunkCalls, contractRead, multicall3Of } from './multicall.ts'
+import { runSimReader, simulateUnserved } from './sim-reader.ts'
 import { applyPrincipal, positionEventsAbi, type Pair, type PositionEvent } from '@mamoru/projector'
 import {
   address,
@@ -42,6 +43,7 @@ const userOperationEvent = parseAbiItem(
   'event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)',
 )
 
+export { SIM_READER_CODE, decodeReaderRun, runSimReader, simReaderAbi, simulateUnserved, type ReaderRun } from './sim-reader.ts'
 export { BATCH_MAX_BYTES, BATCH_MAX_CALLS, Batch, balanceRead, blockNumberRead, chunkCalls, contractRead, multicall3Abi, multicall3Of, type Handle, type Read } from './multicall.ts'
 export {
   addFeePoint,
@@ -897,6 +899,12 @@ export type Simulation = {
   nftDelta: bigint
   gasUsed: bigint
   logs: Log[]
+  /**
+   * otto/mamoru#429: false when the run came from the eth_call reader (no provider served eth_simulateV1): `logs` is then
+   * empty because nothing was read, not because nothing was emitted. A check that needs an event refuses on it.
+   * Absent: an eth_simulateV1 run, logs as emitted.
+   */
+  logsRead?: false
 }
 
 /**
@@ -920,10 +928,17 @@ export async function simulateFromEntryPoint(client: PublicClient, account: Addr
   // provider that accepts the plain call keep the exact simulation they had (review of #260, P1).
   let res: SimCallResult[]
   try {
-    res = await simulateCalls(client, batch, blockNumber)
+    try {
+      res = await simulateCalls(client, batch, blockNumber)
+    } catch (e) {
+      if (!senderNotEoa(e)) throw e
+      res = await simulateCalls(client, batch, blockNumber, { [ep]: { code: '0x' } })
+    }
   } catch (e) {
-    if (!senderNotEoa(e)) throw e
-    res = await simulateCalls(client, batch, blockNumber, { [ep]: { code: '0x' } })
+    // otto/mamoru#429: only where no provider serves eth_simulateV1 at all (Monad since 20 Nov 2026). Any provider that
+    // serves it keeps the exact run above.
+    if (!simulateUnserved(e)) throw e
+    return simulateWithReader(client, account, callData, blockNumber, reads.map((r) => r.to), ep, TOKENS)
   }
   const n = reads.length
   const exec = res[n]!
@@ -953,6 +968,39 @@ export async function simulateFromEntryPoint(client: PublicClient, account: Addr
     nftDelta: word(res[2 * n]!) - word(res[n - 1]!),
     gasUsed,
     logs: exec.logs,
+  }
+}
+
+/**
+ * otto/mamoru#429: the same checks as simulateFromEntryPoint by one eth_call (SimReader at the EntryPoint's address):
+ * balances before and after, the account's success and revert data, so the deltas, the position count and the revert
+ * read the same. Logs cannot be read this way (`logsRead: false`). Gas is measured as on Monad today: eth_estimateGas
+ * of the same call from the EntryPoint at the head.
+ */
+async function simulateWithReader(client: PublicClient, account: Address, callData: Hex, blockNumber: bigint, readTargets: Address[], ep: Address, tokens: RegistryName[]): Promise<Simulation> {
+  const run = await runSimReader(client, ep, account, readTargets, callData, blockNumber, SIM_CALL_GAS)
+  const deltas: Record<RegistryName, bigint> = {}
+  tokens.forEach((t, i) => {
+    deltas[t] = run.after[i]! - run.before[i]!
+  })
+  const last = readTargets.length - 1
+  let gasUsed = run.gasUsed
+  if (run.ok) {
+    try {
+      gasUsed = await client.estimateGas({ account: ep, to: account, data: callData, blockTag: 'latest' })
+    } catch (e) {
+      throw new ReasonError('EHG_SIM_UNAVAILABLE', `gas estimate: ${(e as Error).message.split('\n')[0]}`)
+    }
+  }
+  return {
+    block: blockNumber,
+    ok: run.ok,
+    revert: run.ok ? undefined : run.ret,
+    deltas,
+    nftDelta: run.after[last]! - run.before[last]!,
+    gasUsed,
+    logs: [],
+    logsRead: false,
   }
 }
 

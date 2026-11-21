@@ -1306,6 +1306,11 @@ export class Engine {
       throw e
     }
     if (!sim.ok) return void j.move(op.opId, 'discarded', 'EHG_SIM_REVERT', { simulation: sim }, sim.revert)
+    // otto/mamoru#429: a harvest is checked against its Collect event and a bridge-out against its DepositForBurn. A run
+    // without logs (the eth_call reader) cannot show either, so those two wait for a provider that serves eth_simulateV1.
+    if (sim.logsRead === false && (proposal.kind === 'harvest' || proposal.kind === 'bridge_out')) {
+      return void j.move(op.opId, 'discarded', 'EHG_SIM_UNAVAILABLE', {}, `a ${proposal.kind} is checked against its events, and no provider served eth_simulateV1`)
+    }
     const mismatch = this.deltaMismatch(proposal, prepared, sim)
     if (mismatch) return void j.move(op.opId, 'discarded', 'EHG_SIM_DELTA_MISMATCH', { simulation: sim }, mismatch)
     // otto/mamoru#61: a chain that charges the gas limit gets limits sized from this simulation (tightUserOpGas).

@@ -173,11 +173,14 @@ export function logRangeOf(url: string, overrides: Record<string, number> = {}):
  */
 function methodUnserved(e: any): boolean {
   // -32601 first: a revert never carries it, and a provider may add `data` (even null) to it.
-  if (e.code === -32601) return true
+  // otto/mamoru#429: -32604 is rpc4.monad.xyz's "this request method is not supported".
+  if (e.code === -32601 || e.code === -32604) return true
   // A revert (code 3, or any other error carrying `data`) is the method's real answer, whatever its reason says.
   if (e.code === 3 || e.data != null) return false
   // drpc's free plan: code 35, "method is not available on free plan"; geth's wording without the standard code.
-  return /^(the )?method \S+ (does not exist|is not available)|^method is not available on (your|free|the free) plan/i.test(String(e.message))
+  // otto/mamoru#429: "this request method is not supported" (rpc4.monad.xyz), "eth_simulateV1 is not available on the
+  // MONAD_MAINNET" (Alchemy, code -32600), "is available for paid plans only" (Tatum, code -16401).
+  return /^(the )?method \S+ (does not exist|is not available)|^method is not available on (your|free|the free) plan|^this request method is not supported|^\S+ is not available on the [A-Z0-9_]+\b|is available for paid plans only/i.test(String(e.message))
 }
 
 /** Refusals that are worth a retry or another provider, not a real answer: rate or capacity, or a method this provider does not serve. */

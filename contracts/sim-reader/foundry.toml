@@ -1,0 +1,13 @@
+# otto/mamoru#429: the reader that stands in for eth_simulateV1 where no provider serves it (Monad). Never deployed:
+# its runtime code is given to the EntryPoint address by an eth_call state override (packages/rpc SIM_READER_CODE).
+# Reproduce the constant: ~/.foundry/bin/forge build, then `jq -r .deployedBytecode.object out/SimReader.sol/SimReader.json`.
+[profile.default]
+src = "src"
+out = "out"
+solc_version = "0.8.28"
+# paris: no PUSH0 or MCOPY, so the code runs on any EVM chain Mamoru reads.
+evm_version = "paris"
+optimizer = true
+optimizer_runs = 200
+bytecode_hash = "none"
+cbor_metadata = false

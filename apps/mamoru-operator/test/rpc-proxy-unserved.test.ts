@@ -93,3 +93,31 @@ describe('a method the provider does not serve', () => {
     }
   })
 })
+
+// otto/mamoru#429: the wordings Monad's providers gave on 21 Nov 2026 are unserved too, so the proxy moves on.
+describe('unserved wordings seen on Monad, 21 Nov 2026', () => {
+  const cases: [string, { code: number; message: string }][] = [
+    ['rpc4.monad.xyz -32604', { code: -32604, message: 'this request method is not supported' }],
+    ['Alchemy, chain left out', { code: -32600, message: 'eth_simulateV1 is not available on the MONAD_MAINNET. For more information visit the docs' }],
+    ['Tatum paid plans', { code: -16401, message: "Method 'eth_simulateV1' is available for paid plans only. To access this feature, upgrade" }],
+  ]
+  for (const [name, err] of cases) {
+    test(`${name}: the next trusted provider is asked`, async () => {
+      const calls: string[] = []
+      const fetch = async (url: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as { id: number; method: string }
+        calls.push(new URL(url).hostname)
+        const r = url === MONAD_PUBLIC ? { error: err } : { result: [{ calls: [] }] }
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, ...r }), { status: 200 })
+      }
+      const proxy = startRpcProxy(MONAD_PUBLIC, { fetch, trusted: [MONAD_ALCHEMY], fallbacks: [], logRanges: {} })
+      try {
+        const res = (await (await globalThis.fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_simulateV1', params: [] }) })).json()) as Reply
+        expect(res.error).toBeUndefined()
+        expect(calls).toEqual(['rpc.monad.xyz', 'monad-mainnet.g.alchemy.com'])
+      } finally {
+        proxy.stop()
+      }
+    })
+  }
+})
