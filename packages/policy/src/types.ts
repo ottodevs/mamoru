@@ -208,6 +208,12 @@ export type PolicyVersion = {
    */
   entryPauseUntil?: Partial<Record<string, number>>
   /**
+   * otto/mamoru#427: this policy's chain is being left (the engine settings' `chainExit`, `withEngineSettings`): every
+   * pool position is taken out in full and the volatile token sold for the savings asset, which stays on the Safe.
+   * Absent: none. Never part of a grant.
+   */
+  chainExit?: true
+  /**
    * Lab only (#101, range geometry): where a new range sits around the price and how wide it is. Absent: the
    * centred range of `range.widthTicks` / `widthTicksByPool`, byte for byte. A pool with a `widthTicksByPool` entry
    * (the stables pool) keeps that width and is never skewed.

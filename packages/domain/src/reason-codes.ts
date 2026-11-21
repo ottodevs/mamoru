@@ -143,6 +143,10 @@ export const REASON_CODES = [
   'DECIDE_ENTRY_PAUSED_FALL',
   // otto/mamoru#415: ops paused new money into a chain's volatile buckets until a set time (a known market event); positions, harvests and sales run.
   'DECIDE_ENTRY_PAUSED_SCHEDULED',
+  // otto/mamoru#427: ops are leaving this chain's pools: positions out in full, the volatile token sold, savings stay on the Safe.
+  'DECIDE_CHAIN_EXIT',
+  // otto/mamoru#427: the chain exit has nothing left to take out or sell; the Safe holds savings (and its gas).
+  'DECIDE_CHAIN_EXIT_DONE',
   // Lab (#101 round 3): the stables pool is off peg past the guard; nothing moves in it, or it is being left.
   'RISK_DEPEG_PAIRED',
   // Lab (#101 round 3): a volatile bucket gave up thirds of its weight on a fall from its 7-day high.

@@ -2257,6 +2257,8 @@ export class Engine {
         this.client.readContract({ address: entry(p.pool, this.registry).address, abi: uniswapV3PoolAbi, functionName: 'slot0', blockNumber }),
       ])
       const liquidity = p.kind === 'rerange' ? pos[7] : p.liquidity < pos[7] ? p.liquidity : pos[7]
+      // otto/mamoru#427: a chain exit's reduce burns the NFT too, only when it takes every unit of liquidity the chain shows.
+      const burnIt = p.kind === 'rerange' || (p.burn === true && liquidity === pos[7])
       const calls: V3Call[] = []
       if (liquidity > 0n) {
         const a = amountsOf(sqrtPriceX96, pos[5], pos[6], liquidity)
@@ -2281,17 +2283,17 @@ export class Engine {
         }
         if (isV4Policy(this.cfg.policy.actionPolicy)) {
           // #348 (I9): checkExit with the decrease's own arguments right before it, then collect (and burn).
-          return { calls: this.a1([{ kind: 'decrease', tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline, burn: p.kind === 'rerange', positionLiquidity: pos[7] }], timestamp), expiresAt: deadline }
+          return { calls: this.a1([{ kind: 'decrease', tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline, burn: burnIt, positionLiquidity: pos[7] }], timestamp), expiresAt: deadline }
         }
         calls.push(this.v3.decreaseLiquidity({ tokenId: p.tokenId, liquidity, amount0Min, amount1Min, deadline }))
       }
       if (isV4Policy(this.cfg.policy.actionPolicy)) {
         const intents: A1Intent[] = [{ kind: 'collect', tokenId: p.tokenId }]
-        if (p.kind === 'rerange') intents.push({ kind: 'burn', tokenId: p.tokenId })
+        if (burnIt) intents.push({ kind: 'burn', tokenId: p.tokenId })
         return { calls: this.a1(intents, timestamp), expiresAt: null }
       }
       calls.push(this.v3.collect({ account: acct, tokenId: p.tokenId }))
-      if (p.kind === 'rerange') calls.push(this.v3.burn(p.tokenId))
+      if (burnIt) calls.push(this.v3.burn(p.tokenId))
       // Without a decrease the batch prices nothing (collect and burn to the account): late, it is harmless.
       return { calls: calls.map(exec), expiresAt: liquidity > 0n ? deadline : null }
     }

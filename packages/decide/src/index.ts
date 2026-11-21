@@ -10,6 +10,7 @@ import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf, harvestSaleOf, principalObs } from './harvest/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
 import { releaseOf } from './release/index.ts'
+import { chainExitStep } from './guard/chain-exit.ts'
 import { anyKey, convertKey, idleConvertOf, isManaged, mergeOf, ratioConvertOf, reduceOf, rerangeOf } from './rerange/index.ts'
 import type { Decision, GateStep, GuardNote, Observation, Proposal, RerangeProposal, ShadowNote, ShadowRisk, VaultRedeemProposal } from './types.ts'
 import { capRoomOf, withinCap } from './cap.ts'
@@ -283,10 +284,16 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     // otto/mamoru#278: an open release (the home account wants savings back) is all this Safe does until it is sent.
     // Every pool of a frozen bucket, not only the guard's own, and the depegged one.
     const release = releaseOf(obs, policy, policyPools, new Set([...frozenPools, ...policy.buckets.filter((b) => frozen.has(b.id)).flatMap((b) => b.pools)]))
+    // otto/mamoru#427: a chain being left does nothing but leave, after an open release (which sends savings home).
+    const leaving = release ? null : chainExitStep(obs, policy, policyPools)
     if (release) {
       releasing = true
       proposal = exit ?? release.proposal
       reason = exit ? PROPOSAL_CODE[exit.kind] : release.code
+    } else if (leaving) {
+      releasing = true
+      proposal = leaving.proposal
+      reason = leaving.code
     } else {
       proposal = exit ?? reranges[0] ?? harvests[0] ?? sold ?? reduce?.proposal ?? idle ?? entries[0] ?? null
       reason = proposal === sold && sold ? 'DECIDE_HARVEST' : proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()

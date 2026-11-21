@@ -46,10 +46,20 @@ export type EngineSettings = {
    * versions keep their hash.
    */
   entryPause?: EntryPause[]
+  /**
+   * otto/mamoru#427: leave a chain's pools. On that chain every pool position is taken out in full (decrease, collect,
+   * burn) and the volatile token is sold for the savings asset, which stays on the Safe: nothing is bridged or
+   * transferred. No entry goes into that chain meanwhile, there or from a policy elsewhere (as an `entryPause` without an
+   * end). At most one entry per chain. Absent = none, so older versions keep their hash.
+   */
+  chainExit?: ChainExit[]
 }
 
 /** otto/mamoru#415: one chain's pause of new money into its volatile buckets. */
 export type EntryPause = { chainId: number; until: number }
+
+/** otto/mamoru#427: one chain whose pool positions are unwound to the savings asset. */
+export type ChainExit = { chainId: number }
 
 /** otto/mamoru#245: per journal state, minutes until a burn to Monad is flagged stuck. */
 export type BridgeStuckAfterMin = { sending: number; burned: number }
@@ -171,7 +181,7 @@ export function validateEngineSettings(s: unknown): string[] {
   const errors: string[] = []
   if (!s || typeof s !== 'object' || Array.isArray(s)) return ['settings must be an object']
   const o = s as Record<string, unknown>
-  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard', 'rerange', 'bridgeOut', 'minEntry', 'bridge', 'entryPause'].includes(k)) errors.push(`unknown setting ${k}`)
+  for (const k of Object.keys(o)) if (!['depth', 'capUsdc', 'guard', 'rerange', 'bridgeOut', 'minEntry', 'bridge', 'entryPause', 'chainExit'].includes(k)) errors.push(`unknown setting ${k}`)
   if (o.bridgeOut !== undefined) {
     const b = o.bridgeOut as Record<string, unknown> | null
     if (!b || typeof b !== 'object' || Array.isArray(b) || Object.keys(b).some((k) => k !== 'enabled') || typeof b.enabled !== 'boolean') errors.push('bridgeOut must be { enabled: true | false }')
@@ -200,6 +210,21 @@ export function validateEngineSettings(s: unknown): string[] {
         else if (seen.has(r.chainId)) errors.push(`entryPause names chain ${r.chainId} twice`)
         seen.add(r.chainId)
         inRange(errors, `entryPause[${i}].until`, r.until, B.pauseUntil)
+      })
+    }
+  }
+  if (o.chainExit !== undefined) {
+    const list = o.chainExit
+    if (!Array.isArray(list) || list.length < B.pauseChains.min || list.length > B.pauseChains.max) errors.push(`chainExit must be a list of ${B.pauseChains.min} to ${B.pauseChains.max} { chainId }`)
+    else {
+      const seen = new Set<unknown>()
+      list.forEach((e: unknown, i) => {
+        const r = e as Record<string, unknown> | null
+        if (!r || typeof r !== 'object' || Array.isArray(r) || Object.keys(r).some((k) => k !== 'chainId')) return void errors.push(`chainExit[${i}] must be { chainId }`)
+        // A chain Mamoru does not run would unwind nothing: refused, never silently ignored.
+        if (!isInt(r.chainId) || !isChainId(r.chainId)) errors.push(`chainExit[${i}].chainId must be a chain Mamoru runs on (8453 or 143)`)
+        else if (seen.has(r.chainId)) errors.push(`chainExit names chain ${r.chainId} twice`)
+        seen.add(r.chainId)
       })
     }
   }
@@ -321,6 +346,10 @@ export function riskyChanges(from: EngineSettings, to: EngineSettings): string[]
     const t = (to.entryPause ?? []).find((e) => e.chainId === f.chainId)
     if (!t || t.until < f.until) out.push(`new money goes into the volatile pools on chain ${f.chainId} sooner`)
   }
+  // otto/mamoru#427: an exit closes every pool position on its chain and sells the volatile side; lifting one lets new
+  // money back in.
+  for (const t of to.chainExit ?? []) if (!(from.chainExit ?? []).some((f) => f.chainId === t.chainId)) out.push(`every pool position on chain ${t.chainId} is closed and its volatile token sold for USDC`)
+  for (const f of from.chainExit ?? []) if (!(to.chainExit ?? []).some((t) => t.chainId === f.chainId)) out.push(`new money goes into the pools on chain ${f.chainId} again`)
   if (!from.bridgeOut?.enabled && to.bridgeOut?.enabled) out.push('owners can move USDC from Ethereum to Base, and the relayer pays the Ethereum gas')
   if (from.depth && to.depth) {
     if (to.depth.impactBps > from.depth.impactBps) out.push('entries may move the pool price more')
@@ -407,6 +436,9 @@ export function withEngineSettings(p: PolicyVersion, s: EngineSettings): PolicyV
   const paused = entryPauseFor(p, s)
   if (paused) out = { ...out, entryPauseUntil: paused }
   else if (out.entryPauseUntil) out = { ...out, entryPauseUntil: undefined }
+  // otto/mamoru#427: a policy on an exited chain unwinds its pools. Off means off, as above.
+  if (chainExitOf(p, s)) out = { ...out, chainExit: true }
+  else if (out.chainExit) out = { ...out, chainExit: undefined }
   if (s.guard.enabled) {
     const ids = new Set(p.buckets.map((b) => b.id))
     const byBucket: NonNullable<PolicyVersion['guards']>['byBucket'] = {}
@@ -426,8 +458,10 @@ const HOME_CHAIN_ID = 8453
  * one being left); a remote bucket when its chain is.
  */
 export function entryPauseFor(p: PolicyVersion, s: EngineSettings): Record<string, number> | null {
-  if (!s.entryPause?.length) return null
-  const until = new Map(s.entryPause.map((e) => [e.chainId, e.until]))
+  if (!s.entryPause?.length && !s.chainExit?.length) return null
+  const until = new Map((s.entryPause ?? []).map((e) => [e.chainId, e.until]))
+  // otto/mamoru#427: an exited chain takes no entry for as long as the exit stands, whatever its pause says.
+  for (const e of s.chainExit ?? []) until.set(e.chainId, ENGINE_SETTINGS_BOUNDS.pauseUntil.max)
   const out: Record<string, number> = {}
   const local = until.get(p.sourceChainId ?? HOME_CHAIN_ID)
   // By what the bucket holds, never by its name: every pool bucket that takes money pauses, stable pairs included (fail
@@ -438,4 +472,10 @@ export function entryPauseFor(p: PolicyVersion, s: EngineSettings): Record<strin
     if (end !== undefined) out[rb.id] = end
   }
   return Object.keys(out).length ? out : null
+}
+
+/** otto/mamoru#427: whether policy `p` runs on a chain these settings exit. */
+export function chainExitOf(p: PolicyVersion, s: EngineSettings): boolean {
+  const chain = p.sourceChainId ?? HOME_CHAIN_ID
+  return (s.chainExit ?? []).some((e) => e.chainId === chain)
 }

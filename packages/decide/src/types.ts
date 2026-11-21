@@ -409,6 +409,8 @@ export type ReduceProposal = {
   pool: RegistryName
   tokenId: bigint
   liquidity: bigint
+  /** otto/mamoru#427: a chain exit takes the whole position and burns the NFT after the collect. Absent: kept. */
+  burn?: true
 }
 
 /**
