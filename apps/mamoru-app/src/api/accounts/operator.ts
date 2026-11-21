@@ -1,6 +1,7 @@
 import { Hono, type Context } from 'hono'
-import type { AccountContext, MigrateV4Input, RemoteSpec } from '@mamoru/domain'
+import type { AccountContext, MigrateV4Input, RemoteSpec, ReturnHomeInput } from '@mamoru/domain'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
+import { buildReturnHome } from '@mamoru/account/return-home'
 import { registryFor, type Registry } from '@mamoru/registry'
 import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
@@ -139,6 +140,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
    * before (an old activation; the operator's own check refuses a migration without it).
    */
   const checkBuilt = async (c: Context<AppEnv>, row: AccountRow, path: string, text: string, registryOf: (chainId: number) => Registry = registryFor): Promise<Response | null> => {
+    if (path.endsWith('/return-home/prepare')) return checkReturnHome(c, row, text, registryOf)
     const sibling = path.endsWith('/ethereum-sibling/prepare')
     const migrate = path.endsWith('/migrate-v4/prepare')
     if (!sibling && !migrate && !path.endsWith('/activate/prepare')) return null
@@ -191,6 +193,33 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
       return null
     })()
     return why ? refusedBuild(c, row, why) : null
+  }
+  /**
+   * otto/mamoru#428 (spec 014, step 1 of leaving Monad): a return home is passed on only when the Worker, with the same
+   * builder (buildReturnHome), gets the same Safe tx from the operator's `returnHome` input, and that input burns from this
+   * row's own Safe on its own (remote) chain to the owner's own Base Safe in the same environment. Anything else: 502
+   * BUILD_MISMATCH, nothing signed.
+   */
+  const checkReturnHome = async (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Promise<Response | null> => {
+    let body: { safe?: string; chainId?: number; safeTxHash?: string; returnHome?: ReturnHomeInput }
+    try {
+      body = JSON.parse(text)
+    } catch {
+      return refusedBuild(c, row, 'not JSON')
+    }
+    const input = body.returnHome
+    if (!input) return refusedBuild(c, row, 'no input')
+    if (row.chain_id === BASE || input.chainId !== row.chain_id || body.chainId !== input.chainId) return refusedBuild(c, row, 'chain')
+    if (input.safe.toLowerCase() !== row.address.toLowerCase() || (body.safe && body.safe.toLowerCase() !== row.address.toLowerCase())) return refusedBuild(c, row, 'safe')
+    const home = await c.env.DB.prepare('SELECT address FROM accounts WHERE user_id = ? AND chain_id = ? AND env = ?').bind(row.user_id, BASE, row.env).first<{ address: string }>()
+    if (!home || home.address.toLowerCase() !== input.home.toLowerCase()) return refusedBuild(c, row, 'home')
+    let hash: string
+    try {
+      hash = buildReturnHome(input, registryOf(input.chainId)).safeTxHash
+    } catch (e) {
+      return refusedBuild(c, row, `build: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    return hash.toLowerCase() === (body.safeTxHash ?? '').toLowerCase() ? null : refusedBuild(c, row, 'hash')
   }
   const refusedBuild = (c: Context<AppEnv>, row: AccountRow, why: string) => {
     console.error(`one-authorization prepare refused for ${row.account_key}: ${why}`)
@@ -266,7 +295,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
   routes.get('/:accountKey/withdraw-assets', forward)
   routes.get('/:accountKey/bridge-out', forward)
   routes.get('/:accountKey/ethereum-sibling', forward)
-  for (const action of ['activate', 'transfer', 'stop', 'renew', 'bridge-out', 'eth-convert', 'migrate-v4', 'ethereum-sibling']) {
+  for (const action of ['activate', 'transfer', 'stop', 'renew', 'bridge-out', 'eth-convert', 'migrate-v4', 'ethereum-sibling', 'return-home']) {
     routes.post(`/:accountKey/${action}/prepare`, forward)
     routes.post(`/:accountKey/${action}`, forward)
   }

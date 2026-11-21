@@ -23,6 +23,7 @@ import type { MonadSender } from './bridge-monad.ts'
 import { MAX_BASE_GAS_PRICE_WEI } from './bridge-out.ts'
 import { attestationValid, CCTP_DOMAIN_BASE, CCTP_DOMAIN_MONAD, cctpAttestation, decodeCctpMessage, MESSAGE_TRANSMITTER_V2, mintIsFor, receiveMessageData } from './cctp.ts'
 import type { ReleaseView } from './release.ts'
+import { returnReleaseId } from '@mamoru/account/return-home'
 
 /** The peer's release routes (RemotePeer). */
 export type ReturnPeer = { release(remote: AccountContext, id: string, amount: bigint): Promise<ReleaseView>; releaseStatus(remote: AccountContext, id?: string): Promise<ReleaseView> }
@@ -42,6 +43,11 @@ export type ReturnEntry = {
   floor?: string
   /** Why it was cancelled here or by the peer. */
   note?: string
+  /**
+   * otto/mamoru#428: the CCTP message sender of an owner-signed return (the design-C Safe itself, spec 014 step 1); absent:
+   * MamoruActionPolicyV4 on Monad, as for every V4 release.
+   */
+  sender?: Address
   /** What the peer burned (≤ amount), its Monad tx and block. */
   burn?: { amount: string; txHash: Hex; block: number }
   cctpNonce?: Hex
@@ -74,7 +80,7 @@ const UNKNOWN_KEPT = 64
 const UNKNOWN_POLL_MS = 60_000
 
 /** otto/mamoru#355: a release the remote operator reports, as the home reads it (exposure.ts ReleaseWire). */
-export type ReportedRelease = { id: string; amount: string; block?: string; tx?: Hex }
+export type ReportedRelease = { id: string; amount: string; block?: string; tx?: Hex; /** otto/mamoru#428: an owner-signed return to this home Safe. */ owner?: string }
 
 class MintBudget extends Error {}
 
@@ -210,6 +216,10 @@ export class ReturnHome {
     if (this.reported.size > 5_000) this.reported.delete(this.reported.keys().next().value!)
     for (const r of releases) {
       if (this.holds(r.id, homes) || this.unknown.has(r.id) || !r.tx || r.block === undefined) continue
+      // otto/mamoru#428: an owner-signed return is followed only to one of the account's own homes; resolveUnknown takes it
+      // in only once Circle's attested message proves it (this Safe's burn, of this amount, to that home).
+      // Review r2: and only under the id derived from its tx (returnReleaseId), never one the remote picks.
+      if (r.owner && (!homes.some((h) => h.toLowerCase() === r.owner!.toLowerCase()) || !/^0x[0-9a-fA-F]{64}$/.test(r.tx) || r.id !== returnReleaseId(r.tx))) continue
       if (this.unknown.size >= UNKNOWN_KEPT) break
       this.unknown.set(r.id, { r, safe: key, accountKey, homes: homes.map((h) => h.toLowerCase()), triedAt: 0 })
     }
@@ -235,17 +245,25 @@ export class ReturnHome {
       let home: string | undefined
       try {
         const msg = decodeCctpMessage(a.message)
-        home = u.homes.find((h) => mintIsFor(msg, m.usdc, h as Address, amount, { source: CCTP_DOMAIN_MONAD, destination: CCTP_DOMAIN_BASE }, m.v4))
+        // otto/mamoru#428: an owner-signed return was sent by the remote Safe itself, to the one home it names.
+        home = r.owner
+          ? mintIsFor(msg, m.usdc, r.owner as Address, amount, { source: CCTP_DOMAIN_MONAD, destination: CCTP_DOMAIN_BASE }, u.safe as Address) ? r.owner : undefined
+          : u.homes.find((h) => mintIsFor(msg, m.usdc, h as Address, amount, { source: CCTP_DOMAIN_MONAD, destination: CCTP_DOMAIN_BASE }, m.v4))
       } catch {
         continue
       }
       if (!home) continue
       const msg = decodeCctpMessage(a.message)
       if (BigInt(msg.nonce) === 0n || !(await attestationValid(this.base, a.message, a.attestation))) continue
-      if (this.returns().some((o) => o.id !== r.id && o.cctpNonce?.toLowerCase() === msg.nonce.toLowerCase())) continue
+      if (this.returns().some((o) => o.id !== r.id && (o.cctpNonce?.toLowerCase() === msg.nonce.toLowerCase() || o.burn?.txHash.toLowerCase() === r.tx!.toLowerCase()))) continue
       const block = await this.base.getBlockNumber()
       const used = await this.base.readContract({ address: MESSAGE_TRANSMITTER_V2, abi: messageTransmitterV2Abi, functionName: 'usedNonces', args: [msg.nonce], blockNumber: block })
+      // otto/mamoru#428: an owner-signed return proven by its attestation and not minted yet is taken in as burned, so mint()
+      // mints it (with the remote Safe as the message sender it checks again). A V4 one unminted is left as it is (never minted here).
+      if (used === 0n && r.owner) return void this.adoptProven(r, u, getAddress(home), msg.nonce)
       if (used === 0n) return
+      // Review r2: an owner report never replaces an entry this journal has (its id is derived from the tx, checked above).
+      if (r.owner && this.journal.returns[r.id]) return void this.unknown.delete(r.id)
       const before = this.journal.returns[r.id]
       const at = this.iso()
       this.journal.returns[r.id] = { id: r.id, accountKey: before?.accountKey ?? u.accountKey, home: getAddress(home), amount: r.amount, state: 'minted', note: `adopted: reported by the remote, its mint found on Base${before ? ` (was ${before.state})` : ''}`, burn: { amount: r.amount, txHash: r.tx, block: Number(r.block) }, cctpNonce: msg.nonce, mintedBlock: block.toString(), at: before?.at ?? at, updatedAt: at }
@@ -260,6 +278,22 @@ export class ReturnHome {
       console.log(`[return] ${u.accountKey} ${r.id}: reported by the remote and minted on Base by block ${block}; adopted`)
       return
     }
+  }
+
+  /** otto/mamoru#428: an owner-signed return whose attested message matched, on disk as burned (sender: the remote Safe). */
+  private adoptProven(r: ReportedRelease, u: { safe: string; accountKey: string }, home: Address, nonce: Hex): void {
+    // Review r2: never over an entry this journal already has, and only under the id its verified tx gives.
+    if (this.journal.returns[r.id] || r.id !== returnReleaseId(r.tx!)) return void this.unknown.delete(r.id)
+    const at = this.iso()
+    this.journal.returns[r.id] = { id: r.id, accountKey: u.accountKey, home, amount: r.amount, state: 'burned', sender: getAddress(u.safe), note: 'owner-signed return home (spec 014), proven by its attestation', burn: { amount: r.amount, txHash: r.tx!, block: Number(r.block) }, cctpNonce: nonce, at, updatedAt: at }
+    try {
+      this.save()
+    } catch (err) {
+      delete this.journal.returns[r.id]
+      throw err
+    }
+    this.unknown.delete(r.id)
+    console.log(`[return] ${u.accountKey} ${r.id}: owner-signed return of ${r.amount} from ${u.safe} to ${home} proven, minting on Base`)
   }
 
   /**
@@ -397,7 +431,7 @@ export class ReturnHome {
     const amount = BigInt(e.burn.amount)
     const att = atts.find((a) => {
       try {
-        return mintIsFor(decodeCctpMessage(a.message), m.usdc, e.home, amount, { source: CCTP_DOMAIN_MONAD, destination: CCTP_DOMAIN_BASE }, m.v4)
+        return mintIsFor(decodeCctpMessage(a.message), m.usdc, e.home, amount, { source: CCTP_DOMAIN_MONAD, destination: CCTP_DOMAIN_BASE }, e.sender ?? m.v4)
       } catch {
         return false
       }

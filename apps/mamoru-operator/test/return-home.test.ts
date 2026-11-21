@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { concat, keccak256, pad, toHex, type Hex, type PublicClient } from 'viem'
+import { concat, getAddress, keccak256, pad, toHex, type Hex, type PublicClient } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, Address } from '@mamoru/domain'
 import type { MonadSender } from '../src/bridge-monad.ts'
@@ -302,5 +302,90 @@ describe('return home (otto/mamoru#278, Base side)', () => {
     expect(s.rel!.sent).toHaveLength(0)
     const journal = JSON.parse(readFileSync(join(s.dir, 'return-home.json'), 'utf8')) as { mintDays: Record<string, { n: number }> }
     expect(Object.values(journal.mintDays).reduce((n, d) => n + d.n, 0)).toBe(0)
+  })
+})
+
+describe('otto/mamoru#428: an owner-signed return (spec 014 step 1) reported by the remote is minted here once proven', () => {
+  const SAFE = REMOTE.address as Address
+  const ID = `home-${'22'.repeat(12)}`
+  const reported = (o: { owner?: string; id?: string; amount?: bigint } = {}) => [{ id: o.id ?? ID, amount: (o.amount ?? AMOUNT).toString(), block: '777', tx: BURN_TX, owner: o.owner ?? HOME }]
+
+  test('to one of the account\'s homes: nothing on disk until its attested burn proves it; then burned (sender: the Safe) and minted', async () => {
+    const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    expect(s.r.returns()).toHaveLength(0)
+    expect(s.r.holds(ID, [HOME])).toBe(false)
+    await s.r.tick(() => null)
+    expect(s.j().returns[ID]).toMatchObject({ state: 'burned', home: getAddress(HOME), sender: getAddress(SAFE), burn: { amount: AMOUNT.toString(), txHash: BURN_TX, block: 777 } })
+    expect(s.r.holds(ID, [HOME])).toBe(true)
+    s.advance(RETURN_ATTEST_FIRST_POLL_MS)
+    await s.r.tick(() => null)
+    expect(s.rel!.sent).toHaveLength(1)
+    expect(s.j().returns[ID]!.state).toBe('minted')
+  })
+
+  test.each([
+    ['sent by V4, not this Safe', () => message()],
+    ['another amount than reported', () => message({ sender: REMOTE.address as Hex, amount: AMOUNT + 1n })],
+    ['to another recipient', () => message({ sender: REMOTE.address as Hex, recipient: `0x${'99'.repeat(20)}` })],
+  ])('a forged report (attestation %s): never on disk, never counted, never minted', async (_why, m) => {
+    const s = setup({ iris: [await attest(m())] })
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    for (let i = 0; i < 3; i++) {
+      await s.r.tick(() => null)
+      s.advance(RETURN_ATTEST_FIRST_POLL_MS)
+    }
+    expect(s.r.returns()).toHaveLength(0)
+    expect(s.r.holds(ID, [HOME])).toBe(false)
+    expect(s.r.inFlight('acc-1')).toBe(0n)
+    expect(s.rel!.sent).toHaveLength(0)
+  })
+
+  test('no attestation at all (a tx that never burned): never on disk; no longer reported: dropped', async () => {
+    const s = setup()
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    await s.r.tick(() => null)
+    expect(s.r.returns()).toHaveLength(0)
+    s.r.noteReported(SAFE, [], 'acc-1', [HOME])
+    s.advance(RETURN_ATTEST_FIRST_POLL_MS)
+    await s.r.tick(() => null)
+    expect(s.r.returns()).toHaveLength(0)
+  })
+
+  test('to an address that is not one of the account\'s homes: not even followed', async () => {
+    const s = setup({ iris: [await attest(message({ sender: SAFE, recipient: `0x${'99'.repeat(20)}` }))] })
+    s.r.noteReported(SAFE, reported({ owner: `0x${'99'.repeat(20)}` }), 'acc-1', [HOME])
+    await s.r.tick(() => null)
+    expect(s.r.returns()).toHaveLength(0)
+  })
+
+  test('a malformed tx in an owner report is skipped, the rest of the report still read', async () => {
+    const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
+    s.r.noteReported(SAFE, [{ id: 'home-x', amount: '1', block: '1', tx: '0x1' as Hex, owner: HOME }, ...reported()], 'acc-1', [HOME])
+    await s.r.tick(() => null)
+    expect(s.r.returns().map((e) => e.id)).toEqual([ID])
+  })
+
+  test('only under the id derived from its tx: a remote-chosen id is not even followed', async () => {
+    const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
+    s.r.noteReported(SAFE, [...reported({ id: 'home-dup' }), ...reported({ id: 'ret-7' })], 'acc-1', [HOME])
+    await s.r.tick(() => null)
+    expect(s.r.returns()).toHaveLength(0)
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    await s.r.tick(() => null)
+    expect(s.r.returns().map((e) => e.id)).toEqual([ID])
+  })
+
+  test('review r2: never over an entry the journal already has (a minted one, another account\'s)', async () => {
+    const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
+    const e = await s.r.request('acc-2', HOME, REMOTE, peerOf(), AMOUNT, FLOOR)
+    // An existing entry under the derived id (written straight to the journal, as a pruned-then-reused id would be).
+    const j = (s.r as unknown as { journal: { returns: Record<string, ReturnEntry> } }).journal
+    // Another home, so `holds` does not skip the report up front: the guards themselves are what refuse it.
+    j.returns[ID] = { ...j.returns[e.id]!, id: ID, state: 'minted', accountKey: 'acc-2', home: `0x${'a2'.repeat(20)}` as Address }
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    await s.r.tick(() => null)
+    expect(j.returns[ID]).toMatchObject({ state: 'minted', accountKey: 'acc-2' })
+    expect(s.rel!.sent).toHaveLength(0)
   })
 })

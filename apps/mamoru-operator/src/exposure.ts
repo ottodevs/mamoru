@@ -62,6 +62,8 @@ export type ReleaseWire = {
   tx?: string
   /** Sending, and a read at this block sees its nonce unused: the Safe's read up to this block still holds it (display). */
   notLandedAt?: string
+  /** otto/mamoru#428: a burn the owner signed (return-home), to this home Safe: the home mints it (ReturnHome.noteReported). */
+  owner?: string
 }
 
 export function totalOf(e: Pick<ChainExposure, 'idleUsdc' | 'placedUsdc'>): bigint {
@@ -205,9 +207,9 @@ function listsOf(w: Partial<ExposureWire>): Pick<ChainExposure, 'releases' | 're
     for (const x of w.releases as unknown[]) {
       const r = x as Partial<ReleaseWire> | null
       const uintOpt = (v: unknown) => v === undefined || (typeof v === 'string' && UINT.test(v))
-      if (typeof r?.id !== 'string' || !RELEASE_ID.test(r.id) || typeof r.amount !== 'string' || !UINT.test(r.amount) || !uintOpt(r.block) || !uintOpt(r.notLandedAt) || (r.tx !== undefined && (typeof r.tx !== 'string' || !TX.test(r.tx)))) return null
+      if (typeof r?.id !== 'string' || !RELEASE_ID.test(r.id) || typeof r.amount !== 'string' || !UINT.test(r.amount) || !uintOpt(r.block) || !uintOpt(r.notLandedAt) || (r.tx !== undefined && (typeof r.tx !== 'string' || !TX.test(r.tx))) || (r.owner !== undefined && (typeof r.owner !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(r.owner)))) return null
     }
-    out.releases = (w.releases as ReleaseWire[]).map((r) => ({ id: r.id, amount: r.amount, ...(r.block !== undefined ? { block: r.block } : {}), ...(r.tx !== undefined ? { tx: r.tx } : {}), ...(r.notLandedAt !== undefined ? { notLandedAt: r.notLandedAt } : {}) }))
+    out.releases = (w.releases as ReleaseWire[]).map((r) => ({ id: r.id, amount: r.amount, ...(r.block !== undefined ? { block: r.block } : {}), ...(r.tx !== undefined ? { tx: r.tx } : {}), ...(r.notLandedAt !== undefined ? { notLandedAt: r.notLandedAt } : {}), ...(r.owner !== undefined ? { owner: r.owner } : {}) }))
   }
   if (w.returns !== undefined) {
     if (!Array.isArray(w.returns) || w.returns.length > MAX_LISTED || !(w.returns as unknown[]).every((id) => typeof id === 'string' && RELEASE_ID.test(id))) return null

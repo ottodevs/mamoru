@@ -59,12 +59,11 @@ This is the existing renewal with a new target policy. One owner Safe transactio
 One owner Safe transaction on the Monad Safe, built by the Monad operator:
 
 1. It removes and revokes every session on the Monad Safe. The set is the same as Stop's (`stopRevokes`).
-2. If anything is still in a position (if #427 has not run for this account): it closes and burns each position and
-   sells the WMON to USDC, at the band's minimums. It is the same plan as Stop.
+2. Nothing is priced at signing time. While a position is still open or WMON is held above dust (0.01 WMON), the
+   prepare is refused with `MONAD_UNWIND_PENDING`: #427 winds those down first, with no signature.
 3. If the Safe holds USDC: `approve(TokenMessengerV2, amount)` then `depositForBurn(amount, domain 6, mintRecipient = the account's Base Safe,
    USDC, destinationCaller = 0, maxFee = 0, minFinalityThreshold = 2000)`.
-   - `amount` is the Safe's USDC now, plus the minimum outputs of step 2. Anything above it (slippage gained) stays as
-     dust on the Monad Safe.
+   - `amount` is the Safe's whole USDC balance when prepared. With no USDC the transaction only revokes.
    - The gas MON stays.
 
 Then, with no signature:
@@ -186,7 +185,11 @@ ahead of v7. The flag is scoped like `vaults_v7` (`*` = everyone).
 - **PR 1:** this spec.
 - **PR 2:** `conservador-live-v8` (+ lab twin) in `packages/policy`, `resolveV8Policy` at boot (v7's contracts),
   `v4Target` and `activationPolicy` prefer v8 under `base_v8`, the renew summary lines, the `base_v8` ops flag, tests.
-- **PR 3:** the `return-home` owner kind.
+- **PR 3:** the `return-home` route (held and settled as a Stop, so the engine stops and the grants are revoked as in
+  any Stop). The app calls it on the Monad row with `{ home }`; the Worker checks `home` and rebuilds the tx. The
+  confirmed burn is kept on the Monad account as an owner-signed release (`owner.home`), reported in the Safe's
+  exposure answer; the Base ReturnHome takes a reported owner release to one of the account's homes as burned
+  (sender: that Safe) and mints it after checking Circle's attested message.
   - Monad operator: plan, hold, submit and status routes, and the shared builder `buildReturnHome`.
   - Base operator: prepare and submit forwarded to the peer, the step mirrored as an op, and the confirmed burn
     recorded in ReturnHome with the remote Safe as sender.
