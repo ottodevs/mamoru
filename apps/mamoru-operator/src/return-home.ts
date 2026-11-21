@@ -219,7 +219,7 @@ export class ReturnHome {
       // otto/mamoru#428: an owner-signed return is followed only to one of the account's own homes; resolveUnknown takes it
       // in only once Circle's attested message proves it (this Safe's burn, of this amount, to that home).
       // Review r2: and only under the id derived from its tx (returnReleaseId), never one the remote picks.
-      if (r.owner && (!homes.some((h) => h.toLowerCase() === r.owner!.toLowerCase()) || r.id !== returnReleaseId(r.tx))) continue
+      if (r.owner && (!homes.some((h) => h.toLowerCase() === r.owner!.toLowerCase()) || !/^0x[0-9a-fA-F]{64}$/.test(r.tx) || r.id !== returnReleaseId(r.tx))) continue
       if (this.unknown.size >= UNKNOWN_KEPT) break
       this.unknown.set(r.id, { r, safe: key, accountKey, homes: homes.map((h) => h.toLowerCase()), triedAt: 0 })
     }
