@@ -76,6 +76,17 @@ export function selfReserveConfirmed(minOut: bigint, quoted: bigint): boolean {
   return quoted >= minOut
 }
 
+/**
+ * otto/mamoru#372: the swap is priced (quote, TWAP) at the read block and its deadline counts from that block's time.
+ * A head that far behind the host (a stalled node) prices from a stale market and gives a swap born near or past its
+ * deadline: no swap is planned, the relayer tops the Safe up as for any other start.
+ */
+export const SELF_RESERVE_MAX_HEAD_LAG_SECONDS = 300n
+
+export function headTooOld(blockSeconds: bigint, wallSeconds: bigint): boolean {
+  return wallSeconds - blockSeconds > SELF_RESERVE_MAX_HEAD_LAG_SECONDS
+}
+
 /** Whether a swap with this deadline can no longer be simulated or sent: within the margin of it, or past it. */
 export function reserveExpired(deadline: bigint, nowSeconds: bigint): boolean {
   return nowSeconds + SELF_RESERVE_DEADLINE_MARGIN_SECONDS >= deadline

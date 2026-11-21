@@ -61,6 +61,14 @@ describe('the activation buys its own gas reserve', () => {
     expect(activationSpend(w)).toEqual([GAS_WEI])
   })
 
+  test('#372: a head more than five minutes behind the host prices no swap: the start goes on the relayer path', async () => {
+    const w = selfWorld(20_000_000n)
+    // 15 min: within the deadline's hour, so only the stale-head check refuses it.
+    w.knobs.blockTime -= 900n
+    const tx = (await quiet(() => w.op.prepareActivate(ctx))).out
+    expect(tx.summary.some((l) => l.startsWith('Convert'))).toBe(false)
+  })
+
   test('the same start on the relayer path reserves the top-up too: the difference is the reserve', async () => {
     const w = selfWorld(20_000_000n)
     // A spot 1.1% dearer than the TWAP: no swap, so the relayer tops the reserve up.
