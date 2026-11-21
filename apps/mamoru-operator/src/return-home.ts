@@ -42,6 +42,11 @@ export type ReturnEntry = {
   floor?: string
   /** Why it was cancelled here or by the peer. */
   note?: string
+  /**
+   * otto/mamoru#428: the CCTP message sender of an owner-signed return (the design-C Safe itself, spec 014 step 1); absent:
+   * MamoruActionPolicyV4 on Monad, as for every V4 release.
+   */
+  sender?: Address
   /** What the peer burned (≤ amount), its Monad tx and block. */
   burn?: { amount: string; txHash: Hex; block: number }
   cctpNonce?: Hex
@@ -74,7 +79,7 @@ const UNKNOWN_KEPT = 64
 const UNKNOWN_POLL_MS = 60_000
 
 /** otto/mamoru#355: a release the remote operator reports, as the home reads it (exposure.ts ReleaseWire). */
-export type ReportedRelease = { id: string; amount: string; block?: string; tx?: Hex }
+export type ReportedRelease = { id: string; amount: string; block?: string; tx?: Hex; /** otto/mamoru#428: an owner-signed return to this home Safe. */ owner?: string }
 
 class MintBudget extends Error {}
 
@@ -209,10 +214,31 @@ export class ReturnHome {
     for (const [id, u] of this.unknown) if (u.safe === key && !ids.has(id)) this.unknown.delete(id)
     if (this.reported.size > 5_000) this.reported.delete(this.reported.keys().next().value!)
     for (const r of releases) {
-      if (this.holds(r.id, homes) || this.unknown.has(r.id) || !r.tx || r.block === undefined) continue
+      if (this.holds(r.id, homes) || !r.tx || r.block === undefined) continue
+      // otto/mamoru#428: an owner-signed return to one of the account's home Safes is taken as burned here, so it is minted
+      // (mint() checks Circle's attested message: this Safe's burn of Monad USDC, of this amount, to that home).
+      if (r.owner && homes.some((h) => h.toLowerCase() === r.owner!.toLowerCase()) && !this.journal.returns[r.id]) {
+        this.adoptOwnerBurn(r, key, accountKey)
+        continue
+      }
+      if (this.unknown.has(r.id)) continue
       if (this.unknown.size >= UNKNOWN_KEPT) break
       this.unknown.set(r.id, { r, safe: key, accountKey, homes: homes.map((h) => h.toLowerCase()), triedAt: 0 })
     }
+  }
+
+  /** otto/mamoru#428: an owner-signed return reported by the remote, on disk as burned (sender: that Safe), then minted. */
+  private adoptOwnerBurn(r: ReportedRelease, safe: string, accountKey: string): void {
+    const at = this.iso()
+    this.journal.returns[r.id] = { id: r.id, accountKey, home: getAddress(r.owner!), amount: r.amount, state: 'burned', sender: getAddress(safe), note: 'owner-signed return home (spec 014)', burn: { amount: r.amount, txHash: r.tx!, block: Number(r.block) }, at, updatedAt: at }
+    try {
+      this.save()
+    } catch (err) {
+      delete this.journal.returns[r.id]
+      throw err
+    }
+    this.unknown.delete(r.id)
+    console.log(`[return] ${accountKey} ${r.id}: owner-signed return of ${r.amount} from ${safe} to ${r.owner}, minting on Base`)
   }
 
   /**
@@ -397,7 +423,7 @@ export class ReturnHome {
     const amount = BigInt(e.burn.amount)
     const att = atts.find((a) => {
       try {
-        return mintIsFor(decodeCctpMessage(a.message), m.usdc, e.home, amount, { source: CCTP_DOMAIN_MONAD, destination: CCTP_DOMAIN_BASE }, m.v4)
+        return mintIsFor(decodeCctpMessage(a.message), m.usdc, e.home, amount, { source: CCTP_DOMAIN_MONAD, destination: CCTP_DOMAIN_BASE }, e.sender ?? m.v4)
       } catch {
         return false
       }

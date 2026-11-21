@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, parseAbi, parseAbiItem, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type ReturnHomeInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
@@ -32,6 +32,7 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
+import { buildReturnHome } from '@mamoru/account/return-home'
 import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReportedRelease, ReturnHome } from './return-home.ts'
@@ -750,6 +751,10 @@ function migrateFields(tx: SafeTx, step: 0 | 1, moveTo: Address | undefined): Pa
   }
 }
 
+/** otto/mamoru#428: WMON a return home leaves behind (0.01 WMON); above it, #427 has not finished selling it. */
+const RETURN_HOME_WMON_DUST = 10n ** 16n
+const ZERO_HASH: Hex = `0x${'00'.repeat(32)}`
+
 /** POST migrate-v4/prepare of a step 1, as the Base operator sends it to the Monad operator. */
 type MigrateV4Body = { step?: unknown; home?: unknown; capUsdc?: unknown; moveTo?: unknown }
 
@@ -881,6 +886,8 @@ type Prepared = {
   v4CapUsd?: string
   /** migrate-v4: what buildMigrateV4 built from (returned as `input`) and the hash it gave; hold checks its own tx gives it too. */
   built?: { input: MigrateV4Input; safeTxHash: Hex }
+  /** otto/mamoru#428: a Stop that sends the Safe's USDC home (return-home): what buildReturnHome built from, and its hash. */
+  returnHome?: { input: ReturnHomeInput; safeTxHash: Hex }
 }
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** otto/mamoru#223: out-of-range positions the last decision does not re-range, with the re-range code. */ rangeHolds?: { tokenId: string; code: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
@@ -1891,7 +1898,7 @@ export class Operator {
       this.releasesFrom([safe]).map(async (x) => {
         const used = x.block === undefined && x.sending ? await this.nonceUsedAt(safe, x.sending, r.block) : undefined
         const block = x.block !== undefined ? BigInt(x.block) : used === true ? r.block : undefined
-        return { id: x.id, amount: x.amount.toString(), ...(block !== undefined ? { block: block.toString() } : {}), ...(x.tx ? { tx: x.tx } : {}), ...(used === false ? { notLandedAt: r.block.toString() } : {}) }
+        return { id: x.id, amount: x.amount.toString(), ...(block !== undefined ? { block: block.toString() } : {}), ...(x.tx ? { tx: x.tx } : {}), ...(used === false ? { notLandedAt: r.block.toString() } : {}), ...(x.owner ? { owner: x.owner } : {}) }
       }),
     )
     return {
@@ -2799,6 +2806,10 @@ export class Operator {
     }
     // #309 (a): a V4 activation is the builder's tx too. Review r2 of #235 (Opus P2-2): never one the Safe pays itself (a
     // refund changes the hash, the Worker could not rebuild what the owner signs): as a migration, it waits for Mamoru to pay.
+    // otto/mamoru#428: a return home is exactly the builder's tx too (the Worker rebuilds it), so never one the Safe pays itself.
+    if (extra.returnHome && (fee.refund || extra.returnHome.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.returnHome.input.safeNonce !== nonce.toString())) {
+      throw new HttpError(fee.refund ? 503 : 409, fee.refund ? 'SPONSOR_UNAVAILABLE' : 'RETURN_HOME_STALE', fee.refund ? 'Mamoru cannot pay for this right now: nothing was changed, try again later' : 'your Safe on Monad changed while this was prepared: prepare it again')
+    }
     if (kind === 'activate' && extra.built && fee.refund) throw new HttpError(503, 'SPONSOR_UNAVAILABLE', 'Mamoru cannot pay for this Start right now: nothing was changed, try again later')
     if (kind === 'activate' && extra.built && (extra.built.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.built.input.safeNonce !== nonce.toString())) {
       throw new HttpError(409, 'ONE_AUTH_STALE', 'your Safe changed while the Start was prepared: prepare it again')
@@ -2816,7 +2827,7 @@ export class Operator {
     // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
     const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}), ...(kind === 'activate' && extra.built ? { input: extra.built.input } : {}) }
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}), ...(kind === 'activate' && extra.built ? { input: extra.built.input } : {}), ...(extra.returnHome ? { returnHome: extra.returnHome.input } : {}) }
   }
 
   /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */
@@ -6088,6 +6099,13 @@ export class Operator {
     } else if (p.kind === 'stop') {
       this.stopLoop(acc.accountKey)
       this.disarm(acc, 'STOPPED')
+      // otto/mamoru#428: a return home burned the Safe's USDC to the owner's Base Safe in this very transaction: kept as a
+      // burned release (owner-signed), so this Safe's answers count it until the home holds it, and the home mints it.
+      if (p.returnHome && BigInt(p.returnHome.input.amountUsdc) > 0n) {
+        const at = new Date().toISOString()
+        const rh = p.returnHome.input
+        acc.releasesDone = [...(acc.releasesDone ?? []), { id: `home-${receipt.transactionHash.slice(2, 26)}`, amount: rh.amountUsdc, chainId: BASE_CHAIN_ID, state: 'burned' as const, burn: { userOpHash: ZERO_HASH, amount: rh.amountUsdc, txHash: receipt.transactionHash, block: Number(receipt.blockNumber) }, owner: { home: getAddress(rh.home) }, at, updatedAt: at }]
+      }
       acc.active = false
       acc.revoked.push(...(p.revokes ?? []))
       acc.superseded = unrevoked(acc, p.revokes ?? [])
@@ -7183,6 +7201,46 @@ export class Operator {
     const stored: StoredGrant = { name: 'one-auth-v4', grant: v4StoredGrant({ account: live.safe, chainId: this.cfg.chainId, sessionKey, permissionId: tx.permissionId, salt: V4_REMOTE_SESSION_SALT, deployment: d, registry: this.cfg.registry, policyId: ONE_AUTH_V4_REMOTE }), permissionId: tx.permissionId, ...(admit.length ? { admit: admit.map(String) } : {}) }
     const summary = monadStepLines({ remove: inv.remove.length, revoke: inv.revoke.length, moveTo: target.address, tokens: (['USDC', 'WMON'] as const).filter((t) => (r.tokens[t] ?? 0n) > 0n).map((t) => `${fmtUnits(r.tokens[t]!, entry(t, this.cfg.registry).decimals ?? 18)} ${t}`), positions: admit.length })
     return this.hold(acc, live, 'migrate-v4', tx.calls, summary, { step: 1, grants: [stored], revokes: inv.revoke, removes: inv.remove, capUsdc: homeCfg.capUsd.toString(), home, built: { input, safeTxHash: tx.safeTxHash } })
+  }
+
+  /**
+   * otto/mamoru#428 (spec 014), step 1 of leaving Monad, on a design-C Safe here: ONE owner Safe tx (buildReturnHome) that
+   * removes every session on the Safe (Stop's set) and CCTP-burns its whole USDC to the owner's Base Safe `home`. Held as a
+   * Stop, so it settles as one (the engine stops, the grants are revoked); the burn is then kept as an owner-signed release
+   * that the home mints. Refused while a position is open or WMON is held: #427 winds those down first, so nothing is
+   * priced at signing time. `home` comes from the app; the Worker checks it is the owner's own Base Safe before signing.
+   */
+  prepareReturnHome(ctx: AccountContext, body: unknown): Promise<OwnerTxToSign> {
+    return this.lock(ctx.accountKey).run(() => this.planReturnHome(ctx, body))
+  }
+
+  private async planReturnHome(ctx: AccountContext, body: unknown): Promise<OwnerTxToSign> {
+    this.assertLive()
+    if (this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID || !ctx.remote || isOneAuthV4(ctx.remote.policyId)) throw new HttpError(409, 'NOT_A_REMOTE', 'this Safe has nothing to send home')
+    const h = (body as { home?: unknown } | null)?.home
+    if (typeof h !== 'string' || !isAddress(h) || BigInt(h) === 0n) throw new HttpError(400, 'BAD_REQUEST', 'home must be the address of your Safe on Base')
+    const home = getAddress(h)
+    const { acc, live } = this.account(ctx, { readOnly: true })
+    if (home.toLowerCase() === live.safe.toLowerCase()) throw new HttpError(400, 'BAD_REQUEST', 'home must be the address of your Safe on Base')
+    if (this.stopInFlight(acc)) throw new HttpError(409, 'STOP_IN_FLIGHT', 'a stop of this Safe is already on its way')
+    if (!(await this.enforceGrants(acc))) throw new HttpError(503, 'GRANT_CHECK_UNAVAILABLE', 'the approvals on your Safe could not be read just now: nothing was changed, try again in a minute')
+    const r = await this.readOf(acc, live.safe)
+    if (!r.deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
+    const open = r.positions.filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n)
+    if (open.length || (r.tokens.WMON ?? 0n) > RETURN_HOME_WMON_DUST) throw new HttpError(409, 'MONAD_UNWIND_PENDING', 'Mamoru is still moving your Monad position to USDC: try again in a few minutes')
+    const revokes = this.stopRevokes(acc)
+    if (!revokes.length && r.usdc === 0n) throw new HttpError(409, 'NOTHING_TO_STOP', 'nothing to send home and no approval to revoke')
+    const { nonce } = await readSafeNonce(this.client, live.safe)
+    const input: ReturnHomeInput = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: nonce.toString(), home, amountUsdc: r.usdc.toString(), removeIds: revokes }
+    const tx = buildReturnHome(input, this.cfg.registry)
+    const summary = [
+      ...(revokes.length ? [`Revoke the engine's ${revokes.length} session grant(s) on your Safe on Monad: Mamoru stops working there`] : []),
+      ...(r.usdc > 0n
+        ? [`Send ${fmtUsdc(r.usdc)} USDC from your Safe on Monad to your Safe on Base ${home}, through Circle's CCTP (about 15-20 minutes, no fee)`, 'On Base, Mamoru puts it to work in your positions there']
+        : ['There is no USDC to send']),
+      'The MON left for gas stays in this Safe',
+    ]
+    return this.hold(acc, live, 'stop', tx.calls, summary, { revokes, returnHome: { input, safeTxHash: tx.safeTxHash } })
   }
 
   /** Monad side (`POST migrate-v4/status`, from the Base operator): whether step 1 is confirmed on this Safe. */

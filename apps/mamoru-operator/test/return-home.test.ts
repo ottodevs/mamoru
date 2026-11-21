@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { concat, keccak256, pad, toHex, type Hex, type PublicClient } from 'viem'
+import { concat, getAddress, keccak256, pad, toHex, type Hex, type PublicClient } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, Address } from '@mamoru/domain'
 import type { MonadSender } from '../src/bridge-monad.ts'
@@ -302,5 +302,46 @@ describe('return home (otto/mamoru#278, Base side)', () => {
     expect(s.rel!.sent).toHaveLength(0)
     const journal = JSON.parse(readFileSync(join(s.dir, 'return-home.json'), 'utf8')) as { mintDays: Record<string, { n: number }> }
     expect(Object.values(journal.mintDays).reduce((n, d) => n + d.n, 0)).toBe(0)
+  })
+})
+
+describe('otto/mamoru#428: an owner-signed return (spec 014 step 1) reported by the remote is minted here', () => {
+  const SAFE = REMOTE.address as Address
+  const reported = (o: { owner?: string; id?: string } = {}) => [{ id: o.id ?? 'home-abc', amount: AMOUNT.toString(), block: '777', tx: BURN_TX, owner: o.owner ?? HOME }]
+
+  test('to one of the account\'s homes: taken as burned with the Safe as sender, then minted from its attested burn', async () => {
+    const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    expect(s.j().returns['home-abc']).toMatchObject({ state: 'burned', home: getAddress(HOME), sender: getAddress(SAFE), burn: { amount: AMOUNT.toString(), txHash: BURN_TX, block: 777 } })
+    expect(s.r.holds('home-abc', [HOME])).toBe(true)
+    s.advance(RETURN_ATTEST_FIRST_POLL_MS)
+    await s.r.tick(() => null)
+    expect(s.rel!.sent).toHaveLength(1)
+    expect(s.j().returns['home-abc']!.state).toBe('minted')
+  })
+
+  test('a message sent by V4 (or anyone but this Safe) is not this return: never minted', async () => {
+    const s = setup({ iris: [await attest(message())] })
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    s.advance(RETURN_ATTEST_FIRST_POLL_MS)
+    await s.r.tick(() => null)
+    expect(s.rel!.sent).toHaveLength(0)
+    expect(s.j().returns['home-abc']!.state).toBe('burned')
+  })
+
+  test('to an address that is not one of the account\'s homes: not adopted (followed as an unknown release, never minted)', async () => {
+    const s = setup({ iris: [await attest(message({ sender: SAFE, recipient: `0x${'99'.repeat(20)}` }))] })
+    s.r.noteReported(SAFE, reported({ owner: `0x${'99'.repeat(20)}` }), 'acc-1', [HOME])
+    expect(s.r.returns()).toHaveLength(0)
+    s.advance(RETURN_ATTEST_FIRST_POLL_MS)
+    await s.r.tick(() => null)
+    expect(s.rel!.sent).toHaveLength(0)
+  })
+
+  test('reported again: one entry, one mint', async () => {
+    const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    expect(s.r.returns()).toHaveLength(1)
   })
 })

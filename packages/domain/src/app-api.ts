@@ -387,7 +387,13 @@ export type OwnerTxToSign = {
   safeTx?: { to: Hex0x; value: string; data: Hex0x; operation: 0 | 1; safeTxGas: string; baseGas: string; gasPrice: string; gasToken: Hex0x; refundReceiver: Hex0x; nonce: string }
   // otto/mamoru#293 (migrate-v4): the exact input `buildMigrateV4` built `safeTx` from.
   input?: MigrateV4Input
+  // otto/mamoru#428 (spec 014, step 1 of leaving Monad): the exact input `buildReturnHome` built `safeTx` from. The
+  // Worker rebuilds it, and checks the Safe is the row's own and `home` the owner's Base Safe, before the owner signs.
+  returnHome?: ReturnHomeInput
 }
+// otto/mamoru#428: every input of a return-home Safe tx on a design-C Safe (packages/account/return-home), JSON-safe.
+// `amountUsdc` "0" is a revoke only. `removeIds`: the sessions removed (the same set as Stop).
+export type ReturnHomeInput = { chainId: number; safe: Hex0x; safeNonce: string; home: Hex0x; amountUsdc: string; removeIds: Hex0x[] }
 // otto/mamoru#293 x #295: every input of a migrate-v4 Safe tx, explicit and JSON-safe (integers as decimal strings). The
 // operator builds what it prepares with `buildMigrateV4` (packages/account/one-auth) and returns this as `input`; the
 // Worker rebuilds the tx from it with the same function and compares hashes.

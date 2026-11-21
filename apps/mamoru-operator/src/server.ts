@@ -65,7 +65,7 @@ function decodeContext(header: string): AccountContext {
 // release, release/status, release/cancel (#278, #354): a V4 remote Safe's return home, asked by its home's operator
 // (RemotePeer), signed like every other account route. Before #354 they were dispatched but not listed here, so a
 // return-home release got the generic 404.
-const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop|renew\/prepare|renew|bridge-out\/prepare|bridge-out|eth-convert\/prepare|eth-convert|ethereum-sibling\/prepare|ethereum-sibling|remote-key|provision|remote-announce|release\/status|release\/cancel|release|migrate-v4\/prepare|migrate-v4\/status|migrate-v4|one-auth-key|one-auth-start)$/
+const ROUTE = /^\/api\/accounts\/([^/]+)\/(funding|ops|withdraw-assets|activate\/prepare|activate|transfer\/prepare|transfer|stop\/prepare|stop|renew\/prepare|renew|bridge-out\/prepare|bridge-out|eth-convert\/prepare|eth-convert|ethereum-sibling\/prepare|ethereum-sibling|remote-key|provision|remote-announce|release\/status|release\/cancel|release|migrate-v4\/prepare|migrate-v4\/status|migrate-v4|return-home\/prepare|return-home|one-auth-key|one-auth-start)$/
 
 // Amounts are base-unit strings on the wire; a bigint that slips into a view is sent as its decimal string.
 const wire = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : v)
@@ -310,6 +310,11 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
           return json(200, await op.submitMigrateV4(ctx, parse()))
         case 'POST migrate-v4/status':
           return json(200, op.migrateV4Status(ctx))
+        // otto/mamoru#428 (spec 014): step 1 of leaving Monad on a design-C Safe; signed and settled as a Stop.
+        case 'POST return-home/prepare':
+          return json(200, await op.prepareReturnHome(ctx, parse()))
+        case 'POST return-home':
+          return json(200, await op.submit(ctx, 'stop', parse()))
         // otto/mamoru#278: a V4 remote Safe's return home, asked by its home account's operator.
         case 'POST release':
           return json(200, await op.requestRelease(ctx, parse()))
