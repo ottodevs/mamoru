@@ -430,6 +430,10 @@ export function dayReceipts(ops: readonly StoredOp[]): DayReceiptWire[] {
     }))
 }
 
+/** otto/mamoru#391: facts dated before this were read on Monad with no fee scope; later ones were read with it. */
+export const LATE_SCOPE_BEFORE = '2026-11-21T00:00:00.000Z'
+const lateScoped = (op: StoredOp): boolean => !!op.facts && !op.facts.feeable && !!op.feeScoped && Date.parse(op.facts.at) < Date.parse(LATE_SCOPE_BEFORE)
+
 /** What the snapshot wrapper needs from the operator: every account it has stored (stopped ones too), and a way to persist them. */
 export type ReceiptSource = {
   accounts(): { accountKey: string; safe: Address; ops: StoredOp[] }[]
@@ -439,7 +443,8 @@ export type ReceiptSource = {
   /**
    * otto/mamoru#391: this chain's facts were taken before its loop had a feeScope (Monad), so none says `feeable`. Set,
    * a fact already read whose op was recorded in the fee's scope (StoredOp.feeScoped), with the account in scope now,
-   * becomes feeable: the two checks a fact read today would pass.
+   * becomes feeable: the two checks a fact read today would pass. Only facts dated before LATE_SCOPE_BEFORE: any later
+   * one was read with the scope already decided, and a decision is never revisited.
    */
   scopeTakenLate?: true
 }
@@ -554,10 +559,10 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
   for (const a of accounts) for (const op of a.ops) if (op.facts && priceFees(op.facts, snapshot.pools, registry)) changed = true
   if (source.scopeTakenLate && source.feeScope)
     for (const a of accounts) {
-      if (!a.ops.some((op) => op.facts && !op.facts.feeable && op.feeScoped) || !source.feeScope(a.accountKey)) continue
+      if (!a.ops.some(lateScoped) || !source.feeScope(a.accountKey)) continue
       for (const op of a.ops)
-        if (op.facts && !op.facts.feeable && op.feeScoped) {
-          op.facts = { ...op.facts, feeable: true }
+        if (lateScoped(op)) {
+          op.facts = { ...op.facts!, feeable: true }
           changed = true
         }
     }

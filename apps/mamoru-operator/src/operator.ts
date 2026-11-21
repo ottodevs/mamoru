@@ -1819,12 +1819,18 @@ export class Operator {
    * design-C Safe) collected that owes the fee, as their operator answers it, each Safe once. Any read that fails or
    * says nothing counts 0: the withdrawal then charges less, and the rest is owed on the next one.
    */
+  private remoteSafesOf(acc: AccountState): string[] {
+    const safes = this.onV4(acc) ? [acc.oneAuth?.remote?.address, this.designC(acc)?.address] : [acc.remote?.chainId === BRIDGE_MONAD_CHAIN_ID ? acc.remote.address : undefined]
+    return [...new Set(safes.flatMap((a) => (a ? [String(a).toLowerCase()] : [])))]
+  }
+
   private async remoteFeeBase(acc: AccountState): Promise<bigint> {
     const peers = this.cfg.peers
     if (!peers?.configured) return 0n
-    const safes = this.onV4(acc) ? [acc.oneAuth?.remote?.address, this.designC(acc)?.address] : [acc.remote?.chainId === BRIDGE_MONAD_CHAIN_ID ? acc.remote.address : undefined]
     let total = 0n
-    for (const safe of new Set(safes.flatMap((a) => (a ? [String(a).toLowerCase()] : [])))) {
+    for (const safe of this.remoteSafesOf(acc)) {
+      // A remote Safe two accounts here name is charged by neither: its base would otherwise be charged twice.
+      if (Object.values(this.store.state.accounts).filter((a) => a.accountKey !== acc.accountKey && this.remoteSafesOf(a).includes(safe)).length) continue
       try {
         const r = await peers.read(safe, PEER_START_MAX_AGE_MS)
         if (!r.ok) continue

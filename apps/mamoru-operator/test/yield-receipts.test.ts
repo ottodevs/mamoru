@@ -275,6 +275,10 @@ describe('withReceipts', () => {
     expect(scoped.facts!.feeable).toBe(true)
     expect(unscoped.facts!.feeable).toBeUndefined()
     expect(saves).toBe(1)
+    // A fact dated after the cutoff was read with the scope already decided: never taken late.
+    const later = { ...op('eng-3', { ...facts('0xa3'), at: '2026-11-21T00:00:00.000Z' }, '0xa3'), feeScoped: true } as StoredOp
+    await withReceipts(snapshot(), { ...one([later]), feeScope: () => true, scopeTakenLate: true as const }, async () => null, async () => T, SAFE_BLOCK)
+    expect(later.facts!.feeable).toBeUndefined()
   })
 })
 
