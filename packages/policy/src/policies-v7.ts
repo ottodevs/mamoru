@@ -68,10 +68,12 @@ export const conservadorLabV7: PolicyVersion = { ...conservadorLiveV7, policyId:
  */
 const V7_ENGINE = { vaultMinDeposit: 1_000_000n } as const satisfies Partial<PolicyVersion>
 const v7Engines = new WeakMap<PolicyVersion, PolicyVersion>()
+/** otto/mamoru#428: v8 keeps v7's Stable vaults, so its engine runs with the same floor. */
+const V7_ENGINE_IDS: ReadonlySet<string> = new Set([conservadorLiveV7.policyId, conservadorLabV7.policyId, 'conservador-live-v8', 'conservador-lab-v8'])
 
 /** `p` as the engine runs it: a v7 policy with V7_ENGINE, any other policy unchanged. Same object per `p`. */
 export function v7EnginePolicy(p: PolicyVersion): PolicyVersion {
-  if (p.policyId !== conservadorLiveV7.policyId && p.policyId !== conservadorLabV7.policyId) return p
+  if (!V7_ENGINE_IDS.has(p.policyId)) return p
   let e = v7Engines.get(p)
   if (!e) {
     e = { ...p, ...V7_ENGINE }

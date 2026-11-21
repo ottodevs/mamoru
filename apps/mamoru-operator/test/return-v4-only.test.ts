@@ -83,6 +83,7 @@ describe("the home's view of a design-C sleeve carries its idle USDC and its own
       onV4: () => false,
       idleMinOf: (Operator.prototype as unknown as { idleMinOf: unknown }).idleMinOf,
       unfundable: () => false,
+      inScope: () => false,
     }
     const acc = { accountKey: 'a', remote: { chainId: 143, address: '0x00000000000000000000000000000000000000cc', permissionIds: [], spec: { validUntil: 4_000_000_000, capUsdc: '1233333333' } } }
     const of = (Operator.prototype as unknown as { remoteOf: (a: unknown) => { remote?: (b: bigint) => Promise<unknown> } }).remoteOf.bind(self)
