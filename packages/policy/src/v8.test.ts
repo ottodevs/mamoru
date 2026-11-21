@@ -58,8 +58,10 @@ describe('conservador-live-v8 (otto/mamoru#428): v7 without Monad', () => {
     expect(perCall?.[1]).toBe((CAP * 1500n) / 10_000n)
   })
 
-  test('only accounts with a Monad leg move to it; its engine keeps v7\'s vault floor', () => {
-    expect([...V8_MIGRATES_FROM].sort()).toEqual(['conservador-lab-v6', 'conservador-lab-v7', 'conservador-live-v6', 'conservador-live-v7'])
+  test('every earlier Base version moves to it, never itself or a Monad sleeve; its engine keeps v7\'s vault floor', () => {
+    for (const v of ['v2', 'v3', 'v4', 'v5', 'v6', 'v7']) expect(V8_MIGRATES_FROM.has(`conservador-live-${v}`), v).toBe(true)
+    expect(V8_MIGRATES_FROM.has(conservadorLiveV8.policyId)).toBe(false)
+    expect(V8_MIGRATES_FROM.has('live-wmon-usdc-monad-v6')).toBe(false)
     expect(v7EnginePolicy(conservadorLiveV8).vaultMinDeposit).toBe(1_000_000n)
     expect(v7EnginePolicy(conservadorLiveV8)).toBe(v7EnginePolicy(conservadorLiveV8))
   })

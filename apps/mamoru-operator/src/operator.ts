@@ -2083,7 +2083,8 @@ export class Operator {
       return null
     }
     const flags = this.cfg.opsFlags?.()
-    // otto/mamoru#428: v8 (v7 without Monad) for an account with a Monad leg, ahead of everything: step 0 of leaving Monad.
+    // otto/mamoru#428: v8 (v7 without Monad) for every earlier Base version, ahead of everything (owner, 21 Nov: every
+    // account on the newest version). For a Monad account it is step 0 of leaving Monad.
     const v8 = this.cfg.v8Policy
     if (v8 && this.inScope(acc, 'base_v8') && V8_MIGRATES_FROM.has(cur.policyId) && cur.chain === v8.chain) return v8
     // otto/mamoru#210: v7 (v6 with Stable in lending vaults) configured and offered through its own scoped flag: v2-v6
@@ -3234,6 +3235,11 @@ export class Operator {
     // Spec 007 T7 (d): the renew row moves a v2/v3 account to the on-chain action policy when that is offered.
     const target = this.v4Target(acc)
     const policy = target ?? this.policyOf(acc)
+    // otto/mamoru#428 (review r1): a move that drops the Monad bucket waits for a bridge to Monad still in flight, so the
+    // money it carries is counted on the account until it lands there (the mint itself runs from the bridge journal).
+    if (target && this.policyOf(acc).remoteBuckets?.length && !target.remoteBuckets?.length && this.cfg.bridgeMonad?.pending(acc.accountKey)) {
+      throw new HttpError(409, 'BRIDGE_IN_FLIGHT', 'a transfer to your Safe on Monad is still on its way: try again once it lands, in about 20 minutes')
+    }
     // Grants the account lacks are added by an approval of their own, unless the renewal is due: then the renewal goes
     // first (it revokes every grant the account has, and the added ones would be revoked with them) and the missing
     // grants are offered once it has landed. Nor while a renewal's outcome is unknown: if it ran unseen, the grants the
@@ -3278,7 +3284,7 @@ export class Operator {
         ...this.remoteLines(policy, remote),
         ...(target?.remoteBuckets?.length ? ['USDC/cbBTC is only wound down, nothing new goes into it'] : []),
         // otto/mamoru#428: the move to v8 ends the bridge to Monad; what the Safe there holds comes home in the next step.
-        ...(target && V8_MIGRATES_FROM.has(this.policyOf(acc).policyId) && !target.remoteBuckets?.length ? [`Mamoru stops sending money to Monad: ${(target.buckets.filter((b) => b.pools.includes('pool:USDC/cbBTC/500')).reduce((s, b) => s + b.preference, 0) / 100).toFixed(0)}% goes into USDC/cbBTC on Base instead`, ...(acc.remote ? [`Your Safe on Monad ${acc.remote.address} keeps what it holds until you approve sending it to this Safe, the next step`] : [])] : []),
+        ...(target && this.policyOf(acc).remoteBuckets?.length && V8_MIGRATES_FROM.has(this.policyOf(acc).policyId) && !target.remoteBuckets?.length ? [`Mamoru stops sending money to Monad: ${(target.buckets.filter((b) => b.pools.includes('pool:USDC/cbBTC/500')).reduce((s, b) => s + b.preference, 0) / 100).toFixed(0)}% goes into USDC/cbBTC on Base instead`, ...(acc.remote ? [`Your Safe on Monad ${acc.remote.address} keeps what it holds until you approve sending it to this Safe, the next step`] : [])] : []),
         // otto/mamoru#210: v7 moves Stable to lending; the old USDC/USDT positions stay until the owner opts in to their exit.
         ...(target?.buckets.some((b) => b.vaults?.length) ? [`Stable (${(target.buckets.find((b) => b.vaults?.length)!.preference / 100).toFixed(0)}%) is now USDC lent through ${target.buckets.flatMap((b) => b.vaults ?? []).map((v) => vaultLabel(v, this.cfg.registry)).join(', then ')}; nothing new goes into USDC/USDT, and positions you hold there stay as they are until you ask Mamoru to move them`] : []),
         ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),

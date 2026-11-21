@@ -2,7 +2,9 @@
 // account brings its money home and Monad's 15 % goes into USDC/cbBTC on Base. Stable (50 %, lending vaults) and Balance
 // (35 %, WETH/USDC) are v7's, so the positions an account holds there are not touched; USDC/cbBTC takes money again at
 // 15 %. No remote bucket and no bridge-out grant: an account on v8 can never send money to Monad. Not in POLICIES: an
-// account reaches it through the renewal (operator v4Target) or a Start, behind the scoped ops flag `base_v8`.
+// account reaches it through the renewal (operator v4Target) or a Start, behind the scoped ops flag `base_v8`. Owner
+// scope of 21 Nov: every account ends on the newest version, so every earlier Base policy moves to it with one approval
+// (a Monad account signs a second one on Monad to bring its money home).
 //
 // Grants: every one on MamoruActionPolicyV3 alone, as v7's, so the whole approval stays one owner transaction and none
 // needs MamoruPauseGate (its only user was v6's bridge-out).
@@ -59,5 +61,7 @@ export const conservadorLiveV8: PolicyVersion = {
 /** Fork-only twin of conservadorLiveV8. */
 export const conservadorLabV8: PolicyVersion = { ...conservadorLiveV8, policyId: 'conservador-lab-v8', chain: 'fork' }
 
-/** The policies an account can move to v8 from: the ones with a Monad leg. */
-export const V8_MIGRATES_FROM: ReadonlySet<string> = new Set(['conservador-live-v6', 'conservador-live-v7', 'conservador-lab-v6', 'conservador-lab-v7'])
+/** The policies an account can move to v8 from: every earlier Base conservador version (v2-v7) and its lab twin. */
+export const V8_MIGRATES_FROM: ReadonlySet<string> = new Set(
+  ['v2', 'v3', 'v4', 'v5', 'v6', 'v7'].flatMap((v) => [`conservador-live-${v}`, `conservador-lab-${v}`]),
+)
