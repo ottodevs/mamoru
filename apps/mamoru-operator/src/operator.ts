@@ -6,7 +6,7 @@ import { address, baseRegistry, entry, entryPointV07Abi, isDeployed, erc20Abi, m
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
 import { BATCH_MAX_CALLS, Batch, contractRead, multicall3Of, poolStateCache, restoreHistoryCursor, senderNotEoa, type HistoryCursor, SIM_CALL_GAS, simulateCalls, SharedGuardReads, type SimCall, type SimCallResult } from '@mamoru/rpc'
-import { MONAD_LAB_POLICIES, POLICIES, liveWmonUsdcMonadV6, sleeveEnginePolicy, v7EnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, budgetIn1, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, registryPoolsKey, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
+import { MONAD_LAB_POLICIES, POLICIES, V8_MIGRATES_FROM, liveWmonUsdcMonadV6, sleeveEnginePolicy, v7EnginePolicy, USAGE_RENEW_BPS, V4_TX_GAS_TARGET, calibratedGasModel, fitPrefixBySimulation, budgetUsedBps, canonicalSettingsJson, capBaseUnits, computeCaps, estimateSessionGas, grantKey, instantiateGrant, maxGasCostPerOp, orderV4Keys, retargetToPolicy, splitV4Keys, v4BudgetCaps, v4PoolOf, v4PoolsOn, budgetIn1, withActionPolicy, withEngineSettings, GAS_CAPS_V2_BY_CHAIN, v4CapUsdOf, isOneAuthV4, ONE_AUTH_V4, ONE_AUTH_V4_REMOTE, oneAuthV4Lab, oneAuthV4Live, oneAuthV4RemoteMonad, V4_DOMAIN_BY_CHAIN, V4_MAX_ADMIT, withRegistryPools, registryPoolsKey, type OneAuthV4Deployment, type OpsFlagName, type RegistryPool, type PolicyVersion, type SessionGrant } from '@mamoru/policy'
 import {
   LIVE_CAP_USDC,
   activationBatch,
@@ -630,6 +630,11 @@ export type OperatorConfig = {
    * where v6 is. Offered only through the scoped flag `vaults_v7`. Absent: v7 is not offered.
    */
   v7Policy?: PolicyVersion
+  /**
+   * otto/mamoru#428: the deployed v8 policy (conservadorLiveV8 on v6's contracts, boot.ts `resolveV8Policy`), set only
+   * where v6 is. Offered only through the scoped flag `base_v8`: Starts and the move of v6/v7 accounts. Absent: not offered.
+   */
+  v8Policy?: PolicyVersion
   /** otto/mamoru#129 runtime flags from the settings pull; `onchain_action_policy_v4` offers the v4 renewal per account. Absent: every flag off. */
   opsFlags?: () => Partial<Record<OpsFlagName, boolean>>
   /** otto/mamoru#217: enabled scopable flags from the settings pull: null = everyone (explicit), list = those accounts
@@ -2022,6 +2027,7 @@ export class Operator {
     if (this.cfg.v5Policy?.policyId === acc.policyId) return this.cfg.v5Policy
     if (this.cfg.v6Policy?.policyId === acc.policyId) return this.cfg.v6Policy
     if (this.cfg.v7Policy?.policyId === acc.policyId) return this.cfg.v7Policy
+    if (this.cfg.v8Policy?.policyId === acc.policyId) return this.cfg.v8Policy
     if (this.cfg.policy.policyId === acc.policyId) return this.cfg.policy
     // The lab twin on a fork serves lab v1 sleeves the same way (no chain-writes opt-in on a fork).
     if (MONAD_LAB_POLICIES[acc.policyId] && this.cfg.policy.chain === 'fork') return MONAD_LAB_POLICIES[acc.policyId]!
@@ -2038,7 +2044,7 @@ export class Operator {
    * field counts: null = everyone (and the boolean agrees); a list = only those accounts (key or Safe address);
    * malformed reached us as [] = nobody; missing (an older Worker) = nobody.
    */
-  private inScope(acc: AccountState, flag: 'multichain_v6' | 'multichain_v6_new' | 'one_auth_v4' | 'vaults_v7' | 'stables_lp_exit' | 'yield_fee'): boolean {
+  private inScope(acc: AccountState, flag: 'multichain_v6' | 'multichain_v6_new' | 'one_auth_v4' | 'vaults_v7' | 'base_v8' | 'stables_lp_exit' | 'yield_fee'): boolean {
     const scope = this.cfg.opsScopedFlags?.()[flag]
     if (scope === null) return this.cfg.opsFlags?.()[flag] === true
     return Array.isArray(scope) && (scope.includes(acc.accountKey.toLowerCase()) || scope.includes(String(acc.ctx.address).toLowerCase()))
@@ -2058,6 +2064,9 @@ export class Operator {
    * on the default only to be asked for the move right after.
    */
   activationPolicy(acc: AccountState): PolicyVersion {
+    // otto/mamoru#428: while no new capital goes to Monad (`base_v8`), a Start activates v8: no Safe on Monad, no bridge.
+    const v8 = this.cfg.v8Policy
+    if (v8 && v8.chain === this.cfg.policy.chain && this.inScope(acc, 'base_v8')) return v8
     const v7 = this.cfg.v7Policy
     if (v7 && v7.chain === this.cfg.policy.chain && this.inScope(acc, 'vaults_v7')) return v7
     const v6 = this.cfg.v6Policy
@@ -2074,6 +2083,9 @@ export class Operator {
       return null
     }
     const flags = this.cfg.opsFlags?.()
+    // otto/mamoru#428: v8 (v7 without Monad) for an account with a Monad leg, ahead of everything: step 0 of leaving Monad.
+    const v8 = this.cfg.v8Policy
+    if (v8 && this.inScope(acc, 'base_v8') && V8_MIGRATES_FROM.has(cur.policyId) && cur.chain === v8.chain) return v8
     // otto/mamoru#210: v7 (v6 with Stable in lending vaults) configured and offered through its own scoped flag: v2-v6
     // accounts move to it, ahead of v6. Same scope rules as v6 (#217): only the scoped-flags field offers it.
     const v7 = this.cfg.v7Policy
@@ -3265,6 +3277,8 @@ export class Operator {
         ...(target ? ['Mamoru can now trade only near the market price, and only the positions it opened'] : []),
         ...this.remoteLines(policy, remote),
         ...(target?.remoteBuckets?.length ? ['USDC/cbBTC is only wound down, nothing new goes into it'] : []),
+        // otto/mamoru#428: the move to v8 ends the bridge to Monad; what the Safe there holds comes home in the next step.
+        ...(target && V8_MIGRATES_FROM.has(this.policyOf(acc).policyId) && !target.remoteBuckets?.length ? [`Mamoru stops sending money to Monad: ${(target.buckets.filter((b) => b.pools.includes('pool:USDC/cbBTC/500')).reduce((s, b) => s + b.preference, 0) / 100).toFixed(0)}% goes into USDC/cbBTC on Base instead`, ...(acc.remote ? [`Your Safe on Monad ${acc.remote.address} keeps what it holds until you approve sending it to this Safe, the next step`] : [])] : []),
         // otto/mamoru#210: v7 moves Stable to lending; the old USDC/USDT positions stay until the owner opts in to their exit.
         ...(target?.buckets.some((b) => b.vaults?.length) ? [`Stable (${(target.buckets.find((b) => b.vaults?.length)!.preference / 100).toFixed(0)}%) is now USDC lent through ${target.buckets.flatMap((b) => b.vaults ?? []).map((v) => vaultLabel(v, this.cfg.registry)).join(', then ')}; nothing new goes into USDC/USDT, and positions you hold there stay as they are until you ask Mamoru to move them`] : []),
         ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),

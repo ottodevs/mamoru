@@ -88,6 +88,15 @@ export const OPS_FLAGS = {
     description: 'Offers running Base accounts the renewal that moves them to conservadorLiveV7: Stable 50 % in Morpho gtUSDCp / Aave waBasUSDC on MamoruActionPolicyV3, USDC/USDT exit only (otto/mamoru#210). Scopable to accounts.',
   },
   /**
+   * otto/mamoru#428 (spec 014), default off: no new capital to Monad. In scope, a Start activates conservadorLiveV8 (v7
+   * without the Monad bucket, its 15 % on USDC/cbBTC), and a v6/v7 account is offered the renewal that moves it there
+   * (step 0 of leaving Monad), ahead of everything else. Scopable to accounts.
+   */
+  base_v8: {
+    label: 'Base only, no Monad (v8)',
+    description: 'Starts on conservadorLiveV8 and offers v6/v7 accounts the move to it: v7 without the Monad bucket, 15 % USDC/cbBTC, no bridge to Monad (otto/mamoru#428). Scopable to accounts.',
+  },
+  /**
    * otto/mamoru#210, default off: for a v7 account in scope, the engine winds down its old USDC/USDT positions (the
    * exit-only `stables-lp` bucket) in full; out of scope they are held as they are. Ot has not decided between an
    * automatic and an opt-in migration: until then it is opt-in, per account.
