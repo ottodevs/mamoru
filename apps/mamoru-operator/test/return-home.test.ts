@@ -307,20 +307,21 @@ describe('return home (otto/mamoru#278, Base side)', () => {
 
 describe('otto/mamoru#428: an owner-signed return (spec 014 step 1) reported by the remote is minted here once proven', () => {
   const SAFE = REMOTE.address as Address
-  const reported = (o: { owner?: string; id?: string; amount?: bigint } = {}) => [{ id: o.id ?? 'home-abc', amount: (o.amount ?? AMOUNT).toString(), block: '777', tx: BURN_TX, owner: o.owner ?? HOME }]
+  const ID = `home-${'22'.repeat(12)}`
+  const reported = (o: { owner?: string; id?: string; amount?: bigint } = {}) => [{ id: o.id ?? ID, amount: (o.amount ?? AMOUNT).toString(), block: '777', tx: BURN_TX, owner: o.owner ?? HOME }]
 
   test('to one of the account\'s homes: nothing on disk until its attested burn proves it; then burned (sender: the Safe) and minted', async () => {
     const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
     s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
     expect(s.r.returns()).toHaveLength(0)
-    expect(s.r.holds('home-abc', [HOME])).toBe(false)
+    expect(s.r.holds(ID, [HOME])).toBe(false)
     await s.r.tick(() => null)
-    expect(s.j().returns['home-abc']).toMatchObject({ state: 'burned', home: getAddress(HOME), sender: getAddress(SAFE), burn: { amount: AMOUNT.toString(), txHash: BURN_TX, block: 777 } })
-    expect(s.r.holds('home-abc', [HOME])).toBe(true)
+    expect(s.j().returns[ID]).toMatchObject({ state: 'burned', home: getAddress(HOME), sender: getAddress(SAFE), burn: { amount: AMOUNT.toString(), txHash: BURN_TX, block: 777 } })
+    expect(s.r.holds(ID, [HOME])).toBe(true)
     s.advance(RETURN_ATTEST_FIRST_POLL_MS)
     await s.r.tick(() => null)
     expect(s.rel!.sent).toHaveLength(1)
-    expect(s.j().returns['home-abc']!.state).toBe('minted')
+    expect(s.j().returns[ID]!.state).toBe('minted')
   })
 
   test.each([
@@ -335,7 +336,7 @@ describe('otto/mamoru#428: an owner-signed return (spec 014 step 1) reported by 
       s.advance(RETURN_ATTEST_FIRST_POLL_MS)
     }
     expect(s.r.returns()).toHaveLength(0)
-    expect(s.r.holds('home-abc', [HOME])).toBe(false)
+    expect(s.r.holds(ID, [HOME])).toBe(false)
     expect(s.r.inFlight('acc-1')).toBe(0n)
     expect(s.rel!.sent).toHaveLength(0)
   })
@@ -358,12 +359,25 @@ describe('otto/mamoru#428: an owner-signed return (spec 014 step 1) reported by 
     expect(s.r.returns()).toHaveLength(0)
   })
 
-  test('the same burn reported under two ids: one entry', async () => {
+  test('only under the id derived from its tx: a remote-chosen id is not even followed', async () => {
     const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
-    s.r.noteReported(SAFE, [...reported(), ...reported({ id: 'home-dup' })], 'acc-1', [HOME])
+    s.r.noteReported(SAFE, [...reported({ id: 'home-dup' }), ...reported({ id: 'ret-7' })], 'acc-1', [HOME])
     await s.r.tick(() => null)
-    s.advance(60_000)
+    expect(s.r.returns()).toHaveLength(0)
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
     await s.r.tick(() => null)
-    expect(s.r.returns()).toHaveLength(1)
+    expect(s.r.returns().map((e) => e.id)).toEqual([ID])
+  })
+
+  test('review r2: never over an entry the journal already has (a minted one, another account\'s)', async () => {
+    const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
+    const e = await s.r.request('acc-2', HOME, REMOTE, peerOf(), AMOUNT, FLOOR)
+    // An existing entry under the derived id (written straight to the journal, as a pruned-then-reused id would be).
+    const j = (s.r as unknown as { journal: { returns: Record<string, ReturnEntry> } }).journal
+    j.returns[ID] = { ...j.returns[e.id]!, id: ID, state: 'minted', accountKey: 'acc-2' }
+    s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
+    await s.r.tick(() => null)
+    expect(j.returns[ID]).toMatchObject({ state: 'minted', accountKey: 'acc-2' })
+    expect(s.rel!.sent).toHaveLength(0)
   })
 })
