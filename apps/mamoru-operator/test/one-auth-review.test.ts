@@ -1,6 +1,6 @@
 // otto/mamoru#293, the fixes of the high-stakes review of PR #202 (Opus + Argon NO APTO), one test each.
 import { describe, expect, test } from 'bun:test'
-import { encodeAbiParameters, encodeFunctionResult, parseAbi, type Hex } from 'viem'
+import { encodeAbiParameters, getAddress, encodeFunctionResult, parseAbi, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { AccountContext, Address, OpView } from '@mamoru/domain'
 import { baseRegistry, monadRegistry, type Registry } from '@mamoru/registry'
@@ -155,17 +155,72 @@ describe('P1-8: the SessionCreated scan is off the request path, bounded and che
   })
 })
 
+// #356: the Monad operator's remote session key for the account (stable per account, as `remoteKey` keeps it).
+const REMOTE: Address = getAddress('0x000000000000000000000000000000000000f00d')
+const keyPeer = (key: () => Promise<Address>) => ({ 143: { key, provision: async () => ({ state: 'pending' as const, code: 'TEST' }) } })
+
 describe('P1-9: an account created on V4 counts its first deposit and needs the minimum', () => {
   test('deployed with no USDC: waits (BELOW_DEPLOY_MINIMUM); deposits are counted from the block the key was given', async () => {
-    const w = world(0n, { ...scoped, registry: base })
+    const w = world(0n, { ...scoped, registry: base, remotePeers: keyPeer(async () => REMOTE) })
     const key = await w.op.oneAuthKey({ ...ctx, accountKey: 'k' })
-    const session = v4HomeSession({ sessionKey: key.sessionKey, deployment: D, capUsd: BigInt(key.capUsdc), generation: 1n, admit: [], registry: base })
+    expect(key.remote).toEqual({ domain: 15, sessionKey: REMOTE })
+    const session = v4HomeSession({ sessionKey: key.sessionKey, deployment: D, capUsd: BigInt(key.capUsdc), generation: 1n, admit: [], remote: key.remote, registry: base })
     const created = v4CreateSetup(ctx.owners as Address[], BigInt(ctx.saltNonce), webAuthnSigner(passkey.x, passkey.y, base), session, base)
-    const c2: AccountContext = { ...ctx, address: created.address, oneAuth: { sessionKey: key.sessionKey, capUsdc: key.capUsdc } }
+    const c2: AccountContext = { ...ctx, address: created.address, oneAuth: { sessionKey: key.sessionKey, capUsdc: key.capUsdc, remote: key.remote } }
     w.chain.deployed = true
     const r = await w.op.startOneAuth(c2)
     expect(r).toEqual({ state: 'waiting', code: 'BELOW_DEPLOY_MINIMUM' })
     expect((w.state as unknown as { oneAuthKeyBlocks?: Record<string, string> }).oneAuthKeyBlocks?.k).toBeDefined()
+  })
+})
+
+describe('#356: the remote a V4 session may register is fixed with its key', () => {
+  test('setup mode: the remote is given once with the key and never changes; a Safe naming another is refused', async () => {
+    let k: Address = REMOTE
+    const w = world(0n, { ...scoped, registry: base, remotePeers: keyPeer(async () => k) })
+    const first = await w.op.oneAuthKey({ ...ctx, accountKey: 'k' })
+    k = getAddress('0x000000000000000000000000000000000000beef')
+    expect((await w.op.oneAuthKey({ ...ctx, accountKey: 'k' })).remote).toEqual(first.remote)
+    const other = { domain: 15, sessionKey: k }
+    const session = v4HomeSession({ sessionKey: first.sessionKey, deployment: D, capUsd: BigInt(first.capUsdc), generation: 1n, admit: [], remote: other, registry: base })
+    const created = v4CreateSetup(ctx.owners as Address[], BigInt(ctx.saltNonce), webAuthnSigner(passkey.x, passkey.y, base), session, base)
+    const c2: AccountContext = { ...ctx, address: created.address, oneAuth: { sessionKey: first.sessionKey, capUsdc: first.capUsdc, remote: other } }
+    await expect(w.op.startOneAuth(c2)).rejects.toMatchObject({ code: 'REMOTE_KEY_UNKNOWN' })
+  })
+
+  test('a key given before #356 keeps its session (no remote in the answer, no peer call); that Safe is never run', async () => {
+    let asked = 0
+    const w = world(0n, { ...scoped, registry: base, remotePeers: keyPeer(async () => (asked++, REMOTE)) })
+    const st = w.state as unknown as { oneAuthKeys?: Record<string, Hex> }
+    st.oneAuthKeys = { k: '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d' }
+    const key = await w.op.oneAuthKey({ ...ctx, accountKey: 'k' })
+    expect('remote' in key).toBe(false)
+    expect(asked).toBe(0)
+    const session = v4HomeSession({ sessionKey: key.sessionKey, deployment: D, capUsd: BigInt(key.capUsdc), generation: 1n, admit: [], remote: undefined, registry: base })
+    const created = v4CreateSetup(ctx.owners as Address[], BigInt(ctx.saltNonce), webAuthnSigner(passkey.x, passkey.y, base), session, base)
+    const c2: AccountContext = { ...ctx, address: created.address, oneAuth: { sessionKey: key.sessionKey, capUsdc: key.capUsdc } }
+    await expect(w.op.startOneAuth(c2)).rejects.toMatchObject({ code: 'ONE_AUTH_LEGACY_SESSION' })
+  })
+
+  test('a first key request whose remote cannot be resolved gives no key; the retry gives the key with its remote', async () => {
+    let up = false
+    const w = world(0n, { ...scoped, registry: base, remotePeers: keyPeer(async () => (up ? REMOTE : Promise.reject(new Error('down')))) })
+    await expect(w.op.oneAuthKey({ ...ctx, accountKey: 'k' })).rejects.toMatchObject({ code: 'REMOTE_UNAVAILABLE' })
+    const st = w.state as unknown as { oneAuthKeys?: Record<string, Hex>; oneAuthRemotes?: Record<string, unknown> }
+    expect(st.oneAuthKeys?.k).toBeUndefined()
+    expect(st.oneAuthRemotes?.k).toBeUndefined()
+    up = true
+    const key = await w.op.oneAuthKey({ ...ctx, accountKey: 'k' })
+    expect(key.remote).toEqual({ domain: 15, sessionKey: REMOTE })
+  })
+
+  test('the Monad operator down: an account with a remote bucket waits (503); a Base-only one pins none and goes on', async () => {
+    const w = world(0n, { ...scoped, registry: base, remotePeers: keyPeer(async () => Promise.reject(new Error('down'))) })
+    const p = w.op as unknown as { v4RemoteBinding: (a: AccountState) => Promise<unknown>; v4PolicyOf: (a: unknown) => unknown }
+    const acc = { accountKey: 'k', ctx, policyId: ONE_AUTH_V4 } as unknown as AccountState
+    await expect(p.v4RemoteBinding(acc)).rejects.toMatchObject({ code: 'REMOTE_UNAVAILABLE' })
+    p.v4PolicyOf = () => ({ ...oneAuthV4Live, remoteBuckets: [] })
+    expect(await p.v4RemoteBinding(acc)).toBeNull()
   })
 })
 

@@ -407,6 +407,9 @@ export type MigrateV4Input = {
   homeDomain: number
   moveTo?: Hex0x
   transfers?: { token: Hex0x; amount: string }[]
+  // otto/mamoru#356, step 0 only (required there): the one remote the V4 session's key may register, pinned in the
+  // session (the CCTP domain and the remote session key the remote chain's operator gave); null: none.
+  remote?: { domain: number; sessionKey: Hex0x } | null
 }
 // WebAuthn assertion for SafeWebAuthnSharedSigner (base64url fields as returned by the browser).
 export type OwnerSignature = {
@@ -584,9 +587,11 @@ export type AccountContext = {
   /**
    * otto/mamoru#293 (spec 010): a new account created on V4 (setup mode): its Safe's setup enables the one V4 session of
    * this session key with InitV4 {capUsdc, generation 1}. The operator gives the key (POST one-auth-key) and recomputes
-   * the address from it; creating the Safe is the owner's whole authorization.
+   * the address from it; creating the Safe is the owner's whole authorization. otto/mamoru#356: `remote`, the one remote
+   * the session's key may register (null: none), is part of that session, so of the address; absent only for a key given
+   * before #356 (a fallback-only session the operator never runs).
    */
-  oneAuth?: { sessionKey: Hex0x; capUsdc: string }
+  oneAuth?: { sessionKey: Hex0x; capUsdc: string; remote?: { domain: number; sessionKey: Hex0x } | null }
 }
 
 /**
