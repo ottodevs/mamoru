@@ -2,13 +2,13 @@
 // Safe tx built by buildReturnHome (remove every session, burn the whole USDC to the owner's Base Safe), held as a Stop.
 // Refused while a position is open or WMON is held. The confirmed burn is kept as an owner-signed release, reported home.
 import { describe, expect, test } from 'bun:test'
-import type { Hex, PublicClient } from 'viem'
+import { encodeAbiParameters, encodeEventTopics, pad, type Hex, type PublicClient } from 'viem'
 import type { AccountContext, Address, RemoteSpec } from '@mamoru/domain'
-import { buildReturnHome } from '@mamoru/account/return-home'
-import { monadRegistry } from '@mamoru/registry'
+import { buildReturnHome, TOKEN_MESSENGER_V2 } from '@mamoru/account/return-home'
+import { address, monadRegistry, tokenMessengerV2Abi } from '@mamoru/registry'
 import { liveWmonUsdcMonadV6 } from '@mamoru/policy'
 import { monadV6Deployed, remoteAccountKey, remoteInput, remoteSafe } from '@mamoru/account/remote'
-import { HttpError, Operator } from '../src/operator.ts'
+import { HttpError, Operator, returnBurnMismatch } from '../src/operator.ts'
 import { releasesToCount } from '../src/release.ts'
 import type { Relayer } from '../src/relayer.ts'
 import type { AccountState, StateStore } from '../src/state.ts'
@@ -78,5 +78,54 @@ describe('the confirmed burn, as this Safe reports it home', () => {
   test('an owner-signed release counts with its home and the owner mark, so the home mints it', () => {
     const acc = { ctx: rctx, releasesDone: [{ id: 'home-1', amount: '28850000', chainId: 8453, state: 'burned', burn: { userOpHash: `0x${'00'.repeat(32)}`, amount: '28850000', txHash: `0x${'22'.repeat(32)}`, block: 777 }, owner: { home: HOME }, at: 't', updatedAt: 't' }] } as unknown as AccountState
     expect(releasesToCount(acc)).toEqual([{ id: 'home-1', chainId: 8453, at: 't', home: HOME, owner: HOME, amount: 28_850_000n, block: 777, tx: `0x${'22'.repeat(32)}` }])
+  })
+})
+
+const USDC = address('USDC', registry)
+const RH = { chainId: 143, safe: SAFE, safeNonce: '5', home: HOME, amountUsdc: '28850000', removeIds: GRANTS }
+function burnLog(o: { amount?: bigint; recipient?: Address; depositor?: Address; domain?: number; fee?: bigint; emitter?: Address } = {}) {
+  const topics = encodeEventTopics({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', args: { burnToken: USDC, depositor: o.depositor ?? SAFE, minFinalityThreshold: 2000 } })
+  const data = encodeAbiParameters(
+    [{ type: 'uint256' }, { type: 'bytes32' }, { type: 'uint32' }, { type: 'bytes32' }, { type: 'bytes32' }, { type: 'uint256' }, { type: 'bytes' }],
+    [o.amount ?? 28_850_000n, pad(o.recipient ?? HOME, { size: 32 }), o.domain ?? 6, pad(TOKEN_MESSENGER_V2, { size: 32 }), `0x${'00'.repeat(32)}`, o.fee ?? 0n, '0x'],
+  )
+  return { address: o.emitter ?? TOKEN_MESSENGER_V2, topics, data, blockNumber: 777n, logIndex: 0, transactionHash: `0x${'22'.repeat(32)}`, transactionIndex: 0, blockHash: `0x${'33'.repeat(32)}`, removed: false }
+}
+const rc = (logs: unknown[], status: 'success' | 'reverted' = 'success') => ({ status, logs, blockNumber: 777n }) as never
+
+describe('review r1: the burn is recorded only from its own receipt', () => {
+  test('returnBurnMismatch: exactly the signed burn passes; anything else says why', () => {
+    expect(returnBurnMismatch(rc([burnLog()]), RH, USDC)).toBeNull()
+    expect(returnBurnMismatch(rc([burnLog()], 'reverted'), RH, USDC)).toBe('RETURN_TX_REVERTED')
+    expect(returnBurnMismatch(rc([]), RH, USDC)).toBe('RETURN_BURNS_0')
+    expect(returnBurnMismatch(rc([burnLog({ emitter: `0x${'99'.repeat(20)}` })]), RH, USDC)).toBe('RETURN_BURNS_0')
+    expect(returnBurnMismatch(rc([burnLog(), burnLog()]), RH, USDC)).toBe('RETURN_BURNS_2')
+    for (const o of [{ amount: 1n }, { recipient: `0x${'99'.repeat(20)}` as Address }, { depositor: `0x${'98'.repeat(20)}` as Address }, { domain: 0 }, { fee: 1n }]) {
+      expect(returnBurnMismatch(rc([burnLog(o)]), RH, USDC), JSON.stringify(o, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).toBe('RETURN_BURN_MISMATCH')
+    }
+  })
+
+  test('a confirmed return home (stored on the op, whatever path settled it): one owner-signed release from its receipt, once', async () => {
+    const m = monad()
+    const acc = m.state.accounts[rctx.accountKey]!
+    acc.ops.push({ opId: 'own-1-exit', kind: 'exit', state: 'confirmed', txHash: `0x${'22'.repeat(32)}`, returnHome: RH, updatedAt: 't' } as never)
+    let reads = 0
+    ;(m.op as unknown as { client: { getTransactionReceipt: () => Promise<unknown> } }).client.getTransactionReceipt = async () => (reads++, rc([burnLog()]))
+    const rec = (m.op as unknown as { recordReturnBurns(a: AccountState): Promise<void> }).recordReturnBurns.bind(m.op)
+    await rec(acc)
+    await rec(acc)
+    expect(reads).toBe(1)
+    expect(acc.releasesDone).toHaveLength(1)
+    expect(releasesToCount(acc)).toEqual([{ id: `home-${'22'.repeat(12)}`, chainId: 8453, at: acc.releasesDone![0]!.at, home: HOME, owner: HOME, amount: 28_850_000n, block: 777, tx: `0x${'22'.repeat(32)}` }])
+  })
+
+  test('a receipt without the signed burn: no release, the reason kept on the op', async () => {
+    const m = monad()
+    const acc = m.state.accounts[rctx.accountKey]!
+    acc.ops.push({ opId: 'own-1-exit', kind: 'exit', state: 'confirmed', txHash: `0x${'22'.repeat(32)}`, returnHome: RH, updatedAt: 't' } as never)
+    ;(m.op as unknown as { client: { getTransactionReceipt: () => Promise<unknown> } }).client.getTransactionReceipt = async () => rc([burnLog({ recipient: `0x${'99'.repeat(20)}` })])
+    await quiet(() => (m.op as unknown as { recordReturnBurns(a: AccountState): Promise<void> }).recordReturnBurns(acc))
+    expect(acc.releasesDone ?? []).toHaveLength(0)
+    expect((acc.ops[0] as unknown as { returnRecorded: string }).returnRecorded).toBe('RETURN_BURN_MISMATCH')
   })
 })

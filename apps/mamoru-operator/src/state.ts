@@ -1,7 +1,7 @@
 import type { StoredHistoryCursor } from '@mamoru/rpc'
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { AccountContext, Hex, OpView, RemoteSpec } from '@mamoru/domain'
+import type { AccountContext, Hex, OpView, RemoteSpec, ReturnHomeInput } from '@mamoru/domain'
 import type { SessionGrant } from '@mamoru/policy'
 import type { SafeTx } from '@mamoru/account/live'
 import type { Execution } from '@mamoru/account/safe'
@@ -34,6 +34,13 @@ export type StoredOp = OpView & {
   capUsdc?: string
   /** Owner stop: the permissionIds its tx revokes. */
   revokes?: Hex[]
+  /**
+   * otto/mamoru#428: a Stop that also burns the Safe's USDC home (return-home): its builder input, kept so the burn is
+   * recorded from its own receipt whichever path settles the Stop; `returnRecorded` once that receipt was read
+   * ('burned', or why no release was recorded).
+   */
+  returnHome?: ReturnHomeInput
+  returnRecorded?: string
   /** otto/mamoru#293, migrate-v4: the old ids it removed (revokes: every id it revoked; OpView.migrateStep its step). */
   removes?: Hex[]
   /** migrate-v4: the C the signed InitV4 carries (applied by a late receipt). */

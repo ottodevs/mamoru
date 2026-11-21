@@ -326,6 +326,15 @@ describe('older peers during a deploy (otto/mamoru#355)', () => {
   })
 })
 
+describe('otto/mamoru#428: an owner-signed release crosses the wire with its home', () => {
+  test('a home-<hex> id and its owner pass the read; a malformed owner fails it closed', async () => {
+    const read = (owner: string) => new PeerExposure([{ chainId: 143, url: 'http://monad.test' }], SECRET, async () => Response.json({ chainId: 143, address: HOME.toLowerCase(), block: '1', idleUsdc: '0', placedUsdc: '0', active: false, releases: [{ id: `home-${'ab'.repeat(12)}`, amount: '5', block: '9', tx: `0x${'22'.repeat(32)}`, owner }] })).read(HOME, 0)
+    const got = await read(`0x${'a1'.repeat(20)}`)
+    expect(got.ok && got.chains[0]!.releases).toEqual([{ id: `home-${'ab'.repeat(12)}`, amount: '5', block: '9', tx: `0x${'22'.repeat(32)}`, owner: `0x${'a1'.repeat(20)}` }])
+    expect((await read('not an address')).ok).toBe(false)
+  })
+})
+
 describe('peer answers reused from the cache (otto/mamoru#355)', () => {
   test('a Base answer from before its journal learned the burn, reused after: Monad keeps counting the release, exact', async () => {
     const s = setup()
