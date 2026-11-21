@@ -829,9 +829,9 @@ export async function bootOperator(o: BootOptions) {
       source: {
         accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops })),
         save: () => store.save(),
-        // otto/mamoru#391: Monad yield owes the fee too; facts read before this had no scope, so they take it late. Only with
-        // engine settings (the scoped `yield_fee` flag): without them no scope is known, so none is decided or recorded.
-        ...(settings ? { feeScope: (accountKey: string) => operator.yieldFeeScope(accountKey), scopeTakenLate: true as const } : {}),
+        // otto/mamoru#391: Monad yield owes the fee too, from facts read from here on (facts read before had no scope and
+        // stay uncharged). Only with engine settings: without them no scope is known.
+        ...(settings ? { feeScope: (accountKey: string) => operator.yieldFeeScope(accountKey) } : {}),
       },
       readReceipt: async (hash: Hex) => {
         const r = await snapshotClient.getTransactionReceipt({ hash }).catch((e: unknown) => {

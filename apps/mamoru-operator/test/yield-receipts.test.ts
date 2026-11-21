@@ -259,31 +259,6 @@ describe('withReceipts', () => {
     await withReceipts(snapshot(), one(ops), counting, async () => T, SAFE_BLOCK, tried)
     expect(fresh.facts).toBeDefined()
   })
-
-  test('otto/mamoru#391: facts read before the loop had a fee scope take it late: op recorded in scope, account in scope now', async () => {
-    const facts = (tx: string): OpFacts => ({ txHash: tx, v: FACTS_VERSION, at: '2026-11-10T00:00:00.000Z', gasWei: '1', fees: [] })
-    const scoped = { ...op('eng-1', facts('0xa1'), '0xa1'), feeScoped: true } as StoredOp
-    const unscoped = op('eng-2', facts('0xa2'), '0xa2')
-    let saves = 0
-    const src = (inScope: boolean, late = true) => ({ ...one([scoped, unscoped], () => void saves++), feeScope: () => inScope, ...(late ? { scopeTakenLate: true as const } : {}) })
-    await withReceipts(snapshot(), src(true, false), async () => null, async () => T, SAFE_BLOCK)
-    expect(scoped.facts!.feeable).toBeUndefined()
-    await withReceipts(snapshot(), src(false), async () => null, async () => T, SAFE_BLOCK)
-    expect(scoped.facts!.feeable).toBeUndefined()
-    expect(saves).toBe(0)
-    await withReceipts(snapshot(), src(true), async () => null, async () => T, SAFE_BLOCK)
-    expect(scoped.facts!.feeable).toBe(true)
-    expect(unscoped.facts!.feeable).toBeUndefined()
-    expect(saves).toBe(1)
-    // A fact dated after the cutoff was read with the scope already decided: never taken late.
-    const later = { ...op('eng-3', { ...facts('0xa3'), at: '2026-11-21T00:00:00.000Z' }, '0xa3'), feeScoped: true } as StoredOp
-    await withReceipts(snapshot(), { ...one([later]), feeScope: () => true, scopeTakenLate: true as const }, async () => null, async () => T, SAFE_BLOCK)
-    expect(later.facts!.feeable).toBeUndefined()
-    // A fact read with the scope in hand (out of scope then) keeps that decision when the account comes back in scope.
-    const decided = { ...op('eng-4', { ...facts('0xa4'), scopeRead: true }, '0xa4'), feeScoped: true } as StoredOp
-    await withReceipts(snapshot(), { ...one([decided]), feeScope: () => true, scopeTakenLate: true as const }, async () => null, async () => T, SAFE_BLOCK)
-    expect(decided.facts!.feeable).toBeUndefined()
-  })
 })
 
 describe('Monad (otto/mamoru#358): the chain registry decides the position manager, the pool name and the gas price', () => {
@@ -326,9 +301,7 @@ describe('feeable (otto/mamoru#371): facts taken while the account is in the yie
     expect((await run(false))?.feeable).toBeUndefined()
     expect((await run(undefined))?.feeable).toBeUndefined()
     // Out of scope when the op was recorded, in scope by the time its facts are read: never charged.
-    expect((await run(true, false))?.feeable).toBeUndefined()    // otto/mamoru#391: read with a scope in hand, the decision is recorded; without one (no fee on the chain), it is not.
-    expect((await run(false))?.scopeRead).toBe(true)
-    expect((await run(undefined))?.scopeRead).toBeUndefined()
+    expect((await run(true, false))?.feeable).toBeUndefined()
   })
 })
 

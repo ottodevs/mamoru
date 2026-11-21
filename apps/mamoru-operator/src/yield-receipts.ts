@@ -72,8 +72,6 @@ export type OpFacts = {
    * these facts were taken. Only such facts are the fee's base: yield collected while out of scope is never charged.
    */
   feeable?: true
-  /** otto/mamoru#391: read with a fee scope in hand, so `feeable` is a decision, never revisited by scopeTakenLate. */
-  scopeRead?: true
   /** FACTS_VERSION when read; absent on facts read before spec 012. */
   v?: number
   /** spec 012: the block the receipt was included in (decimal). */
@@ -432,23 +430,12 @@ export function dayReceipts(ops: readonly StoredOp[]): DayReceiptWire[] {
     }))
 }
 
-/** otto/mamoru#391: facts dated before this were read on Monad with no fee scope; later ones were read with it. */
-export const LATE_SCOPE_BEFORE = '2026-11-21T00:00:00.000Z'
-const lateScoped = (op: StoredOp): boolean => !!op.facts && !op.facts.feeable && !op.facts.scopeRead && !!op.feeScoped && Date.parse(op.facts.at) < Date.parse(LATE_SCOPE_BEFORE)
-
 /** What the snapshot wrapper needs from the operator: every account it has stored (stopped ones too), and a way to persist them. */
 export type ReceiptSource = {
   accounts(): { accountKey: string; safe: Address; ops: StoredOp[] }[]
   save(): void
   /** otto/mamoru#371: whether the account is in the yield fee's scope now. Absent: never (no fee on this chain). */
   feeScope?(accountKey: string): boolean
-  /**
-   * otto/mamoru#391: this chain's facts were taken before its loop had a feeScope (Monad), so none says `feeable`. Set,
-   * a fact already read whose op was recorded in the fee's scope (StoredOp.feeScoped), with the account in scope now,
-   * becomes feeable: the two checks a fact read today would pass. Only facts read without a scope (no `scopeRead`) and
-   * dated before LATE_SCOPE_BEFORE: a fact read with the scope in hand keeps that decision, whatever the scope is later.
-   */
-  scopeTakenLate?: true
 }
 
 export type ReceiptReader = (txHash: Hex) => Promise<{ logs: Log[]; blockNumber: bigint } | null>
@@ -550,8 +537,7 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
       // A layout upgrade keeps the old fee scope too: it was decided when the facts were first taken (#371).
       const upgrade = op.facts?.txHash?.toLowerCase() === txHash.toLowerCase()
       const feeable = upgrade ? op.facts!.feeable === true : !!(op.feeScoped && source.feeScope?.(a.accountKey))
-      const scopeRead = upgrade ? op.facts!.scopeRead === true : !!source.feeScope
-      op.facts = { ...keepPrices(read, op.facts), ...(feeable ? { feeable: true as const } : {}), ...(scopeRead ? { scopeRead: true as const } : {}) }
+      op.facts = { ...keepPrices(read, op.facts), ...(feeable ? { feeable: true as const } : {}) }
       delete op.factsMisses
       tried.delete(key)
       changed = true
@@ -560,15 +546,6 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
     }
   }
   for (const a of accounts) for (const op of a.ops) if (op.facts && priceFees(op.facts, snapshot.pools, registry)) changed = true
-  if (source.scopeTakenLate && source.feeScope)
-    for (const a of accounts) {
-      if (!a.ops.some(lateScoped) || !source.feeScope(a.accountKey)) continue
-      for (const op of a.ops)
-        if (lateScoped(op)) {
-          op.facts = { ...op.facts!, feeable: true }
-          changed = true
-        }
-    }
   if (changed) source.save()
   const receipts = accounts
     .map((a) => {
