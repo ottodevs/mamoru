@@ -359,6 +359,13 @@ describe('otto/mamoru#428: an owner-signed return (spec 014 step 1) reported by 
     expect(s.r.returns()).toHaveLength(0)
   })
 
+  test('a malformed tx in an owner report is skipped, the rest of the report still read', async () => {
+    const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
+    s.r.noteReported(SAFE, [{ id: 'home-x', amount: '1', block: '1', tx: '0x1' as Hex, owner: HOME }, ...reported()], 'acc-1', [HOME])
+    await s.r.tick(() => null)
+    expect(s.r.returns().map((e) => e.id)).toEqual([ID])
+  })
+
   test('only under the id derived from its tx: a remote-chosen id is not even followed', async () => {
     const s = setup({ iris: [await attest(message({ sender: SAFE }))] })
     s.r.noteReported(SAFE, [...reported({ id: 'home-dup' }), ...reported({ id: 'ret-7' })], 'acc-1', [HOME])
@@ -374,7 +381,8 @@ describe('otto/mamoru#428: an owner-signed return (spec 014 step 1) reported by 
     const e = await s.r.request('acc-2', HOME, REMOTE, peerOf(), AMOUNT, FLOOR)
     // An existing entry under the derived id (written straight to the journal, as a pruned-then-reused id would be).
     const j = (s.r as unknown as { journal: { returns: Record<string, ReturnEntry> } }).journal
-    j.returns[ID] = { ...j.returns[e.id]!, id: ID, state: 'minted', accountKey: 'acc-2' }
+    // Another home, so `holds` does not skip the report up front: the guards themselves are what refuse it.
+    j.returns[ID] = { ...j.returns[e.id]!, id: ID, state: 'minted', accountKey: 'acc-2', home: `0x${'a2'.repeat(20)}` as Address }
     s.r.noteReported(SAFE, reported(), 'acc-1', [HOME])
     await s.r.tick(() => null)
     expect(j.returns[ID]).toMatchObject({ state: 'minted', accountKey: 'acc-2' })
