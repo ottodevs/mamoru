@@ -6354,7 +6354,12 @@ export class Operator {
     return { name: `manage:${tokenId}`, grant, permissionId: permissionIdOf(toSmartSession(grant, undefined, this.cfg.registry)) }
   }
 
-  /** The live demo does not enable manage grants: every manage session is known to the engine but revoked, so decide never harvests. */
+  /**
+   * Revokes in the engine's ledger every session named `manage`, the per-position baseline grant the engine requests through
+   * `requestManageGrant` when a policy has no manage-any grant. It does not stop harvest: a policy that holds manage-any and
+   * convert-any harvests through those (packages/decide), which this does not touch. Harvest and re-range are limited by what an
+   * activation keeps within the gas limit (otto/mamoru#5), not by this method.
+   */
   private revokeManage(engine: Engine): void {
     for (const s of engine.sessions) if (s.grant.name === 'manage') engine.ledger.revoke(s.permissionId)
   }
