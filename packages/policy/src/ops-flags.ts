@@ -89,12 +89,12 @@ export const OPS_FLAGS = {
   },
   /**
    * otto/mamoru#428 (spec 014), default off: no new capital to Monad. In scope, a Start activates conservadorLiveV8 (v7
-   * without the Monad bucket, its 15 % on USDC/cbBTC), and a v6/v7 account is offered the renewal that moves it there
-   * (step 0 of leaving Monad), ahead of everything else. Scopable to accounts.
+   * without the Monad bucket, its 15 % on USDC/cbBTC), and every earlier Base account (v2-v7) is offered the renewal that
+   * moves it there, ahead of everything else (for a Monad account, step 0 of leaving Monad). Scopable to accounts.
    */
   base_v8: {
     label: 'Base only, no Monad (v8)',
-    description: 'Starts on conservadorLiveV8 and offers v6/v7 accounts the move to it: v7 without the Monad bucket, 15 % USDC/cbBTC, no bridge to Monad (otto/mamoru#428). Scopable to accounts.',
+    description: 'Starts on conservadorLiveV8 and offers every v2-v7 account the move to it: v7 without the Monad bucket, 15 % USDC/cbBTC, no bridge to Monad (otto/mamoru#428). Scopable to accounts.',
   },
   /**
    * otto/mamoru#210, default off: for a v7 account in scope, the engine winds down its old USDC/USDT positions (the
