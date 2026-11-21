@@ -210,7 +210,8 @@ export type PolicyVersion = {
   /**
    * otto/mamoru#427: this policy's chain is being left (the engine settings' `chainExit`, `withEngineSettings`): every
    * pool position is taken out in full and the volatile token sold for the savings asset, which stays on the Safe.
-   * Absent: none. Never part of a grant.
+   * Absent: none. Never part of a grant; like `entryPauseUntil` and the depth sizing, it rides on the policy the engine
+   * decides with (and so on its decision's policyRef hash), never on the signed policy the sessions were built from.
    */
   chainExit?: true
   /**

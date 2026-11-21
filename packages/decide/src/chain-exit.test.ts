@@ -13,7 +13,7 @@ const GRANT = 'manage-any:pool:WMON/USDC/3000'
 
 function pool(name: string, tick: number, registry: Registry): PoolObs {
   const e = entry(name, registry)
-  return { name, address: e.address, token0: e.token0!, token1: e.token1!, fee: e.fee!, tickSpacing: e.tickSpacing!, sqrtPriceX96: sqrtRatioAtTick(tick), tick, liquidity: 10n ** 18n, twapTick: tick, identity: { factoryPool: e.address, token0: address(e.token0!, registry), token1: address(e.token1!, registry), fee: e.fee!, tickSpacing: e.tickSpacing! } }
+  return { name, address: e.address, token0: e.token0!, token1: e.token1!, fee: e.fee!, tickSpacing: e.tickSpacing!, sqrtPriceX96: sqrtRatioAtTick(tick), tick, liquidity: 10n ** 18n, twapTick: tick, twapLiquidity: 10n ** 18n, identity: { factoryPool: e.address, token0: address(e.token0!, registry), token1: address(e.token1!, registry), fee: e.fee!, tickSpacing: e.tickSpacing! } }
 }
 
 const MONAD = pool('pool:WMON/USDC/3000', TICK, monadRegistry)
@@ -69,11 +69,32 @@ describe('chain exit (otto/mamoru#427)', () => {
     expect(d.proposal).toMatchObject({ kind: 'reduce', liquidity: 10n ** 15n, burn: true })
   })
 
-  test('no position left: every WMON on the Safe, harvested included, is sold for USDC; nothing is bridged', () => {
+  test('no position left: the WMON on the Safe, harvested included, is sold for USDC; nothing is bridged', () => {
     const wmon = 3n * 10n ** 21n
-    const d = decide(obs({ balances: { USDC: 7n * USDC, WMON: wmon }, harvested: { WMON: { amount: 10n ** 18n, since: Number(NOW) - 60 } } }), EXIT)
+    const deep = { ...MONAD, liquidity: 10n ** 24n, twapLiquidity: 10n ** 24n }
+    const d = decide(obs({ pools: [deep], balances: { USDC: 7n * USDC, WMON: wmon }, harvested: { WMON: { amount: 10n ** 18n, since: Number(NOW) - 60 } } }), EXIT)
     expect(d.proposal).toEqual({ kind: 'enter_swap', grant: GRANT, pool: MONAD.name, tokenIn: 'WMON', tokenOut: 'USDC', fee: 3000, amountIn: wmon })
     expect(d.reason).toBe('DECIDE_CHAIN_EXIT')
+  })
+
+  test('a balance larger than the pool takes at the impact limit is sold in slices, never in one sale', () => {
+    const thin = { ...MONAD, liquidity: 10n ** 15n, twapLiquidity: 10n ** 15n }
+    const wmon = 10n ** 26n
+    const d = decide(obs({ pools: [thin], balances: { USDC: 0n, WMON: wmon } }), EXIT)
+    expect(d.proposal?.kind).toBe('enter_swap')
+    const amountIn = (d.proposal as { amountIn: bigint }).amountIn
+    expect(amountIn > 0n && amountIn < wmon).toBe(true)
+    // No TWAP liquidity read: no room, the WMON waits and says so; never DONE with WMON left.
+    const unread = decide(obs({ pools: [{ ...MONAD, twapLiquidity: null }], balances: { USDC: 0n, WMON: wmon } }), EXIT)
+    expect(unread.proposal).toBeNull()
+    expect(unread.reason).toBe('DECIDE_WAIT_DEPTH')
+  })
+
+  test('without a manage-any grant nothing can be taken out: it waits for a renewal, never reports done', () => {
+    const none = { ...EXIT, session: { ...EXIT.session, grants: [] } }
+    const d = decide(obs({ positions: [position()] }), none)
+    expect(d.proposal).toBeNull()
+    expect(d.reason).toBe('DECIDE_WAIT_RENEWAL')
   })
 
   test('an empty NFT that still owes tokens worth the gas is collected and burnt; one owing nothing is left alone', () => {

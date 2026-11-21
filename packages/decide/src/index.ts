@@ -291,9 +291,10 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       proposal = exit ?? release.proposal
       reason = exit ? PROPOSAL_CODE[exit.kind] : release.code
     } else if (leaving) {
+      // The guard's own exit (depeg) still goes first, as it does over a release.
       releasing = true
-      proposal = leaving.proposal
-      reason = leaving.code
+      proposal = exit ?? leaving.proposal
+      reason = exit ? PROPOSAL_CODE[exit.kind] : leaving.code
     } else {
       proposal = exit ?? reranges[0] ?? harvests[0] ?? sold ?? reduce?.proposal ?? idle ?? entries[0] ?? null
       reason = proposal === sold && sold ? 'DECIDE_HARVEST' : proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()

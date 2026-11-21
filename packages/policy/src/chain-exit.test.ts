@@ -14,7 +14,9 @@ describe('chainExit settings (otto/mamoru#427)', () => {
 
   test('refused: a chain twice, a chain Mamoru does not run, extra keys, an empty list, not a list', () => {
     expect(validateEngineSettings(s([{ chainId: 143 }, { chainId: 143 }])).join()).toContain('chain 143 twice')
-    expect(validateEngineSettings(s([{ chainId: 144 }])).join()).toContain('chainExit[0].chainId must be a chain Mamoru runs on')
+    expect(validateEngineSettings(s([{ chainId: 144 }])).join()).toContain('chainExit[0].chainId must be 143')
+    // Base cannot be exited: its buckets hold vaults and pools this exit was not designed for.
+    expect(validateEngineSettings(s([{ chainId: 8453 }])).join()).toContain('chainExit[0].chainId must be 143')
     expect(validateEngineSettings(s([{ chainId: 143, bucket: 'risk' }])).join()).toContain('chainExit[0] must be')
     expect(validateEngineSettings(s([])).join()).toContain('chainExit must be a list')
     expect(validateEngineSettings(s({ chainId: 143 })).join()).toContain('chainExit must be a list')

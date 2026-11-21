@@ -50,7 +50,7 @@ export type EngineSettings = {
    * otto/mamoru#427: leave a chain's pools. On that chain every pool position is taken out in full (decrease, collect,
    * burn) and the volatile token is sold for the savings asset, which stays on the Safe: nothing is bridged or
    * transferred. No entry goes into that chain meanwhile, there or from a policy elsewhere (as an `entryPause` without an
-   * end). At most one entry per chain. Absent = none, so older versions keep their hash.
+   * end). Monad (143) only. At most one entry per chain. Absent = none, so older versions keep their hash.
    */
   chainExit?: ChainExit[]
 }
@@ -222,7 +222,9 @@ export function validateEngineSettings(s: unknown): string[] {
         const r = e as Record<string, unknown> | null
         if (!r || typeof r !== 'object' || Array.isArray(r) || Object.keys(r).some((k) => k !== 'chainId')) return void errors.push(`chainExit[${i}] must be { chainId }`)
         // A chain Mamoru does not run would unwind nothing: refused, never silently ignored.
-        if (!isInt(r.chainId) || !isChainId(r.chainId)) errors.push(`chainExit[${i}].chainId must be a chain Mamoru runs on (8453 or 143)`)
+        // Only Monad for now: Base's buckets hold vaults and pools that do not all pair the savings asset, which this
+        // exit was not designed for. A typo would unwind nothing: refused too.
+        if (r.chainId !== 143) errors.push(`chainExit[${i}].chainId must be 143 (Monad): no other chain can be exited`)
         else if (seen.has(r.chainId)) errors.push(`chainExit names chain ${r.chainId} twice`)
         seen.add(r.chainId)
       })
