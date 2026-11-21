@@ -912,7 +912,13 @@ export type Simulation = {
  * rounds of balance reads, and returns the deltas per registry token and
  * the change in the account's position count.
  */
-export async function simulateFromEntryPoint(client: PublicClient, account: Address, callData: Hex, blockNumber: bigint, registry: Registry = baseRegistry): Promise<Simulation> {
+/**
+ * otto/mamoru#429: `readerFallback` lets an unserved eth_simulateV1 fall back to the eth_call reader (no logs). Off by
+ * default: only a caller whose checks for this op read no event, on a chain where the method is known unserved, turns it on.
+ */
+export type SimulateOptions = { readerFallback?: boolean }
+
+export async function simulateFromEntryPoint(client: PublicClient, account: Address, callData: Hex, blockNumber: bigint, registry: Registry = baseRegistry, opts: SimulateOptions = {}): Promise<Simulation> {
   const npm = address('NonfungiblePositionManager', registry)
   // otto/mamoru#210: vault shares are ERC-20 balances too, so a deposit or redeem shows its share delta.
   const TOKENS = [...registryNames(registry).tokens, ...registry.entries.filter((e) => e.kind === 'vault').map((e) => e.name)]
@@ -935,10 +941,10 @@ export async function simulateFromEntryPoint(client: PublicClient, account: Addr
       res = await simulateCalls(client, batch, blockNumber, { [ep]: { code: '0x' } })
     }
   } catch (e) {
-    // otto/mamoru#429: only where no provider serves eth_simulateV1 at all (Monad since 20 Nov 2026). Any provider that
+    // otto/mamoru#429: only when the caller opts in and the method is unserved (Monad since 20 Nov 2026). Any provider that
     // serves it keeps the exact run above.
-    if (!simulateUnserved(e)) throw e
-    return simulateWithReader(client, account, callData, blockNumber, reads.map((r) => r.to), ep, TOKENS)
+    if (!opts.readerFallback || !simulateUnserved(e)) throw e
+    return simulateWithReader(client, account, callData, blockNumber, reads, ep, TOKENS)
   }
   const n = reads.length
   const exec = res[n]!
@@ -977,7 +983,14 @@ export async function simulateFromEntryPoint(client: PublicClient, account: Addr
  * read the same. Logs cannot be read this way (`logsRead: false`). Gas is measured as on Monad today: eth_estimateGas
  * of the same call from the EntryPoint at the head.
  */
-async function simulateWithReader(client: PublicClient, account: Address, callData: Hex, blockNumber: bigint, readTargets: Address[], ep: Address, tokens: RegistryName[]): Promise<Simulation> {
+async function simulateWithReader(client: PublicClient, account: Address, callData: Hex, blockNumber: bigint, reads: SimCall[], ep: Address, tokens: RegistryName[]): Promise<Simulation> {
+  // The reader calls balanceOf(account) on each target: the reads must be exactly that, one per token then the
+  // position manager, or a delta would land on the wrong token.
+  const balanceOfAccount = encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [account] })
+  if (reads.length !== tokens.length + 1 || reads.some((r) => r.data !== balanceOfAccount || r.from !== undefined)) {
+    throw new ReasonError('EHG_SIM_UNAVAILABLE', 'reader: the balance reads are not balanceOf(account) per token and the position manager')
+  }
+  const readTargets = reads.map((r) => r.to)
   const run = await runSimReader(client, ep, account, readTargets, callData, blockNumber, SIM_CALL_GAS)
   const deltas: Record<RegistryName, bigint> = {}
   tokens.forEach((t, i) => {

@@ -57,6 +57,15 @@ const mamoruActionPolicyReadAbi = parseAbi([
 const observeAbi = parseAbi(['function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128s)'])
 import { reconcileReceipt } from './receipt.ts'
 
+
+/** Monad: no reachable provider serves eth_simulateV1 since 20 Nov 2026 (otto/mamoru#429). */
+const MONAD_CHAIN_ID = 143
+/**
+ * otto/mamoru#429: kinds whose simulation checks (deltaMismatch, vaultMismatch) read only balance deltas, the position
+ * count and the revert, never an event, so the eth_call reader's run (no logs) checks them exactly. harvest and
+ * bridge_out read events and are left out.
+ */
+const READER_SAFE_KINDS: ReadonlySet<Proposal['kind']> = new Set(['enter_swap', 'enter_mint', 'increase_liquidity', 'rerange', 'reduce', 'vault_deposit', 'vault_redeem'])
 /**
  * Gas limits of every engine userOp. Their sum is the budget `decide` prices for the harvest cost. otto/mamoru#348: they
  * fit a V4 session's A1 batches under MamoruGasPolicyV2's Base caps (verification 3M, call 2M, preVerification 200k).
@@ -1300,15 +1309,17 @@ export class Engine {
     // simulate: eth_simulateV1 from the EntryPoint, deltas against the intent.
     let sim: Simulation
     try {
-      sim = await simulateFromEntryPoint(this.client, this.cfg.account, callData, block.number, this.registry)
+      // otto/mamoru#429: the eth_call reader (no logs) only for kinds whose checks read no event, on Monad.
+      const readerFallback = this.registry.chainId === MONAD_CHAIN_ID && READER_SAFE_KINDS.has(proposal.kind)
+      sim = await simulateFromEntryPoint(this.client, this.cfg.account, callData, block.number, this.registry, { readerFallback })
     } catch (e) {
       if (e instanceof ReasonError) return void j.move(op.opId, 'discarded', e.code, {}, e.detail)
       throw e
     }
     if (!sim.ok) return void j.move(op.opId, 'discarded', 'EHG_SIM_REVERT', { simulation: sim }, sim.revert)
-    // otto/mamoru#429: a harvest is checked against its Collect event and a bridge-out against its DepositForBurn. A run
-    // without logs (the eth_call reader) cannot show either, so those two wait for a provider that serves eth_simulateV1.
-    if (sim.logsRead === false && (proposal.kind === 'harvest' || proposal.kind === 'bridge_out')) {
+    // otto/mamoru#429: a run without logs never reaches a check that reads events (harvest: its Collect; bridge-out: its
+    // DepositForBurn). Belt and braces: the reader is only asked for READER_SAFE_KINDS.
+    if (sim.logsRead === false && !READER_SAFE_KINDS.has(proposal.kind)) {
       return void j.move(op.opId, 'discarded', 'EHG_SIM_UNAVAILABLE', {}, `a ${proposal.kind} is checked against its events, and no provider served eth_simulateV1`)
     }
     const mismatch = this.deltaMismatch(proposal, prepared, sim)

@@ -33,17 +33,26 @@ export type ReaderRun = { ok: boolean; ret: Hex; gasUsed: bigint; before: readon
 
 /**
  * eth_simulateV1 not served at all by the provider that answered (as opposed to a revert, which is the method's real
- * answer): method not found, a plan or chain that leaves it out, or a capacity cap that a retry within the minute
- * does not lift. Seen on Monad, 20-21 Nov 2026: -32601 from the public endpoints, -32604 "this request method is not
- * supported", "eth_simulateV1 is not available on the MONAD_MAINNET", "Monthly capacity limit exceeded", "available
- * for paid plans only".
+ * answer): method not found, or a plan or chain that leaves it out. Seen on Monad, 20-21 Nov 2026: -32601 from the
+ * public endpoints, -32604 "this request method is not supported", "eth_simulateV1 is not available on the
+ * MONAD_MAINNET", "available for paid plans only". A quota ("Monthly capacity limit exceeded") is not unserved.
  */
 export function simulateUnserved(e: unknown): boolean {
   if (!(e instanceof ReasonError) || e.code !== 'EHG_SIM_UNAVAILABLE') return false
   const text = `${e.message} ${e.detail ?? ''}`
   if (/sender not eoa/i.test(text)) return false
-  return /method not found|does not exist|not supported|is not available|not available on|paid plan|monthly capacity|capacity limit exceeded/i.test(text)
+  return UNSERVED.some((re) => re.test(text))
 }
+
+/** The providers' own words for "this method is not served here", as seen (21 Nov 2026). A quota or a timeout is not one. */
+const UNSERVED = [
+  /\bMethod not found\b/i, // -32601, public Monad endpoints
+  /\bthe method eth_simulateV1 does not exist\b/i, // viem's wording of -32601
+  /\bthis request method is not supported\b/i, // -32604, rpc4.monad.xyz
+  /\beth_simulateV1 is not available on the [A-Z0-9_]+\b/, // Alchemy, chain left out of the plan
+  /\beth_simulateV1'? is available for paid plans only\b/i, // Tatum
+  /\bmethod is not available on (your|free|the free) plan\b/i, // drpc
+]
 
 /**
  * One eth_call to the EntryPoint's address, its code replaced by SimReader for this call only: balanceOf(account) for

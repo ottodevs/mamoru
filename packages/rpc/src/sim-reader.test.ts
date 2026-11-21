@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { encodeFunctionResult, type Hex, type PublicClient } from 'viem'
+import { encodeFunctionResult, toFunctionSelector, type Hex, type PublicClient } from 'viem'
 import { ReasonError } from '@mamoru/domain'
 import { address, monadRegistry } from '@mamoru/registry'
 import { SIM_READER_CODE, decodeReaderRun, simReaderAbi, simulateFromEntryPoint, simulateUnserved } from './index.ts'
@@ -37,10 +37,13 @@ function fakeClient(answer: (n: number) => Hex, sim: () => never = () => { throw
 
 describe('simulateUnserved', () => {
   test('method missing, chain left out, plan or monthly cap: unserved', () => {
-    for (const d of ['this request method is not supported', 'Method not found', 'eth_simulateV1 is not available on the MONAD_MAINNET', 'Monthly capacity limit exceeded.', 'available for paid plans only'])
+    for (const d of ['this request method is not supported', 'Method not found', 'eth_simulateV1 is not available on the MONAD_MAINNET', "Method 'eth_simulateV1' is available for paid plans only"])
       expect(simulateUnserved(new ReasonError('EHG_SIM_UNAVAILABLE', `RPC Request failed. (${d})`))).toBe(true)
   })
-  test('a timeout, "sender not eoa" or another code is not', () => {
+  test('a quota, a timeout, "sender not eoa", another failure or another code is not', () => {
+    expect(simulateUnserved(new ReasonError('EHG_SIM_UNAVAILABLE', 'HTTP request failed. (Monthly capacity limit exceeded.)'))).toBe(false)
+    expect(simulateUnserved(new ReasonError('EHG_SIM_UNAVAILABLE', 'historical state is not available'))).toBe(false)
+    expect(simulateUnserved(new ReasonError('EHG_SIM_UNAVAILABLE', 'state overrides not supported'))).toBe(false)
     expect(simulateUnserved(new ReasonError('EHG_SIM_UNAVAILABLE', 'The request took too long to respond.'))).toBe(false)
     expect(simulateUnserved(new ReasonError('EHG_SIM_UNAVAILABLE', 'Missing or invalid parameters. (sender not eoa)'))).toBe(false)
     expect(simulateUnserved(new ReasonError('OBS_RPC_UNAVAILABLE', 'Method not found'))).toBe(false)
@@ -56,7 +59,7 @@ describe('simulateFromEntryPoint without eth_simulateV1', () => {
       const after = before.map((b, i) => (i === 0 ? b + 5n : i === tokens - 1 ? b - 1n : b))
       return reader(true, before, after)
     })
-    const sim = await simulateFromEntryPoint(client, SAFE, '0xabcd', 9n, monadRegistry)
+    const sim = await simulateFromEntryPoint(client, SAFE, '0xabcd', 9n, monadRegistry, { readerFallback: true })
     expect(seen.simulations).toBeGreaterThan(0)
     expect(seen.call.to).toBe(EP)
     expect(seen.call.stateOverride).toEqual([{ address: EP, code: SIM_READER_CODE }])
@@ -75,7 +78,7 @@ describe('simulateFromEntryPoint without eth_simulateV1', () => {
       const t = tokensOf(seen.call.data)
       return reader(false, Array(t).fill(1n), Array(t).fill(1n), '0x08c379a0')
     })
-    const sim = await simulateFromEntryPoint(client, SAFE, '0x', 1n, monadRegistry)
+    const sim = await simulateFromEntryPoint(client, SAFE, '0x', 1n, monadRegistry, { readerFallback: true })
     expect(sim.ok).toBe(false)
     expect(sim.revert).toBe('0x08c379a0')
     expect(seen.estimate).toBeUndefined()
@@ -85,12 +88,17 @@ describe('simulateFromEntryPoint without eth_simulateV1', () => {
       () => '0x',
       () => [{ calls: Array.from({ length: 64 }, () => ({ status: '0x1', returnData: '0x' + '00'.repeat(32), gasUsed: '0x5208', logs: [] })) }] as never,
     )
-    const sim = await simulateFromEntryPoint(client, SAFE, '0x', 1n, monadRegistry)
+    const sim = await simulateFromEntryPoint(client, SAFE, '0x', 1n, monadRegistry, { readerFallback: true })
     expect(seen.call).toBeUndefined()
     expect(sim.logsRead).toBeUndefined()
   })
   test('a timeout is not an unserved method: the error stands, no reader', async () => {
     const { client, seen } = fakeClient(() => '0x', () => { throw new Error('The request took too long to respond.') })
+    await expect(simulateFromEntryPoint(client, SAFE, '0x', 1n, monadRegistry, { readerFallback: true })).rejects.toThrow('EHG_SIM_UNAVAILABLE')
+    expect(seen.call).toBeUndefined()
+  })
+  test('without the caller opting in (harvest, bridge-out, any other caller) an unserved method stays EHG_SIM_UNAVAILABLE', async () => {
+    const { client, seen } = fakeClient(() => '0x')
     await expect(simulateFromEntryPoint(client, SAFE, '0x', 1n, monadRegistry)).rejects.toThrow('EHG_SIM_UNAVAILABLE')
     expect(seen.call).toBeUndefined()
   })
@@ -104,10 +112,19 @@ describe('decodeReaderRun', () => {
 })
 
 describe('SIM_READER_CODE', () => {
-  test('is the compiled runtime of contracts/sim-reader (when built)', () => {
+  // CI builds the contract and runs this with MAMORU_SIM_READER_STRICT=1 (.github/workflows/ci.yml): there a missing
+  // artifact fails. Locally it is checked when `forge build` has run in contracts/sim-reader.
+  test('is the compiled runtime of contracts/sim-reader', () => {
     const artifact = join(import.meta.dir, '../../../contracts/sim-reader/out/SimReader.sol/SimReader.json')
-    if (!existsSync(artifact)) return // forge build not run here; the PR states the command
+    if (!existsSync(artifact)) {
+      expect(process.env.MAMORU_SIM_READER_STRICT).toBeUndefined()
+      return
+    }
     expect(JSON.parse(readFileSync(artifact, 'utf8')).deployedBytecode.object).toBe(SIM_READER_CODE)
+  })
+  test('carries the run(address,address[],bytes) selector the ABI encodes', () => {
+    const selector = toFunctionSelector('run(address,address[],bytes)').slice(2)
+    expect(SIM_READER_CODE).toContain(`63${selector}`)
   })
 })
 

@@ -31,6 +31,10 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
         with:
           version: v1.7.1
+      # otto/mamoru#429: SIM_READER_CODE (packages/rpc) must be the compiled SimReader; the test fails here if it is not.
+      - run: forge build --root contracts/sim-reader && bun test packages/rpc/src/sim-reader.test.ts
+        env:
+          MAMORU_SIM_READER_STRICT: '1'
       - run: bun apps/mamoru-operator/test/e2e-monad-fork.ts scenarios/monad/MONAD-01.prestate.json.gz
         env:
           MAMORU_PROFILE_AGE: warn
