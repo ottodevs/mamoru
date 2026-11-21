@@ -4,7 +4,7 @@
 // WMON/USDC): no new grant is needed. `prepareCalls` is private; reached with a cast, like engine-v4-bounds.test.ts.
 // The FakeChain serves Base's registry, so the calls are mapped back to registry names before they are compared.
 import { describe, expect, test } from 'bun:test'
-import { decodeFunctionData, toFunctionSelector, type Hex } from 'viem'
+import { decodeFunctionData, encodeFunctionData, toFunctionSelector, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import type { Address } from '@mamoru/domain'
 import type { Proposal } from '@mamoru/decide'
@@ -104,6 +104,14 @@ describe('chain exit reduce through the engine (otto/mamoru#427)', () => {
       expect(check(part, kept, -1n)).toContain('intent 0')
       const plain: Proposal = { kind: 'reduce', grant: 'manage-any', pool: POOL, tokenId: TOKEN_ID, liquidity: pos.liquidity }
       expect(check(plain, await prepare(e, plain, chain), -1n)).toContain('intent 0')
+      // Adversarial batches: no burn call, a burn of another NFT, a burn with value, a burn to another target.
+      const npm = address('NonfungiblePositionManager', baseRegistry)
+      const burnOf = (id: bigint) => encodeFunctionData({ abi: nonfungiblePositionManagerAbi, functionName: 'burn', args: [id] })
+      const withoutBurn: Prepared = { calls: burnt.calls.slice(0, 2) }
+      expect(check(full, withoutBurn, -1n)).toContain('intent 0')
+      expect(check(full, { calls: [...withoutBurn.calls, { target: npm, value: 0n, callData: burnOf(TOKEN_ID + 1n) }] }, -1n)).toContain('intent 0')
+      expect(check(full, { calls: [...withoutBurn.calls, { target: npm, value: 1n, callData: burnOf(TOKEN_ID) }] }, -1n)).toContain('intent 0')
+      expect(check(full, { calls: [...withoutBurn.calls, { target: ACCOUNT, value: 0n, callData: burnOf(TOKEN_ID) }] }, -1n)).toContain('intent 0')
     })
   })
 })

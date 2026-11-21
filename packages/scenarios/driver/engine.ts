@@ -2524,7 +2524,13 @@ export class Engine {
       // holds the position manager's burn, and only then is one position fewer the intent.
       const npm = address('NonfungiblePositionManager', this.registry)
       const burnSel = toFunctionSelector('function burn(uint256)')
-      const burns = p.kind === 'reduce' && p.burn === true && prepared.calls.some((c) => isAddressEqual(c.target, npm) && c.callData.slice(0, 10).toLowerCase() === burnSel)
+      // Bound to this position: burn(p.tokenId), no value, sent straight to the position manager (a Monad reduce is never
+      // wrapped in a multicall: decrease, collect and burn are three calls). Under the event-free simulation (#429) there
+      // are no logs to read the Transfer to zero from, so the batch this engine prepared is the evidence.
+      const burns =
+        p.kind === 'reduce' &&
+        p.burn === true &&
+        prepared.calls.some((c) => isAddressEqual(c.target, npm) && (c.value ?? 0n) === 0n && c.callData.length === 2 + 8 + 64 && c.callData.slice(0, 10).toLowerCase() === burnSel && BigInt(`0x${c.callData.slice(10)}`) === p.tokenId)
       const want = p.kind === 'rerange' || burns ? -1n : 0n
       if (sim.nftDelta !== want) return `positions changed by ${sim.nftDelta}, intent ${want}`
       const pool = entry(p.pool, this.registry)
