@@ -814,8 +814,8 @@ export async function bootOperator(o: BootOptions) {
   }
   // otto/mamoru#343 phase B: Monad capital is measured for the worked APY like Base's, from the same readSnapshot over the
   // Monad registry. A plain loop: no hold-value baseline, no yield receipts (both are Base-bound). It does not follow the
-  // `yield_ledger` flag, and syncYieldLedger never touches this loop (its own variable): the Monad operator pulls no engine settings today (no MAMORU_SETTINGS_URL) and must not start
-  // to, so the flag is unreachable here. MAMORU_SNAPSHOT_MONAD=1 turns it on (deploy notes); the app Worker still pulls
+  // `yield_ledger` flag, and syncYieldLedger never touches this loop (its own variable). With MAMORU_SETTINGS_URL (#385)
+  // the Monad operator has engine settings and the scoped `yield_fee` flag, which its fee scope below reads (#391). MAMORU_SNAPSHOT_MONAD=1 turns it on (deploy notes); the app Worker still pulls
   // /snapshot only while its own `yield_ledger` flag is on. Off: /snapshot answers 404 "snapshot off", as before.
   let monadSnapshot: SnapshotLoop | null = null
   const multicall3Monad = chainId === BRIDGE_MONAD_CHAIN_ID && registry.chainId === BRIDGE_MONAD_CHAIN_ID ? multicall3Of(registry) : null

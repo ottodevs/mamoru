@@ -279,6 +279,10 @@ describe('withReceipts', () => {
     const later = { ...op('eng-3', { ...facts('0xa3'), at: '2026-11-21T00:00:00.000Z' }, '0xa3'), feeScoped: true } as StoredOp
     await withReceipts(snapshot(), { ...one([later]), feeScope: () => true, scopeTakenLate: true as const }, async () => null, async () => T, SAFE_BLOCK)
     expect(later.facts!.feeable).toBeUndefined()
+    // A fact read with the scope in hand (out of scope then) keeps that decision when the account comes back in scope.
+    const decided = { ...op('eng-4', { ...facts('0xa4'), scopeRead: true }, '0xa4'), feeScoped: true } as StoredOp
+    await withReceipts(snapshot(), { ...one([decided]), feeScope: () => true, scopeTakenLate: true as const }, async () => null, async () => T, SAFE_BLOCK)
+    expect(decided.facts!.feeable).toBeUndefined()
   })
 })
 
@@ -322,7 +326,9 @@ describe('feeable (otto/mamoru#371): facts taken while the account is in the yie
     expect((await run(false))?.feeable).toBeUndefined()
     expect((await run(undefined))?.feeable).toBeUndefined()
     // Out of scope when the op was recorded, in scope by the time its facts are read: never charged.
-    expect((await run(true, false))?.feeable).toBeUndefined()
+    expect((await run(true, false))?.feeable).toBeUndefined()    // otto/mamoru#391: read with a scope in hand, the decision is recorded; without one (no fee on the chain), it is not.
+    expect((await run(false))?.scopeRead).toBe(true)
+    expect((await run(undefined))?.scopeRead).toBeUndefined()
   })
 })
 
