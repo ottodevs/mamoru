@@ -1269,13 +1269,16 @@ export class BridgeOut {
         if (r.receipt.status !== 'success') throw new Error('deploy reverted')
         await this.simulate(p.live.safe, exec)
       }
-      // From here the owner transaction may reach the provider even if the call below throws before returning a hash.
-      route.execStarted = true
-      this.write(ctx.accountKey, route)
+      // Started once SIGNED: the owner transaction may reach the provider even if the send then throws before returning a
+      // hash. A refusal before signing (gas price, budget, relayer balance) sent nothing, so the route stays 'failed'.
+      const started = () => {
+        route.execStarted = true
+        this.write(ctx.accountKey, route)
+      }
       const r = await this.charged({ to: p.live.safe, data: exec, gas: EXEC_GAS }, (h) => {
         route.l1Tx = h
-        this.write(ctx.accountKey, route)
-      })
+        started()
+      }, started)
       if (r.receipt.status !== 'success') {
         route.state = 'failed'
       } else {
@@ -1418,12 +1421,15 @@ export class BridgeOut {
         if (r.receipt.status !== 'success') throw new Error('deploy reverted')
         await this.simulate(p.live.safe, exec)
       }
-      c.execStarted = true
-      this.writeConvert(ctx.accountKey, c)
+      // Started once SIGNED, as for the move: a refusal before signing (gas price, budget, relayer balance) sent nothing.
+      const started = () => {
+        c.execStarted = true
+        this.writeConvert(ctx.accountKey, c)
+      }
       const r = await this.charged({ to: p.live.safe, data: exec, gas: CONVERT_GAS }, (h) => {
         c.l1Tx = h
-        this.writeConvert(ctx.accountKey, c)
-      })
+        started()
+      }, started)
       this.settleConvert(c, r.receipt)
     } catch (e) {
       logErr(`[bridge-out] convert ${ctx.accountKey.slice(0, 8)}:`, e)

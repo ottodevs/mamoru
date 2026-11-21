@@ -386,3 +386,59 @@ describe('convert reconciliation at a stale head (otto/mamoru#285)', () => {
     expect(await status(T0 + 60n, { signed: '1', nonce: 2n })).toBe('failed')
   })
 })
+
+describe('convert and move: started only once the owner transaction is signed (otto/mamoru#339)', () => {
+  const { mkdtempSync, readFileSync } = require('node:fs') as typeof import('node:fs')
+  const { tmpdir } = require('node:os') as typeof import('node:os')
+  const { join } = require('node:path') as typeof import('node:path')
+  type Hex = `0x${string}`
+  const SAFE = '0x0000000000000000000000000000000000000aaa' as const
+  const run = async (o: { gasPrice: bigint; send: (onSigned?: (h: Hex, n: number) => void) => Promise<never> }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'mamoru-convert-send-'))
+    const l1 = {
+      getBalance: async () => 10n ** 18n,
+      getCode: async () => '0x60',
+      readContract: async () => 0n,
+      getBlockNumber: async () => 100n,
+      getGasPrice: async () => o.gasPrice,
+      call: async () => ({ data: `0x${'1'.padStart(64, '0')}` }),
+    } as unknown as import('viem').PublicClient
+    const sent: number[] = []
+    const relayer = {
+      address: '0x0000000000000000000000000000000000000001' as const,
+      send: (_tx: unknown, _onSent?: unknown, _onSending?: unknown, onSigned?: (h: Hex, n: number) => void) => (sent.push(1), o.send(onSigned)),
+    }
+    const bo = new BridgeOut(l1, relayer, dir, fetch, () => Date.parse('2026-10-20T10:00:00Z'), undefined, () => true)
+    const p = { prepareId: 'p1', accountKey: 'a', live: { safe: SAFE }, tx: { to: SAFE, value: 0n, data: '0x', operation: 0, nonce: 0n }, safeTxHash: `0x${'c1'.repeat(32)}`, amountIn: 10n ** 18n, minOut: 1n, deployed: true, expires: 0 }
+    let error: unknown
+    try {
+      await (bo as unknown as { sendConvert: (c: unknown, p: unknown, s: Hex) => Promise<unknown> }).sendConvert({ accountKey: 'a' }, p, '0x')
+    } catch (e) {
+      error = e
+    }
+    const stored = JSON.parse(readFileSync(join(dir, 'bridge-out.json'), 'utf8')).converts.a as { state: string; execStarted?: boolean }
+    return { stored, sent: sent.length, error }
+  }
+
+  test('a refusal before the send (gas price) leaves the conversion failed, never unconfirmed', async () => {
+    const r = await run({ gasPrice: 10n ** 12n, send: () => Promise.reject(new Error('unreachable')) })
+    expect(r.sent).toBe(0)
+    expect(r.stored.state).toBe('failed')
+    expect(r.stored.execStarted).toBeUndefined()
+    expect((r.error as HttpError).code).toBe('CONVERT_FAILED')
+  })
+
+  test('a send that fails after the transaction was signed stays unconfirmed', async () => {
+    const r = await run({
+      gasPrice: 1n,
+      send: (onSigned) => {
+        onSigned?.(`0x${'ab'.repeat(32)}`, 0)
+        return Promise.reject(new Error('provider dropped the connection'))
+      },
+    })
+    expect(r.sent).toBe(1)
+    expect(r.stored.state).toBe('unconfirmed')
+    expect(r.stored.execStarted).toBe(true)
+    expect(r.error).toBeUndefined()
+  })
+})
