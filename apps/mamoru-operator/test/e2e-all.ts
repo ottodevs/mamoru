@@ -33,14 +33,39 @@ if (scripts.some((f) => NEEDS_POLICY_BUILD.has(f))) {
   run(['forge', 'build', '--silent'])
 }
 
+// A run stopped from outside (timeout wrapper, SIGTERM, Ctrl-C) must not leave the running script and its anvil forks
+// behind: forward the signal to the current script's process group, SIGKILL it after a grace period, then exit.
+let currentGroup: number | undefined
+let stopped: number | undefined
+const killCurrent = (sig: NodeJS.Signals) => {
+  try {
+    if (currentGroup) process.kill(-currentGroup, sig)
+  } catch {
+    // already gone
+  }
+}
+for (const [sig, code] of [['SIGTERM', 143], ['SIGINT', 130]] as const) {
+  process.on(sig, () => {
+    console.error(`${sig}: stopping the running e2e script and its process group`)
+    stopped = code
+    killCurrent(sig)
+    setTimeout(() => {
+      killCurrent('SIGKILL')
+      process.exit(code)
+    }, 5_000)
+  })
+}
+
 const rows: { name: string; result: 'PASS' | 'FAIL' | 'TIMEOUT'; secs: number; log: string }[] = []
 for (const f of scripts) {
+  if (stopped) break
   const log = join(logDir, `${f.slice(0, -3)}.log`)
   const t0 = Date.now()
   // One descriptor for both streams, new each run; each script leads its own process group (`detached`: setsid on Linux
   // and macOS, no external binary), so a timeout stops its anvil and proxies too, not only the bun process.
   const fd = openSync(log, 'w')
   const proc = spawn('bun', [join('apps/mamoru-operator/test', f)], { cwd: root, stdio: ['ignore', fd, fd], env: process.env, detached: true })
+  currentGroup = proc.pid
   const exited = new Promise<number | null>((resolve) => proc.on('exit', (c) => resolve(c)))
   const group = (sig: NodeJS.Signals) => {
     try {
@@ -59,11 +84,14 @@ for (const f of scripts) {
   clearTimeout(timer)
   // Whatever the script left behind (an anvil it did not stop) goes with it.
   group('SIGKILL')
+  currentGroup = undefined
   closeSync(fd)
   const secs = Math.round((Date.now() - t0) / 1000)
   rows.push({ name: f.slice(4, -3), result: timedOut ? 'TIMEOUT' : code === 0 ? 'PASS' : 'FAIL', secs, log })
   console.log(`${rows.at(-1)!.result.padEnd(7)} ${f} (${secs}s)`)
 }
+
+if (stopped) process.exit(stopped)
 
 const w = Math.max(6, ...rows.map((r) => r.name.length))
 console.log(`\n${'script'.padEnd(w)}  result   secs  log`)
