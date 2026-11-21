@@ -18,6 +18,14 @@ const withdrawal = (state: StoredOp['state'], feeUsdc?: string, txHash?: string)
   ({ opId: `own-${state}-${feeUsdc}-${txHash}`, kind: 'transfer', state, updatedAt: '2026-11-06T00:00:00Z', amountUsdc: '1000000', ...(feeUsdc ? { feeUsdc } : {}), ...(txHash ? { txHash } : {}) }) as StoredOp
 
 describe('yieldFee (otto/mamoru#371)', () => {
+  test('otto/mamoru#391: the remote Safes fee base adds to the home one, and home withdrawals cover both', () => {
+    const at = '2026-11-10T00:00:00.000Z'
+    expect(yieldFee([harvest(at, '20000000')], undefined, undefined, 30_000_000n)).toMatchObject({ collectedUsdc: 50_000_000n, feeUsdc: 5_000_000n, owedUsdc: 5_000_000n })
+    expect(yieldFee([], undefined, undefined, 30_000_000n)).toMatchObject({ collectedUsdc: 30_000_000n, owedUsdc: 3_000_000n })
+    expect(yieldFee([harvest(at, '20000000'), withdrawal('confirmed', '4000000', '0x01')], undefined, undefined, 30_000_000n)).toMatchObject({ chargedUsdc: 4_000_000n, owedUsdc: 1_000_000n })
+    expect(yieldFee([harvest(at, '20000000')], undefined, undefined, -5n).collectedUsdc).toBe(20_000_000n)
+  })
+
   test('otto/mamoru#423: a collect read on several stored ops is charged once', () => {
     const retry = (i: number, txHash = '0xAB'): StoredOp =>
       ({ opId: `eng-r${i}`, kind: 'reduce', state: 'confirmed', updatedAt: '2026-11-15T21:07:00.000Z', txHash, facts: { txHash, at: '2026-11-15T21:07:00.000Z', gasWei: '1', fees: [{ ...fee('5670000'), logIndex: 121 }], feeable: true } }) as StoredOp

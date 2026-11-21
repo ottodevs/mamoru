@@ -1815,6 +1815,29 @@ export class Operator {
   }
 
   /**
+   * otto/mamoru#391: what the account's remote Safes (remoteOf: the Monad sleeve, a V4 account's remote and its retired
+   * design-C Safe) collected that owes the fee, as their operator answers it, each Safe once. Any read that fails or
+   * says nothing counts 0: the withdrawal then charges less, and the rest is owed on the next one.
+   */
+  private async remoteFeeBase(acc: AccountState): Promise<bigint> {
+    const peers = this.cfg.peers
+    if (!peers?.configured) return 0n
+    const safes = this.onV4(acc) ? [acc.oneAuth?.remote?.address, this.designC(acc)?.address] : [acc.remote?.chainId === BRIDGE_MONAD_CHAIN_ID ? acc.remote.address : undefined]
+    let total = 0n
+    for (const safe of new Set(safes.flatMap((a) => (a ? [String(a).toLowerCase()] : [])))) {
+      try {
+        const r = await peers.read(safe, PEER_START_MAX_AGE_MS)
+        if (!r.ok) continue
+        const e = r.chains.find((c) => c.chainId === BRIDGE_MONAD_CHAIN_ID && c.at?.safe.toLowerCase() === safe)
+        total += e?.feeCollectedUsdc ?? 0n
+      } catch (err) {
+        logErr(`[peer] ${acc.accountKey} remote fee base not read:`, err)
+      }
+    }
+    return total
+  }
+
+  /**
    * otto/mamoru#212: GET /internal/exposure/<address>, what a peer operator counts of this Safe on this chain. Read only:
    * an address no account here uses is read from the chain and stored nowhere.
    */
@@ -1870,6 +1893,8 @@ export class Operator {
       releases,
       ...(returns?.ids.length ? { returns: returns.ids } : {}),
       ...(homeCap !== undefined ? { capUsdc: homeCap.toString() } : {}),
+      // otto/mamoru#391: a remote chain tells the home what this Safe's ops collected that owes the fee.
+      ...(acc && this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID ? { feeCollectedUsdc: yieldFee(acc.ops).collectedUsdc.toString() } : {}),
     }
   }
 
@@ -4089,7 +4114,9 @@ export class Operator {
     // otto/mamoru#371: Mamoru's yield fee, for an account in the `yield_fee` scope: paid to the relayer in this same
     // batch, on top of the amount. When the Safe cannot free both, the fee comes out of the amount, and the owner is
     // told what they receive; a withdrawal no larger than the fee pays no fee (it is owed on the next one).
-    const owed = this.inScope(acc, 'yield_fee') ? yieldFee(acc.ops) : null
+    // otto/mamoru#391: the home charges the fee its remote Safes owe too (their money comes home to be withdrawn here); a
+    // remote chain charges none, so nothing is charged twice.
+    const owed = this.inScope(acc, 'yield_fee') && this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID ? yieldFee(acc.ops, YIELD_FEE_BPS, YIELD_FEE_FROM, await this.remoteFeeBase(acc)) : null
     let fee = owed?.owedUsdc ?? 0n
     let pay = amount
     const planFor = async (total: bigint) => {

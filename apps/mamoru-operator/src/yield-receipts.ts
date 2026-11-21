@@ -436,6 +436,12 @@ export type ReceiptSource = {
   save(): void
   /** otto/mamoru#371: whether the account is in the yield fee's scope now. Absent: never (no fee on this chain). */
   feeScope?(accountKey: string): boolean
+  /**
+   * otto/mamoru#391: this chain's facts were taken before its loop had a feeScope (Monad), so none says `feeable`. Set,
+   * a fact already read whose op was recorded in the fee's scope (StoredOp.feeScoped), with the account in scope now,
+   * becomes feeable: the two checks a fact read today would pass.
+   */
+  scopeTakenLate?: true
 }
 
 export type ReceiptReader = (txHash: Hex) => Promise<{ logs: Log[]; blockNumber: bigint } | null>
@@ -546,6 +552,15 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
     }
   }
   for (const a of accounts) for (const op of a.ops) if (op.facts && priceFees(op.facts, snapshot.pools, registry)) changed = true
+  if (source.scopeTakenLate && source.feeScope)
+    for (const a of accounts) {
+      if (!a.ops.some((op) => op.facts && !op.facts.feeable && op.feeScoped) || !source.feeScope(a.accountKey)) continue
+      for (const op of a.ops)
+        if (op.facts && !op.facts.feeable && op.feeScoped) {
+          op.facts = { ...op.facts, feeable: true }
+          changed = true
+        }
+    }
   if (changed) source.save()
   const receipts = accounts
     .map((a) => {

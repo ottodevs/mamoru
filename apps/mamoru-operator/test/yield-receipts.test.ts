@@ -259,6 +259,23 @@ describe('withReceipts', () => {
     await withReceipts(snapshot(), one(ops), counting, async () => T, SAFE_BLOCK, tried)
     expect(fresh.facts).toBeDefined()
   })
+
+  test('otto/mamoru#391: facts read before the loop had a fee scope take it late: op recorded in scope, account in scope now', async () => {
+    const facts = (tx: string): OpFacts => ({ txHash: tx, v: FACTS_VERSION, at: '2026-11-10T00:00:00.000Z', gasWei: '1', fees: [] })
+    const scoped = { ...op('eng-1', facts('0xa1'), '0xa1'), feeScoped: true } as StoredOp
+    const unscoped = op('eng-2', facts('0xa2'), '0xa2')
+    let saves = 0
+    const src = (inScope: boolean, late = true) => ({ ...one([scoped, unscoped], () => void saves++), feeScope: () => inScope, ...(late ? { scopeTakenLate: true as const } : {}) })
+    await withReceipts(snapshot(), src(true, false), async () => null, async () => T, SAFE_BLOCK)
+    expect(scoped.facts!.feeable).toBeUndefined()
+    await withReceipts(snapshot(), src(false), async () => null, async () => T, SAFE_BLOCK)
+    expect(scoped.facts!.feeable).toBeUndefined()
+    expect(saves).toBe(0)
+    await withReceipts(snapshot(), src(true), async () => null, async () => T, SAFE_BLOCK)
+    expect(scoped.facts!.feeable).toBe(true)
+    expect(unscoped.facts!.feeable).toBeUndefined()
+    expect(saves).toBe(1)
+  })
 })
 
 describe('Monad (otto/mamoru#358): the chain registry decides the position manager, the pool name and the gas price', () => {

@@ -23,7 +23,7 @@ export const YIELD_FEE_FROM = '2026-11-05T00:00:00.000Z'
 export const YIELD_FEE_MIN = 10_000n
 
 export type YieldFee = {
-  /** USDC (raw) the account's ops collected since YIELD_FEE_FROM, priced fees only. */
+  /** USDC (raw) the account's ops collected since YIELD_FEE_FROM, priced fees only, plus its remote Safes' (#391). */
   collectedUsdc: bigint
   /** Collected fees not priced yet: owed once priced. */
   unpriced: number
@@ -44,9 +44,14 @@ function charged(op: StoredOp): boolean {
   return op.state !== 'failed'
 }
 
-export function yieldFee(ops: readonly StoredOp[], bps: bigint = YIELD_FEE_BPS, from: string = YIELD_FEE_FROM): YieldFee {
+/**
+ * `remoteUsdc` (otto/mamoru#391): what the account's remote Safes collected that owes the fee, as their operator answers
+ * it (already priced, feeable and since `from` there). Added to the base here; charged only at home, so `chargedUsdc`
+ * (this Safe's withdrawals) covers both.
+ */
+export function yieldFee(ops: readonly StoredOp[], bps: bigint = YIELD_FEE_BPS, from: string = YIELD_FEE_FROM, remoteUsdc: bigint = 0n): YieldFee {
   const since = Date.parse(from)
-  let collectedUsdc = 0n
+  let collectedUsdc = remoteUsdc > 0n ? remoteUsdc : 0n
   let unpriced = 0
   let chargedUsdc = 0n
   // otto/mamoru#423: a collect read on several stored ops is charged once.

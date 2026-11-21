@@ -34,6 +34,22 @@ export type ChainExposure = {
    * chain. A remote Safe's own cap is its bridge-out total, not the account's: its engine places within this one.
    */
   capUsdc?: bigint
+  /**
+   * otto/mamoru#391: what this Safe's ops collected that owes the yield fee (yieldFee's collectedUsdc), answered by a
+   * remote chain for a Safe of an account it runs there. The home charges it in the owner's next withdrawal.
+   */
+  feeCollectedUsdc?: bigint
+}
+
+/**
+ * otto/mamoru#391: the remote's fee base, when it sent a well-formed one. A malformed one is dropped, not the read: the
+ * caps and totals this answer carries do not depend on it, and without it the home only charges less.
+ */
+function feeOf(chainId: number, w: Partial<ExposureWire>): { feeCollectedUsdc?: bigint } {
+  if (w.feeCollectedUsdc === undefined) return {}
+  if (typeof w.feeCollectedUsdc === 'string' && UINT.test(w.feeCollectedUsdc)) return { feeCollectedUsdc: BigInt(w.feeCollectedUsdc) }
+  console.log(`[peer] chain ${chainId} exposure read: fee base malformed, left out`)
+  return {}
 }
 
 /** otto/mamoru#355: one release of a remote Safe as its operator reports it. Amounts are base-unit strings. */
@@ -166,7 +182,7 @@ export function coversAsked(had: Covered | undefined, want: Covered | undefined)
  * What GET /internal/exposure/<address> answers. Amounts are base-unit strings. otto/mamoru#355: `releases` (a remote
  * Safe's operator) and `returns` (the home's), both optional: a peer on older code sends neither and ignores both.
  */
-export type ExposureWire = { chainId: number; address: string; block: string; idleUsdc: string; placedUsdc: string; active: boolean; releases?: ReleaseWire[]; returns?: string[]; capUsdc?: string }
+export type ExposureWire = { chainId: number; address: string; block: string; idleUsdc: string; placedUsdc: string; active: boolean; releases?: ReleaseWire[]; returns?: string[]; capUsdc?: string; feeCollectedUsdc?: string }
 
 export type PeerRead = { ok: true; chains: ChainExposure[] } | { ok: false; chainId: number }
 
@@ -332,7 +348,7 @@ export class PeerExposure {
         console.log(`[peer] chain ${peer.chainId} exposure read malformed (releases, returns or cap)`)
         return null
       }
-      return { chainId: peer.chainId, idleUsdc: BigInt(w.idleUsdc), placedUsdc: BigInt(w.placedUsdc), active: w.active, at: { safe: address, block: BigInt(w.block) }, ...lists, ...(w.capUsdc !== undefined ? { capUsdc: BigInt(w.capUsdc) } : {}) }
+      return { chainId: peer.chainId, idleUsdc: BigInt(w.idleUsdc), placedUsdc: BigInt(w.placedUsdc), active: w.active, at: { safe: address, block: BigInt(w.block) }, ...lists, ...(w.capUsdc !== undefined ? { capUsdc: BigInt(w.capUsdc) } : {}), ...feeOf(peer.chainId, w) }
     } catch (e) {
       // Fixed text only: an error may quote the URL.
       console.log(`[peer] chain ${peer.chainId} exposure read failed (${e instanceof Error && e.name === 'TimeoutError' ? 'timeout' : 'unreachable'})`)

@@ -116,6 +116,16 @@ describe('two chains placing from stale reads never place past the cap together'
     }
   })
 
+  test('otto/mamoru#391: a remote fee base rides on the read; a malformed one is dropped, never the read', async () => {
+    const good = peer(() => wire({ feeCollectedUsdc: '1234' }))
+    const r = await new PeerExposure([{ chainId: 143, url: good.url }], SECRET).read(SAFE, 0)
+    expect(r.ok && r.chains[0]!.feeCollectedUsdc).toBe(1234n)
+    const bad = peer(() => wire({ feeCollectedUsdc: '-1' }))
+    const b = await new PeerExposure([{ chainId: 143, url: bad.url }], SECRET).read(SAFE, 0)
+    expect(b.ok && b.chains[0]!.idleUsdc).toBe(300n * USDC)
+    expect(b.ok && b.chains[0]!.feeCollectedUsdc).toBeUndefined()
+  })
+
   test('the peer could not be read: no new money on either side', () => {
     expect(room(0n, 1_000n * USDC, { ok: false, chainId: 143 })).toBe(0n)
   })

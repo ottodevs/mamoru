@@ -826,7 +826,13 @@ export async function bootOperator(o: BootOptions) {
     // Monad harvest counts in the yield ledger like a Base one. No hold-value baseline (Base-bound).
     const tried = new Map<string, number>()
     const receipts = {
-      source: { accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops })), save: () => store.save() },
+      source: {
+        accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops })),
+        save: () => store.save(),
+        // otto/mamoru#391: Monad yield owes the fee too; facts read before this had no scope, so they take it late.
+        feeScope: (accountKey: string) => operator.yieldFeeScope(accountKey),
+        scopeTakenLate: true as const,
+      },
       readReceipt: async (hash: Hex) => {
         const r = await snapshotClient.getTransactionReceipt({ hash }).catch((e: unknown) => {
           if (e instanceof TransactionReceiptNotFoundError) return null
