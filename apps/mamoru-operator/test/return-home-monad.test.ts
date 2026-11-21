@@ -83,8 +83,8 @@ describe('the confirmed burn, as this Safe reports it home', () => {
 
 const USDC = address('USDC', registry)
 const RH = { chainId: 143, safe: SAFE, safeNonce: '5', home: HOME, amountUsdc: '28850000', removeIds: GRANTS }
-function burnLog(o: { amount?: bigint; recipient?: Address; depositor?: Address; domain?: number; fee?: bigint; emitter?: Address } = {}) {
-  const topics = encodeEventTopics({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', args: { burnToken: USDC, depositor: o.depositor ?? SAFE, minFinalityThreshold: 2000 } })
+function burnLog(o: { amount?: bigint; recipient?: Address; depositor?: Address; domain?: number; fee?: bigint; emitter?: Address; finality?: number } = {}) {
+  const topics = encodeEventTopics({ abi: tokenMessengerV2Abi, eventName: 'DepositForBurn', args: { burnToken: USDC, depositor: o.depositor ?? SAFE, minFinalityThreshold: o.finality ?? 2000 } })
   const data = encodeAbiParameters(
     [{ type: 'uint256' }, { type: 'bytes32' }, { type: 'uint32' }, { type: 'bytes32' }, { type: 'bytes32' }, { type: 'uint256' }, { type: 'bytes' }],
     [o.amount ?? 28_850_000n, pad(o.recipient ?? HOME, { size: 32 }), o.domain ?? 6, pad(TOKEN_MESSENGER_V2, { size: 32 }), `0x${'00'.repeat(32)}`, o.fee ?? 0n, '0x'],
@@ -100,7 +100,7 @@ describe('review r1: the burn is recorded only from its own receipt', () => {
     expect(returnBurnMismatch(rc([]), RH, USDC)).toBe('RETURN_BURNS_0')
     expect(returnBurnMismatch(rc([burnLog({ emitter: `0x${'99'.repeat(20)}` })]), RH, USDC)).toBe('RETURN_BURNS_0')
     expect(returnBurnMismatch(rc([burnLog(), burnLog()]), RH, USDC)).toBe('RETURN_BURNS_2')
-    for (const o of [{ amount: 1n }, { recipient: `0x${'99'.repeat(20)}` as Address }, { depositor: `0x${'98'.repeat(20)}` as Address }, { domain: 0 }, { fee: 1n }]) {
+    for (const o of [{ amount: 1n }, { recipient: `0x${'99'.repeat(20)}` as Address }, { depositor: `0x${'98'.repeat(20)}` as Address }, { domain: 0 }, { fee: 1n }, { finality: 1000 }]) {
       expect(returnBurnMismatch(rc([burnLog(o)]), RH, USDC), JSON.stringify(o, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).toBe('RETURN_BURN_MISMATCH')
     }
   })
@@ -117,6 +117,37 @@ describe('review r1: the burn is recorded only from its own receipt', () => {
     expect(reads).toBe(1)
     expect(acc.releasesDone).toHaveLength(1)
     expect(releasesToCount(acc)).toEqual([{ id: `home-${'22'.repeat(12)}`, chainId: 8453, at: acc.releasesDone![0]!.at, home: HOME, owner: HOME, amount: 28_850_000n, block: 777, tx: `0x${'22'.repeat(32)}` }])
+  })
+
+  test('review r2: two passes at once (the settle and an exposure answer) record one release, one receipt read', async () => {
+    const m = monad()
+    const acc = m.state.accounts[rctx.accountKey]!
+    acc.ops.push({ opId: 'own-1-exit', kind: 'exit', state: 'confirmed', txHash: `0x${'22'.repeat(32)}`, returnHome: RH, updatedAt: 't' } as never)
+    let reads = 0
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    ;(m.op as unknown as { client: { getTransactionReceipt: () => Promise<unknown> } }).client.getTransactionReceipt = async () => (reads++, await gate, rc([burnLog()]))
+    const rec = (m.op as unknown as { recordReturnBurns(a: AccountState): Promise<void> }).recordReturnBurns.bind(m.op)
+    const a = rec(acc)
+    const b = rec(acc)
+    release()
+    await Promise.all([a, b])
+    expect(reads).toBe(1)
+    expect(acc.releasesDone).toHaveLength(1)
+  })
+
+  test('review r2: a receipt with no burn log is read again a few times before it is final', async () => {
+    const m = monad()
+    const acc = m.state.accounts[rctx.accountKey]!
+    acc.ops.push({ opId: 'own-1-exit', kind: 'exit', state: 'confirmed', txHash: `0x${'22'.repeat(32)}`, returnHome: RH, updatedAt: 't' } as never)
+    let logs: unknown[] = []
+    ;(m.op as unknown as { client: { getTransactionReceipt: () => Promise<unknown> } }).client.getTransactionReceipt = async () => rc(logs)
+    const rec = (m.op as unknown as { recordReturnBurns(a: AccountState): Promise<void> }).recordReturnBurns.bind(m.op)
+    await rec(acc)
+    expect((acc.ops[0] as unknown as { returnRecorded?: string }).returnRecorded).toBeUndefined()
+    logs = [burnLog()]
+    await rec(acc)
+    expect(acc.releasesDone).toHaveLength(1)
   })
 
   test('a receipt without the signed burn: no release, the reason kept on the op', async () => {

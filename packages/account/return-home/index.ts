@@ -32,6 +32,15 @@ const dec = (s: string, what: string): bigint => {
   return BigInt(s)
 }
 
+/**
+ * The release id of an owner-signed return, derived from its burn transaction's hash: the Monad operator records it under
+ * this id and the home accepts an owner report only under the id it derives itself from the attested tx.
+ */
+export function returnReleaseId(txHash: Hex): string {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) throw new Error('returnReleaseId: not a transaction hash')
+  return `home-${txHash.slice(2, 26).toLowerCase()}`
+}
+
 /** The calls of `input`, in order. Throws on any input the operator would not prepare. */
 export function returnHomeCalls(input: ReturnHomeInput, registry: Registry): { to: Address; value: bigint; data: Hex }[] {
   if (registry.chainId !== input.chainId) throw new Error(`buildReturnHome: registry of chain ${registry.chainId}, input on ${input.chainId}`)

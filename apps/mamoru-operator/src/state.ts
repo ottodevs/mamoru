@@ -41,6 +41,8 @@ export type StoredOp = OpView & {
    */
   returnHome?: ReturnHomeInput
   returnRecorded?: string
+  /** otto/mamoru#428: reads of its receipt that showed no burn log yet (a provider's incomplete answer is read again). */
+  returnReads?: number
   /** otto/mamoru#293, migrate-v4: the old ids it removed (revokes: every id it revoked; OpView.migrateStep its step). */
   removes?: Hex[]
   /** migrate-v4: the C the signed InitV4 carries (applied by a late receipt). */

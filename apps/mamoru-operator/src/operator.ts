@@ -32,7 +32,7 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
-import { buildReturnHome, RETURN_HOME_DOMAIN, TOKEN_MESSENGER_V2 as RETURN_TOKEN_MESSENGER } from '@mamoru/account/return-home'
+import { buildReturnHome, RETURN_HOME_DOMAIN, RETURN_HOME_FINALITY, returnReleaseId, TOKEN_MESSENGER_V2 as RETURN_TOKEN_MESSENGER } from '@mamoru/account/return-home'
 import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReportedRelease, ReturnHome } from './return-home.ts'
@@ -769,9 +769,13 @@ export function returnBurnMismatch(receipt: Pick<TransactionReceipt, 'status' | 
     a.destinationDomain === RETURN_HOME_DOMAIN &&
     BigInt(a.destinationCaller) === 0n &&
     a.maxFee === 0n &&
+    a.minFinalityThreshold === RETURN_HOME_FINALITY &&
     a.hookData === '0x'
   return ok ? null : 'RETURN_BURN_MISMATCH'
 }
+
+/** otto/mamoru#428: reads of a return's receipt that shows no burn log before that is taken as final. */
+const RETURN_RECEIPT_READS = 5
 
 /** otto/mamoru#428: WMON a return home leaves behind (0.01 WMON); above it, #427 has not finished selling it. */
 const RETURN_HOME_WMON_DUST = 10n ** 16n
@@ -7272,27 +7276,46 @@ export class Operator {
   private async recordReturnBurns(acc: AccountState): Promise<void> {
     for (const op of acc.ops as StoredOp[]) {
       const rh = op.returnHome
-      if (!rh || op.returnRecorded || op.state !== 'confirmed' || !op.txHash) continue
+      // Review r2: one read per op at a time (the settle's microtask and an exposure answer may both get here); marked
+      // before the await, checked again after it.
+      if (!rh || op.returnRecorded || op.state !== 'confirmed' || !op.txHash || this.returnRecording.has(op.opId)) continue
       if (BigInt(rh.amountUsdc) === 0n) {
         op.returnRecorded = 'NOTHING_BURNED'
         this.store.save()
         continue
       }
-      const receipt = await this.client.getTransactionReceipt({ hash: op.txHash as Hex })
-      const why = returnBurnMismatch(receipt, rh, address('USDC', this.cfg.registry))
-      if (why) {
-        op.returnRecorded = why
-        logErr(`[alert] ${acc.accountKey} return home ${op.opId} (tx ${op.txHash}): ${why}; no release recorded`, undefined)
+      this.returnRecording.add(op.opId)
+      try {
+        const receipt = await this.client.getTransactionReceipt({ hash: op.txHash as Hex })
+        if (op.returnRecorded) continue
+        const why = returnBurnMismatch(receipt, rh, address('USDC', this.cfg.registry))
+        // No burn log at all in a successful receipt may be a provider's incomplete answer: read again, a few times.
+        if (why === 'RETURN_BURNS_0' && (op.returnReads = (op.returnReads ?? 0) + 1) < RETURN_RECEIPT_READS) {
+          this.store.save()
+          continue
+        }
+        if (why) {
+          op.returnRecorded = why
+          logErr(`[alert] ${acc.accountKey} return home ${op.opId} (tx ${op.txHash}): ${why}; no release recorded`, undefined)
+          this.store.save()
+          continue
+        }
+        const id = returnReleaseId(op.txHash as Hex)
+        if (!(acc.releasesDone ?? []).some((r) => r.id === id)) {
+          const at = new Date().toISOString()
+          acc.releasesDone = [...(acc.releasesDone ?? []), { id, amount: rh.amountUsdc, chainId: BASE_CHAIN_ID, state: 'burned', burn: { userOpHash: ZERO_HASH, amount: rh.amountUsdc, txHash: op.txHash as Hex, block: Number(receipt.blockNumber) }, owner: { home: getAddress(rh.home) }, at, updatedAt: at }]
+        }
+        op.returnRecorded = 'burned'
         this.store.save()
-        continue
+        console.log(`[return] ${acc.accountKey} ${op.opId}: ${rh.amountUsdc} USDC burned home to ${rh.home} (tx ${op.txHash})`)
+      } finally {
+        this.returnRecording.delete(op.opId)
       }
-      const at = new Date().toISOString()
-      acc.releasesDone = [...(acc.releasesDone ?? []), { id: `home-${op.txHash.slice(2, 26)}`, amount: rh.amountUsdc, chainId: BASE_CHAIN_ID, state: 'burned', burn: { userOpHash: ZERO_HASH, amount: rh.amountUsdc, txHash: op.txHash as Hex, block: Number(receipt.blockNumber) }, owner: { home: getAddress(rh.home) }, at, updatedAt: at }]
-      op.returnRecorded = 'burned'
-      this.store.save()
-      console.log(`[return] ${acc.accountKey} ${op.opId}: ${rh.amountUsdc} USDC burned home to ${rh.home} (tx ${op.txHash})`)
     }
   }
+
+  /** otto/mamoru#428: return-home ops whose receipt is being read now (recordReturnBurns). */
+  private readonly returnRecording = new Set<string>()
 
   /** Monad side (`POST migrate-v4/status`, from the Base operator): whether step 1 is confirmed on this Safe. */
   migrateV4Status(ctx: AccountContext): { done: boolean; failed: boolean; code?: string } {
