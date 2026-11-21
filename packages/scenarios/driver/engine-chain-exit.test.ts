@@ -87,4 +87,23 @@ describe('chain exit reduce through the engine (otto/mamoru#427)', () => {
     expect(MONAD_GRANT.has(`WMON|${toFunctionSelector('function approve(address,uint256)')}`)).toBe(true)
     expect(MONAD_GRANT.has(`SwapRouter02|${toFunctionSelector('function exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))')}`)).toBe(true)
   })
+
+  test('the simulation check expects one position fewer only when the prepared batch burns it', async () => {
+    await withEngine(POLICIES['conservador-live-v2']!, async (e, chain) => {
+      chain.addPosition(ACCOUNT, TOKEN_ID, POOL)
+      const pos = chain.positions.find((p) => p.tokenId === TOKEN_ID)!
+      const check = (p: Proposal, prepared: Prepared, nftDelta: bigint) =>
+        (e as unknown as { deltaMismatch: (p: Proposal, prepared: Prepared, sim: unknown) => string | null }).deltaMismatch(p, prepared, { block: chain.head, ok: true, deltas: {}, nftDelta, gasUsed: 0n, logs: [] })
+      const full: Proposal = { kind: 'reduce', grant: 'manage-any', pool: POOL, tokenId: TOKEN_ID, liquidity: pos.liquidity, burn: true }
+      const burnt = await prepare(e, full, chain)
+      expect(check(full, burnt, -1n)).toBeNull()
+      expect(check(full, burnt, 0n)).toContain('intent -1')
+      const part: Proposal = { ...full, liquidity: pos.liquidity - 1n }
+      const kept = await prepare(e, part, chain)
+      expect(check(part, kept, 0n)).toBeNull()
+      expect(check(part, kept, -1n)).toContain('intent 0')
+      const plain: Proposal = { kind: 'reduce', grant: 'manage-any', pool: POOL, tokenId: TOKEN_ID, liquidity: pos.liquidity }
+      expect(check(plain, await prepare(e, plain, chain), -1n)).toContain('intent 0')
+    })
+  })
 })

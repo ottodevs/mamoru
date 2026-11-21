@@ -2520,7 +2520,12 @@ export class Engine {
       return null
     }
     if (p.kind === 'rerange' || p.kind === 'reduce') {
-      const want = p.kind === 'rerange' ? -1n : 0n
+      // otto/mamoru#427: a chain exit's reduce burns the NFT when it took the whole position: the batch prepared for it
+      // holds the position manager's burn, and only then is one position fewer the intent.
+      const npm = address('NonfungiblePositionManager', this.registry)
+      const burnSel = toFunctionSelector('function burn(uint256)')
+      const burns = p.kind === 'reduce' && p.burn === true && prepared.calls.some((c) => isAddressEqual(c.target, npm) && c.callData.slice(0, 10).toLowerCase() === burnSel)
+      const want = p.kind === 'rerange' || burns ? -1n : 0n
       if (sim.nftDelta !== want) return `positions changed by ${sim.nftDelta}, intent ${want}`
       const pool = entry(p.pool, this.registry)
       if (d(pool.token0!) < 0n || d(pool.token1!) < 0n) return `${pool.token0} moved ${d(pool.token0!)}, ${pool.token1} moved ${d(pool.token1!)}: a ${p.kind} only returns tokens to the account`
