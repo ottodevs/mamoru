@@ -34,8 +34,10 @@ export const DEPOSIT_CONFIRM_BLOCKS = 300n
 
 /** Blocks per eth_getLogs page (the provider's 2,000-block range, as OWNER_LOG_PAGE_BLOCKS). */
 export const DEPOSIT_PAGE_BLOCKS = 2_000n
-/** How far back a Safe with no cursor yet is read (about a day of Base blocks): older deposits are not listed. */
+/** How far back a Safe with no cursor yet is read (a day): older deposits are not listed. In blocks at 2 s, the default. */
 export const DEPOSIT_BACKFILL_BLOCKS = 43_200n
+/** otto/mamoru#445: the same day in seconds, which the operator turns into blocks of its chain. */
+export const DEPOSIT_BACKFILL_SECONDS = 86_400
 /** Rows kept per account, newest last. */
 export const DEPOSITS_KEPT = 200
 
@@ -44,8 +46,8 @@ export const DEPOSITS_KEPT = 200
  * to the head, at most `pages` pages. Null when the cursor is at the head already. A gap longer than the backfill (a
  * Safe nobody looked at for days) starts over at the backfill window: older deposits are not listed.
  */
-export function depositRange(cursor: bigint | undefined, head: bigint, pages: number): { from: bigint; to: bigint } | null {
-  const oldest = head >= DEPOSIT_BACKFILL_BLOCKS ? head - DEPOSIT_BACKFILL_BLOCKS + 1n : 0n
+export function depositRange(cursor: bigint | undefined, head: bigint, pages: number, backfill = DEPOSIT_BACKFILL_BLOCKS): { from: bigint; to: bigint } | null {
+  const oldest = head >= backfill ? head - backfill + 1n : 0n
   const from = cursor === undefined || cursor + 1n < oldest ? oldest : cursor + 1n
   if (from > head) return null
   const span = DEPOSIT_PAGE_BLOCKS * BigInt(pages)

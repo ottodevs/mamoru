@@ -186,7 +186,8 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
   } as unknown as Relayer
   const state = { accounts: {} as Record<string, AccountState> }
   const store = { state, save: () => {} } as unknown as StateStore
-  const cfg = { chainId: 8453, registry: baseRegistry, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES[policyId]!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 } satisfies OperatorConfig
+  // otto/mamoru#445: this world's heights were written at Base's old 2 s blocks; it keeps that pace.
+  const cfg = { chainId: 8453, registry: baseRegistry, blockTimeMs: 2_000, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES[policyId]!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 } satisfies OperatorConfig
   const op = new Operator(cfg, client, relayer, store)
   ;(op as unknown as { retryMs: number }).retryMs = 0
   const w = { op, chain, sent, simulated, called, knobs, factory, state }

@@ -64,15 +64,15 @@ describe('FORBIDDEN_LAB_CHAIN_IDS', () => {
 })
 
 describe('secondsToBlocks and blocksIn (otto/mamoru#417)', () => {
-  test('a duration lasts as long on every chain: 24 s is 12 Base blocks and 80 Monad blocks; a partial block rounds up', () => {
-    expect(secondsToBlocks(8453, 24)).toBe(12n)
+  test('a duration lasts as long on every chain: 24 s is 120 Base blocks (200 ms, otto/mamoru#445) and 80 Monad blocks (300 ms); a partial block rounds up', () => {
+    expect(secondsToBlocks(8453, 24)).toBe(120n)
     expect(secondsToBlocks(143, 24)).toBe(80n)
-    expect(secondsToBlocks(8453, 900)).toBe(450n)
+    expect(secondsToBlocks(8453, 900)).toBe(4_500n)
     expect(secondsToBlocks(143, 900)).toBe(3_000n)
-    expect(secondsToBlocks(8453, 1)).toBe(1n)
+    expect(secondsToBlocks(143, 1)).toBe(4n)
   })
   test('blocksIn rounds a span of chain time down; an unsupported chain is refused', () => {
-    expect(blocksIn(8453, 601n)).toBe(300n)
+    expect(blocksIn(8453, 61n)).toBe(305n)
     expect(blocksIn(143, 3n)).toBe(10n)
     expect(code(() => secondsToBlocks(1, 24))).toBe('CHAIN_UNSUPPORTED')
   })

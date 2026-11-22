@@ -40,7 +40,9 @@ export const BASE_CHAIN: ChainDescriptor = {
   name: 'Base',
   native: { symbol: 'ETH', decimals: 18 },
   wrappedNative: 'WETH',
-  blockTimeMs: 2_000,
+  // otto/mamoru#445: 200 ms since about 2026-11-05 18:02 UTC (block ~53,556,722); 2 s before. Measured on two public
+  // nodes on 2026-11-22: 10,000 blocks span 2,000 s.
+  blockTimeMs: 200,
   finalityTag: 'safe',
   gasModel: 'gas_used',
   l1DataFee: true,

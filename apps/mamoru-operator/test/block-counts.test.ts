@@ -18,9 +18,8 @@ const ALLOWED: Record<string, string> = {
   DEPOSIT_PAGE_BLOCKS: 'RPC page size',
   MONAD_HISTORY_STEP_BLOCKS: 'RPC page size (Monad only)',
   // How far back a search reads: RPC budget per look, sized per chain where it matters (#419 cuts RPC volume).
-  OWNER_LOG_SEARCH_BLOCKS: 'search budget in blocks',
   LOG_WINDOW_BLOCKS: 'search budget in blocks',
-  DEPOSIT_BACKFILL_BLOCKS: 'search budget in blocks',
+  DEPOSIT_BACKFILL_BLOCKS: 'the default for a caller without a chain; the operator passes a day of its own blocks',
   INVENTORY_SLACK_BLOCKS: 'search budget in blocks',
   MONAD_HISTORY_LAG_BLOCKS: 'search budget in blocks (Monad only)',
   MONAD_CATCH_UP_BLOCKS: 'search budget in blocks (Monad only)',
@@ -31,8 +30,8 @@ const ALLOWED: Record<string, string> = {
   SIBLING_SCAN_LAG: 'Ethereum only',
   // Stats sync on the engine: block windows of the pool history, labelled per chain.
   MB_MAX_LAG_BLOCKS: 'indexer lag in blocks',
-  WINDOW_BLOCKS: 'stats window in blocks',
-  SNAPSHOT_RETENTION_BLOCKS: 'stats retention in blocks',
+  WINDOW_BLOCKS: 'default without a chain; syncOnce uses WINDOW_SECONDS',
+  SNAPSHOT_RETENTION_BLOCKS: 'default without a chain; syncOnce uses SNAPSHOT_RETENTION_SECONDS',
   VOUCHED_BLOCKS_PER_RUN: 'a count of blocks per run, not a duration',
 }
 

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, pad, parseAbi, parseAbiItem, parseEventLogs, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { BASE_CHAIN_ID, blocksIn, chainOf, isChainId, overCap, secondsToBlocks, ReasonError, type AccountContext, type Address, type RemoteSpec, type ReturnHomeInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type ReturnHomeInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, baseRegistry, tokenMessengerV2Abi, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
@@ -57,7 +57,7 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, POSITION_DUST_USDC, amountsForLiquidity, idleTokens, inUsdc, livePool, nativePricePool, positionUsdc, positionView, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
-import { balanceMoves, DEPOSIT_CONFIRM_BLOCKS, DEPOSIT_PAGE_BLOCKS, depositId, depositOpView, depositRange, depositsOf, mergeDeposits, readTransfersIn, type DepositRow } from './deposits.ts'
+import { balanceMoves, DEPOSIT_BACKFILL_SECONDS, DEPOSIT_CONFIRM_BLOCKS, DEPOSIT_PAGE_BLOCKS, depositId, depositOpView, depositRange, depositsOf, mergeDeposits, readTransfersIn, type DepositRow } from './deposits.ts'
 import { exposureOf, joinReads, totalOf, type ChainExposure, type Covered, type ExposureWire, type PeerExposure, type PeerRead } from './exposure.ts'
 import { closeCalls, planReduce, planVaultExit, routeOf, swapBackCalls, vaultExitCalls, type SwapBack, type VaultExit } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
@@ -190,8 +190,8 @@ const SETTLE_SECONDS = 24
 type LocalTotal = { total: bigint; safe: Address; block: bigint }
 type SpentBy = { safeTxHash: Hex; tx: Hex; block: bigint; ours: boolean; success: boolean }
 const EXECUTION_SUCCESS_EVENT = parseAbiItem('event ExecutionSuccess(bytes32 indexed txHash, uint256 payment)')
-/** How far past an owner op's send block its ExecutionSuccess is searched for (about a day of Base blocks), and per request. */
-const OWNER_LOG_SEARCH_BLOCKS = 43_200n
+/** How far past an owner op's send its ExecutionSuccess is searched for (a day: otto/mamoru#445, in seconds), and the blocks per request. */
+const OWNER_LOG_SEARCH_SECONDS = 86_400
 const OWNER_LOG_PAGE_BLOCKS = 2_000n
 /** First and longest wait between reconciliation passes of an account with owner ops still unresolved (doubling). */
 const RECONCILE_RETRY_MS = 30_000
@@ -579,6 +579,8 @@ export function safeHttpError(status: number, code: keyof typeof SAFE_ERROR_MESS
 
 export type OperatorConfig = {
   chainId: number
+  /** otto/mamoru#445: block time in ms for seconds-to-blocks, for tests and lab forks; absent: the chain's reference. */
+  blockTimeMs?: number
   /**
    * otto/mamoru#63: the registry of the chain this operator reads (boot.ts `operatorRegistry`): pools, tokens, the
    * live pool and every contract address come from it. On a lab fork it is the registry of the forked chain.
@@ -1079,14 +1081,24 @@ export class Operator {
   private readonly refillHeld = new Map<string, string>()
   private readonly gasReserveAlertOverride = gasReserveAlertOverrideFromEnv()
   private relayerBalanceCache: { at: number; value: bigint } | null = null
-  /** otto/mamoru#417: the chain whose block time turns seconds into blocks (Base for a config without a registry). */
-  private get timeChain(): number {
-    return this.cfg.registry?.chainId ?? BASE_CHAIN_ID
+  /**
+   * otto/mamoru#417/#445: the block time that turns seconds into blocks: the config's when set (tests and lab forks that
+   * mine at their own pace), else the chain's reference (Base 200 ms since 5 Nov 2026, Monad 300 ms).
+   */
+  private get blockMs(): bigint {
+    return BigInt(this.cfg.blockTimeMs ?? chainOf(this.cfg.registry?.chainId ?? BASE_CHAIN_ID).blockTimeMs)
+  }
+  /** `seconds` of chain time in blocks, rounded up. */
+  private toBlocks(seconds: number): bigint {
+    return (BigInt(seconds) * 1000n + this.blockMs - 1n) / this.blockMs
+  }
+  /** How many blocks fit in a span of chain time (bigint seconds), rounded down. */
+  private spanBlocks(seconds: bigint): bigint {
+    return (seconds * 1000n) / this.blockMs
   }
   /** otto/mamoru#417: the block-count waits of this operator's chain, from their durations in seconds. */
   private get blocks(): { settle: bigint; depositsSave: bigint } {
-    const chainId = this.timeChain
-    return { settle: secondsToBlocks(chainId, SETTLE_SECONDS), depositsSave: secondsToBlocks(chainId, DEPOSITS_SAVE_SECONDS) }
+    return { settle: this.toBlocks(SETTLE_SECONDS), depositsSave: this.toBlocks(DEPOSITS_SAVE_SECONDS) }
   }
   /** otto/mamoru#412: the maxFeePerGas the relayer check last read (RELAYER_BALANCE_CACHE_MS), and when it last logged a hold. */
   private relayerGasPriceCache: { at: number; value: bigint } | null = null
@@ -2610,7 +2622,7 @@ export class Operator {
     const found: DepositRow[] = []
     const moves: string[] = []
     try {
-      const range = depositRange(w.cursor, head, DEPOSIT_PAGES_PER_PASS)
+      const range = depositRange(w.cursor, head, DEPOSIT_PAGES_PER_PASS, this.toBlocks(DEPOSIT_BACKFILL_SECONDS))
       let arriving: DepositRow[] | null = range ? null : []
       const above: DepositRow[] = []
       if (range) {
@@ -4642,7 +4654,7 @@ export class Operator {
       // From before the op's first handover (the Safe nonce was N or lower then), widened until it is.
       const top = await this.client.getBlock({ blockNumber: upTo })
       const since = BigInt(Math.floor((op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt)) / 1000))
-      let back = (top.timestamp > since ? blocksIn(this.timeChain, top.timestamp - since) : 0n) + secondsToBlocks(this.timeChain, SEARCH_SLACK_SECONDS)
+      let back = (top.timestamp > since ? this.spanBlocks(top.timestamp - since) : 0n) + this.toBlocks(SEARCH_SLACK_SECONDS)
       let lo = upTo > back ? upTo - back : 0n
       let loNonce = await nonceAt(lo)
       while (loNonce > n && lo > 0n) {
@@ -4785,7 +4797,7 @@ export class Operator {
   private async firstSendBlock(op: StoredOp, upTo: bigint): Promise<bigint> {
     const top = await this.client.getBlock({ blockNumber: upTo })
     const since = BigInt(Math.floor((op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt)) / 1000))
-    const back = (top.timestamp > since ? blocksIn(this.timeChain, top.timestamp - since) : 0n) + secondsToBlocks(this.timeChain, SEARCH_SLACK_SECONDS)
+    const back = (top.timestamp > since ? this.spanBlocks(top.timestamp - since) : 0n) + this.toBlocks(SEARCH_SLACK_SECONDS)
     return upTo > back ? upTo - back : 0n
   }
 
@@ -5582,7 +5594,7 @@ export class Operator {
         // first block with the grant enabled, searched from just before the transaction was first handed over.
         const head = await this.client.getBlockNumber()
         const since = a.sentAt ?? (Date.parse(op.updatedAt) || Date.now())
-        const back = blocksIn(this.timeChain, BigInt(Math.ceil(Math.max(0, Date.now() - since) / 1000))) + secondsToBlocks(this.timeChain, ACTIVATION_SEARCH_MARGIN_SECONDS)
+        const back = this.spanBlocks(BigInt(Math.ceil(Math.max(0, Date.now() - since) / 1000))) + this.toBlocks(ACTIVATION_SEARCH_MARGIN_SECONDS)
         const floor = head > back ? head - back : 0n
         let block: bigint
         let depositsFrom: bigint | undefined
@@ -6364,7 +6376,7 @@ export class Operator {
    * Without a receipt: the Safe's ExecutionSuccess log of the op's own Safe tx hash. Only an owner execTransaction
    * emits it (engine userOps run through the module), so the log proves the tx executed. otto/mamoru#140: searched
    * from the block it was first handed to a provider around (broadcastAt; else sentAt, else its time) up to the head,
-   * at most OWNER_LOG_SEARCH_BLOCKS (about a day) past the latest handover (lastBroadcastAt), in pages of OWNER_LOG_PAGE_BLOCKS sent one after another and filtered by that Safe tx hash, so
+   * at most OWNER_LOG_SEARCH_SECONDS (a day) past the latest handover (lastBroadcastAt), in pages of OWNER_LOG_PAGE_BLOCKS sent one after another and filtered by that Safe tx hash, so
    * a transaction that landed late (sent, its hash lost in a timeout) is still found. The Safe tx hash alone is the
    * match, in any transaction (otto/mamoru#163: the owner's signature can be relayed by anyone). `anyTx`: searched to
    * the head (the Safe nonce is past the op's). Without a Safe tx hash (an op stored before it was kept): only the old
@@ -6376,11 +6388,11 @@ export class Operator {
     // else its creation, else its time; to a day past the latest handover.
     const blockAt = (ms: number) => {
       const t = BigInt(Math.floor(ms / 1000))
-      const lag = head.timestamp > t ? blocksIn(this.timeChain, head.timestamp - t) : 0n
+      const lag = head.timestamp > t ? this.spanBlocks(head.timestamp - t) : 0n
       return head.number > lag ? head.number - lag : 0n
     }
     const at = blockAt(op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt))
-    const slack = secondsToBlocks(this.timeChain, SEARCH_SLACK_SECONDS)
+    const slack = this.toBlocks(SEARCH_SLACK_SECONDS)
     const fromBlock = at > slack ? at - slack : 0n
     const lastAt = blockAt(op.lastBroadcastAt ?? op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt))
     const own = op.safeTxHash?.toLowerCase() as Hex | undefined
@@ -6396,7 +6408,8 @@ export class Operator {
     // `anyTx` (otto/mamoru#163): the Safe nonce is past this op's, so its Safe tx ran by now or never will: searched to
     // the head, in whatever transaction carried it.
     // `toBlock`: exactly to that block (a pinned view, executionAt), whatever this head says.
-    const last = opts.toBlock ?? (!opts.anyTx && lastAt + OWNER_LOG_SEARCH_BLOCKS < head.number ? lastAt + OWNER_LOG_SEARCH_BLOCKS : head.number)
+    const day = this.toBlocks(OWNER_LOG_SEARCH_SECONDS)
+    const last = opts.toBlock ?? (!opts.anyTx && lastAt + day < head.number ? lastAt + day : head.number)
     const logs: Awaited<ReturnType<PublicClient['getLogs']>> = []
     for (let from = fromBlock; from <= last; from += OWNER_LOG_PAGE_BLOCKS) {
       const to = from + OWNER_LOG_PAGE_BLOCKS - 1n < last ? from + OWNER_LOG_PAGE_BLOCKS - 1n : last

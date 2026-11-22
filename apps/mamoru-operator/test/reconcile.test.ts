@@ -43,7 +43,8 @@ function setup(withHash: boolean, archiveOnly = false, logged: string = SAFE_TX,
       fromBlock <= 51833884n && 51833884n <= toBlock ? [{ address: SAFE, topics: [EXECUTION_SUCCESS, logged], transactionHash: TX, blockNumber: 51833884n }] : [],
   } as unknown as PublicClient
   const store = { state: { accounts: { k: acc } }, save: () => {} } as unknown as StateStore
-  const op = new Operator({} as never, client, { address: RELAYER } as unknown as Relayer, store)
+  // otto/mamoru#445: the block numbers below were written at Base's old 2 s blocks.
+  const op = new Operator({ blockTimeMs: 2_000 } as never, client, { address: RELAYER } as unknown as Relayer, store)
   return { acc, op }
 }
 

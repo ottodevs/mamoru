@@ -8,6 +8,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname } from 'node:path'
 import { createPublicClient, http, parseAbi, type Hex, type PublicClient } from 'viem'
 import { base } from 'viem/chains'
+import { BASE_CHAIN } from '@mamoru/domain'
 import { baseRegistry } from '@mamoru/registry'
 import { encodeDataset, makeDataset } from '../src/dataset.ts'
 import type { PoolSample, Sample } from '../src/types.ts'
@@ -99,9 +100,11 @@ async function onAny<T>(f: (c: PublicClient) => Promise<T>): Promise<T> {
 }
 
 const head = (await onAny((c) => c.getBlock({ blockTag: 'safe' }))).number
-// Base produces a block every two seconds: 43,200 a day.
+// otto/mamoru#445: blocks a day at Base's current block time (200 ms since 5 Nov 2026; a range before that is longer
+// in time: give --from-block for it).
+const perDay = (86_400 * 1000) / BASE_CHAIN.blockTimeMs
 const to = process.argv.includes('--to-block') ? BigInt(arg('to-block')) : head - (head % step)
-const from = process.argv.includes('--from-block') ? BigInt(arg('from-block')) : to - BigInt(Math.round(Number(arg('days', '7')) * 43_200))
+const from = process.argv.includes('--from-block') ? BigInt(arg('from-block')) : to - BigInt(Math.round(Number(arg('days', '7')) * perDay))
 const blocks: bigint[] = []
 for (let b = from - (from % step); b <= to; b += step) blocks.push(b)
 

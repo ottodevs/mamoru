@@ -54,12 +54,12 @@ describe('readSafe (otto/mamoru#135)', () => {
     const first = await readSafe(chain.client, SAFE, baseRegistry)
     expect(first.deployed).toBe(true)
     expect(chain.count('eth_getCode')).toBe(1)
-    // Still close to the sighting (well under the ~450-block stand-in for the safe tag): asked again.
+    // Still close to the sighting (well under the 15 min stand-in for the safe tag, 4,500 Base blocks): asked again.
     chain.head += 10n
     await readSafe(chain.client, SAFE, baseRegistry)
     expect(chain.count('eth_getCode')).toBe(2)
     // Far enough past the sighting now: one more read confirms it (at the safe-ish block).
-    chain.head = 1_500n
+    chain.head = 15_000n
     await readSafe(chain.client, SAFE, baseRegistry)
     const confirmedAt = chain.count('eth_getCode')
     expect(confirmedAt).toBe(3)

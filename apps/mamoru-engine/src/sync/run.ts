@@ -1,4 +1,4 @@
-import { ReasonError, type IndexHealth, type PoolRef, type PoolView, type ReasonCode } from '@mamoru/domain'
+import { ReasonError, secondsToBlocks, type IndexHealth, type PoolRef, type PoolView, type ReasonCode } from '@mamoru/domain'
 import { conservadorV1, type PolicyVersion } from '@mamoru/policy'
 import type { MultiBaasClient } from '@mamoru/multibaas'
 import { baseRegistry, entry, readCodeHash, type Registry, type RegistryEntry } from '@mamoru/registry'
@@ -18,11 +18,15 @@ import { MultiBaasPoolIndex } from './multibaas-index.ts'
 import { buildPoolView, displayedBlocks, type PoolHistory } from './pool-view.ts'
 import type { Anchor } from './provenance.ts'
 
-/** Stats window: 1,800 blocks. About one hour on Base (2 s blocks), about 9 minutes on Monad (300 ms blocks). */
+/** Stats window: 1,800 blocks, the default without a chain. otto/mamoru#445: syncOnce uses an hour of its chain's blocks. */
 export const WINDOW_BLOCKS = 1800
+/** otto/mamoru#445: the stats window and the pool history kept, in seconds. */
+export const WINDOW_SECONDS = 3_600
+export const SNAPSHOT_RETENTION_SECONDS = 90 * 86_400
 
 /**
- * The pool history keeps about 90 days (43,200 blocks a day on Base): near 390,000 rows, well inside one D1 database.
+ * The default pool history without a chain: 90 days at 2 s blocks. syncOnce keeps 90 days of its chain's blocks
+ * (SNAPSHOT_RETENTION_SECONDS, otto/mamoru#445): near 390,000 rows, well inside one D1 database.
  * Older history is not lost with the rows: it is the chain's, and any block can be read again from an archive node.
  */
 export const SNAPSHOT_RETENTION_BLOCKS = 90 * 43_200
@@ -130,7 +134,7 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
   const policy = deps.policy ?? conservadorV1
   const log = deps.log ?? ((line) => console.log(JSON.stringify(line)))
   const observedAt = deps.now().toISOString()
-  const W = deps.windowBlocks ?? WINDOW_BLOCKS
+  const W = deps.windowBlocks ?? Number(secondsToBlocks(chainId, WINDOW_SECONDS))
 
   const notConfigured: Omit<IndexHealth, 'provider'> = { status: 'not_configured', checkedAt: observedAt }
   const sourceRow = (h: Omit<IndexHealth, 'provider'>): Omit<SourceStateRow, 'rpcStatus' | 'block' | 'safeBlock'> => ({
@@ -272,7 +276,7 @@ export async function syncOnce(deps: SyncDeps): Promise<SyncSummary> {
   let snapshots = 0
   try {
     if (history.length < historyPools.length) log({ msg: 'sync.snapshots_partial', read: history.length, pools: historyPools.length })
-    const floor = anchor.blockNumber - (deps.snapshotRetentionBlocks ?? SNAPSHOT_RETENTION_BLOCKS)
+    const floor = anchor.blockNumber - (deps.snapshotRetentionBlocks ?? Number(secondsToBlocks(chainId, SNAPSHOT_RETENTION_SECONDS)))
     if (history.length > 0) {
       await db.batch([
         ...history.map((r) => insertPoolSnapshot(db, anchor, head.safe.timestamp, head.safe.baseFeePerGas, r)),
