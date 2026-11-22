@@ -6,6 +6,7 @@ import { metricsSignature } from '@mamoru/operator-auth'
 import type { Db } from './env.ts'
 import { writeIncome, type AccountVaultWire, type IncomeEventWire } from './income-ledger.ts'
 import { writeFlows, type FlowWire } from './flows-ledger.ts'
+import { writeCover, type FlowCoverWire } from './flow-cover.ts'
 
 export type OperatorFetch = (input: string, init: RequestInit) => Promise<Response>
 
@@ -86,7 +87,7 @@ export type SnapshotWire = {
    * yield-receipts.ts), the last few days only, including accounts the snapshot did not read (stopped). Absent from
    * an operator older than this field.
    */
-  receipts?: { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire; flows?: FlowWire[] }[]
+  receipts?: { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire; flows?: FlowWire[]; cover?: FlowCoverWire }[]
   /** Spec 013 plan §3.5: CCTP transfers between an account's Safes (Base operator only). Absent: journals not read. */
   bridges?: BridgeWire[]
 }
@@ -467,6 +468,14 @@ async function writeFlowsSafely(db: Db, snapshot: SnapshotWire, now: Date): Prom
     await writeFlows(db, snapshot, now, (chainId, address) => resolveAccount(db, chainId, address))
   } catch (e) {
     console.error('yield-ledger: flows not written', e instanceof Error ? e.message : String(e))
+    return
+  }
+  // otto/mamoru#438: the operator's word on those flows, only once they are written (a cover must never vouch for flows
+  // D1 does not hold); a cover not written this pull falls behind the latest read and reads as partial.
+  try {
+    await writeCover(db, snapshot, now, (chainId, address) => resolveAccount(db, chainId, address))
+  } catch (e) {
+    console.error('yield-ledger: flow cover not written', e instanceof Error ? e.message : String(e))
   }
 }
 

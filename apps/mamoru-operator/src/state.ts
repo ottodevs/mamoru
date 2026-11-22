@@ -7,6 +7,7 @@ import type { SafeTx } from '@mamoru/account/live'
 import type { Execution } from '@mamoru/account/safe'
 import type { OpRecord } from '@mamoru/scenarios/driver/journal.ts'
 import type { DepositRow } from './deposits.ts'
+import type { FlowBackfillJob, FlowCover, MintRow } from './flow-cover.ts'
 import type { SponsorEntry } from './sponsorship.ts'
 import type { OpFacts } from './yield-receipts.ts'
 import type { OneAuthState } from './one-auth.ts'
@@ -169,6 +170,9 @@ export type AccountState = {
   /** otto/mamoru#340: USDC sent to the Safe from outside Mamoru, oldest first (deposits.ts), and how far its logs were read. */
   deposits?: DepositRow[]
   depositsSeen?: { safe: string; block: string }
+  /** otto/mamoru#438: from which block the deposit look has read every incoming USDC transfer, and the USDC minted to the Safe (flow-cover.ts). */
+  flowCover?: FlowCover
+  flowMints?: MintRow[]
   /**
    * otto/mamoru#140 (Sol review round 2 of #64): engine ops whose signed bytes may still be included (Engine.carried),
    * handed to every later engine of the account until the nonce at `safe` passes them or they land.
@@ -250,6 +254,8 @@ export type OperatorState = {
   oneAuthKeys?: Record<string, Hex>
   /** otto/mamoru#293: the block each of those keys was given at (the account's deposits are counted from there). */
   oneAuthKeyBlocks?: Record<string, string>
+  /** otto/mamoru#438: the log backfill of the Safes' incoming USDC in progress (flow-cover.ts). */
+  flowBackfill?: FlowBackfillJob
 }
 
 const BIG = '$big'
