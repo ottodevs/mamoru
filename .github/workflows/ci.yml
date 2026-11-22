@@ -30,7 +30,7 @@ jobs:
       # it rotted; here it breaks the PR that breaks it. anvil at the lab's pin (scenarios/manifest.json).
       - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
         with:
-          version: v1.7.1
+          version: v1.10.0
       # otto/mamoru#429: SIM_READER_CODE (packages/rpc) must be the compiled SimReader; the test fails here if it is not.
       - run: forge build --root contracts/sim-reader && bun test packages/rpc/src/sim-reader.test.ts
         env:
