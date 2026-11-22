@@ -466,7 +466,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * gives, else its cycle's: Alchemy the first of the month, UTC); any good answer clears it. #420: an ordinary rate
    * limit or a failure takes it out of the read spread for a few seconds (a method it does not serve does not).
    */
-  const proxyName = opts.name ?? 'chain'
+  // The name goes into the page: a short word only, never something a caller could put a URL in.
+  const proxyName = /^[a-z0-9_-]{1,24}$/i.test(opts.name ?? 'chain') ? (opts.name ?? 'chain') : 'proxy'
   // Labels and states only (quota.providers never holds a URL): which providers are spent, cooling or merely failing.
   const outage = new OutageWatch(proxyName, () => quota.providers().filter((p) => p.proxy === proxyName).map((p) => `${p.label} ${p.state}${p.until ? ` until ${p.until}` : ''}`).join(', ') || 'no provider', opts.allDownAlertMs)
   const noteQuota = (url: string, sentAt: number, status: number | undefined, err: any, retryAfter?: string | null) => {
@@ -482,7 +483,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     } else if (!methodUnserved(err) && !RANGE_REFUSAL.test(String(err?.message ?? '')) && (status === undefined || retriable(status, { error: err }))) {
       quota.backoff(url, label, classifyRpcError(status, err) === 'rateCapacity' ? 'burst_limited' : 'failing')
       outage.failed()
-    } else outage.ok() // a revert, an unserved method or a range refusal is an answer: the provider is up
+    } else if (status !== undefined && status >= 400) outage.failed() // 401/403 (a key revoked), 404, 5xx: no answer
+    else outage.ok() // a JSON-RPC answer (a revert, an unserved method, a range refusal): the provider is up
   }
   /**
    * The providers of `list` not out of quota. When every one is, only one request a minute asks one of them (a refusal

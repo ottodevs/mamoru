@@ -78,4 +78,25 @@ describe('the proxy pages when every provider fails (#444)', () => {
     expect(alerts[0]).not.toContain('test-key')
     expect(lines.filter((l) => l.includes('providers answer again'))).toHaveLength(1)
   })
+
+  test('every provider answering 401 (keys revoked) is an outage too, and a URL given as the name never reaches the page', async () => {
+    const fetcher = async () => new Response('unauthorized', { status: 401 })
+    const lines: string[] = []
+    const orig = console.error
+    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '))
+    const proxy = startRpcProxy(A, { name: A, fetch: fetcher as never, trusted: [Q], fallbacks: [], logRanges: {}, quota: new QuotaBook(), allDownAlertMs: 50 })
+    try {
+      await call(proxy.url)
+      await Bun.sleep(80)
+      await call(proxy.url)
+    } finally {
+      proxy.stop()
+      console.error = orig
+    }
+    const alerts = lines.filter((l) => l.startsWith('[alert] rpc '))
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]).toStartWith('[alert] rpc proxy:')
+    expect(lines.join('\n')).not.toContain('test-key')
+  })
 })
+
