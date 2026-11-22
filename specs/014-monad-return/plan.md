@@ -40,7 +40,8 @@ not wait for step A to confirm before preparing step B.
   `MONAD_UNWIND_PENDING`, `NOTHING_TO_STOP`. Holds the Safe tx as a Stop.
 - **Change (RH-07):** a new owner kind `monad-sell` (step A0): builder `buildMonadSell` (approve + `exactInputSingle`,
   `minOut` = QuoterV2 quote less 30 bps), held and settled as an owner op that changes no grant and keeps the account
-  active (not a Stop). `planReturnHome` keeps refusing `MONAD_UNWIND_PENDING` while WMON is held, except after a
+  active (not a Stop). The operator runs the quote and TWAP check itself and persists `MONAD_DEPTH_TOO_LOW` (quote,
+  block) on refusal; the Worker rebuilds A0 and checks hash, field pins and price again (RH-03). `planReturnHome` keeps refusing `MONAD_UNWIND_PENDING` while WMON is held, except after a
   `MONAD_DEPTH_TOO_LOW` refusal of A0, when it builds step A on the USDC alone.
 - **Change (RH-11), fence on Base first:** the Worker forwards `return-home/prepare` to the Monad operator only after the
   Base operator answers `return-home/fence` for the account. The fence is taken under the Base account lock that the
@@ -50,6 +51,11 @@ not wait for step A to confirm before preparing step B.
   (`sending`, `burned`, `dropped`, or `minted` without the mint read on the Safe; only `failed` with a proven revert
   and a read mint are terminal); any → `BRIDGE_IN_FLIGHT`, nothing prepared. With the fence set no new one can appear,
   so the check cannot race a signature.
+- **`dropped` under the fence:** a dropped bridge userOp becomes terminal (`dead`) once the EntryPoint nonce of its
+  key has advanced past its nonce with no receipt for its hash, or its `validUntil` has passed; the operator reads
+  both each review. Under the fence it may send a nonce-consuming no-op on that key to force the first condition. A
+  `dead` bridge never minted is not in flight, so step A proceeds. Without this rule a dropped bridge would block
+  step A for good.
 - Settle (built): the confirmed tx records the release `home-<tx>` (state `burned`, `owner.home`), marks the account
   inactive, records the revokes.
 - **Change:** after settle, read back `isSessionEnabled` for every id in the input and every id `sessionCreatedIds`

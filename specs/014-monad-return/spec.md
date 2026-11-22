@@ -26,13 +26,13 @@ the owners' OK. Companion files: `plan.md` (operator sequence, idempotency), `ta
 
 | Id | Requirement |
 |---|---|
-| RH-01 | One authorization screen per Monad user lists every line both chains will sign before the first passkey prompt. |
+| RH-01 | One authorization screen per Monad user lists every line both chains will sign before the first passkey prompt. For a depth-held Safe, step A's amount is shown as "your USDC after the sale (at least Z + current balance)" and its exact lines are shown again before its own prompt. |
 | RH-02 | The Monad leg is one owner Safe tx on the user's Monad Safe: revoke every Mamoru session there, and CCTP-burn the Safe's whole USDC with `mintRecipient` = the same user's Base Safe. Nothing else. |
-| RH-03 | The Worker rebuilds the Monad Safe tx with the shared builder, and checks recipient, domain, amount, sessions and hash, before the owner signs (`BUILD_MISMATCH` otherwise). |
+| RH-03 | The Worker rebuilds every owner Safe tx of this flow with the shared builder (`buildReturnHome`, `buildMonadSell`) and compares the SafeTx hash, before the owner signs (`BUILD_MISMATCH` otherwise). Step A: recipient, domain, amount, sessions. Step A0: Safe = the row's own, router = the registry's SwapRouter02, `tokenIn` WMON, `tokenOut` USDC, the growth pool's fee, `recipient` = this Safe, `amountIn` = the Safe's on-chain WMON balance, only MultiSendCallOnly delegatecalled, plus the price check. |
 | RH-04 | The Base leg moves the account to `conservador-live-v8` through the existing renewal: no remote bucket, no bridge-out grant, USDC/cbBTC taking money. |
 | RH-05 | After the burn, minting on Base and placing into v8 need no signature and no person. Every step is idempotent and resumable after an operator restart. |
 | RH-06 | Each leg stands alone: any prefix of the flow (none, one leg, both) leaves funds only in the user's own Safes, counted in the totals and the cap. |
-| RH-07 | A Safe whose unwind is held (#410, `REMOTE_DEPTH_BELOW_BUDGET`) still goes home whole: an owner sale first (step A0, price guarded), then step A on the exact resulting balance. No residual, at the cost of one more Monad prompt for those Safes. |
+| RH-07 | A Safe whose unwind is held (#410, `REMOTE_DEPTH_BELOW_BUDGET`) still goes home: an owner sale first (step A0, price guarded), then step A on the exact resulting balance, with no residual and one more Monad prompt. If the sale is refused (`MONAD_DEPTH_TOO_LOW`), the USDC goes home and the WMON stays the owner's on Monad for a withdrawal. |
 | RH-11 | Before the Monad operator prepares step A, the Base operator sets a permanent fence on the account (under the account lock): from then it signs, re-signs and broadcasts no bridge to Monad for it. Step A is then refused while any Base → Monad bridge for the account is not terminal (`sending`, `burned`, `dropped`, or `minted` without the mint read on the Safe). |
 | RH-08 | No V4 contract, no new contract and no new session-key custody (ships without #356 / #322). |
 | RH-09 | Nothing visible changes in the app until Ot and Brais approve the screens and the copy below. |
@@ -139,7 +139,13 @@ swaps revert, #410, possibly for good), the screen shows one more Monad step bef
   quote and the quote is no more than 300 bps under the TWAP value of `w` (policy long window); otherwise
   `MONAD_DEPTH_TOO_LOW` and step A0 waits (the USDC already on the Safe can still go home with step A; that step A
   then revokes, and the WMON leaves with an ordinary withdrawal). A revert is atomic and the step is prepared again.
-- **Then step A** is prepared once A0 is confirmed, on the exact USDC balance, so nothing is left behind.
+- **Then step A** is prepared once A0 is confirmed, on the exact USDC balance, so nothing is left behind. Between A0
+  and A the engine spends nothing: the entry pause for chain 143 refuses every entry, and the chain exit only sells
+  WMON (none left). Step A re-reads the balance at prepare in any case.
+- **Who decides the refusal:** the Monad operator runs the same quote and TWAP check at A0 prepare and records
+  `MONAD_DEPTH_TOO_LOW` on the account (state, with the quote and block) when it fails; only then does
+  `planReturnHome` build step A on the USDC alone. The Worker's check is a second, independent one: a Worker refusal
+  of a prepare the operator passed is `BUILD_MISMATCH`, nothing signed, and does not unlock the USDC-only step A.
 - Cost: three prompts for these accounts (A0, A, B) instead of two. On 21 Nov two prod accounts were depth-held.
 
 ### Step B, Base: move the account to `conservador-live-v8`
