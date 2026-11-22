@@ -265,7 +265,7 @@ export function Balance({
         </div>
         <VsIdleHead v={vsIdle} mamoruAprPct={mamoruAprPct} />
         </div>
-        {vsIdle?.breakdown ? <VsIdleBody v={vsIdle} /> : null}
+        {vsIdle?.breakdown && vsIdle.netDeposited.status === 'complete' ? <VsIdleBody v={vsIdle} /> : null}
       </div>
     </section>
   )
@@ -1510,7 +1510,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       </header>
       <Balance
         s={s}
-        vsIdle={vsIdle.data ?? null}
+        vsIdle={vsIdle.isError || past ? null : (vsIdle.data ?? null)}
         mamoruAprPct={apy.data?.monthlyPct ?? null}
         onAdd={addMoney}
         onWithdraw={() => withdraw()}
