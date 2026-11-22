@@ -288,6 +288,8 @@ export function labelProviders(providers: string[]): Map<string, string> {
 }
 
 export type RpcProxyOptions = {
+  /** otto/mamoru#444: tests only; the outage page window (default ALL_DOWN_ALERT_MS). */
+  allDownAlertMs?: number
   maxLogRange?: number
   metrics?: RpcMetrics
   /** Fallback providers; default MAMORU_RPC_FALLBACKS, read now. */
@@ -388,6 +390,44 @@ const LOGS_REQUEST_MS = 50_000
 /** An answer about the range itself, never a rate: asking again gets the same refusal. */
 const RANGE_REFUSAL = /result|response size|block range|range (is )?too|exceeds/i
 
+/** otto/mamoru#444: how long no provider of a proxy may go without a good answer before ops is paged. */
+export const ALL_DOWN_ALERT_MS = 5 * 60_000
+
+/**
+ * otto/mamoru#444 (SPOF audit #11, post-mortem #13): one page when no provider of this proxy has given a good answer for
+ * ALL_DOWN_ALERT_MS while it was being asked (failures, refusals, or every provider out of quota), and one line when an
+ * answer comes back. Only fixed text and provider labels: never a URL.
+ */
+export class OutageWatch {
+  private lastOk: number
+  private paged = false
+  constructor(
+    private readonly name: string,
+    private readonly states: () => string,
+    private readonly alertMs: number = ALL_DOWN_ALERT_MS,
+    now: number = Date.now(),
+  ) {
+    this.lastOk = now
+  }
+
+  ok(now: number = Date.now()): void {
+    if (this.paged) console.error(`[rpc] ${this.name}: providers answer again after ${Math.round((now - this.lastOk) / 1000)} s without one`)
+    this.paged = false
+    this.lastOk = now
+  }
+
+  failed(now: number = Date.now()): void {
+    if (this.paged || now - this.lastOk < this.alertMs) return
+    this.paged = true
+    console.error(`[alert] rpc ${this.name}: no provider has answered for ${Math.round((now - this.lastOk) / 60_000)} min; reads and sends wait (${this.states()})`)
+  }
+
+  /** Whether a page is out (an outage not yet answered). */
+  down(): boolean {
+    return this.paged
+  }
+}
+
 export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { url: string; stop: () => void; cacheStats: () => ReadCacheStats | null } {
   const providerTimeoutMs = opts.providerTimeoutMs ?? 30_000
   const rawSend = opts.fetch ?? fetch
@@ -426,13 +466,23 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * gives, else its cycle's: Alchemy the first of the month, UTC); any good answer clears it. #420: an ordinary rate
    * limit or a failure takes it out of the read spread for a few seconds (a method it does not serve does not).
    */
+  const proxyName = opts.name ?? 'chain'
+  // Labels and states only (quota.providers never holds a URL): which providers are spent, cooling or merely failing.
+  const outage = new OutageWatch(proxyName, () => quota.providers().filter((p) => p.proxy === proxyName).map((p) => `${p.label} ${p.state}${p.until ? ` until ${p.until}` : ''}`).join(', ') || 'no provider', opts.allDownAlertMs)
   const noteQuota = (url: string, sentAt: number, status: number | undefined, err: any, retryAfter?: string | null) => {
-    if (!err) return quota.clear(url, sentAt)
+    if (!err) {
+      outage.ok()
+      return quota.clear(url, sentAt)
+    }
     const label = labelOf(url)
     if (quotaExhausted(status, err)) {
       const now = Date.now()
       quota.mark(url, label, providerWords(err?.message).slice(0, 60), resetFromAnswer(err?.message, retryAfter, now) ?? nextReset(domainOfLabel(label), now, resetDays), now)
-    } else if (!methodUnserved(err) && !RANGE_REFUSAL.test(String(err?.message ?? '')) && (status === undefined || retriable(status, { error: err }))) quota.backoff(url, label, classifyRpcError(status, err) === 'rateCapacity' ? 'burst_limited' : 'failing')
+      outage.failed(now)
+    } else if (!methodUnserved(err) && !RANGE_REFUSAL.test(String(err?.message ?? '')) && (status === undefined || retriable(status, { error: err }))) {
+      quota.backoff(url, label, classifyRpcError(status, err) === 'rateCapacity' ? 'burst_limited' : 'failing')
+      outage.failed()
+    } else outage.ok() // a revert, an unserved method or a range refusal is an answer: the provider is up
   }
   /**
    * The providers of `list` not out of quota. When every one is, only one request a minute asks one of them (a refusal
@@ -447,6 +497,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   }
   /** The answer when every provider of a call is out of quota: when the first of them resets. Never names a URL. */
   const allSpent = (urls: readonly string[], id: unknown) => {
+    outage.failed()
     const at = Math.min(...urls.map((u) => quota.until(u) ?? Number.POSITIVE_INFINITY))
     return { jsonrpc: '2.0', id: id ?? null, error: { code: 429, message: `every provider for this call is out of quota${Number.isFinite(at) ? ` until ${new Date(at).toISOString()}` : ''}` } }
   }
