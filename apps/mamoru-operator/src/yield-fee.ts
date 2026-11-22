@@ -37,8 +37,13 @@ export type YieldFee = {
   feeUsdc: bigint
   /** Fees of withdrawals that did not fail (confirmed or in flight). */
   chargedUsdc: bigint
-  /** What the next withdrawal pays: feeUsdc − chargedUsdc, never below zero; 0 under YIELD_FEE_MIN. */
+  /**
+   * What the next withdrawal pays: each component's fee less what withdrawals charged for it, never below zero
+   * (collected and vault growth keep a high-water of their own, otto/mamoru#433); 0 under YIELD_FEE_MIN.
+   */
   owedUsdc: bigint
+  /** The part of owedUsdc that is vault growth: the withdrawal records it (StoredOp.feeVaultUsdc) so the next one knows the split. */
+  owedVaultUsdc: bigint
 }
 
 /**
@@ -84,8 +89,9 @@ const ceilDiv = (a: bigint, b: bigint): bigint => (a + b - 1n) / b
  * the account holds now (so shares held before the first flow read, or moved in without a flow, leave the vault uncharged).
  * Basis rounds up, value and realized assets round down.
  *
- * High-water: the fee is owed as max(0, fee − charged) (yieldFee). What a withdrawal already charged is never refunded when
- * growth later falls, and nothing new is charged until the growth exceeds what was already charged. `onSkip` names each
+ * High-water, per component (yieldFee): the vault part owed is max(0, vault fee − what withdrawals charged for vault growth). It is never
+ * refunded when growth falls, nothing new is charged for it until growth passes what was charged, and a vault dropping out
+ * of reconciliation never stands against the fee on collected yield. `onSkip` names each
  * vault left out and why, so a history that stops reconciling is seen, not silent.
  */
 export function vaultGrowth(ops: readonly StoredOp[], input: VaultFeeInput): bigint {
@@ -190,9 +196,22 @@ export function yieldFee(ops: readonly StoredOp[], bps: bigint = YIELD_FEE_BPS, 
     if (fee.usdc === undefined) unpriced++
     else collectedUsdc += BigInt(fee.usdc)
   }
-  for (const op of ops) if (op.kind === 'transfer' && op.feeUsdc && charged(op)) chargedUsdc += BigInt(op.feeUsdc)
+  let chargedVault = 0n
+  for (const op of ops) {
+    if (op.kind !== 'transfer' || !op.feeUsdc || !charged(op)) continue
+    chargedUsdc += BigInt(op.feeUsdc)
+    // Withdrawals before the vault fee carry no split: all of what they charged was for collected fees.
+    if (op.feeVaultUsdc) chargedVault += BigInt(op.feeVaultUsdc)
+  }
+  if (chargedVault > chargedUsdc) chargedVault = chargedUsdc
   const vaultGrowthUsdc = vault ? vaultGrowth(ops, vault) : 0n
-  const feeUsdc = ((collectedUsdc + vaultGrowthUsdc) * bps) / 10_000n
-  const left = feeUsdc > chargedUsdc ? feeUsdc - chargedUsdc : 0n
-  return { collectedUsdc, vaultGrowthUsdc, unpriced, feeUsdc, chargedUsdc, owedUsdc: left >= YIELD_FEE_MIN ? left : 0n }
+  const feeCollected = (collectedUsdc * bps) / 10_000n
+  const feeVault = (vaultGrowthUsdc * bps) / 10_000n
+  // High-water per component: a vault that drops out of reconciliation (or loses value) lowers only its own figure, so
+  // it never makes the fee already paid on it stand against collected fees, and the other way round.
+  const owedCollected = feeCollected > chargedUsdc - chargedVault ? feeCollected - (chargedUsdc - chargedVault) : 0n
+  const owedVault = feeVault > chargedVault ? feeVault - chargedVault : 0n
+  const left = owedCollected + owedVault
+  const owed = left >= YIELD_FEE_MIN ? left : 0n
+  return { collectedUsdc, vaultGrowthUsdc, unpriced, feeUsdc: feeCollected + feeVault, chargedUsdc, owedUsdc: owed, owedVaultUsdc: owed > 0n ? owedVault : 0n }
 }

@@ -21,6 +21,8 @@ export type StoredOp = OpView & {
    * undercharges, never overcharges.
    */
   feeScoped?: true
+  /** otto/mamoru#433: of a withdrawal's `feeUsdc`, the part charged for vault growth (the rest was for collected fees). */
+  feeVaultUsdc?: string
   count?: number
   /** An engine op settled failed whose signed bytes were included later: its session uses replay like a confirmed one. */
   lateIncluded?: boolean

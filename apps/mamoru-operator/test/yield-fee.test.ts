@@ -61,7 +61,7 @@ describe('yieldFee (otto/mamoru#371)', () => {
 
   test('10 % of the priced yield collected since the fee started; nothing before', () => {
     const f = yieldFee([harvest('2026-11-04T23:59:59.000Z', '5000000'), harvest('2026-11-05T10:00:00.000Z', '2000000', '1000000')])
-    expect(f).toEqual({ collectedUsdc: 3_000_000n, vaultGrowthUsdc: 0n, unpriced: 0, feeUsdc: 300_000n, chargedUsdc: 0n, owedUsdc: 300_000n })
+    expect(f).toEqual({ collectedUsdc: 3_000_000n, vaultGrowthUsdc: 0n, unpriced: 0, feeUsdc: 300_000n, chargedUsdc: 0n, owedUsdc: 300_000n, owedVaultUsdc: 0n })
   })
 
   test('an unpriced fee is counted as pending, not owed yet', () => {
@@ -209,7 +209,7 @@ describe('vault growth in the fee (otto/mamoru#433)', () => {
     const out = [...ops, flow('withdraw', 120_000_000n, 100_000_000n, D2)]
     expect(yieldFee(out, undefined, undefined, 0n, input(0n, 0n))).toMatchObject({ vaultGrowthUsdc: 20_000_000n, feeUsdc: 2_000_000n })
     // The fee that withdrawal paid (confirmed or in flight) is not charged again.
-    expect(yieldFee([...out, withdrawal('submitted', '2000000')], undefined, undefined, 0n, input(0n, 0n))).toMatchObject({ chargedUsdc: 2_000_000n, owedUsdc: 0n })
+    expect(yieldFee([...out, { ...withdrawal('submitted', '2000000'), feeVaultUsdc: '2000000' } as StoredOp], undefined, undefined, 0n, input(0n, 0n))).toMatchObject({ chargedUsdc: 2_000_000n, owedUsdc: 0n })
   })
 
   test('a partial redemption keeps the basis of what is left', () => {
@@ -324,8 +324,26 @@ describe('vault growth in the fee (otto/mamoru#433)', () => {
     vaultGrowth([{ ...dep, facts: undefined } as StoredOp], { from: FROM, now: [], onSkip })
     expect(skips).toEqual([`${V}:vault_unread`, `${V}:unexplained_shares`, `${V}:unexplained_shares`, ':bad_start', ':receipts_unread'])
     // Growth fell after a fee on 20 was charged: nothing refunded, nothing new until growth passes what was charged.
-    const ops = [dep, withdrawal('confirmed', '2000000')]
-    expect(yieldFee(ops, undefined, undefined, 0n, input(100_000_000n, 110_000_000n)).owedUsdc).toBe(0n)
-    expect(yieldFee(ops, undefined, undefined, 0n, input(100_000_000n, 130_000_000n)).owedUsdc).toBe(1_000_000n)
+    const paid = { ...withdrawal('confirmed', '2000000'), feeVaultUsdc: '2000000' } as StoredOp
+    const ops = [dep, paid]
+    expect(yieldFee(ops, undefined, undefined, 0n, input(100_000_000n, 110_000_000n))).toMatchObject({ owedUsdc: 0n, owedVaultUsdc: 0n })
+    expect(yieldFee(ops, undefined, undefined, 0n, input(100_000_000n, 130_000_000n))).toMatchObject({ owedUsdc: 1_000_000n, owedVaultUsdc: 1_000_000n })
+  })
+
+  test('#433: a vault that drops out of reconciliation does not stall the fee on collected LP yield', () => {
+    const dep = flow('deposit', 100_000_000n, 100_000_000n, D1)
+    // A fee of 2 USDC was charged for vault growth of 20.
+    const paid = { ...withdrawal('confirmed', '2000000'), feeVaultUsdc: '2000000' } as StoredOp
+    const h = harvest(D2, '30000000')
+    h.facts!.txHash = h.txHash
+    h.facts!.v = 2
+    const ops = [dep, paid, h]
+    // The vault drops out (unread): its growth reads 0, yet the 3 USDC fee on the collected 30 is owed in full.
+    const dropped = { from: FROM, now: [] as { name: string; shares: bigint; assets: bigint }[] }
+    expect(yieldFee(ops, undefined, undefined, 0n, dropped)).toMatchObject({ vaultGrowthUsdc: 0n, owedUsdc: 3_000_000n, owedVaultUsdc: 0n })
+    // Back, with the same growth: only the collected fee is owed; the vault part was paid.
+    expect(yieldFee(ops, undefined, undefined, 0n, input(100_000_000n, 120_000_000n))).toMatchObject({ owedUsdc: 3_000_000n, owedVaultUsdc: 0n })
+    // A withdrawal without a split (before the vault fee) counts as charged for collected fees.
+    expect(yieldFee([h, withdrawal('confirmed', '3000000')], undefined, undefined, 0n, dropped).owedUsdc).toBe(0n)
   })
 })
