@@ -116,6 +116,9 @@ describe('routes', () => {
     expect(text).toContain('vs idle USDC')
     expect(text).toContain('APR · 30-day avg')
     expect(text).not.toContain('Total earned')
+    // otto/mamoru#380: the existing logo goes to the website; no second mark.
+    expect(html).toMatch(/<a href="https:\/\/mamoru\.lol" class="brand"/)
+    expect(html).not.toContain('site-mark')
     expect(text).not.toContain('Saves automatically')
     expect(text).toContain('Balanced · USDC/cbBTC')
     expect(html).not.toContain('aria-label="Sources and method"')

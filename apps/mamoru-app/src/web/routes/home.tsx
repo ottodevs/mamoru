@@ -1503,16 +1503,10 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       <PullToRefresh onRefresh={() => manual.run({ note: false })} />
       <header className="mb-7 flex items-center justify-between gap-3">
         <div className="nav-left">
-          <Brand />
+          <Brand site="https://mamoru.lol" />
           <MainTabs />
         </div>
-        <div className="flex items-center gap-4">
-          <LiveSync chain={fromChain} updatedAt={funding.dataUpdatedAt} intervalMs={fundingInterval(funding.data, inFlight, FUNDING_IDLE_MS)} fetching={funding.isFetching} down={liveDown} note={manual.note} onRefresh={() => void manual.run()} />
-        {/* otto/mamoru#380 (Brais, 21 Nov): the mark at the top right goes back to the website. */}
-        <a className="site-mark" href="https://mamoru.lol" aria-label="Mamoru website" data-testid="site-mark">
-          <img src="/mark-two-stones.png" width={28} height={28} alt="" />
-        </a>
-        </div>
+        <LiveSync chain={fromChain} updatedAt={funding.dataUpdatedAt} intervalMs={fundingInterval(funding.data, inFlight, FUNDING_IDLE_MS)} fetching={funding.isFetching} down={liveDown} note={manual.note} onRefresh={() => void manual.run()} />
       </header>
       <Balance
         s={s}

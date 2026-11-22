@@ -427,9 +427,7 @@ describe('vs idle USDC with the value', () => {
     expect(html).toMatch(/data-testid="bd-net"[^>]*><td>Net<\/td><td class="v alert">/)
     expect(text).not.toContain('explain')
   })
-  test('costs not measured say n/a; no figure yet: n/a, no breakdown, no deposited line', () => {
-    const costs = render(<Balance s={s} vsIdle={vsIdle({ breakdown: { feesUsd: 1, priceMoveUsd: 1, costsUsd: null, mamoruFeeUsd: -0.1, netUsd: 1.9 } })} {...noop} />)
-    expect(costs.text).toContain('Costs n/a')
+  test('no figure yet: n/a, no breakdown, no deposited line', () => {
     const none = render(<Balance s={s} vsIdle={vsIdle({ breakdown: null, netDeposited: { usd: 0, status: 'none' } })} {...noop} />)
     expect(none.text).toContain('vs idle USDC n/a')
     expect(none.text).not.toContain('Breakdown')

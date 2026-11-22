@@ -218,6 +218,3 @@
   .pv-plot { margin-right: 6rem; }
   .pv-ax { margin-right: 6rem; }
 }
-
-.site-mark { display: inline-flex; flex: none; opacity: .9; }
-.site-mark:hover { opacity: 1; }
