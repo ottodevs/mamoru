@@ -79,8 +79,9 @@ describe('the proxy pages when every provider fails (#444)', () => {
     expect(lines.filter((l) => l.includes('providers answer again'))).toHaveLength(1)
   })
 
-  test('every provider answering 401 (keys revoked) is an outage too, and a URL given as the name never reaches the page', async () => {
-    const fetcher = async () => new Response('unauthorized', { status: 401 })
+  test('a revoked key or a 200 that is not JSON-RPC is an outage too, and a URL given as the name never reaches the page', async () => {
+    // Every provider unusable in a different way: a revoked key, and a 200 whose body is not JSON-RPC.
+    const fetcher = async (url: string) => (url.includes('alchemy') ? new Response('unauthorized', { status: 401 }) : new Response('<html>maintenance</html>', { status: 200 }))
     const lines: string[] = []
     const orig = console.error
     console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '))

@@ -483,8 +483,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     } else if (!methodUnserved(err) && !RANGE_REFUSAL.test(String(err?.message ?? '')) && (status === undefined || retriable(status, { error: err }))) {
       quota.backoff(url, label, classifyRpcError(status, err) === 'rateCapacity' ? 'burst_limited' : 'failing')
       outage.failed()
-    } else if (status !== undefined && status >= 400) outage.failed() // 401/403 (a key revoked), 404, 5xx: no answer
-    else outage.ok() // a JSON-RPC answer (a revert, an unserved method, a range refusal): the provider is up
+    } else if (status === 200 && typeof err?.code === 'number' && !/^upstream HTTP /.test(String(err?.message ?? ''))) outage.ok() // a JSON-RPC error answer (a revert, an unserved method, a range refusal): the provider is up
+    else outage.failed() // 401/403 (a key revoked), any other status, a body that is not JSON-RPC: no answer
   }
   /**
    * The providers of `list` not out of quota. When every one is, only one request a minute asks one of them (a refusal
@@ -519,7 +519,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const providers = local ? [upstream] : [...trusted, ...fallbacks.filter((f) => !trusted.includes(f))]
   const labels = labelProviders(providers)
   const labelOf = (url: string) => labels.get(url) ?? registrableDomain(new URL(url).hostname)
-  for (const url of providers) quota.register(url, labelOf(url), opts.name ?? 'chain')
+  for (const url of providers) quota.register(url, labelOf(url), proxyName)
   /** otto/mamoru#420: each trusted provider's read weight, by its label first, then its domain; 1 when not named. */
   const weightTable = opts.weights ?? weightsFromEnv()
   const weightOf = (url: string): number => {
