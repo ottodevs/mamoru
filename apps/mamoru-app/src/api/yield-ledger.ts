@@ -150,7 +150,7 @@ async function resolveAccount(db: Db, chainId: number, address: string): Promise
     const env: LedgerEnv = row.is_test === 1 ? 'test' : row.env === 'prod' || row.env === 'beta' ? row.env : 'unknown'
     return { accountKey: row.account_key, env }
   } catch (e) {
-    if (!/no such column/i.test(e instanceof Error ? e.message : String(e))) throw e
+    if (!/no such column|has no column named/i.test(e instanceof Error ? e.message : String(e))) throw e
     const row = await db.prepare('SELECT account_key FROM accounts WHERE chain_id = ? AND LOWER(address) = LOWER(?)').bind(chainId, address.toLowerCase()).first<{ account_key: string }>()
     return row ? { accountKey: row.account_key, env: 'unknown' } : null
   }
@@ -422,17 +422,37 @@ export async function writeReceipts(db: Db, snapshot: SnapshotWire, now: Date): 
           .run()
       }
       // Last: if a write above failed, the digest is not stored and the day is written again next pull.
-      await db
-        .prepare(
-          `INSERT INTO yield_ledger_account_receipts (day, chain_id, address, account_key, env, gas_paid_wei, gas_paid_usdc, collected_usdc, digest, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(day, chain_id, address) DO UPDATE SET
-             account_key = excluded.account_key, env = excluded.env, gas_paid_wei = excluded.gas_paid_wei, gas_paid_usdc = COALESCE(excluded.gas_paid_usdc, yield_ledger_account_receipts.gas_paid_usdc),
-             collected_usdc = COALESCE(excluded.collected_usdc, yield_ledger_account_receipts.collected_usdc),
-             digest = excluded.digest, updated_at = excluded.updated_at`,
-        )
-        .bind(d.day, snapshot.chainId, address, account.accountKey, account.env, d.gasWei, d.gasUsdc === undefined ? null : Number(d.gasUsdc), collected, digest, now.toISOString())
-        .run()
+      // gas_paid_usdc (otto/mamoru#380) is written when its migration is applied; before it the row is written without it,
+      // so the receipts and the collected figures keep syncing if the Worker ships first.
+      const base = [d.day, snapshot.chainId, address, account.accountKey, account.env, d.gasWei] as const
+      try {
+        await db
+          .prepare(
+            `INSERT INTO yield_ledger_account_receipts (day, chain_id, address, account_key, env, gas_paid_wei, gas_paid_usdc, collected_usdc, digest, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(day, chain_id, address) DO UPDATE SET
+               account_key = excluded.account_key, env = excluded.env, gas_paid_wei = excluded.gas_paid_wei,
+               -- the day's gas is whole or unknown (NULL): a later unpriced op makes it unknown again, never the stale sum
+               gas_paid_usdc = excluded.gas_paid_usdc,
+               collected_usdc = COALESCE(excluded.collected_usdc, yield_ledger_account_receipts.collected_usdc),
+               digest = excluded.digest, updated_at = excluded.updated_at`,
+          )
+          .bind(...base, d.gasUsdc === undefined ? null : Number(d.gasUsdc), collected, digest, now.toISOString())
+          .run()
+      } catch (e) {
+        if (!/no such column|has no column named/i.test(e instanceof Error ? e.message : String(e))) throw e
+        await db
+          .prepare(
+            `INSERT INTO yield_ledger_account_receipts (day, chain_id, address, account_key, env, gas_paid_wei, collected_usdc, digest, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(day, chain_id, address) DO UPDATE SET
+               account_key = excluded.account_key, env = excluded.env, gas_paid_wei = excluded.gas_paid_wei,
+               collected_usdc = COALESCE(excluded.collected_usdc, yield_ledger_account_receipts.collected_usdc),
+               digest = excluded.digest, updated_at = excluded.updated_at`,
+          )
+          .bind(...base, collected, digest, now.toISOString())
+          .run()
+      }
     }
   }
 }

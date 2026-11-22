@@ -186,6 +186,30 @@ describe('APR · 30-day avg', () => {
   })
 })
 
+describe('fee base and APR chains', () => {
+  test('a vault first-sample backfill is never in the fee base', async () => {
+    const db = funded()
+    db.raw.exec(`INSERT INTO yield_ledger_income (event_id, chain_id, account_key, env, source, t_s, from_s, usd, updated_at) VALUES ('vault-backfill:8453:base-u1:vault:gtUSDCp', 8453, 'base-u1', 'prod', 'backfill', ${t('2026-11-06T10:00:00.000Z')}, NULL, ${50 * U}, 'x')`)
+    const v = await loadVsIdle(db, 'u1', NOW, true)
+    expect(v.breakdown!.mamoruFeeUsd).toBe(-0.2) // 10 % of the 2 USDC harvest only
+  })
+
+  test('APR counts income only of the chains whose samples are in the capital-time', async () => {
+    const db = seed()
+    daily(db, '2026-09-01', 1000, 0)
+    daily(db, '2026-11-06', 1000, 0)
+    latest(db, 0, 1000)
+    db.raw.exec(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at) VALUES ('monad-u1', 'u1', 143, '0x00000000000000000000000000000000000000b1', '[]', 'c2', '0x1', '0x2', '1', 'v1', '2026-10-01T00:00:00.000Z')`)
+    for (const at of ['2026-10-08T17:30:00.000Z', '2026-11-06T17:30:00.000Z', '2026-11-06T17:50:00.000Z']) {
+      db.raw.exec(`INSERT INTO account_worked_samples (chain_id, account_key, read_at, t_s, pool, value_usd, in_range) VALUES (8453, 'base-u1', '${at}', ${t(at)}, 'pool:WETH/USDC/3000', ${1000 * U}, 1)`)
+    }
+    db.raw.exec(`INSERT INTO yield_ledger_income (event_id, chain_id, account_key, env, source, t_s, from_s, usd, updated_at) VALUES ('0xm:0', 143, 'monad-u1', 'prod', 'harvest', ${t('2026-11-06T17:40:00.000Z')}, NULL, ${10000} , 'x')`)
+    income(db, '0xh:0', '2026-11-06T17:40:00.000Z', 0.01)
+    // Monad has no samples in the window: its income is not divided by Base capital alone
+    expect((await loadVsIdle(db, 'u1', NOW, true)).apr).toEqual({ pct: 23.7, reason: null })
+  })
+})
+
 describe('GET /api/accounts/:key/vs-idle', () => {
   test('needs a session; another owner and a malformed key get the same 404', async () => {
     const h = harness()

@@ -31,12 +31,13 @@ export const MAMORU_FEE_BPS = 1_000n
 /** Income realized from here on (UTC, unix s) owes the fee. Nothing before 5 Nov is charged. */
 export const MAMORU_FEE_FROM = Math.floor(Date.parse('2026-11-05T00:00:00.000Z') / 1000)
 
-type IncomeRow = { t_s: number; usd: number; source?: string; from_s?: number | null }
+type IncomeRow = { t_s: number; usd: number; source?: string; from_s?: number | null; chain_id?: number; event_id?: string }
 
 /** The fee owed on income realized up to `until` (unix s, exclusive): the seam for the operator-side change (#433). */
 export function mamoruFeeUsdc(income: readonly IncomeRow[], until: number): bigint {
   let base = 0n
-  for (const r of income) if (r.t_s >= MAMORU_FEE_FROM && r.t_s < until) base += BigInt(r.usd)
+  // A vault's first-sample backfill is yield from before it was observed, not income realized from 5 Nov: never charged.
+  for (const r of income) if (r.t_s >= MAMORU_FEE_FROM && r.t_s < until && !r.event_id?.startsWith('vault-backfill:')) base += BigInt(r.usd)
   return (base * MAMORU_FEE_BPS) / 10_000n
 }
 
@@ -143,7 +144,7 @@ export async function loadVsIdle(db: Db, userId: string, now: Date, baselineComp
 }
 
 async function incomeRows(db: Db, chainId: number, accountKey: string): Promise<IncomeRow[]> {
-  return (await db.prepare('SELECT t_s, usd, source, from_s FROM yield_ledger_income WHERE chain_id = ? AND account_key = ? AND usd IS NOT NULL').bind(chainId, accountKey).all<IncomeRow>()).results
+  return (await db.prepare('SELECT t_s, usd, source, from_s, chain_id, event_id FROM yield_ledger_income WHERE chain_id = ? AND account_key = ? AND usd IS NOT NULL').bind(chainId, accountKey).all<IncomeRow>()).results
 }
 
 const DAY_S = 86_400
@@ -151,10 +152,14 @@ const MONTH_S = 30 * DAY_S
 const YEAR_S = 365 * DAY_S
 
 /** See the header. Income rows are the owner's, every chain; `firstDay` the first day with a value. */
-async function netApr30d(db: Db, sleeves: { chain_id: number; account_key: string }[], income: readonly IncomeRow[], firstDay: string | null): Promise<AprView> {
+async function netApr30d(db: Db, sleeves: { chain_id: number; account_key: string }[], allIncome: readonly IncomeRow[], firstDay: string | null): Promise<AprView> {
   const base = sleeves.find((s) => s.chain_id === 8453) ?? sleeves[0]
   const worked = base ? await loadWorked(db, base.chain_id, base.account_key) : null
   if (!worked || firstDay === null) return { pct: null, reason: 'not-measured' }
+  let income = allIncome
+  // Income only of the chains whose samples are in the capital-time below (Base, plus the sleeves loadWorked says contributed).
+  const counted = new Set([base!.chain_id, ...(worked.chains?.month ?? [])])
+  income = income.filter((r) => r.chain_id === undefined || counted.has(r.chain_id))
   const end = Math.floor(Date.parse(worked.asOf) / 1000)
   const start = end - MONTH_S
   if (!Number.isFinite(end) || Date.parse(`${firstDay}T00:00:00.000Z`) / 1000 > start) return { pct: null, reason: 'first-30-days' }
@@ -181,7 +186,7 @@ async function gasRows(db: Db, chainId: number, accountKey: string, throughDay: 
   try {
     return (await db.prepare('SELECT gas_paid_wei, gas_paid_usdc FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ? AND day <= ?').bind(chainId, accountKey, throughDay).all<{ gas_paid_wei: string; gas_paid_usdc: number | null }>()).results
   } catch (e) {
-    if (!/no such (table|column)/i.test(e instanceof Error ? e.message : String(e))) throw e
+    if (!/no such (table|column)|has no column named/i.test(e instanceof Error ? e.message : String(e))) throw e
     return [{ gas_paid_wei: '1', gas_paid_usdc: null }] // not migrated: gas is unknown, not zero
   }
 }
