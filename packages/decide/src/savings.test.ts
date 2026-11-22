@@ -265,6 +265,12 @@ describe('Lab harvest modes (22 Nov): sweep floor by size and the 50x sale trigg
     expect(floor >= 50n * USDC - 2n && floor <= 50n * USDC + 2n).toBe(true)
     expect(savingsSweepOf(big(30n * USDC), V8)).toEqual({ proposal: null, wait: null })
     expect(savingsSweepOf(big(60n * USDC), V8).proposal).toMatchObject({ savings: true, assets: 60n * USDC })
+    // Review of edae4a3e: 30 USDC of room in gtUSDCp, none in waBasUSDC: 30 of the 60 go now, the rest later.
+    const tight = big(60n * USDC)
+    tight.vaults = [vault('vault:gtUSDCp', 50_000n * USDC, { maxDeposit: 30n * USDC }), vault('vault:waBasUSDC', 0n, { maxDeposit: 0n })]
+    expect(savingsSweepOf(tight, V8).proposal).toMatchObject({ vault: 'vault:gtUSDCp', savings: true, assets: 30n * USDC })
+    // The V4 vault ratio leaving 30: the same.
+    expect(savingsSweepOf({ ...big(60n * USDC), budget: { room: 10n ** 12n, vaultRoom: 30n * USDC } }, V8).proposal).toMatchObject({ savings: true, assets: 30n * USDC })
   })
 
   test('v7/v8 engine: harvested volatile is sold at 50x its op cost, not 3x; the signed policy keeps 3x', () => {

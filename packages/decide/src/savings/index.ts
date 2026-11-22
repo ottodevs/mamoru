@@ -73,8 +73,10 @@ export function savingsSweepOf(obs: Observation, policy: PolicyVersion, still?: 
   const named = new Set(b.vaults ?? [])
   if (obs.vaultsUnread?.some((v) => named.has(v))) return none
   const pending = savingsPending(obs, policy)
-  const floor = sweepFloorOf(obs, policy)
-  if (pending < floor) return none
+  // The size floor only decides when pending is worth a sweep (review of edae4a3e, P1): vault capacity and the
+  // smallest sized-down deposit keep the vault floor, so a vault with little room still takes savings in parts.
+  if (pending < sweepFloorOf(obs, policy)) return none
+  const floor = vaultFloorOf(obs, policy)
   const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
   const open = bucketVaults(obs, b).filter((v) => v.maxDeposit >= floor)
   const v = open.find((x) => live(grantKeyFor(policy, 'vault-supply', x.name))) ?? open[0]
