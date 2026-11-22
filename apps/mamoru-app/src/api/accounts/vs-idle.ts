@@ -39,6 +39,14 @@ export function mamoruFeeUsdc(income: readonly IncomeRow[], until: number): bigi
 
 export type NotCounted = 'flows' | 'fees' | 'vault-yield' | 'history' | 'costs'
 /** `pct` null: `first-30-days` (the account is younger than the window) or `not-measured` (no worked capital or no read yet). */
+/**
+ * otto/mamoru#413 seam: harvested yield kept in the Stable vault as a separate savings layer. It is already inside total
+ * value and inside `feesUsd` (it is earned), so no row changes; `savingsUsd` is only what the Working capital Stable row
+ * shows next to the bucket amount. The ledger tagging is another session's: until it exists this is 0. Savings never
+ * count toward a share or mix.
+ */
+export const SAVINGS_USD_UNTIL_TAGGED = 0
+
 export type AprView = { pct: number | null; reason: 'first-30-days' | 'not-measured' | null }
 export type VsIdleView = {
   asOf: string | null
@@ -51,6 +59,8 @@ export type VsIdleView = {
   breakdown: { feesUsd: number; priceMoveUsd: number; costsUsd: number | null; mamoruFeeUsd: number; netUsd: number } | null
   /** Uncollected fees inside the total value, shown apart from `breakdown`. */
   pendingUsd: number
+  /** Savings layer inside the figures above (otto/mamoru#413 seam, 0 until the ledger tags it). */
+  savingsUsd: number
   /** APR · 30-day avg, net of the fee (see the header). */
   apr: AprView
   status: 'complete' | 'partial'
@@ -66,7 +76,7 @@ const usd = (c: number) => c / 100
 export async function loadVsIdle(db: Db, userId: string, now: Date): Promise<VsIdleView> {
   const { view, pending } = await loadValueSeriesDetail(db, userId, now)
   const last = view.points.at(-1)
-  const empty: VsIdleView = { asOf: view.asOf, totalUsd: last?.usd ?? null, netDeposited: view.netDeposited, since: view.points[0]?.day ?? null, breakdown: null, pendingUsd: last ? usd(toCents(BigInt(pending.get(last.day) ?? 0))) : 0, apr: { pct: null, reason: 'not-measured' }, status: 'partial', notCounted: [], series: [] }
+  const empty: VsIdleView = { asOf: view.asOf, totalUsd: last?.usd ?? null, netDeposited: view.netDeposited, since: view.points[0]?.day ?? null, breakdown: null, pendingUsd: last ? usd(toCents(BigInt(pending.get(last.day) ?? 0))) : 0, savingsUsd: SAVINGS_USD_UNTIL_TAGGED, apr: { pct: null, reason: 'not-measured' }, status: 'partial', notCounted: [], series: [] }
   if (!last) return empty
   const notCounted = new Set<NotCounted>(['costs'])
   if (view.netDeposited.status !== 'complete') notCounted.add('flows')

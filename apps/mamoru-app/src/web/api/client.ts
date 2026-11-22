@@ -39,6 +39,8 @@ export type VsIdleView = {
   since: string | null
   breakdown: { feesUsd: number; priceMoveUsd: number; costsUsd: number | null; mamoruFeeUsd: number; netUsd: number } | null
   pendingUsd: number
+  /** Savings layer (otto/mamoru#413 seam): 0 until the ledger tags it; inside total and fees, never in a share. */
+  savingsUsd: number
   /** APR · 30-day avg, the owner's real net APR; null for the first 30 days (show the Mamoru average) or while nothing worked. */
   apr: { pct: number | null; reason: 'first-30-days' | 'not-measured' | null }
   status: 'complete' | 'partial'

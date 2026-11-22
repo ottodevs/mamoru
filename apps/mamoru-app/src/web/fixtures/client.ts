@@ -412,6 +412,7 @@ export const fixtureClient: ApiClient = {
       since: series[0]!.day,
       breakdown: { feesUsd: 6.62, priceMoveUsd: 5.1, costsUsd: -0.62, mamoruFeeUsd: -0.55, netUsd: 10.55 },
       pendingUsd: 0.4,
+      savingsUsd: 0,
       apr: { pct: 33.9, reason: null },
       status: 'complete' as const,
       notCounted: [],
