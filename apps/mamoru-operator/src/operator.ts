@@ -230,8 +230,13 @@ const ARM_CAP_HOLD_MS = 300_000
 const ARM_BUDGET_HOLD_MS = 600_000
 /** Minimum gap between two receipt reconciliation passes of one account. */
 const RECONCILE_EVERY_MS = 20_000
-/** Blocks added before the handover time when looking for the block an activation executed in (clock and block-time slack). */
-const ACTIVATION_SEARCH_MARGIN = 60n
+/** Chain time added before the handover time when looking for the block an activation executed in (clock and block-time slack; 60 blocks on Base, otto/mamoru#417). */
+const ACTIVATION_SEARCH_MARGIN_SECONDS = 120
+/**
+ * Slack before an op's time when its block is searched for (150 blocks on Base: clock skew, provider lag). otto/mamoru#417:
+ * in seconds, so Monad gets the same 5 minutes, not 45 s of its blocks.
+ */
+const SEARCH_SLACK_SECONDS = 300
 /** Passes the search for that block is tried before the account is started from the search floor. */
 const RECOVER_TRIES = 3
 const PREPARE_TTL_MS = 5 * 60_000
@@ -4637,7 +4642,7 @@ export class Operator {
       // From before the op's first handover (the Safe nonce was N or lower then), widened until it is.
       const top = await this.client.getBlock({ blockNumber: upTo })
       const since = BigInt(Math.floor((op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt)) / 1000))
-      let back = (top.timestamp > since ? blocksIn(this.timeChain, top.timestamp - since) : 0n) + 150n
+      let back = (top.timestamp > since ? blocksIn(this.timeChain, top.timestamp - since) : 0n) + secondsToBlocks(this.timeChain, SEARCH_SLACK_SECONDS)
       let lo = upTo > back ? upTo - back : 0n
       let loNonce = await nonceAt(lo)
       while (loNonce > n && lo > 0n) {
@@ -4780,7 +4785,7 @@ export class Operator {
   private async firstSendBlock(op: StoredOp, upTo: bigint): Promise<bigint> {
     const top = await this.client.getBlock({ blockNumber: upTo })
     const since = BigInt(Math.floor((op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt)) / 1000))
-    const back = (top.timestamp > since ? blocksIn(this.timeChain, top.timestamp - since) : 0n) + 150n
+    const back = (top.timestamp > since ? blocksIn(this.timeChain, top.timestamp - since) : 0n) + secondsToBlocks(this.timeChain, SEARCH_SLACK_SECONDS)
     return upTo > back ? upTo - back : 0n
   }
 
@@ -5577,7 +5582,7 @@ export class Operator {
         // first block with the grant enabled, searched from just before the transaction was first handed over.
         const head = await this.client.getBlockNumber()
         const since = a.sentAt ?? (Date.parse(op.updatedAt) || Date.now())
-        const back = blocksIn(this.timeChain, BigInt(Math.ceil(Math.max(0, Date.now() - since) / 1000))) + ACTIVATION_SEARCH_MARGIN
+        const back = blocksIn(this.timeChain, BigInt(Math.ceil(Math.max(0, Date.now() - since) / 1000))) + secondsToBlocks(this.timeChain, ACTIVATION_SEARCH_MARGIN_SECONDS)
         const floor = head > back ? head - back : 0n
         let block: bigint
         let depositsFrom: bigint | undefined
@@ -6375,7 +6380,8 @@ export class Operator {
       return head.number > lag ? head.number - lag : 0n
     }
     const at = blockAt(op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt))
-    const fromBlock = at > 150n ? at - 150n : 0n
+    const slack = secondsToBlocks(this.timeChain, SEARCH_SLACK_SECONDS)
+    const fromBlock = at > slack ? at - slack : 0n
     const lastAt = blockAt(op.lastBroadcastAt ?? op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt))
     const own = op.safeTxHash?.toLowerCase() as Hex | undefined
     if (!own) {
