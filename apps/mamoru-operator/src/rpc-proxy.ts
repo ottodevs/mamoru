@@ -148,6 +148,13 @@ function pinnedAt(msg: { method: string; params?: unknown[] }): bigint | null {
 /** How long a served head is held when a provider behind it answers a lower tip: the served head never steps back meanwhile. */
 const HEAD_HOLD_MS = 30_000
 
+/**
+ * otto/mamoru#419: with the read cache on, one tip read serves every head the proxy needs for this long (eth_blockNumber,
+ * `latest` blocks, log ranges up to `latest`): every engine and the operator share one head poll. A few blocks, as
+ * MAMORU_HEAD_LAG already serves.
+ */
+export const HEAD_TTL_MS = 1_000
+
 /** How long a block hash answered by a trusted provider may witness a log range: one review's worth of requests. */
 const WITNESS_TTL_MS = 15_000
 
@@ -335,6 +342,8 @@ export type RpcProxyOptions = {
   name?: string
   /** otto/mamoru#419: share identical reads in flight and keep pinned reads under the finalized block (default off; the operator's boot turns it on). */
   readCache?: boolean
+  /** otto/mamoru#419: with readCache, how long one tip read serves every head the proxy needs; default HEAD_TTL_MS. */
+  headTtlMs?: number
   /** Tests: the upstream transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
@@ -822,7 +831,27 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * as is, so one wrong answer cannot hold the head for longer.
    */
   let served: { n: bigint; at: number } | null = null
-  async function head(): Promise<bigint> {
+  const headTtl = opts.readCache === true ? (opts.headTtlMs ?? HEAD_TTL_MS) : 0
+  let tipRead: { p: Promise<bigint>; at: number } | null = null
+  let headShared = 0
+  function head(): Promise<bigint> {
+    const now = Date.now()
+    if (tipRead && now - tipRead.at < headTtl && now >= tipRead.at) {
+      headShared++
+      return tipRead.p
+    }
+    const p = readHead()
+    if (headTtl > 0) {
+      const mine = { p, at: now }
+      tipRead = mine
+      // A failed read is never served again.
+      p.catch(() => {
+        if (tipRead === mine) tipRead = null
+      })
+    }
+    return p
+  }
+  async function readHead(): Promise<bigint> {
     const answered: { url?: string } = {}
     const r = await raw({ jsonrpc: '2.0', id: ++id, method: 'eth_blockNumber', params: [] }, false, 0, answered)
     if (r.error) throw Object.assign(new Error(r.error.message), { rpc: r.error })
@@ -861,6 +890,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const kept = cache?.hit(msg)
     if (kept !== undefined) return { ...(kept as object), id: msg.id }
     const r = cache ? { ...((await cache.run(msg, () => handleInner(msg, seen))) as object), id: msg.id } : await handleInner(msg, seen)
+    // A send, or a transaction found mined, changes state the operator reads: no `latest` answer from before it is served.
+    if (cache && (msg.method === 'eth_sendRawTransaction' || (msg.method === 'eth_getTransactionReceipt' && (r as any)?.result))) cache.changed()
     // Name the call behind an invalid-params refusal: the engine only sees the message.
     const e = (r as any)?.error
     if (e && msg.method === 'eth_sendRawTransaction') {
@@ -905,5 +936,5 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       return Response.json(await caller.run(componentOf(new URL(req.url).pathname), answer))
     },
   })
-  return { url: `http://127.0.0.1:${server.port}/`, stop: () => server.stop(true), cacheStats: (): ReadCacheStats | null => cache?.snapshot() ?? null }
+  return { url: `http://127.0.0.1:${server.port}/`, stop: () => server.stop(true), cacheStats: (): ReadCacheStats | null => (cache ? { ...cache.snapshot(), headShared } : null) }
 }

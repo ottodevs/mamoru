@@ -15,6 +15,12 @@
 // provider that broke finality could be repeated. Receipts are never kept (their block hash is not checked here). The
 // finalized head is learned from answers to the `finalized` tag that pass through, and asked for at most every
 // FINAL_REFRESH_MS, only when a pinned read is likely to fall under it.
+//
+// A third layer serves `latest` state reads (calls, code, balances, storage) again for LATEST_KEEP_MS, a few blocks:
+// an answer that old is what a provider's node a few blocks behind gives anyway, and the proxy already serves `latest`
+// heads MAMORU_HEAD_LAG blocks behind the tip. Anything that changes state the operator reads drops it at once: a
+// transaction sent through the proxy, or a receipt found for one. Nonces, gas prices, estimates, simulations and
+// `pending` reads are never kept.
 
 /** Methods whose answer depends only on their params (no sends, no filters, no logs). */
 const READS = new Set([
@@ -49,6 +55,10 @@ export const READ_CACHE_MAX = 5_000
 export const FINAL_MARGIN = 64n
 /** How long a kept answer is served. */
 export const FINAL_KEEP_MS = 10 * 60_000
+/** How long a `latest` state read is served again: 5 Base blocks, 3 Monad blocks. */
+export const LATEST_KEEP_MS = 1_000
+/** `latest` reads whose answer is the chain's state at the tip and nothing else. */
+const LATEST_READS = new Set(['eth_call', 'eth_getCode', 'eth_getBalance', 'eth_getStorageAt'])
 
 type Req = { method: string; params?: unknown[] }
 
@@ -83,24 +93,53 @@ export function keyOf(msg: Req): string {
   return `${msg.method}:${JSON.stringify(msg.params ?? [])}`
 }
 
-export type ReadCacheStats = { inflightShared: number; finalHits: number; kept: number; finalized: string | null }
+/** A `latest` state read with no block param or the `latest` tag (a call with state overrides is never one). */
+export function latestRead(msg: Req): boolean {
+  if (!LATEST_READS.has(msg.method)) return false
+  const i = BLOCK_PARAM[msg.method]!
+  const p = msg.params ?? []
+  if (p.length > i + 1) return false
+  return p[i] === undefined || p[i] === 'latest'
+}
+
+/**
+ * `latestRepeats`: latest reads that reached a provider although the same read had been asked less than REPEAT_WINDOW_MS
+ * before: what a longer keep time would save, measured before choosing one.
+ */
+export type ReadCacheStats = { inflightShared: number; finalHits: number; latestHits: number; latestRepeats: number; headShared?: number; kept: number; finalized: string | null }
+
+/** The window `latestRepeats` counts in: one operator tick. */
+export const REPEAT_WINDOW_MS = 60_000
 
 export class ReadCache {
   private readonly inflight = new Map<string, Promise<unknown>>()
   private readonly kept = new Map<string, { r: unknown; at: number }>()
+  private readonly latest = new Map<string, { r: unknown; at: number }>()
+  private readonly latestInflight = new Map<string, Promise<unknown>>()
+  /** Bumped by every state change: a `latest` read sent before it is neither shared nor kept after it. */
+  private epoch = 0
   private final: bigint | null = null
   /** The head known when `final` was learned: how far finality has likely moved since is the head's move. */
   private headAtFinal: bigint | null = null
   private head: bigint | null = null
   private finalAskedAt = Number.NEGATIVE_INFINITY
-  private stats = { inflightShared: 0, finalHits: 0 }
+  private stats = { inflightShared: 0, finalHits: 0, latestHits: 0, latestRepeats: 0 }
+  private readonly lastAsked = new Map<string, number>()
 
   constructor(
     private readonly askFinalized: () => Promise<unknown>,
     private readonly max = READ_CACHE_MAX,
     private readonly refreshMs = FINAL_REFRESH_MS,
     private readonly keepMs = FINAL_KEEP_MS,
+    private readonly latestMs = LATEST_KEEP_MS,
   ) {}
+
+  /** State the operator reads may have changed (a send, a receipt found): no `latest` answer from before is served. */
+  changed(): void {
+    this.epoch++
+    this.latest.clear()
+    this.latestInflight.clear()
+  }
 
   /** The provider's tip as the proxy last read it. */
   noteHead(n: bigint): void {
@@ -120,6 +159,17 @@ export class ReadCache {
 
   /** A kept answer for this request, or undefined. */
   hit(msg: Req): unknown {
+    if (latestRead(msg)) {
+      const k = keyOf(msg)
+      const v = this.latest.get(k)
+      if (v === undefined) return undefined
+      if (Date.now() - v.at >= this.latestMs) {
+        this.latest.delete(k)
+        return undefined
+      }
+      this.stats.latestHits++
+      return v.r
+    }
     const k = this.cacheable(msg)
     if (k === null) return undefined
     const v = this.kept.get(k)
@@ -142,6 +192,7 @@ export class ReadCache {
    */
   async run(msg: Req, ask: () => Promise<any>): Promise<any> {
     if (!isRead(msg.method)) return ask()
+    if (latestRead(msg)) return this.runLatest(msg, ask)
     // Decided now, at send time: a block finalized only after this request went out does not make its answer keepable.
     const k = this.cacheable(msg)
     if (k === null) {
@@ -159,6 +210,34 @@ export class ReadCache {
     this.inflight.set(k, p)
     const r = await p
     if (r && !r.error && !emptyLooking(r.result)) this.keep(k, r)
+    return r
+  }
+
+  private async runLatest(msg: Req, ask: () => Promise<any>): Promise<any> {
+    const k = keyOf(msg)
+    const pending = this.latestInflight.get(k)
+    if (pending) {
+      this.stats.inflightShared++
+      return pending
+    }
+    const epoch = this.epoch
+    const at = Date.now()
+    const before = this.lastAsked.get(k)
+    if (before !== undefined && at - before < REPEAT_WINDOW_MS) this.stats.latestRepeats++
+    this.lastAsked.delete(k)
+    this.lastAsked.set(k, at)
+    while (this.lastAsked.size > this.max) this.lastAsked.delete(this.lastAsked.keys().next().value as string)
+    const p = ask().finally(() => {
+      if (this.latestInflight.get(k) === p) this.latestInflight.delete(k)
+    })
+    this.latestInflight.set(k, p)
+    const r = await p
+    // Kept from when it was sent, and only if nothing changed meanwhile.
+    if (epoch === this.epoch && r && !r.error && !emptyLooking(r.result)) {
+      this.latest.delete(k)
+      this.latest.set(k, { r, at })
+      while (this.latest.size > this.max) this.latest.delete(this.latest.keys().next().value as string)
+    }
     return r
   }
 

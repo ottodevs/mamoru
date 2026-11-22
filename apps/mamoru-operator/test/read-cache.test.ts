@@ -5,10 +5,86 @@ import { createPublicClient, http } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { historyCursor, observe, type ObserveInput } from '@mamoru/rpc'
 import { FakeChain } from '../../../packages/rpc/test/fake-chain.ts'
-import { ReadCache, pinnedBlock } from '../src/read-cache.ts'
+import { ReadCache, latestRead, pinnedBlock } from '../src/read-cache.ts'
 import { startRpcProxy } from '../src/rpc-proxy.ts'
 
 const hex = (n: bigint) => `0x${n.toString(16)}`
+
+describe('latest reads (otto/mamoru#419)', () => {
+  const ok = (result: string) => async () => ({ jsonrpc: '2.0', id: 1, result })
+
+  test('only state reads at latest or with no block qualify; pending, nonces, estimates and overrides never', () => {
+    expect(latestRead({ method: 'eth_call', params: [{ to: '0x1' }, 'latest'] })).toBe(true)
+    expect(latestRead({ method: 'eth_call', params: [{ to: '0x1' }] })).toBe(true)
+    expect(latestRead({ method: 'eth_getStorageAt', params: ['0x1', '0x0', 'latest'] })).toBe(true)
+    expect(latestRead({ method: 'eth_call', params: [{ to: '0x1' }, 'pending'] })).toBe(false)
+    expect(latestRead({ method: 'eth_call', params: [{ to: '0x1' }, 'latest', { '0x1': { code: '0x00' } }] })).toBe(false)
+    expect(latestRead({ method: 'eth_call', params: [{ to: '0x1' }, '0x10'] })).toBe(false)
+    for (const method of ['eth_getTransactionCount', 'eth_estimateGas', 'eth_gasPrice', 'eth_blockNumber', 'eth_getBlockByNumber'])
+      expect(latestRead({ method, params: ['0x1', 'latest'] })).toBe(false)
+  })
+
+  test('a latest answer is served again for the keep time only', async () => {
+    const c = new ReadCache(async () => null, 10, 60_000, 60_000, 20)
+    let asked = 0
+    const msg = { method: 'eth_getBalance', params: ['0x1', 'latest'] }
+    await c.run(msg, async () => (asked++, { jsonrpc: '2.0', id: 1, result: '0x5' }))
+    expect(c.hit(msg)).toEqual({ jsonrpc: '2.0', id: 1, result: '0x5' })
+    await Bun.sleep(30)
+    expect(c.hit(msg)).toBeUndefined()
+    await c.run(msg, async () => (asked++, { jsonrpc: '2.0', id: 1, result: '0x5' }))
+    expect(asked).toBe(2)
+    expect(c.snapshot()).toMatchObject({ latestHits: 1, latestRepeats: 1 })
+  })
+
+  test('a state change drops every latest answer, and one sent before it is never kept', async () => {
+    const c = new ReadCache(async () => null)
+    const a = { method: 'eth_call', params: [{ to: '0x1', data: '0xaa' }, 'latest'] }
+    await c.run(a, ok('0x01'))
+    c.changed()
+    expect(c.hit(a)).toBeUndefined()
+    await c.run(a, async () => (c.changed(), { jsonrpc: '2.0', id: 1, result: '0x02' }))
+    expect(c.hit(a)).toBeUndefined()
+  })
+
+  test('errors and empty-looking latest answers are never kept', async () => {
+    const c = new ReadCache(async () => null)
+    const code = { method: 'eth_getCode', params: ['0x1', 'latest'] }
+    await c.run(code, ok('0x'))
+    expect(c.hit(code)).toBeUndefined()
+    const err = { method: 'eth_call', params: [{ to: '0x1' }, 'latest'] }
+    await c.run(err, async () => ({ jsonrpc: '2.0', id: 1, error: { code: 3, message: 'execution reverted' } }))
+    expect(c.hit(err)).toBeUndefined()
+  })
+})
+
+describe('the proxy shares one head and drops latest answers on a send (otto/mamoru#419)', () => {
+  test('heads within HEAD_TTL share one tip read; a send makes the next latest call reach the provider', async () => {
+    const asked: string[] = []
+    const fetch = async (_url: string, init: RequestInit) => {
+      const m = JSON.parse(String(init.body)) as { id: number; method: string }
+      asked.push(m.method)
+      const result = m.method === 'eth_blockNumber' ? '0x100' : m.method === 'eth_chainId' ? '0x2105' : m.method === 'eth_sendRawTransaction' ? `0x${'ab'.repeat(32)}` : '0x01'
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }), { headers: { 'content-type': 'application/json' } })
+    }
+    const proxy = startRpcProxy('https://up.example/', { readCache: true, fallbacks: [], trusted: [], logRanges: {}, headLag: 0n, headTtlMs: 60_000, fetch })
+    const send = async (method: string, params: unknown[]) =>
+      (await (await globalThis.fetch(proxy.url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })).json()) as { result: string }
+    try {
+      for (let i = 0; i < 3; i++) expect((await send('eth_blockNumber', [])).result).toBe('0x100')
+      const call = [{ to: '0x0000000000000000000000000000000000000001', data: '0xaa' }, 'latest']
+      await send('eth_call', call)
+      await send('eth_call', call)
+      await send('eth_sendRawTransaction', ['0x02'])
+      await send('eth_call', call)
+      expect(asked.filter((m) => m === 'eth_blockNumber').length).toBe(1)
+      expect(asked.filter((m) => m === 'eth_call').length).toBe(2)
+      expect(proxy.cacheStats()?.headShared).toBe(2)
+    } finally {
+      proxy.stop()
+    }
+  })
+})
 
 describe('read cache rules', () => {
   test('only a hex block number pins a read', () => {
@@ -68,7 +144,7 @@ describe('read cache rules', () => {
     expect(n).toBe(2)
   })
 
-  test('identical final reads in flight share one answer; a head or latest read is never shared', async () => {
+  test('identical final and latest reads in flight share one answer; a head read is never shared', async () => {
     const c = new ReadCache(async () => null)
     c.noteFinal({ number: hex(1000n) })
     let asked = 0
@@ -81,7 +157,7 @@ describe('read cache rules', () => {
     const all = Promise.all([c.run(final, ask), c.run(final, ask), c.run(head, ask), c.run(head, ask), c.run(latest, ask), c.run(latest, ask)])
     release()
     expect((await all).map((r) => r.result)).toEqual(['0x1', '0x1', '0x1', '0x1', '0x1', '0x1'])
-    expect(asked).toBe(5)
+    expect(asked).toBe(4)
   })
 
   test('a block finalized only after the request went out does not make its answer keepable', async () => {
@@ -117,8 +193,12 @@ describe('read cache rules', () => {
   })
 })
 
-/** 13 accounts with code and a USDC balance, reviewed one after another at heads `spacing` blocks apart, `rounds` times. */
-async function measure(opts: { cache: boolean; finalLag: bigint; safeLag: bigint; spacing: bigint; rounds: number }): Promise<Record<string, number>> {
+/**
+ * 13 accounts with code and a USDC balance, reviewed one after another at heads `spacing` blocks apart, `rounds` times.
+ * The fake head jumps between reviews made a few milliseconds apart, so the shared head read is off (headTtlMs 0) unless
+ * a test sets it: with it, every review in a round would see the round's first head.
+ */
+async function measure(opts: { cache: boolean; finalLag: bigint; safeLag: bigint; spacing: bigint; rounds: number; headTtlMs?: number }): Promise<Record<string, number>> {
   const chain = new FakeChain()
   const accounts = Array.from({ length: 13 }, (_, i) => `0x${(0xa0 + i).toString(16).padStart(40, '0')}` as Address)
   for (const a of accounts) {
@@ -126,7 +206,7 @@ async function measure(opts: { cache: boolean; finalLag: bigint; safeLag: bigint
     chain.setBalance('USDC', a, 25_000_000n)
   }
   const up = chain.serve()
-  const proxy = startRpcProxy(up.url, { readCache: opts.cache, chainId: 8453, fallbacks: [], trusted: [], logRanges: {}, headLag: 0n })
+  const proxy = startRpcProxy(up.url, { readCache: opts.cache, headTtlMs: opts.headTtlMs ?? 0, chainId: 8453, fallbacks: [], trusted: [], logRanges: {}, headLag: 0n })
   const client = createPublicClient({ transport: http(`${proxy.url}c/engine`, { batch: true }) }) as never
   const cursors = accounts.map(() => historyCursor())
   const input = (a: Address, i: number): ObserveInput => ({
@@ -173,6 +253,16 @@ describe('requests per review behind the proxy (otto/mamoru#419)', () => {
     console.log(`[measure] base on  ${JSON.stringify(on)}`)
     expect(on.total!).toBeLessThan(off.total!)
     expect(on.eth_chainId ?? 0).toBe(0)
+  })
+
+  test('engines reviewing at one head share one tip read', async () => {
+    const off = await measure({ cache: true, finalLag: 600n, safeLag: 100n, spacing: 0n, rounds: 3 })
+    const on = await measure({ cache: true, finalLag: 600n, safeLag: 100n, spacing: 0n, rounds: 3, headTtlMs: 60_000 })
+    console.log(`[measure] one head, no shared tip ${JSON.stringify(off)}`)
+    console.log(`[measure] one head, shared tip    ${JSON.stringify(on)}`)
+    expect(off.eth_blockNumber).toBe(39)
+    expect(on.eth_blockNumber ?? 0).toBe(0)
+    expect(on.total!).toBeLessThan(off.total!)
   })
 
   test('Monad-like: finality two blocks behind the head, engines 50 blocks apart', async () => {
