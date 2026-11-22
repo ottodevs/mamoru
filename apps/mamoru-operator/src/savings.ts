@@ -11,7 +11,7 @@
 //   bucket never sees them as its own money in the meantime;
 // - a withdrawal stored with `savingsOut` (computed at prepare, savings first) takes that off, never more than held;
 // - a Stop (owner `exit`) empties the books and starts a new epoch;
-// - a cut (what a balance below the books took off at a read, `clampSavings`) takes that off at its block.
+// - a cap (a read that held less than the books, `clampSavings`) holds them to what that read held, at its block.
 // Ops stored before this code carry none of these flags and count for nothing: no backfill. Every subtraction lowers a
 // vault's basis pro rata. The books are a part of what the Safe holds, never an addition to it.
 
@@ -32,31 +32,24 @@ export type SavingsBooks = {
   vaults: Record<string, { shares: bigint; basis: bigint }>
   /** A savings op is confirmed whose receipt is not read yet: a figure may be short until it is. */
   partial: boolean
-  /** Vaults whose savings shares include an estimate (a deposit not read from its receipt): never cut from it. */
-  estimated?: string[]
+  /** A savings deposit not read yet could not be priced (its vault unread, no earlier rate): no cap is stored meanwhile. */
+  unpriced?: true
 }
 
 /** Stored on a withdrawal at prepare (SAV-R5): what it takes from the books when it confirms. Raw units. */
 export type SavingsOut = { pending: string; shares: Record<string, string> }
 
 /**
- * What a balance below the books took off, at the block of that read. Kept per epoch (AccountState.savingsCuts).
- * `seen`: how many confirmed ops were at or below that block when it was taken. An op confirmed there later (a late
- * landing, an op settled after the read that saw its effect) changes the count: the cut was measured on a history
- * that missed it, so it no longer applies (the next read takes a fresh one if the books are still above what is held).
+ * A read that held less than the books (review of #395): what it held, at its block. Applied as a cap after every op of
+ * that block (`pending = min(pending, usdc)`, `shares = min(shares, held)`), so it is idempotent and holds whatever
+ * history lands late: an op that lowers the books makes it a no-op (nothing counted twice), an op that does not touch
+ * them leaves it in force, an inflow at or before the block was already in what the read held. Kept per epoch.
  */
-export type SavingsCut = { block: number; seen?: number; pending?: string; shares?: Record<string, string> }
+export type SavingsCut = { block: number; usdc?: string; shares?: Record<string, string> }
 export type SavingsCuts = { epoch: string; cuts: SavingsCut[] }
 
 /** A vault as read: its shares held and what they are worth. */
 export type VaultRead = { name: string; shares: bigint; assets: bigint }
-
-/** Confirmed ops (with their block) at or below `block`: a cut's fingerprint of the history it was measured on. */
-function seenAt(ops: readonly StoredOp[], block: number): number {
-  let n = 0
-  for (const o of ops) if (o.state === 'confirmed' && o.block !== undefined && o.block <= block) n++
-  return n
-}
 
 /**
  * Same-block order (review of #395): money in before money out, a Stop last, so a deposit never runs before the harvest
@@ -109,14 +102,18 @@ export function savingsOf(ops: readonly StoredOp[], registry: Registry, opts: { 
   events.sort((a, b) => a.block - b.block || a.rank - b.rank || a.seq - b.seq)
   let books = empty('')
   let partial = false
-  const estimated = new Set<string>()
+  let unpriced = false
+  // The last rate each vault's own receipts showed: prices a deposit not read yet when the read has no rate for it.
+  const lastRate = new Map<string, { shares: bigint; assets: bigint }>()
   for (const e of events) {
     if (e.cut) {
-      // Cuts of another epoch (before the last Stop) do not apply, nor one measured on a history that has changed since.
+      // Caps of another epoch (before the last Stop) do not apply.
       if ((opts.cuts?.epoch ?? '') !== books.epoch) continue
-      if (e.cut.seen !== undefined && seenAt(ops, e.cut.block) !== e.cut.seen) continue
-      takePending(books, BigInt(e.cut.pending ?? '0'))
-      for (const [vault, s] of Object.entries(e.cut.shares ?? {})) takeShares(books, vault, BigInt(s))
+      if (e.cut.usdc !== undefined && books.pending > BigInt(e.cut.usdc)) books.pending = BigInt(e.cut.usdc)
+      for (const [vault, held] of Object.entries(e.cut.shares ?? {})) {
+        const v = books.vaults[vault]
+        if (v && v.shares > BigInt(held)) takeShares(books, vault, v.shares - BigInt(held))
+      }
       continue
     }
     const op = e.op!
@@ -124,7 +121,7 @@ export function savingsOf(ops: readonly StoredOp[], registry: Registry, opts: { 
       if (op.kind === 'exit') {
         books = empty(op.opId)
         partial = false
-        estimated.clear()
+        unpriced = false
         continue
       }
       takePending(books, BigInt(op.savingsOut!.pending))
@@ -161,47 +158,53 @@ export function savingsOf(ops: readonly StoredOp[], registry: Registry, opts: { 
           const cur = books.vaults[f.vault] ?? { shares: 0n, basis: 0n }
           books.vaults[f.vault] = { shares: cur.shares + BigInt(f.shares), basis: cur.basis + BigInt(f.assets) }
           takePending(books, BigInt(f.assets))
+          if (BigInt(f.assets) > 0n) lastRate.set(f.vault, { shares: BigInt(f.shares), assets: BigInt(f.assets) })
         }
         continue
       }
-      // Receipt not read yet, or read without its Deposit (review of #395: never leave pending as it was): the intent's
-      // assets at the vault rate of the read. The estimate is marked so no cut is ever taken from it.
       partial = true
+      // Read without a Deposit (review of #395): the op deposited nothing (a Safe deposit always emits one with the Safe
+      // as owner); pending stays, and a read holding less caps it.
+      if (op.facts) continue
+      // Not read yet: the intent's assets at the vault rate of the read, or its last receipt's. An over-estimate by a few
+      // share units is harmless: a cap holds what the read held, and the receipt replaces the estimate.
       const assets = BigInt(op.amountIn ?? '0')
       const vault = op.tokenOut
-      const rate = vault ? opts.rates?.find((v) => v.name === vault) : undefined
-      takePending(books, assets)
-      if (vault && rate && rate.assets > 0n && assets > 0n) {
-        const cur = books.vaults[vault] ?? { shares: 0n, basis: 0n }
-        books.vaults[vault] = { shares: cur.shares + (assets * rate.shares) / rate.assets, basis: cur.basis + assets }
-        estimated.add(vault)
+      const r = vault ? opts.rates?.find((v) => v.name === vault) : undefined
+      const rate = r && r.assets > 0n ? r : vault ? lastRate.get(vault) : undefined
+      if (!vault || !rate || assets === 0n) {
+        // No rate at all (review of #395): the assets stay pending rather than vanish; no cap is stored meanwhile.
+        unpriced = true
+        continue
       }
+      takePending(books, assets)
+      const cur = books.vaults[vault] ?? { shares: 0n, basis: 0n }
+      books.vaults[vault] = { shares: cur.shares + (assets * rate.shares) / rate.assets, basis: cur.basis + assets }
     }
   }
-  return { ...books, partial, ...(estimated.size ? { estimated: [...estimated].sort() } : {}) }
+  return { ...books, partial, ...(unpriced ? { unpriced: true as const } : {}) }
 }
 
 /**
- * The spec's clamp made persistent: the books never above what the Safe holds (`usdc`, the vaults' shares). What a read
- * finds missing is stored as a cut at its block, so the books stay down when the balance comes back (a later deposit is
- * never tagged savings). Returns the books after the cut and the cuts to store (the caller saves them when changed).
+ * The spec's clamp made persistent: the books never above what the Safe holds (`usdc`, the vaults' shares). A read that
+ * holds less is stored as a cap at its block, so the books stay down when the balance comes back (a later deposit is
+ * never tagged savings). Returns the books after it and the caps to store (the caller saves them when changed).
  */
 export function clampSavings(ops: readonly StoredOp[], registry: Registry, read: { block: number; usdc: bigint | undefined; vaults: readonly VaultRead[] }, stored?: SavingsCuts): { books: SavingsBooks; cuts: SavingsCuts } {
   const first = savingsOf(ops, registry, { atBlock: read.block, rates: read.vaults, cuts: stored })
-  // Cuts of an older epoch are dropped: a Stop emptied what they applied to.
+  // Caps of an older epoch are dropped: a Stop emptied what they applied to.
   const kept: SavingsCuts = { epoch: first.epoch, cuts: stored?.epoch === first.epoch ? [...stored.cuts] : [] }
-  // An op included and not settled yet is in the balances and not in the books: the cut taken now counts it, and its
-  // fingerprint (`seen`) drops that cut once the op confirms at or below this block, so it is never counted twice.
-  const cut: SavingsCut = { block: read.block, seen: seenAt(ops, read.block) }
-  // A balance the read did not return is no sign the USDC left (review of #395): no cut from a missing entry.
-  if (read.usdc !== undefined && first.pending > read.usdc) cut.pending = (first.pending - read.usdc).toString()
+  // A deposit that could not be priced keeps its assets in pending for now: no cap from books known to be off.
+  if (first.unpriced) return { books: clipBooks(first, read.usdc, read.vaults), cuts: kept }
+  const cut: SavingsCut = { block: read.block }
+  // A balance the read did not return is no sign the USDC left (review of #395): no cap from a missing entry.
+  if (read.usdc !== undefined && first.pending > read.usdc) cut.usdc = read.usdc.toString()
   for (const [vault, v] of Object.entries(first.vaults)) {
-    // A vault this read did not return (unread, or not read at all) is no sign its shares left; an estimated count
-    // (a deposit not read from its receipt) can sit a few units above what it minted: no cut from either.
+    // A vault this read did not return (unread, or not read at all) is no sign its shares left.
     const r = read.vaults.find((x) => x.name === vault)
-    if (r && v.shares > r.shares && !first.estimated?.includes(vault)) (cut.shares ??= {})[vault] = (v.shares - r.shares).toString()
+    if (r && v.shares > r.shares) (cut.shares ??= {})[vault] = r.shares.toString()
   }
-  if (!cut.pending && !cut.shares) return { books: first, cuts: kept }
+  if (cut.usdc === undefined && !cut.shares) return { books: first, cuts: kept }
   const cuts = { epoch: first.epoch, cuts: [...kept.cuts, cut] }
   return { books: savingsOf(ops, registry, { atBlock: read.block, rates: read.vaults, cuts }), cuts }
 }

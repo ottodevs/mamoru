@@ -101,13 +101,12 @@ describe('savingsOf: what enters and leaves the books', () => {
     expect(b.vaults[VAULT]!.basis).toBe(2n * USDC)
   })
 
-  test('review of #395: a deposit read without its Deposit flow still moves pending (estimated, partial)', () => {
+  test('review of #395: a deposit read without its Deposit flow deposited nothing: pending stays (partial)', () => {
     const noFlow = { ...deposit(2, 2n * USDC), facts: { at: at(2), gasWei: '1', fees: [] } } as StoredOp
     const b = savingsOf([harvest(1, 2n * USDC), noFlow], baseRegistry, { rates: read(sharesFor(100n * USDC)) })
-    expect(b.pending).toBe(0n)
-    expect(b.vaults[VAULT]!.shares).toBe(sharesFor(2n * USDC))
+    expect(b.pending).toBe(2n * USDC)
+    expect(b.vaults).toEqual({})
     expect(b.partial).toBe(true)
-    expect(b.estimated).toEqual([VAULT])
   })
 
   test('review of #395: a sale whose facts are not scoped to its userOp adds nothing (partial)', () => {
@@ -127,7 +126,7 @@ describe('clampSavings: never above what the Safe holds, and kept down', () => {
     const ops = [harvest(1, 5n * USDC)]
     const first = clampSavings(ops, baseRegistry, { block: 10, usdc: 2n * USDC, vaults: [] })
     expect(first.books.pending).toBe(2n * USDC)
-    expect(first.cuts).toEqual({ epoch: '', cuts: [{ block: 10, seen: 1, pending: (3n * USDC).toString() }] })
+    expect(first.cuts).toEqual({ epoch: '', cuts: [{ block: 10, usdc: (2n * USDC).toString() }] })
     // An owner deposit of 100 later: the books stay at 2, the deposit is bucket money.
     const later = clampSavings(ops, baseRegistry, { block: 20, usdc: 102n * USDC, vaults: [] }, first.cuts)
     expect(later.books.pending).toBe(2n * USDC)
@@ -145,26 +144,43 @@ describe('clampSavings: never above what the Safe holds, and kept down', () => {
     expect(unread.cuts.cuts).toEqual([])
   })
 
-  test('an op settled after the cut that saw its effect drops that cut: a withdrawal is never counted twice', () => {
+  test('review of #395: a cap holds whatever lands late: a withdrawal is never counted twice, an unrelated op keeps it', () => {
     const ops = [harvest(1, 5n * USDC)]
     const sent = { ...withdrawal(9, { pending: 3n * USDC }), state: 'submitted', txHash: '0xab' } as StoredOp
-    // The withdrawal's 3 already left the Safe at block 9: 2 USDC held, books still 5. The read cuts 3.
+    // The withdrawal's 3 already left the Safe at block 9: 2 USDC held, books still 5. The read caps at 2.
     const during = clampSavings([...ops, sent], baseRegistry, { block: 10, usdc: 2n * USDC, vaults: [] })
     expect(during.books.pending).toBe(2n * USDC)
-    expect(during.cuts.cuts).toEqual([{ block: 10, seen: 1, pending: (3n * USDC).toString() }])
-    // It confirms at block 9 (or lands late after being given up on): the cut's history changed, the cut goes.
-    const after = clampSavings([...ops, { ...sent, state: 'confirmed' } as StoredOp], baseRegistry, { block: 11, usdc: 2n * USDC, vaults: [] }, during.cuts)
-    expect(after.books.pending).toBe(2n * USDC)
-    expect(savingsOf([...ops, { ...sent, state: 'confirmed' } as StoredOp], baseRegistry, { cuts: during.cuts }).pending).toBe(2n * USDC)
+    expect(during.cuts.cuts).toEqual([{ block: 10, usdc: (2n * USDC).toString() }])
+    // It confirms at block 9 (or lands late after being given up on): 5 - 3 = 2 under a cap of 2, not 2 - 3.
+    const confirmed = [...ops, { ...sent, state: 'confirmed' } as StoredOp]
+    expect(savingsOf(confirmed, baseRegistry, { cuts: during.cuts }).pending).toBe(2n * USDC)
+    // An op that spent USDC outside the books lands late at block 9; the owner then deposits 100: still 2.
+    const spend = eng(9, { step: 'enter_swap', tokenIn: 'USDC', tokenOut: 'WETH', amountIn: '3000000' })
+    const later = clampSavings([...ops, spend], baseRegistry, { block: 20, usdc: 102n * USDC, vaults: [] }, during.cuts)
+    expect(later.books.pending).toBe(2n * USDC)
   })
 
-  test('review of #395: a balance the read did not return cuts nothing; an estimated deposit is never cut', () => {
+  test('review of #395: a balance the read did not return caps nothing; an over-estimated deposit is replaced by its receipt', () => {
     const ops = [harvest(1, 5n * USDC)]
     expect(clampSavings(ops, baseRegistry, { block: 10, usdc: undefined, vaults: [] }).cuts.cuts).toEqual([])
-    // An unread deposit counted at a rate a little off: its estimate may sit above the shares held.
+    // An unread deposit counted at a rate a little off sits a few units above what it minted: capped at the held shares.
+    const held = sharesFor(10n * USDC)
     const unread = [harvest(1, 10n * USDC), deposit(2, 10n * USDC, false)]
-    const r = clampSavings(unread, baseRegistry, { block: 10, usdc: 0n, vaults: read(sharesFor(10n * USDC) - 5n) })
+    const r = clampSavings(unread, baseRegistry, { block: 10, usdc: 0n, vaults: read(held - 5n) })
+    expect(r.books.vaults[VAULT]!.shares).toBe(held - 5n)
+    // Its receipt says it minted held - 5: the cap is a no-op, nothing lost.
+    const readOps = [harvest(1, 10n * USDC), { ...deposit(2, 10n * USDC), facts: { at: at(2), gasWei: '1', fees: [], vaultFlows: [{ vault: VAULT, kind: 'deposit' as const, assets: (10n * USDC).toString(), shares: (held - 5n).toString(), logIndex: 1 }] } } as StoredOp]
+    expect(savingsOf(readOps, baseRegistry, { cuts: r.cuts }).vaults[VAULT]!.shares).toBe(held - 5n)
+  })
+
+  test('review of #395: an unread deposit with no rate at all keeps its assets pending, and no cap is stored', () => {
+    const ops = [harvest(1, 10n * USDC), deposit(2, 10n * USDC, false)]
+    const r = clampSavings(ops, baseRegistry, { block: 10, usdc: 0n, vaults: [] })
+    expect(r.books.unpriced).toBe(true)
     expect(r.cuts.cuts).toEqual([])
+    // With an earlier receipt of the same vault, its rate prices the new one.
+    const withHistory = [harvest(1, 20n * USDC), deposit(2, 10n * USDC), deposit(3, 10n * USDC, false)]
+    expect(savingsOf(withHistory, baseRegistry).vaults[VAULT]!.shares).toBe(2n * sharesFor(10n * USDC))
   })
 
   test('a Stop starts a new epoch: the older cuts are dropped and do not touch the new books', () => {
