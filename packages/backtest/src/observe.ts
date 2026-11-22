@@ -13,6 +13,9 @@ const ID = (`0x${'00'.repeat(32)}`) as Hex
 /** Sessions never lapse in a run; how many uses each grant took is reported against its limit instead. */
 const FOREVER = 2 ** 40
 
+/** Uniswap v3's MAX_TICK: a TWAP outside ±this is a bad read, not a price. */
+const MAX_TWAP_TICK = 887_272n
+
 /** Mean tick over the policy window from the oracle cumulatives of the samples, rounded toward negative infinity. */
 export function twapTick(ds: Dataset, poolIndex: number, i: number, windowSeconds: number): number {
   const now = ds.samples[i]!
@@ -28,6 +31,9 @@ export function twapTick(ds: Dataset, poolIndex: number, i: number, windowSecond
   const delta = cur.tickCumulative - before.tickCumulative
   let tick = delta / secs
   if (delta < 0n && delta % secs !== 0n) tick -= 1n
+  // otto/mamoru#127: two samples whose cumulatives disagree (read from different providers of a public pool) give a
+  // mean no pool can have; that window is unread and the spot tick stands in, as without cumulatives.
+  if (tick > MAX_TWAP_TICK || tick < -MAX_TWAP_TICK) return cur.tick
   return Number(tick)
 }
 
