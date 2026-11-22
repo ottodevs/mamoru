@@ -79,14 +79,24 @@ export function principalObs(obs: Observation): Observation {
  * re-minting every position on this chain. Without `obs.budget` (not V4) it always goes: the chain's own checks apply.
  */
 export function reinvestFits(obs: Observation, policy: PolicyVersion, value: bigint): boolean {
-  if (!obs.budget) return true
+  const room = reinvestRoomOf(obs, policy)
+  return room === null || room >= value
+}
+
+/**
+ * otto/mamoru#413: the largest reinvestment `reinvestFits` lets through: V4's room less the all-positions reserve (0
+ * when the reserve takes it all). Null without `obs.budget` (not V4): no bound here.
+ */
+export function reinvestRoomOf(obs: Observation, policy: PolicyVersion): bigint | null {
+  if (!obs.budget) return null
   const savings = policy.savingsAsset
   let lp = 0n
   for (const p of obs.positions) {
     const pool = p.pool ? obs.pools.find((x) => x.name === p.pool) : undefined
     if (pool && p.liquidity > 0n) lp += positionValue(p, pool, savings)
   }
-  return obs.budget.room >= value + (lp * REINVEST_RESERVE_BPS) / 10_000n
+  const reserve = (lp * REINVEST_RESERVE_BPS) / 10_000n
+  return obs.budget.room > reserve ? obs.budget.room - reserve : 0n
 }
 
 export type HarvestSale = { proposal: EnterSwapProposal | null; waits: { bucket: string; code: ReasonCode }[] }

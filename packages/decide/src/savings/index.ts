@@ -1,7 +1,7 @@
 import type { ReasonCode } from '@mamoru/domain'
 import { grantKeyFor, type PolicyVersion } from '@mamoru/policy'
 import { vaultFloorOf } from '../allocate/index.ts'
-import { reinvestFits } from '../harvest/index.ts'
+import { reinvestRoomOf } from '../harvest/index.ts'
 import type { Observation, VaultDepositProposal } from '../types.ts'
 import { bucketVaults } from '../value.ts'
 
@@ -69,6 +69,12 @@ export function savingsSweepOf(obs: Observation, policy: PolicyVersion, still?: 
     if (ratioRoom < floor) return { proposal: null, wait: { bucket: b.id, code: 'DECIDE_WAIT_BUDGET' } }
     assets = ratioRoom
   }
-  if (!reinvestFits(obs, policy, assets)) return { proposal: null, wait: { bucket: b.id, code: 'DECIDE_WAIT_BUDGET' } }
+  // HRV-R7 (review of #392, P1): sized down to what the V4 room leaves after the all-positions reserve, so a room that
+  // replenishes in parts still takes the savings in parts; under the floor it waits.
+  const fits = reinvestRoomOf(obs, policy)
+  if (fits !== null && fits < assets) {
+    if (fits < floor) return { proposal: null, wait: { bucket: b.id, code: 'DECIDE_WAIT_BUDGET' } }
+    assets = fits
+  }
   return { proposal: { kind: 'vault_deposit', grant: grantKeyFor(policy, 'vault-supply', v.name) as `vault-supply:${string}`, bucket: b.id, pool: v.name, vault: v.name, assets, savings: true }, wait: null }
 }

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV8, grantKey, v7EnginePolicy } from '@mamoru/policy'
 import { address, baseRegistry, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { allocate, bucketObs, decide, positionValue, savingsSweepOf, type Observation, type PoolObs, type PositionObs, type VaultObs } from './index.ts'
+import { allocate, bucketObs, decide, positionValue, reinvestRoomOf, savingsSweepOf, type Observation, type PoolObs, type PositionObs, type VaultObs } from './index.ts'
 
 // otto/mamoru#413 (spec 012 savings-layer.md): harvested USDC is savings in the Stable vault, outside the bucket weights.
 // conservador-live-v8 as the engine runs it (Stable 50 in vaults / WETH-USDC 25 / USDC-cbBTC 25, vault floor 1 USDC).
@@ -117,6 +117,15 @@ describe('the bucket books (SAV-R4)', () => {
     expect(withSavings.buckets.map((b) => [b.bucket, b.target, b.weightBps])).toEqual(plain.buckets.map((b) => [b.bucket, b.target, b.weightBps]))
   })
 
+  test('review of #392: Lab weight scaling (CPPI) reads the bucket books: savings move no weight', () => {
+    const cppi = { ...V8, cppi: { floorBps: 9_000, multiplier: 3 } } as typeof V8
+    const guard = { peakValue: 1_050n * USDC, pools: {} } as unknown as Observation['guard']
+    const plain = decide(account(500n * USDC, 0n, 0n, { guard }), cppi)
+    const withSavings = decide(account(500n * USDC, 400n * USDC, 0n, { guard }), cppi)
+    expect(plain.targets).toBeDefined()
+    expect(withSavings.targets).toEqual(plain.targets)
+  })
+
   test('the drain band never redeems savings: the same shares untagged would be redeemed (SAV-S4)', () => {
     // 700 of shares in gtUSDCp on 1,200: 58 % Stable, past target + 5 points.
     const untagged = decide(account(700n * USDC), V8)
@@ -169,6 +178,17 @@ describe('the savings deposit (SAV-R1, R2)', () => {
     expect(d.buckets).toContainEqual({ bucket: 'stables', code: 'DECIDE_WAIT_BUDGET' })
     // Room for the deposit plus 1.5 x the 500 of positions: it goes.
     expect(decide(account(500n * USDC, 0n, 5n * USDC, { budget: { room: 800n * USDC } }), V8).proposal).toMatchObject({ kind: 'vault_deposit', savings: true })
+  })
+
+  test('review of #392: room for part of it past the reserve takes that part, so a room refilling in parts drains it', () => {
+    // Positions worth ~500: the reserve is ~750. 3 USDC of room past it takes 3 of the 200 pending.
+    const big = 10_000n * USDC
+    const reserve = big - reinvestRoomOf(account(500n * USDC, 0n, 0n, { budget: { room: big } }), V8)!
+    expect(reserve > 740n * USDC && reserve < 760n * USDC).toBe(true)
+    const p = decide(account(500n * USDC, 0n, 200n * USDC, { budget: { room: reserve + 3n * USDC } }), V8).proposal as { assets: bigint; savings?: true }
+    expect(p).toMatchObject({ kind: 'vault_deposit', savings: true, assets: 3n * USDC })
+    // Past the reserve by less than the floor: it waits.
+    expect(savingsSweepOf(account(500n * USDC, 0n, 200n * USDC, { budget: { room: reserve + 500_000n } }), V8).wait).toEqual({ bucket: 'stables', code: 'DECIDE_WAIT_BUDGET' })
   })
 
   test('the V4 vault ratio caps it; under the floor it waits', () => {

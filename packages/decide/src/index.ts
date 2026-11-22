@@ -22,7 +22,7 @@ import { poolDepthShadowRisk } from './shadow-pool-depth.ts'
 
 export type * from './types.ts'
 export { capRoomOf, placedOf, withinCap } from './cap.ts'
-export { estimateFees, harvestSaleOf, principalObs, reinvestFits, HARVEST_SALE_AGE_SECONDS, REINVEST_RESERVE_BPS } from './harvest/index.ts'
+export { estimateFees, harvestSaleOf, principalObs, reinvestFits, reinvestRoomOf, HARVEST_SALE_AGE_SECONDS, REINVEST_RESERVE_BPS } from './harvest/index.ts'
 export { bucketObs, savingsPending, savingsSweepOf } from './savings/index.ts'
 export { safeSavings } from './enter/index.ts'
 export { amountsForLiquidity, bucketVaults, inSavings, poolTvlInSavings, vaultValue, volatileOf } from './value.ts'
@@ -88,7 +88,8 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   const entryObs = withinCap(held, given)
   const room = capRoomOf(principal, given)
   // Lab (#101 experiment 6): every step reads the scaled preferences; the decision still names the policy as given.
-  const targets = weightTargets(obs, given)
+  // otto/mamoru#413 (review of #392, P1): Lab weight scaling reads the bucket books too, so savings never move a weight.
+  const targets = weightTargets(bucketObs(obs, given), given)
   const policy: PolicyVersion = targets ? { ...given, buckets: targets } : given
   const observationCodes: ReasonCode[] = ['OBS_OK']
   const unsafeDeposit = obs.deposits.some((d) => !d.safe)
