@@ -289,5 +289,28 @@ export function markdown(cells: Cell[], aggs: Aggregate[]): string {
   }
   out.push('### Per split', '', '| Split | Deposit | Variant | Windows | Mean return % | Mean vs hold % | Worst return % | Worst max DD % | Worst day % | Ops | Gas |', '|---|---|---|---|---|---|---|---|---|---|---|')
   for (const a of aggs) out.push(`| ${a.split} | ${a.deposit} | ${a.variant} | ${a.cells} | ${f2(a.meanReturnPct)} | ${f2(a.meanVsHoldPct)} | ${f2(a.worstReturnPct)} | ${f2(a.worstDrawdownPct)} | ${f2(a.worstDayPct)} | ${a.ops} | ${f2(a.gas)} |`)
+  out.push('', ...rankingLines(aggs))
   return `${out.join('\n')}\n`
+}
+
+/**
+ * otto/mamoru#164 (3): candidates ranked by what a user nets. Per split and deposit, best first by mean return against
+ * holding the same mix (after gas, so impermanent loss and gas count against it), then by mean return. Protection
+ * (worst return, worst drawdown) is shown beside it, so a candidate that nets more by risking more is visible as such.
+ */
+export function rankByNetYield(aggs: Aggregate[]): Aggregate[] {
+  return [...aggs].sort((a, b) => (a.split === b.split ? 0 : a.split === 'train' ? -1 : 1) || a.deposit - b.deposit || b.meanVsHoldPct - a.meanVsHoldPct || b.meanReturnPct - a.meanReturnPct)
+}
+
+function rankingLines(aggs: Aggregate[]): string[] {
+  const out = ['### Ranked by net yield (vs hold, after gas)', '', '| Split | Deposit | Rank | Variant | Mean vs hold % | Mean return % | Worst return % | Worst max DD % |', '|---|---|---|---|---|---|---|---|']
+  let group = ''
+  let rank = 0
+  for (const a of rankByNetYield(aggs)) {
+    const g = `${a.split}:${a.deposit}`
+    rank = g === group ? rank + 1 : 1
+    group = g
+    out.push(`| ${a.split} | ${a.deposit} | ${rank} | ${a.variant} | ${f2(a.meanVsHoldPct)} | ${f2(a.meanReturnPct)} | ${f2(a.worstReturnPct)} | ${f2(a.worstDrawdownPct)} |`)
+  }
+  return out
 }

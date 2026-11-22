@@ -3,7 +3,7 @@ import { conservadorLabGuardsV1, conservadorLiveV2, type PolicyVersion } from '@
 import { syntheticDataset } from './fixtures.ts'
 import { marketOfDataset, moveOf } from './market.ts'
 import { runBacktest } from './run.ts'
-import { aggregate, applyOverrides, cellMetrics, markdown, overridesFromAssignments, policyOf, sortCells, worstDayBps, type Cell, type CellMetrics } from './sweep.ts'
+import { aggregate, applyOverrides, cellMetrics, markdown, overridesFromAssignments, policyOf, rankByNetYield, sortCells, worstDayBps, type Aggregate, type Cell, type CellMetrics } from './sweep.ts'
 import { blockAt, blockTime, LAB_WINDOWS, windowBlocks } from './windows.ts'
 
 const H = 3600
@@ -209,5 +209,25 @@ describe('windows', () => {
     expect(blockTime(fromBlock - 300)).toBeLessThan(Date.parse(w.from) / 1000)
     expect(blockTime(toBlock)).toBeLessThanOrEqual(Date.parse(w.to) / 1000)
     expect(fromBlock % 300).toBe(0)
+  })
+})
+
+describe('ranked by net yield (otto/mamoru#164)', () => {
+  const agg = (variant: string, split: 'train' | 'test', deposit: number, meanVsHoldPct: number, meanReturnPct: number): Aggregate => ({ variant, split, deposit, cells: 3, meanReturnPct, meanVsHoldPct, worstReturnPct: -1, worstDrawdownPct: 2, worstDayPct: 1, ops: 10, gas: 1 })
+  test('per split and deposit, best first by mean vs hold, then by mean return; TRAIN before TEST', () => {
+    const ranked = rankByNetYield([
+      agg('base', 'test', 1000, 0.1, 1),
+      agg('base', 'train', 1000, -0.2, 1),
+      agg('wide', 'train', 1000, 0.3, 0.5),
+      agg('tight', 'train', 1000, 0.3, 0.9),
+      agg('base', 'train', 100000, 0.0, 1),
+    ])
+    expect(ranked.map((a) => `${a.split}:${a.deposit}:${a.variant}`)).toEqual(['train:1000:tight', 'train:1000:wide', 'train:1000:base', 'train:100000:base', 'test:1000:base'])
+  })
+  test('the sweep report carries the ranking, numbered within each split and deposit', () => {
+    const md = markdown([], [agg('base', 'train', 1000, -0.2, 1), agg('tight', 'train', 1000, 0.3, 0.9)])
+    expect(md).toContain('### Ranked by net yield (vs hold, after gas)')
+    expect(md).toContain('| train | 1000 | 1 | tight | 0.30 | 0.90 | -1.00 | 2.00 |')
+    expect(md).toContain('| train | 1000 | 2 | base | -0.20 | 1.00 | -1.00 | 2.00 |')
   })
 })
