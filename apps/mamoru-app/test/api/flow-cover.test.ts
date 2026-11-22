@@ -60,7 +60,7 @@ describe('net deposited complete (otto/mamoru#438)', () => {
     expect((await loadValueSeries(db, 'u1', NOW)).netDeposited).toEqual({ usd: 1500, status: 'complete', since: '2026-11-04' })
   })
 
-  test('first-day check: a Safe funded before the deposit look plus a recorded top-up is partial even with the cover row', async () => {
+  test('first-day check (second line of defence; the operator sends no cover over a funded start): a Safe funded before the deposit look plus a recorded top-up is partial even with the cover row', async () => {
     const db = seed()
     daily(db, '2026-11-04', 8453, 'base-u1', 1000 * USDC, 100) // 1000 USDC there on the first read, never recorded
     daily(db, '2026-11-05', 8453, 'base-u1', 1500 * USDC, 300)
@@ -116,6 +116,11 @@ describe('net deposited complete (otto/mamoru#438)', () => {
     )
     const v = await loadValueSeries(db, 'u1', NOW)
     expect(v.netDeposited).toEqual({ usd: 1500, status: 'complete', since: '2026-11-04' }) // the bridge is not a deposit
+    // One own bridge matches one mint, of its amount: a second mint in the same block is money from elsewhere.
+    await cover(db, 143, S2, { from: 6000, through: 9000, open: [], mints: [mint, { ...mint, usdc: String(10_000 * USDC) }] })
+    expect(await status(db)).toBe('partial')
+    await cover(db, 143, S2, { from: 6000, through: 9000, open: [], mints: [{ ...mint, usdc: String(4_000 * USDC) }] })
+    expect(await status(db)).toBe('partial')
   })
 
   test('a mint on a chain whose first day it does not explain, or flows on a chain without value, is partial', async () => {
@@ -132,6 +137,8 @@ describe('writeCover', () => {
     const db = seed()
     expect(await writeCover(db, { chainId: 8453, receipts: [{ safe: S1.toUpperCase().replace('0X', '0x'), cover: { from: 1, through: 2, open: ['x'], mints: [] } }, { safe: '0xff', cover: { from: 1, open: [], mints: [] } }, { safe: S1, cover: { from: -1, open: [], mints: [] } }] }, NOW, resolve)).toBe(1)
     await writeCover(db, { chainId: 8453, receipts: [{ safe: S1, cover: { from: 1, open: [], mints: [] } }] }, NOW, resolve)
+    // A flow writeFlows would skip: the cover is not written (the row stays as it was).
+    expect(await writeCover(db, { chainId: 8453, receipts: [{ safe: S1, flows: [{ id: 'in:0x1:0', t: 1, kind: 'in', usdc: '0' }], cover: { from: 9, through: 9, open: [], mints: [] } }] }, NOW, resolve)).toBe(0)
     expect(db.raw.query('SELECT chain_id, account_key, from_block, through_block, open_json, mints_json FROM account_flow_cover').all()).toEqual([
       { chain_id: 8453, account_key: 'base-u1', from_block: 1, through_block: null, open_json: '[]', mints_json: '[]' },
     ])

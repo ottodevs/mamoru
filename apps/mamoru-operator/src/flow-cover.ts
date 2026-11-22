@@ -1,10 +1,13 @@
 // otto/mamoru#438: the operator vouches for an account's flows, so the Worker can call its net deposited complete.
 //
 // What it vouches, per account and chain (`FlowCoverWire` on the snapshot's receipts entry):
-// - `from`: the block from which every incoming USDC Transfer to the Safe has been read without a hole. The deposit look
+// - `from`: the block from which every incoming USDC Transfer to the Safe has been read without a hole, AND before which
+//   the Safe held nothing: its USDC balance at from - 1 was dust (read once, verifyCovers) and no op of the account is
+//   older than `from`. So every USDC the Safe ever received is a recorded deposit or a listed mint. The deposit look
 //   (operator.ts lookForDeposits) sets it where a Safe's first look starts, and moves it up to where a look starts again
-//   after a hole (depositRange skips a Safe nobody looked at for longer than its backfill). An account whose look began
-//   before this field existed has none until the log backfill below has read its history.
+//   after a hole (depositRange skips a Safe nobody looked at for longer than its backfill). A start that is not proven
+//   (a balance there, an op before it, or a look that began before this field existed) is read back by the log
+//   backfill below, 30 days further each time, until it is.
 // - `through`: the snapshot's block, when the deposit look's final cursor plus one read of (cursor, block] found no
 //   deposit and no mint the operator has not recorded yet. Absent: something arrived that is not on the wire yet.
 // - `open`: what the operator cannot vouch for right now (a deposit or mint list at its cap, a withdrawal whose receipt
@@ -17,7 +20,7 @@
 // its range, each of its accounts is covered from the job's start.
 import { parseAbiItem, type Address, type Hex } from 'viem'
 import type { Registry } from '@mamoru/registry'
-import { DEPOSIT_MIN_USDC, DEPOSIT_PAGE_BLOCKS, DEPOSITS_KEPT, depositsOf, mergeDeposits } from './deposits.ts'
+import { DEPOSIT_MIN_USDC, DEPOSIT_PAGE_BLOCKS, DEPOSITS_KEPT, depositsOf, mergeDeposits, type DepositRow } from './deposits.ts'
 import { accountFlows } from './flows.ts'
 import type { Snapshot } from './snapshot.ts'
 import type { AccountState, StoredOp } from './state.ts'
@@ -25,11 +28,12 @@ import type { AccountReceiptsWire } from './yield-receipts.ts'
 
 const TRANSFER = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)')
 const ZERO = '0x0000000000000000000000000000000000000000'
+const BALANCE_OF = [parseAbiItem('function balanceOf(address) view returns (uint256)')]
 
 /** USDC minted to the Safe (a CCTP leg). `at`: the block's time (ISO), or when it was found if the node gave none. */
 export type MintRow = { txHash: Hex; logIndex: number; block: string; amountUsdc: string; at: string }
 /** Where the account's flows are vouched from. `backfill`: the look started again after a hole; the job must read it. */
-export type FlowCover = { safe: string; fromBlock: string; backfill?: true }
+export type FlowCover = { safe: string; fromBlock: string; backfill?: true; /** The Safe held only dust at fromBlock - 1 and no op is older (verifyCovers). */ verified?: true }
 /** The log backfill in progress: [from, to] for these Safes, read up to `next` - 1. */
 export type FlowBackfillJob = { from: string; to: string; next: string; accounts: { accountKey: string; safe: string }[] }
 export type FlowCoverWire = { from: number; through?: number; open: string[]; mints: { block: number; t: number; usdc: string }[] }
@@ -97,7 +101,7 @@ const seconds = (iso: string): number | null => {
 /** What the account's receipts entry carries: undefined without a cover for its current Safe or while its hole is unread. */
 export function coverWire(acc: Pick<AccountState, 'deposits' | 'ops' | 'flowCover' | 'flowMints'>, safe: string, through: bigint | undefined): FlowCoverWire | undefined {
   const c = acc.flowCover
-  if (!c || c.safe !== safe.toLowerCase() || c.backfill) return undefined
+  if (!c || c.safe !== safe.toLowerCase() || c.backfill || !c.verified) return undefined
   const open: string[] = []
   if ((acc.deposits?.length ?? 0) >= DEPOSITS_KEPT) open.push('deposits-cap')
   if ((acc.flowMints?.length ?? 0) >= MINTS_KEPT) open.push('mints-cap')
@@ -117,8 +121,10 @@ export type CoverSource = {
   registry: Registry
   /** Incoming USDC Transfer logs to any of `safes` in [from, to] (one topic-OR request). */
   readLogs(usdc: Address, safes: Address[], from: bigint, to: bigint): Promise<TransferLog[]>
-  /** A block's time (unix seconds), for a log the node served without one. */
+  /** A block's time (unix seconds), for a row whose log the node served without one. */
   blockTime(block: bigint): Promise<bigint>
+  /** The Safe's USDC balance at the end of `block` (an archive read). */
+  balanceAt(usdc: Address, safe: Address, block: bigint): Promise<bigint>
   job(): FlowBackfillJob | undefined
   setJob(job: FlowBackfillJob | undefined): void
   save(): void
@@ -126,14 +132,19 @@ export type CoverSource = {
 }
 
 const ownTxOf = (acc: AccountState) => new Set(acc.ops.flatMap((o) => (o.txHash ? [o.txHash.toLowerCase()] : [])))
+/** The oldest block the account is known to have acted at: its activation, any op of it. */
+function firstOp(acc: AccountState): bigint | undefined {
+  const known = [...(BigInt(acc.historyFromBlock || '0') > 0n ? [BigInt(acc.historyFromBlock)] : []), ...acc.ops.flatMap((o) => (o.block !== undefined && /^\d+$/.test(String(o.block)) ? [BigInt(o.block)] : []))]
+  return known.length ? known.reduce((a, b) => (b < a ? b : a)) : undefined
+}
 const cursorOf = (acc: AccountState): bigint | undefined => (acc.depositsSeen && acc.depositsSeen.safe === acc.ctx.address.toLowerCase() ? BigInt(acc.depositsSeen.block) : undefined)
 
 /**
  * A new backfill job, or undefined when no account needs one. Needs one: an account whose look has a cursor but no cover
- * (its look began before the cover existed), whose look skipped a hole, or whose cover starts after a block known of it. Its range starts BACKFILL_MARGIN_BLOCKS before
- * the earliest block known of any of them (an owner op, the activation, the cursor) and ends at the latest cursor (or
- * the block before a cover that started again after a hole). The Worker checks the first value day against the flows,
- * so a start too late reads as partial, never as complete.
+ * (its look began before the cover existed), whose look skipped a hole or found a balance before its start (`backfill`),
+ * or whose cover starts after an op of the account. Its range starts BACKFILL_MARGIN_BLOCKS before the earliest block
+ * known of any of them (an op, the activation, the cursor, the cover's start) and ends at the latest cursor (or the
+ * block before the cover). A start that is still not proven after the job is read back again (verifyCovers).
  */
 export function planBackfill(accounts: readonly CoverAccount[]): FlowBackfillJob | undefined {
   let from: bigint | undefined
@@ -144,11 +155,12 @@ export function planBackfill(accounts: readonly CoverAccount[]): FlowBackfillJob
     const cursor = cursorOf(acc)
     if (cursor === undefined) continue
     const c = acc.flowCover?.safe === safe ? acc.flowCover : undefined
-    const known = [cursor, ...(BigInt(acc.historyFromBlock || '0') > 0n ? [BigInt(acc.historyFromBlock)] : []), ...acc.ops.flatMap((o) => (o.opId.startsWith('own-') && o.block ? [BigInt(o.block)] : []))]
+    const op = firstOp(acc)
+    const known = [cursor, ...(op !== undefined ? [op] : []), ...(c ? [BigInt(c.fromBlock)] : [])]
     const first = known.reduce((a, b) => (b < a ? b : a))
-    // A cover from before everything known of the account needs nothing; one that starts after its activation or an
-    // owner op (its first look came late) may start after its first value, so it is read back too.
-    if (c && !c.backfill && BigInt(c.fromBlock) <= first) continue
+    // A cover from before every op of the account waits for its balance check; one that starts after an op (its first
+    // look came late) cannot be proven, so it is read back.
+    if (c && !c.backfill && (op === undefined || BigInt(c.fromBlock) <= op)) continue
     const end = c ? BigInt(c.fromBlock) - 1n : cursor
     const start = first > BACKFILL_MARGIN_BLOCKS ? first - BACKFILL_MARGIN_BLOCKS : 0n
     from = from === undefined || start < from ? start : from
@@ -195,8 +207,15 @@ export async function backfillTick(src: CoverSource, pages = BACKFILL_PAGES_PER_
       const from = BigInt(job.next)
       const to = from + DEPOSIT_PAGE_BLOCKS - 1n < BigInt(job.to) ? from + DEPOSIT_PAGE_BLOCKS - 1n : BigInt(job.to)
       for (const [, group] of byUsdc) {
-        const logs = await timed(await src.readLogs(group[0]!.usdc, group.map((a) => a.acc.ctx.address as Address), from, to), src.blockTime)
-        for (const { acc } of group) keepRows(acc, logs, src.registry, foundAt)
+        const logs = await src.readLogs(group[0]!.usdc, group.map((a) => a.acc.ctx.address as Address), from, to)
+        // Rows are dated before any is kept: a row dated when it was found would be a months-old deposit dated today.
+        const rows = group.map(({ acc }) => ({ acc, ...rowsOf(acc, logs, src.registry, foundAt) }))
+        const times = new Map<string, string>()
+        for (const r of rows) for (const x of [...r.deposits, ...r.mints]) if (x.at === foundAt && !times.has(x.block)) times.set(x.block, new Date(Number(await src.blockTime(BigInt(x.block))) * 1000).toISOString())
+        for (const r of rows) {
+          for (const x of [...r.deposits, ...r.mints]) if (x.at === foundAt) x.at = times.get(x.block)!
+          keep(r.acc, r.deposits, r.mints)
+        }
       }
       job.next = (to + 1n).toString()
     }
@@ -211,28 +230,49 @@ export async function backfillTick(src: CoverSource, pages = BACKFILL_PAGES_PER_
   src.save()
 }
 
-/** `logs` with each one's block time: a row dated when it was found would be a months-old deposit dated today. Throws when a time cannot be read (the page is read again). */
-async function timed(logs: TransferLog[], blockTime: (block: bigint) => Promise<bigint>): Promise<TransferLog[]> {
-  const times = new Map<bigint, bigint>()
-  for (const l of logs) {
-    if (l.blockTimestamp != null || l.blockNumber == null || times.has(l.blockNumber)) continue
-    times.set(l.blockNumber, await blockTime(l.blockNumber))
-  }
-  return logs.map((l) => (l.blockTimestamp == null && l.blockNumber != null ? { ...l, blockTimestamp: times.get(l.blockNumber)! } : l))
-}
-
-/** The deposits and mints of `logs` for `acc`'s Safe, merged into its rows. */
-export function keepRows(acc: AccountState, logs: readonly TransferLog[], registry: Registry, foundAt: string): void {
+/** The deposits and mints of `logs` for `acc`'s Safe. */
+function rowsOf(acc: AccountState, logs: readonly TransferLog[], registry: Registry, foundAt: string) {
   const safe = acc.ctx.address as Address
   const ownTx = ownTxOf(acc)
   const mine = logs.filter((l) => l.args?.to?.toLowerCase() === safe.toLowerCase())
-  const dep = depositsOf(mine, safe, registry, foundAt, ownTx)
-  if (dep.length) {
-    const { rows, added } = mergeDeposits(acc.deposits ?? [], dep)
+  return { deposits: depositsOf(mine, safe, registry, foundAt, ownTx), mints: mintsOf(mine, safe, foundAt, ownTx) }
+}
+
+/** Merges rows into the account's lists. */
+function keep(acc: AccountState, deposits: DepositRow[], mints: MintRow[]): void {
+  if (deposits.length) {
+    const { rows, added } = mergeDeposits(acc.deposits ?? [], deposits)
     if (added.length) acc.deposits = rows
   }
-  const mints = mintsOf(mine, safe, foundAt, ownTx)
   if (mints.length) acc.flowMints = mergeMints(acc.flowMints ?? [], mints)
+}
+
+/**
+ * Proves each unproven cover's start (one archive balance read per cover, once): no op of the account older than it and
+ * the Safe's USDC at fromBlock - 1 under DEPOSIT_MIN_USDC. A balance there sends the start back to the backfill (the job
+ * reads BACKFILL_MARGIN_BLOCKS further back); a read that fails is tried again next tick.
+ */
+export async function verifyCovers(src: CoverSource): Promise<void> {
+  let changed = false
+  for (const { acc, usdc } of src.accounts()) {
+    const c = acc.flowCover
+    const safe = acc.ctx.address.toLowerCase()
+    if (!c || c.safe !== safe || c.backfill || c.verified) continue
+    const op = firstOp(acc)
+    const from = BigInt(c.fromBlock)
+    if (op !== undefined && from > op) continue // planBackfill reads it back
+    let balance = 0n
+    try {
+      if (from > 0n) balance = await src.balanceAt(usdc, acc.ctx.address as Address, from - 1n)
+    } catch (e) {
+      console.error(`[flow-cover] ${acc.accountKey} balance at ${from - 1n} not read`, e instanceof Error ? e.message : String(e))
+      continue
+    }
+    if (acc.flowCover !== c) continue // a look moved it meanwhile
+    acc.flowCover = balance < DEPOSIT_MIN_USDC ? { ...c, verified: true } : { ...c, backfill: true }
+    changed = true
+  }
+  if (changed) src.save()
 }
 
 /**
@@ -245,7 +285,7 @@ export async function sweepThrough(src: CoverSource, block: bigint): Promise<Map
   const due: { a: CoverAccount; cursor: bigint }[] = []
   for (const a of src.accounts()) {
     const cursor = cursorOf(a.acc)
-    if (cursor === undefined || !a.acc.flowCover || a.acc.flowCover.backfill) continue
+    if (cursor === undefined || !a.acc.flowCover?.verified || a.acc.flowCover.backfill) continue
     if (cursor >= block) out.set(a.acc.accountKey, block)
     else if (block - cursor <= SWEEP_MAX_PAGES * DEPOSIT_PAGE_BLOCKS) due.push({ a, cursor })
   }
@@ -285,10 +325,14 @@ export async function withCover<S extends Snapshot & { receipts?: AccountReceipt
     console.error('[flow-cover] backfill tick failed', e instanceof Error ? e.message : String(e))
   }
   let through = new Map<string, bigint>()
-  try {
-    through = await sweepThrough(src, snapshot.block)
-  } catch (e) {
-    console.error('[flow-cover] through check failed', e instanceof Error ? e.message : String(e))
+  // Over the RPC budget nothing is read: no cover is vouched through this snapshot (partial until the budget is back).
+  if (!src.overBudget()) {
+    try {
+      await verifyCovers(src)
+      through = await sweepThrough(src, snapshot.block)
+    } catch (e) {
+      console.error('[flow-cover] through check failed', e instanceof Error ? e.message : String(e))
+    }
   }
   const receipts = [...(snapshot.receipts ?? [])]
   for (const { acc } of src.accounts()) {
@@ -316,6 +360,7 @@ export function coverSource(
   operator: { coverAccounts(): CoverAccount[] },
   readLogs: CoverSource['readLogs'],
   blockTime: CoverSource['blockTime'],
+  balanceAt: CoverSource['balanceAt'],
   registry: Registry,
   overBudget: () => boolean,
 ): CoverSource {
@@ -324,6 +369,7 @@ export function coverSource(
     registry,
     readLogs,
     blockTime,
+    balanceAt,
     job: () => store.state.flowBackfill,
     setJob: (job) => {
       store.state.flowBackfill = job
@@ -331,4 +377,9 @@ export function coverSource(
     save: () => store.save(),
     overBudget,
   }
+}
+
+/** The archive balance read for a viem client. */
+export function usdcBalanceAt(client: { readContract(args: unknown): Promise<unknown> }): CoverSource['balanceAt'] {
+  return async (usdc, safe, block) => (await client.readContract({ address: usdc, abi: BALANCE_OF, functionName: 'balanceOf', args: [safe], blockNumber: block })) as bigint
 }

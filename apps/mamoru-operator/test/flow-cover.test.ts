@@ -3,7 +3,7 @@ import type { Address, Hex } from 'viem'
 import { baseRegistry } from '@mamoru/registry'
 import type { AccountState, StoredOp } from '../src/state.ts'
 import { DEPOSITS_KEPT, type DepositRow } from '../src/deposits.ts'
-import { BACKFILL_MARGIN_BLOCKS, backfillTick, coverAfterLook, coverWire, mergeMints, mintsOf, planBackfill, sweepThrough, withCover, type CoverSource, type FlowBackfillJob } from '../src/flow-cover.ts'
+import { BACKFILL_MARGIN_BLOCKS, backfillTick, verifyCovers, coverAfterLook, coverWire, mergeMints, mintsOf, planBackfill, sweepThrough, withCover, type CoverSource, type FlowBackfillJob } from '../src/flow-cover.ts'
 import type { Snapshot } from '../src/snapshot.ts'
 import type { AccountReceiptsWire } from '../src/yield-receipts.ts'
 
@@ -18,7 +18,7 @@ const acct = (key: string, safe: Address, o: Partial<AccountState> = {}): Accoun
 const log = (from: Address, to: Address, value: bigint, block: bigint, tx = `0x${block.toString(16).padStart(4, '0')}`, logIndex = 0) => ({ args: { from, to, value }, transactionHash: tx as Hex, logIndex, blockNumber: block, blockTimestamp: 1_762_000_000n + block })
 const dep = (block: string, i = 0): DepositRow => ({ txHash: `0xd${block}` as Hex, logIndex: i, block, amountUsdc: '1000000', from: WALLET as Hex, at: '2026-11-10T10:00:00.000Z' })
 
-function source(accounts: AccountState[], logs: ReturnType<typeof log>[], o: { over?: boolean; fail?: boolean } = {}) {
+function source(accounts: AccountState[], logs: ReturnType<typeof log>[], o: { over?: boolean; fail?: boolean; balance?: (safe: Address, block: bigint) => bigint } = {}) {
   const calls: { safes: Address[]; from: bigint; to: bigint }[] = []
   const state: { job?: FlowBackfillJob } = {}
   const src: CoverSource = {
@@ -31,6 +31,10 @@ function source(accounts: AccountState[], logs: ReturnType<typeof log>[], o: { o
       return logs.filter((l) => set.has(l.args.to.toLowerCase()) && l.blockNumber >= from && l.blockNumber <= to)
     },
     blockTime: async (b) => 1_762_000_000n + b,
+    balanceAt: async (_u, safe, block) => {
+      calls.push({ safes: [safe], from: block, to: block })
+      return o.balance?.(safe, block) ?? 0n
+    },
     job: () => state.job,
     setJob: (j) => (state.job = j),
     save: () => {},
@@ -53,7 +57,8 @@ describe('coverAfterLook', () => {
 })
 
 describe('coverWire', () => {
-  test('nothing without a cover, for another Safe, or while a hole waits for the backfill', () => {
+  test('nothing without a cover, for another Safe, while a hole waits for the backfill, or before its start is proven', () => {
+    expect(coverWire(acct('k', SAFE, { flowCover: { safe: SAFE, fromBlock: '1' } }), SAFE, 10n)).toBeUndefined()
     expect(coverWire(acct('k', SAFE), SAFE, 10n)).toBeUndefined()
     expect(coverWire(acct('k', SAFE, { flowCover: { safe: SAFE2, fromBlock: '1' } }), SAFE, 10n)).toBeUndefined()
     expect(coverWire(acct('k', SAFE, { flowCover: { safe: SAFE, fromBlock: '1', backfill: true } }), SAFE, 10n)).toBeUndefined()
@@ -62,7 +67,7 @@ describe('coverWire', () => {
   test('open: a deposit list at its cap and a withdrawal not dated yet; through and mints as kept', () => {
     const pending = { opId: 'own-1', kind: 'transfer', state: 'confirmed', txHash: '0xe1', amountUsdc: '5000000', updatedAt: '' } as unknown as StoredOp
     const dated = { ...pending, opId: 'own-2', txHash: '0xe2', facts: { txHash: '0xe2', at: '2026-11-10T10:00:00.000Z' } } as unknown as StoredOp
-    const a = acct('k', SAFE, { flowCover: { safe: SAFE, fromBlock: '7' }, ops: [pending, dated], flowMints: [{ txHash: '0xm', logIndex: 0, block: '9', amountUsdc: '3000000', at: '2026-11-10T10:00:00.000Z' }] })
+    const a = acct('k', SAFE, { flowCover: { safe: SAFE, fromBlock: '7', verified: true }, ops: [pending, dated], flowMints: [{ txHash: '0xm', logIndex: 0, block: '9', amountUsdc: '3000000', at: '2026-11-10T10:00:00.000Z' }] })
     expect(coverWire(a, SAFE, 10n)).toEqual({ from: 7, through: 10, open: ['out:own-1'], mints: [{ block: 9, t: Date.parse('2026-11-10T10:00:00.000Z') / 1000, usdc: '3000000' }] })
     // Its receipt facts arrive: the reason is gone on the next snapshot.
     pending.facts = { txHash: '0xe1', at: '2026-11-10T11:00:00.000Z' } as never
@@ -130,9 +135,9 @@ describe('log backfill', () => {
 
 describe('through', () => {
   test('the snapshot block when (cursor, block] holds no deposit or mint; not with an arrival there, nor a cursor too far behind', async () => {
-    const quiet = acct('q', SAFE, { depositsSeen: { safe: SAFE, block: '9900' }, flowCover: { safe: SAFE, fromBlock: '1' } })
-    const busy = acct('b', SAFE2, { depositsSeen: { safe: SAFE2, block: '9950' }, flowCover: { safe: SAFE2, fromBlock: '1' } })
-    const far = acct('f', '0x00000000000000000000000000000000000000b3' as Address, { depositsSeen: { safe: '0x00000000000000000000000000000000000000b3', block: '1' }, flowCover: { safe: '0x00000000000000000000000000000000000000b3', fromBlock: '1' } })
+    const quiet = acct('q', SAFE, { depositsSeen: { safe: SAFE, block: '9900' }, flowCover: { safe: SAFE, fromBlock: '1', verified: true } })
+    const busy = acct('b', SAFE2, { depositsSeen: { safe: SAFE2, block: '9950' }, flowCover: { safe: SAFE2, fromBlock: '1', verified: true } })
+    const far = acct('f', '0x00000000000000000000000000000000000000b3' as Address, { depositsSeen: { safe: '0x00000000000000000000000000000000000000b3', block: '1' }, flowCover: { safe: '0x00000000000000000000000000000000000000b3', fromBlock: '1', verified: true } })
     const { src, calls } = source([quiet, busy, far], [log(WALLET, SAFE, 5_000_000n, 9_800n), log(WALLET, SAFE2, 5_000_000n, 9_990n)])
     const t = await sweepThrough(src, 10_000n)
     expect([...t]).toEqual([['q', 10_000n]])
@@ -141,8 +146,8 @@ describe('through', () => {
 
   test('withCover puts the cover on the receipts entry, adding one for an account with none, with the flows as the state holds them now', async () => {
     // A deposit recorded after the receipts were built: the cover vouches its cursor, so the flows carry it.
-    const a = acct('a', SAFE, { depositsSeen: { safe: SAFE, block: '1000' }, flowCover: { safe: SAFE, fromBlock: '5' }, deposits: [dep('900')] })
-    const b = acct('b', SAFE2, { depositsSeen: { safe: SAFE2, block: '1000' }, flowCover: { safe: SAFE2, fromBlock: '6' } })
+    const a = acct('a', SAFE, { depositsSeen: { safe: SAFE, block: '1000' }, flowCover: { safe: SAFE, fromBlock: '5', verified: true }, deposits: [dep('900')] })
+    const b = acct('b', SAFE2, { depositsSeen: { safe: SAFE2, block: '1000' }, flowCover: { safe: SAFE2, fromBlock: '6', verified: true } })
     const { src } = source([a, b], [])
     const snap = { chainId: 8453, block: 1_000n, readAt: '', pools: {}, safes: [], calls: 0, receipts: [{ safe: SAFE, days: [] }] } as Snapshot & { receipts: AccountReceiptsWire[] }
     const out = await withCover(snap, src)
@@ -150,5 +155,23 @@ describe('through', () => {
       { safe: SAFE, days: [], flows: [{ id: 'in:0xd900:0', t: Date.parse('2026-11-10T10:00:00.000Z') / 1000, kind: 'in', usdc: '1000000' }], cover: { from: 5, through: 1000, open: [], mints: [] } },
       { safe: SAFE2, days: [], cover: { from: 6, through: 1000, open: [], mints: [] } },
     ])
+  })
+})
+
+describe('verifyCovers', () => {
+  test('a start with no op before it and only dust at the block before is proven; a balance there sends it back to the backfill; a start after an op waits for planBackfill', async () => {
+    const own = { opId: 'own-1', block: '600', kind: 'activate', state: 'confirmed' } as unknown as StoredOp
+    const clean = acct('a', SAFE, { flowCover: { safe: SAFE, fromBlock: '500' }, ops: [own] })
+    const funded = acct('b', SAFE2, { flowCover: { safe: SAFE2, fromBlock: '500' } })
+    const late = acct('c', '0x00000000000000000000000000000000000000b3' as Address, { flowCover: { safe: '0x00000000000000000000000000000000000000b3', fromBlock: '700' }, ops: [own] })
+    const { src, calls } = source([clean, funded, late], [], { balance: (safe) => (safe === SAFE2 ? 50_000_000n : 9_999n) })
+    await verifyCovers(src)
+    expect(clean.flowCover).toEqual({ safe: SAFE, fromBlock: '500', verified: true })
+    expect(funded.flowCover).toEqual({ safe: SAFE2, fromBlock: '500', backfill: true })
+    expect(late.flowCover).toEqual({ safe: '0x00000000000000000000000000000000000000b3', fromBlock: '700' })
+    expect(calls.map((c) => c.from)).toEqual([499n, 499n])
+    // The funded one is read back from 30 days before its start.
+    const job = planBackfill([{ acc: funded, usdc: USDC }, { acc: { ...funded, depositsSeen: { safe: SAFE2, block: '900' } } as AccountState, usdc: USDC }])
+    expect(job).toMatchObject({ from: '0', to: '499' })
   })
 })
