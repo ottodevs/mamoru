@@ -18,7 +18,7 @@ const acct = (key: string, safe: Address, o: Partial<AccountState> = {}): Accoun
 const log = (from: Address, to: Address, value: bigint, block: bigint, tx = `0x${block.toString(16).padStart(4, '0')}`, logIndex = 0) => ({ args: { from, to, value }, transactionHash: tx as Hex, logIndex, blockNumber: block, blockTimestamp: 1_762_000_000n + block })
 const dep = (block: string, i = 0): DepositRow => ({ txHash: `0xd${block}` as Hex, logIndex: i, block, amountUsdc: '1000000', from: WALLET as Hex, at: '2026-11-10T10:00:00.000Z' })
 
-function source(accounts: AccountState[], logs: ReturnType<typeof log>[], o: { over?: boolean; fail?: boolean; balance?: (safe: Address, block: bigint) => bigint } = {}) {
+function source(accounts: AccountState[], logs: ReturnType<typeof log>[], o: { over?: boolean; fail?: boolean; balance?: (safe: Address, block: bigint) => bigint; code?: (safe: Address) => boolean } = {}) {
   const calls: { safes: Address[]; from: bigint; to: bigint }[] = []
   const state: { job?: FlowBackfillJob } = {}
   const src: CoverSource = {
@@ -35,6 +35,7 @@ function source(accounts: AccountState[], logs: ReturnType<typeof log>[], o: { o
       calls.push({ safes: [safe], from: block, to: block })
       return o.balance?.(safe, block) ?? 0n
     },
+    deployedAt: async (safe) => o.code?.(safe) ?? false,
     job: () => state.job,
     setJob: (j) => (state.job = j),
     save: () => {},
@@ -173,5 +174,32 @@ describe('verifyCovers', () => {
     // The funded one is read back from 30 days before its start.
     const job = planBackfill([{ acc: funded, usdc: USDC }, { acc: { ...funded, depositsSeen: { safe: SAFE2, block: '900' } } as AccountState, usdc: USDC }])
     expect(job).toMatchObject({ from: '0', to: '499' })
+  })
+})
+
+describe('verifyCovers: code and read limits', () => {
+  test('a Safe that already had code at the block before the start is read back (it may have held a position); a failed read waits an hour', async () => {
+    const a = acct('a', SAFE, { flowCover: { safe: SAFE, fromBlock: '500' } })
+    await verifyCovers(source([a], [], { code: () => true }).src)
+    expect(a.flowCover).toEqual({ safe: SAFE, fromBlock: '500', backfill: true })
+    const b = acct('b', SAFE2, { flowCover: { safe: SAFE2, fromBlock: '500' } })
+    const failing = source([b], [], { fail: true })
+    failing.src.balanceAt = async () => {
+      throw new Error('no history')
+    }
+    await verifyCovers(failing.src, 1_000)
+    const again = source([b], [])
+    await verifyCovers(again.src, 1_000 + 60_000)
+    expect(b.flowCover).toEqual({ safe: SAFE2, fromBlock: '500' })
+    await verifyCovers(again.src, 1_000 + 3_600_000)
+    expect(b.flowCover).toEqual({ safe: SAFE2, fromBlock: '500', verified: true })
+  })
+
+  test('at most VERIFY_PER_TICK starts per tick, none over the budget', async () => {
+    const many = Array.from({ length: 7 }, (_, i) => acct(`k${i}`, `0x00000000000000000000000000000000000000${(0xc0 + i).toString(16)}` as Address, { flowCover: { safe: `0x00000000000000000000000000000000000000${(0xc0 + i).toString(16)}`, fromBlock: '500' } }))
+    await verifyCovers(source(many, [], { over: true }).src)
+    expect(many.filter((a) => a.flowCover?.verified).length).toBe(0)
+    await verifyCovers(source(many, []).src)
+    expect(many.filter((a) => a.flowCover?.verified).length).toBe(5)
   })
 })

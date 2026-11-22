@@ -2,8 +2,9 @@
 //
 // What it vouches, per account and chain (`FlowCoverWire` on the snapshot's receipts entry):
 // - `from`: the block from which every incoming USDC Transfer to the Safe has been read without a hole, AND before which
-//   the Safe held nothing: its USDC balance at from - 1 was dust (read once, verifyCovers) and no op of the account is
-//   older than `from`. So every USDC the Safe ever received is a recorded deposit or a listed mint. The deposit look
+//   the Safe held nothing: at from - 1 it had no code yet (so it had opened no position, vault or pool of its own) and a
+//   dust USDC balance (both read once, verifyCovers), and no op of the account is older than `from`. So every USDC the
+//   Safe ever received is a recorded deposit or a listed mint. The deposit look
 //   (operator.ts lookForDeposits) sets it where a Safe's first look starts, and moves it up to where a look starts again
 //   after a hole (depositRange skips a Safe nobody looked at for longer than its backfill). A start that is not proven
 //   (a balance there, an op before it, or a look that began before this field existed) is read back by the log
@@ -125,6 +126,8 @@ export type CoverSource = {
   blockTime(block: bigint): Promise<bigint>
   /** The Safe's USDC balance at the end of `block` (an archive read). */
   balanceAt(usdc: Address, safe: Address, block: bigint): Promise<bigint>
+  /** Whether the Safe had code at the end of `block` (an archive read). */
+  deployedAt(safe: Address, block: bigint): Promise<boolean>
   job(): FlowBackfillJob | undefined
   setJob(job: FlowBackfillJob | undefined): void
   save(): void
@@ -247,29 +250,44 @@ function keep(acc: AccountState, deposits: DepositRow[], mints: MintRow[]): void
   if (mints.length) acc.flowMints = mergeMints(acc.flowMints ?? [], mints)
 }
 
+/** At most this many starts verified per snapshot tick (two archive reads each); a failed one waits VERIFY_RETRY_MS. */
+export const VERIFY_PER_TICK = 5
+export const VERIFY_RETRY_MS = 3_600_000
+const verifyFailedAt = new WeakMap<AccountState, number>()
+
 /**
- * Proves each unproven cover's start (one archive balance read per cover, once): no op of the account older than it and
- * the Safe's USDC at fromBlock - 1 under DEPOSIT_MIN_USDC. A balance there sends the start back to the backfill (the job
- * reads BACKFILL_MARGIN_BLOCKS further back); a read that fails is tried again next tick.
+ * Proves each unproven cover's start: no op of the account older than it, and at fromBlock - 1 the Safe had no code and
+ * its USDC was under DEPOSIT_MIN_USDC. Code or a balance there sends the start back to the backfill (the job reads
+ * BACKFILL_MARGIN_BLOCKS further back, down to before the Safe existed). VERIFY_PER_TICK starts per tick, none over the
+ * RPC budget; a read that fails is tried again after VERIFY_RETRY_MS (a node without history keeps the cover unsent).
  */
-export async function verifyCovers(src: CoverSource): Promise<void> {
+export async function verifyCovers(src: CoverSource, now = Date.now()): Promise<void> {
   let changed = false
+  let reads = 0
   for (const { acc, usdc } of src.accounts()) {
+    if (reads >= VERIFY_PER_TICK || src.overBudget()) break
+    if (now - (verifyFailedAt.get(acc) ?? -Infinity) < VERIFY_RETRY_MS) continue
     const c = acc.flowCover
     const safe = acc.ctx.address.toLowerCase()
     if (!c || c.safe !== safe || c.backfill || c.verified) continue
     const op = firstOp(acc)
     const from = BigInt(c.fromBlock)
     if (op !== undefined && from > op) continue // planBackfill reads it back
-    let balance = 0n
+    let empty = true
     try {
-      if (from > 0n) balance = await src.balanceAt(usdc, acc.ctx.address as Address, from - 1n)
+      if (from > 0n) {
+        reads++
+        const deployed = await src.deployedAt(acc.ctx.address as Address, from - 1n)
+        empty = !deployed && (await src.balanceAt(usdc, acc.ctx.address as Address, from - 1n)) < DEPOSIT_MIN_USDC
+      }
     } catch (e) {
-      console.error(`[flow-cover] ${acc.accountKey} balance at ${from - 1n} not read`, e instanceof Error ? e.message : String(e))
+      verifyFailedAt.set(acc, now)
+      console.error(`[flow-cover] ${acc.accountKey} start ${from - 1n} not read`, e instanceof Error ? e.message : String(e))
       continue
     }
     if (acc.flowCover !== c) continue // a look moved it meanwhile
-    acc.flowCover = balance < DEPOSIT_MIN_USDC ? { ...c, verified: true } : { ...c, backfill: true }
+    // A new object either way: a later start never inherits `verified`.
+    acc.flowCover = empty ? { safe: c.safe, fromBlock: c.fromBlock, verified: true } : { safe: c.safe, fromBlock: c.fromBlock, backfill: true }
     changed = true
   }
   if (changed) src.save()
@@ -361,6 +379,7 @@ export function coverSource(
   readLogs: CoverSource['readLogs'],
   blockTime: CoverSource['blockTime'],
   balanceAt: CoverSource['balanceAt'],
+  deployedAt: CoverSource['deployedAt'],
   registry: Registry,
   overBudget: () => boolean,
 ): CoverSource {
@@ -370,6 +389,7 @@ export function coverSource(
     readLogs,
     blockTime,
     balanceAt,
+    deployedAt,
     job: () => store.state.flowBackfill,
     setJob: (job) => {
       store.state.flowBackfill = job
@@ -382,4 +402,12 @@ export function coverSource(
 /** The archive balance read for a viem client. */
 export function usdcBalanceAt(client: { readContract(args: unknown): Promise<unknown> }): CoverSource['balanceAt'] {
   return async (usdc, safe, block) => (await client.readContract({ address: usdc, abi: BALANCE_OF, functionName: 'balanceOf', args: [safe], blockNumber: block })) as bigint
+}
+
+/** The archive code read for a viem client. */
+export function codeAt(client: { getCode(args: { address: Address; blockNumber: bigint }): Promise<Hex | undefined> }): CoverSource['deployedAt'] {
+  return async (safe, block) => {
+    const code = await client.getCode({ address: safe, blockNumber: block })
+    return !!code && code !== '0x'
+  }
 }
