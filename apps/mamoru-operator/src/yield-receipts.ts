@@ -89,6 +89,15 @@ export type OpFacts = {
  * userOp per handleOps (bundler.ts), so this matters only for a bundle someone else built. Without it (an owner
  * transaction, or an engine op stored before its hash was kept) the whole transaction counts.
  */
+/**
+ * otto/mamoru#380: gas counts as a cost of the user's Safe only when the Safe's own prefund paid it: a userOp with no
+ * paymaster (Base runs without one, bundler.ts). A userOp with a paymaster was paid by it, so no ETH of the Safe is
+ * counted. Owner transactions go through the relayer (no userOp of the Safe: gas 0 here, the relayer's subsidy is in
+ * acc.sponsored and is not a user cost; past the sponsorship limits the Safe refunds the relayer, which this does not
+ * see yet).
+ */
+const paidBySafe = (paymaster: Address | undefined) => !paymaster || /^0x0{40}$/i.test(paymaster)
+
 export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, userOpHash?: Hex, registry: Registry = baseRegistry): OpFacts {
   // otto/mamoru#358: the chain's own contracts; Monad's position manager is another address than Base's.
   const entryPoint = address('EntryPointV07', registry)
@@ -99,11 +108,11 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
     const i = opEvents.findIndex((e) => e.args.userOpHash.toLowerCase() === userOpHash.toLowerCase() && isAddressEqual(e.args.sender, safe))
     const own = opEvents[i]
     if (!own) return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: '0', fees: [], v: FACTS_VERSION }
-    gas = own.args.actualGasCost
+    gas = paidBySafe(own.args.paymaster) ? own.args.actualGasCost : 0n
     const from = i > 0 ? opEvents[i - 1]!.logIndex : -1
     logs = logs.filter((l) => l.logIndex !== null && l.logIndex > from && l.logIndex < own.logIndex)
   } else {
-    for (const e of opEvents) if (isAddressEqual(e.args.sender, safe)) gas += e.args.actualGasCost
+    for (const e of opEvents) if (isAddressEqual(e.args.sender, safe) && paidBySafe(e.args.paymaster)) gas += e.args.actualGasCost
   }
 
   // The pool emits its Collect right before the manager's: the nearest one earlier in the log names the pool.

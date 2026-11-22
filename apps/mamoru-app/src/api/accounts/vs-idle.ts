@@ -14,7 +14,8 @@
 //   fee, over the capital that worked in that window times its time (worked.ts, in range only), annualised. Null for the
 //   first 30 days of the account ('first-30-days': the app shows the Mamoru average then) and while nothing worked.
 // - price move: the residual that makes the rows exact (what the volatile side of the pools did to the value).
-// - costs: the gas Mamoru paid, in USDC as the operator priced it per op (receipts `gasUsdc`, summed over the owner's
+// - costs: the gas the user's Safe paid (a userOp with no paymaster; relayer-sponsored owner transactions are not a user
+//   cost and are not counted), in USDC as the operator priced it per op (receipts `gasUsdc`, summed over the owner's
 //   chains). Slippage is not in the op facts (no realized vs quoted figure), so it is not counted: costs are gas only.
 //   A day with gas not priced yet makes 'costs' partial (named in `notCounted`), never a zero. Costs are inside the
 //   value already; the price move row is the residual, so it gives the costs back (value change = price move - costs).
@@ -36,8 +37,9 @@ type IncomeRow = { t_s: number; usd: number; source?: string; from_s?: number | 
 /** The fee owed on income realized up to `until` (unix s, exclusive): the seam for the operator-side change (#433). */
 export function mamoruFeeUsdc(income: readonly IncomeRow[], until: number): bigint {
   let base = 0n
-  // A vault's first-sample backfill is yield from before it was observed, not income realized from 5 Nov: never charged.
-  for (const r of income) if (r.t_s >= MAMORU_FEE_FROM && r.t_s < until && !r.event_id?.startsWith('vault-backfill:')) base += BigInt(Math.round(r.usd))
+  // History rows (source 'backfill': a day's collected fees known only as a total, a vault's first-sample yield) are income
+  // from before it was observed, not income realized from 5 Nov: only events of the operator's own record enter the base.
+  for (const r of income) if (r.t_s >= MAMORU_FEE_FROM && r.t_s < until && r.source !== 'backfill' && !r.event_id?.startsWith('backfill:') && !r.event_id?.startsWith('vault-backfill:')) base += BigInt(Math.round(r.usd))
   return (base * MAMORU_FEE_BPS) / 10_000n
 }
 

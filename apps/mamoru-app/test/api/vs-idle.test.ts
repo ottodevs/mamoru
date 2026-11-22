@@ -187,6 +187,12 @@ describe('APR · 30-day avg', () => {
 })
 
 describe('fee base and APR chains', () => {
+  test('day-total backfill rows are not in the fee base either', async () => {
+    const db = funded()
+    db.raw.exec(`INSERT INTO yield_ledger_income (event_id, chain_id, account_key, env, source, t_s, from_s, usd, updated_at) VALUES ('backfill:8453:base-u1:2026-11-06', 8453, 'base-u1', 'prod', 'backfill', ${t('2026-11-06T00:00:00.000Z')}, NULL, ${40 * U}, 'x')`)
+    expect((await loadVsIdle(db, 'u1', NOW, true)).breakdown!.mamoruFeeUsd).toBe(-0.2)
+  })
+
   test('a vault first-sample backfill is never in the fee base', async () => {
     const db = funded()
     db.raw.exec(`INSERT INTO yield_ledger_income (event_id, chain_id, account_key, env, source, t_s, from_s, usd, updated_at) VALUES ('vault-backfill:8453:base-u1:vault:gtUSDCp', 8453, 'base-u1', 'prod', 'backfill', ${t('2026-11-06T10:00:00.000Z')}, NULL, ${50 * U}, 'x')`)

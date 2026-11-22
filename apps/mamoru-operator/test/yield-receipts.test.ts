@@ -23,8 +23,8 @@ const npmAbi = parseAbi([
 let idx = 0
 const log = (addr: Address, topics: Hex[], data: Hex): Log => ({ address: addr, topics: topics as [Hex, ...Hex[]], data, logIndex: idx++, blockNumber: 1n, blockHash: '0x01', transactionHash: '0x02', transactionIndex: 0, removed: false }) as Log
 
-const userOp = (sender: Address, gas: bigint, hash: Hex = `0x${'ab'.repeat(32)}`) =>
-  log(EP, encodeEventTopics({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', args: { userOpHash: hash, sender, paymaster: '0x0000000000000000000000000000000000000000' } }) as Hex[], encodeAbiParameters([{ type: 'uint256' }, { type: 'bool' }, { type: 'uint256' }, { type: 'uint256' }], [0n, true, gas, 100_000n]))
+const userOp = (sender: Address, gas: bigint, hash: Hex = `0x${'ab'.repeat(32)}`, paymaster: Address = '0x0000000000000000000000000000000000000000') =>
+  log(EP, encodeEventTopics({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', args: { userOpHash: hash, sender, paymaster } }) as Hex[], encodeAbiParameters([{ type: 'uint256' }, { type: 'bool' }, { type: 'uint256' }, { type: 'uint256' }], [0n, true, gas, 100_000n]))
 const poolCollect = (a0: bigint, a1: bigint) =>
   log(POOL, encodeEventTopics({ abi: poolAbi, eventName: 'Collect', args: { owner: NPM, tickLower: -10, tickUpper: 10 } }) as Hex[], encodeAbiParameters([{ type: 'address' }, { type: 'uint128' }, { type: 'uint128' }], [NPM, a0, a1]))
 const npmCollect = (tokenId: bigint, recipient: Address, a0: bigint, a1: bigint) =>
@@ -34,6 +34,16 @@ const decrease = (tokenId: bigint, a0: bigint, a1: bigint) =>
 
 const T = 1_792_655_000n // 2026-10-22T07:43:20Z, inside the snapshot's RECEIPT_DAYS window
 const op = (opId: string, facts?: OpFacts, txHash: Hex | null = '0xaa'): StoredOp => ({ opId, kind: 'reduce', state: 'confirmed', updatedAt: '2026-10-22T00:00:00Z', ...(txHash ? { txHash } : {}), ...(facts ? { facts } : {}) }) as StoredOp
+
+describe('factsFromLogs: who paid the gas (otto/mamoru#380)', () => {
+  test('a userOp paid by a paymaster is not a cost of the Safe; one with none is', () => {
+    const PM = '0x00000000000000000000000000000000000000cc' as Address
+    expect(factsFromLogs([userOp(SAFE, 7_000n)], SAFE, T).gasWei).toBe('7000')
+    expect(factsFromLogs([userOp(SAFE, 7_000n, undefined, PM)], SAFE, T).gasWei).toBe('0')
+    const h = `0x${'cd'.repeat(32)}` as Hex
+    expect(factsFromLogs([userOp(SAFE, 7_000n, h, PM)], SAFE, T, h).gasWei).toBe('0')
+  })
+})
 
 describe('factsFromLogs (otto/mamoru#129)', () => {
   test('gas is this Safe\'s actualGasCost only; a harvest-only collect is all fees', () => {
