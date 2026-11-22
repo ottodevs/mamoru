@@ -94,6 +94,11 @@ function ready(w: ReturnType<typeof world>): void {
   ;(p as unknown as { readOf: () => Promise<unknown> }).readOf = async () => ({ block: 100n, deployed: false, usdc: 0n, eth: 0n })
 }
 
+/** `ready`, with the Safe read as deployed (otto/mamoru#446: only a deployed Safe's owner transaction is estimated). */
+function deployedRead(w: ReturnType<typeof world>): void {
+  ;(priv(w.op) as unknown as { readOf: () => Promise<unknown> }).readOf = async () => ({ block: 100n, deployed: true, usdc: 0n, eth: 0n })
+}
+
 const SESSION_KEY = privateKeyToAccount(FIXTURE_SESSION_KEY).address
 const pinnedV3 = withPinnedV3()
 
@@ -290,6 +295,7 @@ describe('owner transactions of a v6 approval', () => {
     running(w, v5)
     ready(w)
     chain(w, 7n)
+    deployedRead(w)
     // Under the target: one owner transaction, as the owner was promised.
     w.knobs.ownerEstimate = V4_TX_GAS_TARGET - 400_000n
     expectOneV6Transaction(w, await w.op.prepareRenew(ctx))
@@ -307,6 +313,12 @@ describe('owner transactions of a v6 approval', () => {
     // A node that will not estimate: the simulation path as before (here every grant fits one transaction).
     w.knobs.ownerEstimate = null
     expectOneV6Transaction(w, await w.op.prepareRenew(ctx))
+    // An undeployed Safe is never estimated: a call to an address without code runs nothing (merge gate r1).
+    ready(w)
+    w.knobs.ownerEstimate = V4_TX_GAS_TARGET
+    const n = w.knobs.estimates.length
+    expectOneV6Transaction(w, await w.op.prepareRenew(ctx))
+    expect(w.knobs.estimates.length).toBe(n)
   })
 
   test('#446: a move that does not fit one transaction lands in steps; the next step is offered, never a hold for good', async () => {
@@ -315,6 +327,7 @@ describe('owner transactions of a v6 approval', () => {
     const acc = running(w, v5)
     ready(w)
     chain(w, 7n)
+    deployedRead(w)
     // Every grant together is over the target; any shorter batch fits: the move takes a later step.
     w.knobs.ownerEstimate = 1_000_000n
     await w.op.prepareRenew(ctx)

@@ -3030,8 +3030,11 @@ export class Operator {
    * very execTransaction sent by an owner with a pre-validated signature (`r` = the owner, `s` = 0, `v` = 1: the Safe
    * takes a hash its sender approves). On Base this measured within 33k of the signed transaction's estimate, the
    * difference being the WebAuthn check, which PASSKEY_VERIFY_GAS covers. The SAR figure (×9/8 + 300k) came to ~1.6x
-   * the receipt and split the v5 -> v6 move into two signatures. Null when it cannot be read (an undeployed Safe, a
-   * batch that reverts, a node that will not estimate from a contract): ownerTxGasLimit then, as before.
+   * the receipt and split the v5 -> v6 move into two signatures. Only for a deployed Safe: a call to an address with
+   * no code succeeds without running the batch, a figure that measures nothing (merge gate r1). Null when it cannot be
+   * read (a batch that reverts, a node that will not estimate from a contract): ownerTxGasLimit then, as before. A
+   * Safe that pays its own fee (`refund` in the held tx) also pays the relayer inside execTransaction: an ETH transfer
+   * of some 10k gas, inside the margin PASSKEY_VERIFY_GAS leaves over the ~33k WebAuthn check.
    */
   private async ownerTxGasEstimate(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], block: bigint): Promise<bigint | null> {
     const owner = live.owners[0]
@@ -3303,7 +3306,7 @@ export class Operator {
       // owner's execTransaction itself, pre-validated (otto/mamoru#446), else one simulation of the whole batch in the
       // Safe's own context. Neither available (an undeployed Safe): the per-call simulation, bounded
       // up by 5/4 (EIP-3529: a refund is at most 1/5 of the gas before it), else the static estimate.
-      const limit = (await this.ownerTxGasEstimate(live, calls, r.block)) ?? (await this.ownerTxGasLimit(live, calls, r.block))
+      const limit = (r.deployed ? await this.ownerTxGasEstimate(live, calls, r.block) : null) ?? (await this.ownerTxGasLimit(live, calls, r.block))
       const sim = limit === null ? await this.activationGasOf(live, calls, a.stored.length, r.block, fallback) : { gas: limit, simulated: true }
       const gas = limit !== null || !sim.simulated ? sim.gas : (sim.gas * 5n) / 4n
       built.set(ks.length, { a, calls, gas, simulated: sim.simulated })
