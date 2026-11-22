@@ -2383,7 +2383,9 @@ export class BridgeOut {
     this.relayerReadAt = this.now()
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      // Bounded: a provider that accepts the request and never answers costs this read, never the tick.
+      // Bounded: a provider that accepts the request and never answers costs this read, never the tick. The requests
+      // themselves end on the L1 transport's own timeout (boot.ts SIDE_CLIENT_TIMEOUT_MS, 60 s), well inside the 10 min
+      // between reads, so at most one read is ever in flight.
       const late = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error('timeout')), RELAYER_READ_TIMEOUT_MS)))
       const [wei, price] = await Promise.race([Promise.all([this.l1.getBalance({ address: this.relayer.address }), this.l1.getGasPrice()]), late])
       this.relayerWatch.observe('bridge_out', ETHEREUM_CHAIN_ID, this.relayer.address, wei, 2n * ((DEPLOY_GAS + EXEC_GAS) * price * 2n), 'moves', new Date(this.now()).toISOString())
