@@ -81,7 +81,7 @@ function json(status: number, body: unknown): Response {
  * no session keys, no full account keys, no RPC URLs, no grants, no signatures, no salts, no userOps.
  * See docs/operator-metrics.md.
  */
-async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha: string, bootedAt: number, quota?: QuotaBook | null, rpcCache?: () => Record<string, ReadCacheStats | null>): Promise<unknown> {
+async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha: string, bootedAt: number, quota?: QuotaBook | null, rpcCache?: () => Record<string, ReadCacheStats | null>, bridgeOut?: BridgeOut | null): Promise<unknown> {
   const rpc = rpcMetrics.snapshot()
   const relayerBalance = await op.relayerBalance()
   return {
@@ -103,7 +103,8 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       bridgeMonad: op.cfg.bridgeMonad?.metrics() ?? null,
       // otto/mamoru#277: the native balance of each relayer key (this chain's, the bridge's on Monad) as last read on a
       // timer, with the line under which ops are paged; and the remote Safes not provisioned for over 30 min.
-      relayers: op.relayersSnapshot(),
+      // otto/mamoru#440: and the Ethereum relayer that fronts bridge-out gas.
+      relayers: [...op.relayersSnapshot(), ...(bridgeOut?.relayers() ?? [])],
       // otto/mamoru#401: remote Safes waiting for their pool's depth (Monad side), and sleeves whose idle USDC is due home
       // with no signed way back (Base side, needs a renewal).
       remote: { stuck: op.remoteStuck(), depthHeld: op.remoteDepthHeld(), returnBlocked: op.remoteReturnBlocked() },
@@ -161,7 +162,7 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
         if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
         const sig = req.headers.get('x-mamoru-sig')
         if (!(await verifyMetricsSignature(opts.secret, 'GET', '/metrics', sig))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
-        return json(200, await buildMetricsPayload(op, opts.rpcMetrics, opts.gitSha, opts.bootedAt, opts.quota, opts.rpcCache))
+        return json(200, await buildMetricsPayload(op, opts.rpcMetrics, opts.gitSha, opts.bootedAt, opts.quota, opts.rpcCache, opts.bridgeOut))
       }
       if (url.pathname === '/pool-stats') {
         // otto/mamoru#248: the hourly pool stats (TVL, daily volumes) the app turns into the plan APY. Signed like

@@ -558,8 +558,8 @@ export type EngineHealthSnapshot = {
 /** otto/mamoru#277: a slot held this long (an op neither sent nor settled) pages ops once; #357 held one 13 h unseen. */
 export const SLOT_BUSY_ALERT_MS = 30 * 60_000
 
-/** otto/mamoru#277: a relayer's native balance as /metrics shows it; `lowBelowWei` is two provisionings (operator) or two mints (bridge). */
-export type RelayerBalance = { role: 'operator' | 'bridge_monad'; chainId: number; address: string; wei: string; at: string; lowBelowWei: string; low: boolean }
+/** otto/mamoru#277: a relayer's native balance as /metrics shows it; `lowBelowWei` is two provisionings (operator), two mints (bridge to Monad) or two moves (bridge-out on Ethereum, #440). */
+export type RelayerBalance = { role: 'operator' | 'bridge_monad' | 'bridge_out'; chainId: number; address: string; wei: string; at: string; lowBelowWei: string; low: boolean }
 
 /** otto/mamoru#277: a relayer is read at most this often, whatever the tick that asks. */
 export const RELAYER_READ_MS = 10 * 60_000
@@ -573,7 +573,7 @@ export class RelayerWatch {
    * Records a read. Pages ops once when the balance goes below `lowBelow` (`unit`: what the threshold counts), logs one
    * plain line when it is back, and pages again only after that recovery.
    */
-  observe(role: RelayerBalance['role'], chainId: number, address: string, wei: bigint, lowBelow: bigint, unit: 'provisionings' | 'mints', at: string): void {
+  observe(role: RelayerBalance['role'], chainId: number, address: string, wei: bigint, lowBelow: bigint, unit: 'provisionings' | 'mints' | 'moves', at: string): void {
     const low = wei < lowBelow
     this.entry = { role, chainId, address, wei: wei.toString(), at, lowBelowWei: lowBelow.toString(), low }
     if (low && !this.paged) {

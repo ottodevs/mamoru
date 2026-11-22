@@ -18,7 +18,7 @@ import type { BundlerGuard } from './bundler.ts'
 import { L1Bundler, MAX_CONSTANT_FEE, PaymasterError, RATE_SLACK_BPS, RpcRefused, type Erc20Paymaster, type GasPrice } from './paymaster.ts'
 import { Lock } from './lock.ts'
 import { HttpError } from './operator.ts'
-import { logErr } from './metrics.ts'
+import { logErr, RELAYER_READ_MS, RelayerWatch, type RelayerBalance } from './metrics.ts'
 import { readinessMismatch, stepReady, userOpOutcome, type AnnounceAnswer, type OnSigned, type OpOutcome, type ReadyFlow, type ReadyPorts, type SendAnswer, type SentOp } from './readiness.ts'
 
 // Bridge-out (otto/mamoru#133, first instance of the routing layer). USDC that reached a Mamoru account's address on
@@ -2368,7 +2368,33 @@ export class BridgeOut {
     if (c.legFails.n >= SIBLING_LEG_FAILS) logErr(`[alert] bridge-out sibling ${accountKey.slice(0, 8)}: ${c.legFails.n} failed ops on Ethereum today, the engine waits for tomorrow`, undefined)
   }
 
+  private readonly relayerWatch = new RelayerWatch()
+  private relayerReadAt = 0
+
+  /**
+   * otto/mamoru#440: reads the Ethereum relayer's ETH at most every RELAYER_READ_MS and pages once when it is under two
+   * moves (a deploy and an owner transaction, DEPLOY_GAS + EXEC_GAS, at twice the gas price read now), as the Base and
+   * Monad relayers are watched (#277). A failed read keeps the last value; nothing throws into the tick.
+   */
+  async tickRelayer(): Promise<void> {
+    if (this.now() - this.relayerReadAt < RELAYER_READ_MS) return
+    this.relayerReadAt = this.now()
+    try {
+      const [wei, price] = await Promise.all([this.l1.getBalance({ address: this.relayer.address }), this.l1.getGasPrice()])
+      this.relayerWatch.observe('bridge_out', ETHEREUM_CHAIN_ID, this.relayer.address, wei, 2n * ((DEPLOY_GAS + EXEC_GAS) * price * 2n), 'moves', new Date(this.now()).toISOString())
+    } catch (e) {
+      logErr('[bridge-out] relayer balance not read, last value kept:', e instanceof Error ? e.message : e)
+    }
+  }
+
+  /** otto/mamoru#440: the Ethereum relayer's balance as last read, for /metrics `relayers`. */
+  relayers(): RelayerBalance[] {
+    const e = this.relayerWatch.last()
+    return e ? [e] : []
+  }
+
   async tick(): Promise<void> {
+    await this.tickRelayer()
     await this.settleReservations().catch((e) => logErr('[bridge-out] tick reservations:', e instanceof Error ? e.message : e))
     for (const accountKey of Object.keys(this.journal.siblings ?? {})) await this.reconcileSibling(accountKey).catch((e) => logErr('[bridge-out] tick sibling:', e instanceof Error ? e.message : e))
     for (const accountKey of Object.keys(this.journal.siblings ?? {})) await this.driveReadiness(accountKey).catch((e) => logErr('[bridge-out] tick sibling readiness:', e instanceof Error ? e.message : e))

@@ -442,3 +442,39 @@ describe('convert and move: started only once the owner transaction is signed (o
     expect(r.error).toBeUndefined()
   })
 })
+
+describe('the Ethereum relayer balance is watched like the others (otto/mamoru#440)', () => {
+  const { mkdtempSync } = require('node:fs') as typeof import('node:fs')
+  const { tmpdir } = require('node:os') as typeof import('node:os')
+  const { join } = require('node:path') as typeof import('node:path')
+  test('under two moves at twice the gas price it pages once and shows in relayers(); funded again, it says so once; a failed read keeps the last value', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bo-relayer-'))
+    let wei = 10n ** 15n
+    let fail = false
+    let t = Date.parse('2026-11-22T10:00:00Z')
+    const l1 = { getBalance: async () => (fail ? Promise.reject(new Error('down')) : wei), getGasPrice: async () => 1_000_000_000n } as unknown as import('viem').PublicClient
+    const relayer = { address: '0x7777777777777777777777777777777777777777' as const, send: async () => Promise.reject(new Error('unused')) }
+    const bo = new BridgeOut(l1, relayer, dir, fetch, () => t, undefined, () => false)
+    const errs: string[] = []
+    const orig = console.error
+    console.error = (...a: unknown[]) => void errs.push(a.map(String).join(' '))
+    try {
+      // Two moves: 2 x (DEPLOY_GAS + EXEC_GAS) x 2 gwei x 2 = 0.004 ETH; 0.001 ETH is under it.
+      await bo.tickRelayer()
+      expect(bo.relayers()).toEqual([expect.objectContaining({ role: 'bridge_out', chainId: 1, wei: (10n ** 15n).toString(), lowBelowWei: (4n * 10n ** 15n).toString(), low: true })])
+      t += 11 * 60_000
+      await bo.tickRelayer() // still low: no second page
+      wei = 10n ** 17n
+      t += 11 * 60_000
+      await bo.tickRelayer()
+      fail = true
+      t += 11 * 60_000
+      await bo.tickRelayer()
+    } finally {
+      console.error = orig
+    }
+    expect(errs.filter((e) => e.includes('[alert] relayer bridge_out'))).toHaveLength(1)
+    expect(errs.filter((e) => e.includes('[relayer] bridge_out') && e.includes('is back'))).toHaveLength(1)
+    expect(bo.relayers()[0]).toMatchObject({ wei: (10n ** 17n).toString(), low: false })
+  })
+})
