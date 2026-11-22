@@ -37,7 +37,7 @@ export type VsIdleView = {
   totalUsd: number | null
   netDeposited: { usd: number; status: 'complete' | 'partial' | 'none'; since?: string }
   since: string | null
-  breakdown: { feesUsd: number; priceMoveUsd: number; costsUsd: number | null; mamoruFeeUsd: number; netUsd: number } | null
+  breakdown: { feesUsd: number; priceMoveUsd: number; costsUsd: number; mamoruFeeUsd: number; netUsd: number } | null
   pendingUsd: number
   /** Savings layer (otto/mamoru#413 seam): 0 until the ledger tags it; inside total and fees, never in a share. */
   savingsUsd: number

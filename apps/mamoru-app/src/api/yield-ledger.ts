@@ -70,6 +70,8 @@ export type SafeWire = {
 export type DayReceiptWire = {
   day: string
   gasWei: string
+  /** otto/mamoru#380: the day's gas in raw USDC; absent while an op of the day is not priced yet. */
+  gasUsdc?: string
   collectedUsdc?: string
   positions: { tokenId: string; collected0: string; collected1: string; collectedUsdc?: string }[]
 }
@@ -422,14 +424,14 @@ export async function writeReceipts(db: Db, snapshot: SnapshotWire, now: Date): 
       // Last: if a write above failed, the digest is not stored and the day is written again next pull.
       await db
         .prepare(
-          `INSERT INTO yield_ledger_account_receipts (day, chain_id, address, account_key, env, gas_paid_wei, collected_usdc, digest, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO yield_ledger_account_receipts (day, chain_id, address, account_key, env, gas_paid_wei, gas_paid_usdc, collected_usdc, digest, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(day, chain_id, address) DO UPDATE SET
-             account_key = excluded.account_key, env = excluded.env, gas_paid_wei = excluded.gas_paid_wei,
+             account_key = excluded.account_key, env = excluded.env, gas_paid_wei = excluded.gas_paid_wei, gas_paid_usdc = excluded.gas_paid_usdc,
              collected_usdc = COALESCE(excluded.collected_usdc, yield_ledger_account_receipts.collected_usdc),
              digest = excluded.digest, updated_at = excluded.updated_at`,
         )
-        .bind(d.day, snapshot.chainId, address, account.accountKey, account.env, d.gasWei, collected, digest, now.toISOString())
+        .bind(d.day, snapshot.chainId, address, account.accountKey, account.env, d.gasWei, d.gasUsdc === undefined ? null : Number(d.gasUsdc), collected, digest, now.toISOString())
         .run()
     }
   }

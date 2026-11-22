@@ -273,6 +273,8 @@ export type PositionReceiptWire = { tokenId: string; collected0: string; collect
 export type DayReceiptWire = {
   day: string
   gasWei: string
+  /** otto/mamoru#380: the day's gas in raw USDC; absent while an op of the day is not priced yet. */
+  gasUsdc?: string
   /** Absent when a fee of the day is not priced yet: the reader leaves the column as it was. */
   collectedUsdc?: string
   positions: PositionReceiptWire[]
@@ -363,32 +365,37 @@ export function distinctFees(ops: readonly StoredOp[]): { fees: CountedFee[]; pe
  * reads only its own); an op that read the whole transaction (no userOp hash) holds all of the Safe's userOps, so the
  * transaction counts the larger of the two.
  */
-function dayGas(ops: readonly StoredOp[]): Map<string, bigint> {
-  const days = new Map<string, bigint>()
-  const txs = new Map<string, { day: string; whole: bigint; userOps: Map<string, bigint> }>()
+type Gas = { wei: bigint; usdc: bigint | null }
+const addGas = (x: Gas, y: Gas): Gas => ({ wei: x.wei + y.wei, usdc: x.usdc === null || y.usdc === null ? null : x.usdc + y.usdc })
+const gasOf = (f: OpFacts): Gas => ({ wei: BigInt(f.gasWei), usdc: f.gasUsdc === undefined ? (BigInt(f.gasWei) === 0n ? 0n : null) : BigInt(f.gasUsdc) })
+
+/** Gas per UTC day as wei and, when every counted op is priced (`gasUsdc`), as raw USDC (otto/mamoru#380: the Costs row). */
+function dayGas(ops: readonly StoredOp[]): Map<string, Gas> {
+  const days = new Map<string, Gas>()
+  const txs = new Map<string, { day: string; whole: Gas; userOps: Map<string, Gas> }>()
+  const zero: Gas = { wei: 0n, usdc: 0n }
   for (const op of ops) {
     const f = op.facts
     if (!f) continue
     const day = f.at.slice(0, 10)
-    const gas = BigInt(f.gasWei)
+    const gas = gasOf(f)
     const tx = txOf(op)
     if (!tx) {
-      days.set(day, (days.get(day) ?? 0n) + gas)
+      days.set(day, addGas(days.get(day) ?? zero, gas))
       continue
     }
-    const t = txs.get(tx) ?? { day, whole: 0n, userOps: new Map() }
+    const t = txs.get(tx) ?? { day, whole: zero, userOps: new Map() }
     txs.set(tx, t)
     const own = op.opId.startsWith('eng-') ? op.userOpHash?.toLowerCase() : undefined
     if (own) {
-      const seen = t.userOps.get(own) ?? 0n
-      t.userOps.set(own, gas > seen ? gas : seen)
-    }
-    else if (gas > t.whole) t.whole = gas
+      const seen = t.userOps.get(own) ?? zero
+      t.userOps.set(own, gas.wei > seen.wei ? gas : seen)
+    } else if (gas.wei > t.whole.wei) t.whole = gas
   }
   for (const t of txs.values()) {
-    let sum = 0n
-    for (const g of t.userOps.values()) sum += g
-    days.set(t.day, (days.get(t.day) ?? 0n) + (sum > t.whole ? sum : t.whole))
+    let sum: Gas = zero
+    for (const g of t.userOps.values()) sum = addGas(sum, g)
+    days.set(t.day, addGas(days.get(t.day) ?? zero, sum.wei > t.whole.wei ? sum : t.whole))
   }
   return days
 }
@@ -399,9 +406,9 @@ function dayGas(ops: readonly StoredOp[]): Map<string, bigint> {
  * that reached the chain are absent.
  */
 export function dayReceipts(ops: readonly StoredOp[]): DayReceiptWire[] {
-  const days = new Map<string, { gas: bigint; usdc: bigint; priced: boolean; positions: Map<string, { c0: bigint; c1: bigint; usdc: bigint; priced: boolean }> }>()
+  const days = new Map<string, { gas: Gas; usdc: bigint; priced: boolean; positions: Map<string, { c0: bigint; c1: bigint; usdc: bigint; priced: boolean }> }>()
   const day = (d: string) => {
-    const x = days.get(d) ?? { gas: 0n, usdc: 0n, priced: true, positions: new Map() }
+    const x = days.get(d) ?? { gas: { wei: 0n, usdc: 0n } as Gas, usdc: 0n, priced: true, positions: new Map() }
     days.set(d, x)
     return x
   }
@@ -426,7 +433,8 @@ export function dayReceipts(ops: readonly StoredOp[]): DayReceiptWire[] {
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([day, d]) => ({
       day,
-      gasWei: d.gas.toString(),
+      gasWei: d.gas.wei.toString(),
+      ...(d.gas.usdc !== null ? { gasUsdc: d.gas.usdc.toString() } : {}),
       ...(d.priced ? { collectedUsdc: d.usdc.toString() } : {}),
       positions: [...d.positions.entries()].map(([tokenId, p]) => ({ tokenId, collected0: p.c0.toString(), collected1: p.c1.toString(), ...(p.priced ? { collectedUsdc: p.usdc.toString() } : {}) })),
     }))

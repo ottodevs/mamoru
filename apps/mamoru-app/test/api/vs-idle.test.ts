@@ -32,6 +32,9 @@ const latest = (db: Db, fees: number, total: number) =>
   )
 const flow = (db: Db, id: string, kind: 'in' | 'out', at: string, usdc: number) =>
   db.raw.exec(`INSERT INTO account_flows (chain_id, account_key, flow_id, kind, t_s, usd, updated_at) VALUES (8453, 'base-u1', '${id}', '${kind}', ${t(at)}, ${usdc * U}, '${at}')`)
+const cover = (db: Db) => db.raw.exec(`INSERT INTO account_flows (chain_id, account_key, flow_id, kind, t_s, usd, updated_at) VALUES (8453, 'base-u1', 'cover:0', 'cover', 1, 0, 'x')`)
+const gasDay = (db: Db, day: string, wei: string, usdc: number | null) =>
+  db.raw.exec(`INSERT INTO yield_ledger_account_receipts (day, chain_id, address, account_key, env, gas_paid_wei, gas_paid_usdc, collected_usdc, digest, updated_at) VALUES ('${day}', 8453, 'base-u1', 'base-u1', 'prod', '${wei}', ${usdc === null ? 'NULL' : Math.round(usdc * U)}, NULL, 'd${day}', 'x')`)
 const income = (db: Db, id: string, at: string, usdc: number) =>
   db.raw.exec(`INSERT INTO yield_ledger_income (event_id, chain_id, account_key, env, source, t_s, from_s, usd, updated_at) VALUES ('${id}', 8453, 'base-u1', 'prod', 'harvest', ${t(at)}, NULL, ${usdc * U}, 'x')`)
 
@@ -42,6 +45,7 @@ function funded() {
   daily(db, '2026-11-06', 1010, 4)
   latest(db, 4, 1010)
   flow(db, 'in:0xa:0', 'in', '2026-11-04T09:00:00.000Z', 1000)
+  cover(db)
   income(db, '0xh1:0', '2026-11-04T12:00:00.000Z', 3) // before 5 Nov: earned, not charged
   income(db, '0xh2:0', '2026-11-05T12:00:00.000Z', 2) // charged: 0.20
   return db
@@ -63,7 +67,7 @@ describe('loadVsIdle', () => {
     expect(v.pendingUsd).toBe(4)
     expect(v.netDeposited).toEqual({ usd: 1000, status: 'complete', since: '2026-11-04' })
     // net = 1010 - 4 pending - 1000 deposited - 0.20 fee = 5.80; fees earned = 5.00 realized (3 + 2)
-    expect(v.breakdown).toEqual({ feesUsd: 5, priceMoveUsd: 1, costsUsd: null, mamoruFeeUsd: -0.2, netUsd: 5.8 })
+    expect(v.breakdown).toEqual({ feesUsd: 5, priceMoveUsd: 1, costsUsd: -0, mamoruFeeUsd: -0.2, netUsd: 5.8 })
     const b = v.breakdown!
     expect(Math.round((b.feesUsd + b.priceMoveUsd + b.mamoruFeeUsd) * 100)).toBe(Math.round(b.netUsd * 100))
     // 11-05: 1006 - 2 pending - 1000 deposited - 0.20 (the fee on the income up to that day's end)
@@ -72,8 +76,23 @@ describe('loadVsIdle', () => {
       { day: '2026-11-05', netUsd: 3.8 },
       { day: '2026-11-06', netUsd: 5.8 },
     ])
-    expect(v.notCounted).toEqual(['costs'])
+    expect(v.notCounted).toEqual([])
     expect(v.status).toBe('complete')
+  })
+
+  test('costs are the gas paid in USDC; the price move gives them back; unpriced gas makes costs partial, not zero', async () => {
+    const db = funded()
+    gasDay(db, '2026-11-05', '5000', 0.3)
+    gasDay(db, '2026-11-06', '7000', 0.2)
+    const v = await loadVsIdle(db, 'u1', NOW)
+    // net 5.80 = fees 5.00 + price move 1.50 - costs 0.50 - fee 0.20
+    expect(v.breakdown).toEqual({ feesUsd: 5, priceMoveUsd: 1.5, costsUsd: -0.5, mamoruFeeUsd: -0.2, netUsd: 5.8 })
+    expect(v.notCounted).toEqual([])
+    gasDay(db, '2026-11-04', '9000', null)
+    const part = await loadVsIdle(db, 'u1', NOW)
+    expect(part.notCounted).toEqual(['costs'])
+    expect(part.breakdown!.costsUsd).toBe(-0.5)
+    expect(part.status).toBe('partial')
   })
 
   test('income newer than the balance read is not in the fee yet; a stale or carried value is named', async () => {
@@ -82,9 +101,9 @@ describe('loadVsIdle', () => {
     const v = await loadVsIdle(db, 'u1', NOW)
     expect(v.breakdown!.netUsd).toBe(5.8)
     expect(v.breakdown!.mamoruFeeUsd).toBe(-0.2)
-    expect(v.notCounted).toEqual(['costs'])
+    expect(v.notCounted).toEqual([])
     const stale = await loadVsIdle(db, 'u1', new Date('2026-11-08T18:00:00.000Z'))
-    expect(stale.notCounted).toEqual(['costs', 'value'])
+    expect(stale.notCounted).toEqual(['value'])
     expect(stale.status).toBe('partial')
   })
 
@@ -93,9 +112,10 @@ describe('loadVsIdle', () => {
     daily(db, '2026-11-06', 970, 0)
     latest(db, 0, 970)
     flow(db, 'in:0xa:0', 'in', '2026-11-04T09:00:00.000Z', 975)
+    cover(db)
     income(db, '0xh2:0', '2026-11-05T12:00:00.000Z', 6)
     const v = await loadVsIdle(db, 'u1', NOW)
-    expect(v.breakdown).toEqual({ feesUsd: 6, priceMoveUsd: -11, costsUsd: null, mamoruFeeUsd: -0.6, netUsd: -5.6 })
+    expect(v.breakdown).toEqual({ feesUsd: 6, priceMoveUsd: -11, costsUsd: -0, mamoruFeeUsd: -0.6, netUsd: -5.6 })
   })
 
   test('no flows or flows that start after the first value: no rows, no series, never a figure against a wrong baseline', async () => {
@@ -105,7 +125,7 @@ describe('loadVsIdle', () => {
     expect(v.breakdown).toBeNull()
     expect(v.series).toEqual([])
     expect(v.netDeposited.status).toBe('none')
-    expect(v.notCounted).toEqual(['costs', 'flows'])
+    expect(v.notCounted).toEqual(['flows'])
     expect(v.status).toBe('partial')
     expect(v.totalUsd).toBe(1010)
     flow(db, 'in:0xb:0', 'in', '2026-11-05T09:00:00.000Z', 20)

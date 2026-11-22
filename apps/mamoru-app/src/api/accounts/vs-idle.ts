@@ -14,8 +14,10 @@
 //   fee, over the capital that worked in that window times its time (worked.ts, in range only), annualised. Null for the
 //   first 30 days of the account ('first-30-days': the app shows the Mamoru average then) and while nothing worked.
 // - price move: the residual that makes the rows exact (what the volatile side of the pools did to the value).
-// - costs: gas and slippage are not in D1 as USDC (gas is wei, slippage is not kept): `costsUsd` is null and 'costs' is
-//   named in `notCounted`; they are inside the value, so the price move row carries them until they are measured.
+// - costs: the gas Mamoru paid, in USDC as the operator priced it per op (receipts `gasUsdc`, summed over the owner's
+//   chains). Slippage is not in the op facts (no realized vs quoted figure), so it is not counted: costs are gas only.
+//   A day with gas not priced yet makes 'costs' partial (named in `notCounted`), never a zero. Costs are inside the
+//   value already; the price move row is the residual, so it gives the costs back (value change = price move - costs).
 // - net deposited is the baseline; when it is not complete (value before the first known flow, or no flow) the rows and
 //   the series are null/empty, never a figure against a wrong baseline. `series` is net by day, ending on `net`.
 import type { Db } from '../env.ts'
@@ -57,7 +59,7 @@ export type VsIdleView = {
   /** The first day with a value. */
   since: string | null
   /** Rows in USDC (2 decimals), signed: fees earned +, price move ±, costs -, Mamoru fee -. Null while the baseline is not complete. */
-  breakdown: { feesUsd: number; priceMoveUsd: number; costsUsd: number | null; mamoruFeeUsd: number; netUsd: number } | null
+  breakdown: { feesUsd: number; priceMoveUsd: number; costsUsd: number; mamoruFeeUsd: number; netUsd: number } | null
   /** Uncollected fees inside the total value, shown apart from `breakdown`. */
   pendingUsd: number
   /** Savings layer inside the figures above (otto/mamoru#413 seam, 0 until the ledger tags it). */
@@ -79,13 +81,15 @@ export async function loadVsIdle(db: Db, userId: string, now: Date): Promise<VsI
   const last = view.points.at(-1)
   const empty: VsIdleView = { asOf: view.asOf, totalUsd: last?.usd ?? null, netDeposited: view.netDeposited, since: view.points[0]?.day ?? null, breakdown: null, pendingUsd: last ? usd(toCents(BigInt(pending.get(last.day) ?? 0))) : 0, savingsUsd: SAVINGS_USD_UNTIL_TAGGED, apr: { pct: null, reason: 'not-measured' }, status: 'partial', notCounted: [], series: [] }
   if (!last) return empty
-  const notCounted = new Set<NotCounted>(['costs'])
+  const notCounted = new Set<NotCounted>()
   // The value itself is stale or carries a chain forward (value-series `partial`): the figure is an estimate.
   if (last.partial) notCounted.add('value')
   if (view.netDeposited.status !== 'complete') notCounted.add('flows')
 
   const sleeves = await sleevesOfUser(db, userId)
   let realized = 0n
+  let gasUsdc = 0n
+  let gasKnown = true
   let earnedKnown = true
   const income: IncomeRow[] = []
   for (const s of sleeves) {
@@ -98,10 +102,17 @@ export async function loadVsIdle(db: Db, userId: string, now: Date): Promise<VsI
     realized += BigInt(earned.totalUsd) - BigInt(snap.fees_usdc)
     for (const n of earned.notCounted) if (n !== 'accrued-24h') notCounted.add(n) // that one belongs to the 24 h figure only
     income.push(...(await incomeRows(db, s.chain_id, s.account_key)))
+    const gas = await gasRows(db, s.chain_id, s.account_key)
+    for (const g of gas) {
+      if (g.gas_paid_usdc === null) {
+        if (BigInt(g.gas_paid_wei) > 0n) gasKnown = false
+      } else gasUsdc += BigInt(g.gas_paid_usdc)
+    }
   }
   if (!earnedKnown) notCounted.add('fees')
+  if (!gasKnown) notCounted.add('costs')
   empty.apr = await netApr30d(db, sleeves, income, view.points[0]?.day ?? null)
-  const status = (): 'complete' | 'partial' => ([...notCounted].some((n) => n !== 'costs') ? 'partial' : 'complete')
+  const status = (): 'complete' | 'partial' => (notCounted.size ? 'partial' : 'complete')
   const out = { ...empty, notCounted: [...notCounted].sort(), status: status() }
   if (view.netDeposited.status !== 'complete' || !earnedKnown) return out
 
@@ -115,7 +126,8 @@ export async function loadVsIdle(db: Db, userId: string, now: Date): Promise<VsI
   const net = netAt(last.day, last.usd, last.deposited ?? view.netDeposited.usd)
   const fee = feeAt(last.day)
   const fees = toCents(realized)
-  const breakdown = { feesUsd: usd(fees), priceMoveUsd: usd(net - fees + fee), costsUsd: null, mamoruFeeUsd: usd(-fee), netUsd: usd(net) }
+  const costs = toCents(gasUsdc)
+  const breakdown = { feesUsd: usd(fees), priceMoveUsd: usd(net - fees + fee + costs), costsUsd: usd(-costs), mamoruFeeUsd: usd(-fee), netUsd: usd(net) }
   return { ...out, breakdown, series }
 }
 
@@ -151,4 +163,13 @@ async function netApr30d(db: Db, sleeves: { chain_id: number; account_key: strin
     earned += r.t_s >= MAMORU_FEE_FROM ? gross * (1 - Number(MAMORU_FEE_BPS) / 10_000) : gross
   }
   return { pct: Math.round((earned / capitalSeconds) * YEAR_S * 1000) / 10, reason: null }
+}
+
+async function gasRows(db: Db, chainId: number, accountKey: string): Promise<{ gas_paid_wei: string; gas_paid_usdc: number | null }[]> {
+  try {
+    return (await db.prepare('SELECT gas_paid_wei, gas_paid_usdc FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<{ gas_paid_wei: string; gas_paid_usdc: number | null }>()).results
+  } catch (e) {
+    if (!/no such (table|column)/i.test(e instanceof Error ? e.message : String(e))) throw e
+    return [{ gas_paid_wei: '1', gas_paid_usdc: null }] // not migrated: gas is unknown, not zero
+  }
 }

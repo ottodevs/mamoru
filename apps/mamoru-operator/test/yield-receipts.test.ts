@@ -65,6 +65,17 @@ describe('factsFromLogs (otto/mamoru#129)', () => {
   })
 })
 
+describe('dayReceipts gas in USDC (otto/mamoru#380)', () => {
+  const at = '2026-11-15T10:00:00.000Z'
+  const one = (id: string, tx: string, gasWei: string, gasUsdc?: string): StoredOp => ({ opId: id, kind: 'enter', state: 'confirmed', updatedAt: at, txHash: tx as `0x${string}`, userOpHash: `0x${id}` as `0x${string}`, facts: { txHash: tx, at, gasWei, ...(gasUsdc === undefined ? {} : { gasUsdc }), fees: [], v: FACTS_VERSION } }) as StoredOp
+  test('the day sums the priced gas of each op; one unpriced op leaves the day unpriced, never 0', () => {
+    expect(dayReceipts([one('eng-a', '0xa1', '100', '300'), one('eng-b', '0xb1', '50', '150')])[0]).toMatchObject({ gasWei: '150', gasUsdc: '450' })
+    const mixed = dayReceipts([one('eng-a', '0xa1', '100', '300'), one('eng-b', '0xb1', '50')])[0]!
+    expect(mixed.gasWei).toBe('150')
+    expect(mixed.gasUsdc).toBeUndefined()
+  })
+})
+
 describe('priceFees and dayReceipts', () => {
   const pools = { [LIVE_POOL]: { sqrtPriceX96: 2n ** 96n, tick: 0, feeGrowthGlobal0X128: 0n, feeGrowthGlobal1X128: 0n } } as unknown as Snapshot['pools']
 
@@ -114,7 +125,7 @@ describe('priceFees and dayReceipts', () => {
     // Copies of both layouts (the receipt is being read again): the current collect once, unpriced until it is.
     const legacy = op('eng-l', { txHash: '0xc2', at, gasWei: '0', fees: [piece(undefined, '1')] }, '0xc2')
     const current = op('eng-c', { txHash: '0xc2', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(121, '1')] }, '0xc2')
-    expect(dayReceipts([legacy, current])[0]).toEqual({ day: '2026-11-15', gasWei: '0', positions: [{ tokenId: '7', collected0: '10', collected1: '0' }] })
+    expect(dayReceipts([legacy, current])[0]).toEqual({ day: '2026-11-15', gasWei: '0', gasUsdc: '0', positions: [{ tokenId: '7', collected0: '10', collected1: '0' }] })
     expect(dayReceipts([current])[0]!.collectedUsdc).toBe('1')
     // An unpriced copy does not hide a priced one.
     const unpriced = op('eng-u', { txHash: '0xc3', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(5)] }, '0xc3')
