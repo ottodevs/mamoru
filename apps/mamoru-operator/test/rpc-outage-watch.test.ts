@@ -15,10 +15,12 @@ function capture(run: () => void): string[] {
 }
 
 describe('OutageWatch (#444)', () => {
-  test('failures under the window page nothing; past it, one page naming the providers by label; a good answer recovers once', () => {
+  test('failures running unbroken past the window page once, naming providers by label; a good answer recovers once', () => {
     const w = new OutageWatch('chain', () => 'alchemy.com exhausted until 2026-12-01T00:00:00.000Z, quiknode.pro failing', ALL_DOWN_ALERT_MS, 0)
     const lines = capture(() => {
-      w.failed(60_000)
+      w.failed(0)
+      w.failed(100_000)
+      w.failed(200_000)
       w.failed(ALL_DOWN_ALERT_MS - 1)
       w.failed(ALL_DOWN_ALERT_MS)
       w.failed(ALL_DOWN_ALERT_MS + 60_000) // still down: no second page
@@ -30,6 +32,15 @@ describe('OutageWatch (#444)', () => {
       '[rpc] chain: providers answer again after 420 s without one',
     ])
     expect(w.down()).toBe(false)
+  })
+
+  test('a quiet spell is not an outage: the first failure after an hour without requests starts the run, it does not page', () => {
+    const w = new OutageWatch('chain', () => 'x', ALL_DOWN_ALERT_MS, 0)
+    const lines = capture(() => {
+      w.failed(3_600_000)
+      w.failed(3_600_000 + 60_000)
+    })
+    expect(lines).toEqual([])
   })
 
   test('an answer inside the window resets it: failures must run unbroken for the whole window', () => {
@@ -49,7 +60,16 @@ describe('the proxy pages when every provider fails (#444)', () => {
   const { QuotaBook } = require('../src/quota.ts') as typeof import('../src/quota.ts')
   const A = 'https://base-mainnet.g.alchemy.com/v2/test-key'
   const Q = 'https://example.base-mainnet.quiknode.pro/test-key/'
-  const call = async (url: string) => (await fetch(url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }) })).json()
+  // An eth_call at a fixed block: a read the proxy sends to a provider (head reads may be answered from its own head).
+  const call = async (url: string) => (await fetch(url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: '0x0000000000000000000000000000000000000001', data: '0x' }, '0x10'] }) })).json()
+  /** Requests for `ms`, one every 10 ms: an unbroken run, as live traffic is. */
+  const hammer = async (url: string, ms: number) => {
+    const end = Date.now() + ms
+    while (Date.now() < end) {
+      await call(url)
+      await Bun.sleep(10)
+    }
+  }
 
   test('upstream and trusted both failing past the window: one [alert] with labels, no URL; an answer after it: one recovery', async () => {
     let up = false
@@ -60,12 +80,9 @@ describe('the proxy pages when every provider fails (#444)', () => {
     const lines: string[] = []
     const orig = console.error
     console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '))
-    const proxy = startRpcProxy(A, { fetch: fetcher as never, trusted: [Q], fallbacks: [], logRanges: {}, quota: new QuotaBook(), allDownAlertMs: 50 })
+    const proxy = startRpcProxy(A, { fetch: fetcher as never, trusted: [Q], fallbacks: [], logRanges: {}, quota: new QuotaBook(), allDownAlertMs: 1_000 })
     try {
-      await call(proxy.url)
-      await Bun.sleep(80)
-      await call(proxy.url)
-      await call(proxy.url)
+      await hammer(proxy.url, 1_600)
       up = true
       await Bun.sleep(30) // past any short backoff
       await call(proxy.url)
@@ -85,11 +102,9 @@ describe('the proxy pages when every provider fails (#444)', () => {
     const lines: string[] = []
     const orig = console.error
     console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '))
-    const proxy = startRpcProxy(A, { name: A, fetch: fetcher as never, trusted: [Q], fallbacks: [], logRanges: {}, quota: new QuotaBook(), allDownAlertMs: 50 })
+    const proxy = startRpcProxy(A, { name: A, fetch: fetcher as never, trusted: [Q], fallbacks: [], logRanges: {}, quota: new QuotaBook(), allDownAlertMs: 1_000 })
     try {
-      await call(proxy.url)
-      await Bun.sleep(80)
-      await call(proxy.url)
+      await hammer(proxy.url, 1_600)
     } finally {
       proxy.stop()
       console.error = orig
@@ -108,16 +123,35 @@ describe('the proxy pages when every provider fails (#444)', () => {
     const lines: string[] = []
     const orig = console.error
     console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '))
-    const proxy = startRpcProxy(A, { fetch: fetcher as never, trusted: [Q], fallbacks: [], logRanges: {}, quota: new QuotaBook(), allDownAlertMs: 50 })
+    const proxy = startRpcProxy(A, { fetch: fetcher as never, trusted: [Q], fallbacks: [], logRanges: {}, quota: new QuotaBook(), allDownAlertMs: 1_000 })
     try {
-      await call(proxy.url)
-      await Bun.sleep(80)
-      await call(proxy.url)
+      await hammer(proxy.url, 1_600)
     } finally {
       proxy.stop()
       console.error = orig
     }
     expect(lines.filter((l) => l.startsWith('[alert] rpc '))).toEqual([])
+  })
+
+  const shapes: [string, (id: number) => Response | Promise<never>][] = [
+    ['a well-formed result on HTTP 503', (id) => new Response(JSON.stringify({ jsonrpc: '2.0', id, result: null }), { status: 503 })],
+    ['an error object without the JSON-RPC envelope on HTTP 200', () => new Response(JSON.stringify({ error: { code: -32602, message: 'block range too large' } }), { status: 200 })],
+    ['a connection that fails', () => Promise.reject(new TypeError('connect ECONNREFUSED'))],
+    ['a retriable refusal on every request (no data for the operator)', (id) => new Response(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32005, message: 'too many requests' } }), { status: 200 })],
+  ]
+  test.each(shapes)('every provider giving %s for the whole window pages once', async (_what, answer) => {
+    const fetcher = async (_url: string, init: RequestInit) => answer((JSON.parse(String(init.body)) as { id: number }).id)
+    const lines: string[] = []
+    const orig = console.error
+    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '))
+    const proxy = startRpcProxy(A, { fetch: fetcher as never, trusted: [Q], fallbacks: [], logRanges: {}, quota: new QuotaBook(), allDownAlertMs: 1_000 })
+    try {
+      await hammer(proxy.url, 1_600)
+    } finally {
+      proxy.stop()
+      console.error = orig
+    }
+    expect(lines.filter((l) => l.startsWith('[alert] rpc chain'))).toHaveLength(1)
   })
 })
 

@@ -390,6 +390,16 @@ const LOGS_REQUEST_MS = 50_000
 /** An answer about the range itself, never a rate: asking again gets the same refusal. */
 const RANGE_REFUSAL = /result|response size|block range|range (is )?too|exceeds/i
 
+/**
+ * otto/mamoru#444: a complete JSON-RPC 2.0 response: version, id, and exactly one of result or an error object with a
+ * numeric code and a string message. Anything else from a provider is not an answer.
+ */
+export function isRpcEnvelope(json: any): boolean {
+  if (!json || typeof json !== 'object' || json.jsonrpc !== '2.0' || !('id' in json)) return false
+  if (('result' in json) === ('error' in json)) return false
+  return !('error' in json) || (!!json.error && typeof json.error.code === 'number' && typeof json.error.message === 'string')
+}
+
 /** otto/mamoru#444: how long no provider of a proxy may go without a good answer before ops is paged. */
 export const ALL_DOWN_ALERT_MS = 5 * 60_000
 
@@ -399,7 +409,9 @@ export const ALL_DOWN_ALERT_MS = 5 * 60_000
  * answer comes back. Only fixed text and provider labels: never a URL.
  */
 export class OutageWatch {
-  private lastOk: number
+  /** Start of the current run of unanswered requests (null: the last request was answered, or none failed yet). */
+  private failingSince: number | null = null
+  private lastEvent: number
   private paged = false
   constructor(
     private readonly name: string,
@@ -407,19 +419,26 @@ export class OutageWatch {
     private readonly alertMs: number = ALL_DOWN_ALERT_MS,
     now: number = Date.now(),
   ) {
-    this.lastOk = now
+    this.lastEvent = now
   }
 
   ok(now: number = Date.now()): void {
-    if (this.paged) console.error(`[rpc] ${this.name}: providers answer again after ${Math.round((now - this.lastOk) / 1000)} s without one`)
+    if (this.paged) console.error(`[rpc] ${this.name}: providers answer again after ${Math.round((now - (this.failingSince ?? now)) / 1000)} s without one`)
     this.paged = false
-    this.lastOk = now
+    this.failingSince = null
+    this.lastEvent = now
   }
 
+  /**
+   * One request no provider answered. The run starts at the first failure after an answer, or after a quiet spell
+   * longer than the window (no requests is not an outage): it pages only once failures have run unbroken for alertMs.
+   */
   failed(now: number = Date.now()): void {
-    if (this.paged || now - this.lastOk < this.alertMs) return
+    if (this.failingSince === null || now - this.lastEvent > this.alertMs) this.failingSince = now
+    this.lastEvent = now
+    if (this.paged || now - this.failingSince < this.alertMs) return
     this.paged = true
-    console.error(`[alert] rpc ${this.name}: no provider has answered for ${Math.round((now - this.lastOk) / 60_000)} min; reads and sends wait (${this.states()})`)
+    console.error(`[alert] rpc ${this.name}: no provider has answered for ${Math.round((now - this.failingSince) / 60_000)} min; reads and sends wait (${this.states()})`)
   }
 
   /** Whether a page is out (an outage not yet answered). */
@@ -470,22 +489,22 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const proxyName = /^[a-z0-9_-]{1,24}$/i.test(opts.name ?? 'chain') ? (opts.name ?? 'chain') : 'proxy'
   // Labels and states only (quota.providers never holds a URL): which providers are spent, cooling or merely failing.
   const outage = new OutageWatch(proxyName, () => quota.providers().filter((p) => p.proxy === proxyName).map((p) => `${p.label} ${p.state}${p.until ? ` until ${p.until}` : ''}`).join(', ') || 'no provider', opts.allDownAlertMs)
-  const noteQuota = (url: string, sentAt: number, status: number | undefined, err: any, retryAfter?: string | null) => {
-    if (!err) {
-      outage.ok()
-      return quota.clear(url, sentAt)
-    }
+  const noteQuota = (url: string, sentAt: number, status: number | undefined, err: any, retryAfter?: string | null, envelope = false) => {
+    // otto/mamoru#444, decided apart from the backoff below: an answer is an HTTP 200 carrying a complete JSON-RPC
+    // response that is neither a spent quota nor a retriable refusal (a revert, an unserved method or a range refusal
+    // are answers: the provider is up). Every provider refusing to serve for 5 min is an outage for the operator, since
+    // its reads and sends get nothing, so a retriable refusal counts as no answer.
+    const answered = status === 200 && envelope && !(err && (quotaExhausted(status, err) || retriable(status, { error: err })))
+    if (answered) outage.ok()
+    else outage.failed()
+    if (!err) return quota.clear(url, sentAt)
     const label = labelOf(url)
     if (quotaExhausted(status, err)) {
       const now = Date.now()
       quota.mark(url, label, providerWords(err?.message).slice(0, 60), resetFromAnswer(err?.message, retryAfter, now) ?? nextReset(domainOfLabel(label), now, resetDays), now)
-      outage.failed(now)
-    } else if (!methodUnserved(err) && !RANGE_REFUSAL.test(String(err?.message ?? '')) && (status === undefined || retriable(status, { error: err }))) {
-      quota.backoff(url, label, classifyRpcError(status, err) === 'rateCapacity' ? 'burst_limited' : 'failing')
-      outage.failed()
-    } else if (status === 200 && typeof err?.code === 'number' && err?.synthetic !== true) outage.ok() // a JSON-RPC error answer (a revert, an unserved method, a range refusal): the provider is up
-    else outage.failed() // 401/403 (a key revoked), any other status, a body that is not JSON-RPC: no answer
+    } else if (!methodUnserved(err) && !RANGE_REFUSAL.test(String(err?.message ?? '')) && (status === undefined || retriable(status, { error: err }))) quota.backoff(url, label, classifyRpcError(status, err) === 'rateCapacity' ? 'burst_limited' : 'failing')
   }
+
   /**
    * The providers of `list` not out of quota. When every one is, only one request a minute asks one of them (a refusal
    * misread as a quota, or a plan raised, is found within the minute); every other request gets an empty list and fails
@@ -642,9 +661,9 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
           const sentAt = Date.now()
           const r = await post(url, body)
           if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk, Date.now(), caller.getStore()))
-          const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}`, synthetic: true })
+          const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
           if (errObj && metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(r.status, errObj)))
-          noteQuota(url, sentAt, r.status, errObj, r.retryAfter)
+          noteQuota(url, sentAt, r.status, errObj, r.retryAfter, isRpcEnvelope(r.json))
           if (at !== null) unseen(url, at, body.method, r.json)
           if (wellFormed(r.json) && !retriable(r.status, r.json)) {
             if (body.method === 'eth_getBlockByNumber') remember(url, r.json.result)
@@ -658,6 +677,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
           if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk, Date.now(), caller.getStore()))
           last = { code: -32603, message: (e as Error).message.split('\n')[0] }
           quota.backoff(url, label, 'failing')
+          outage.failed() // otto/mamoru#444: unreachable or timed out is no answer
           if (metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(undefined, last)))
         }
         if (attempt + 1 < tries) await Bun.sleep(400 * 2 ** attempt)
@@ -691,11 +711,12 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     } catch (e) {
       const rpc = { code: -32603, message: (e as Error).message.split('\n')[0] }
       if (metrics) safeMetrics(() => (metrics.recordRequest(label, method, isChunk, Date.now(), caller.getStore()), metrics.recordError(label, method, classifyRpcError(undefined, rpc))))
+      outage.failed() // otto/mamoru#444: unreachable or timed out is no answer
       throw Object.assign(new Error(String(rpc.message)), { rpc })
     }
     if (metrics) safeMetrics(() => metrics.recordRequest(label, method, isChunk, Date.now(), caller.getStore()))
-    const rpc = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}`, synthetic: true })
-    noteQuota(url, sentAt, r.status, rpc, r.retryAfter)
+    const rpc = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
+    noteQuota(url, sentAt, r.status, rpc, r.retryAfter, isRpcEnvelope(r.json))
     if (!rpc) {
       if (method === 'eth_getBlockByNumber') noteTip(url, r.json.result?.number)
       return r.json.result
