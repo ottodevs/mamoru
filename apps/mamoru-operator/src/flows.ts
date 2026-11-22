@@ -5,7 +5,10 @@
 //
 // Counted: USDC sent to the Safe from outside Mamoru (in), the USDC value of a confirmed owner transfer (out). Not
 // counted: moves between the owner's own Safes (CCTP legs, bridges), the yield fee a transfer pays on top
-// (`feeUsdc`: it is Mamoru's fee, a line of its own), vault and pool moves.
+// vault and pool moves.
+// A withdrawal is out for what left the Safe to the owner AND to Mamoru as its fee (`amountUsdc + feeUsdc`): the fee is
+// not a gain, and the reader subtracts the whole fee owed from the net once (vs-idle.ts), so a fee already paid must not
+// stay inside the net deposited or it would be taken twice.
 import { DEPOSITS_KEPT, type DepositRow } from './deposits.ts'
 import type { StoredOp } from './state.ts'
 import { gaveUp, needsFacts } from './yield-receipts.ts'
@@ -50,7 +53,8 @@ export function accountFlows(deposits: readonly DepositRow[] | undefined, ops: r
       continue
     }
     const id = `out:${op.txHash!.toLowerCase()}`
-    if (!byId.has(id)) byId.set(id, { id, t, kind: 'out', usdc: op.amountUsdc })
+    const fee = op.feeUsdc && /^\d+$/.test(op.feeUsdc) ? BigInt(op.feeUsdc) : 0n
+    if (!byId.has(id)) byId.set(id, { id, t, kind: 'out', usdc: (BigInt(op.amountUsdc) + fee).toString() })
   }
   return [...byId.values()].sort((a, b) => a.t - b.t || (a.id < b.id ? -1 : 1))
 }
