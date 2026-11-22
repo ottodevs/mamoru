@@ -23,8 +23,8 @@ const npmAbi = parseAbi([
 let idx = 0
 const log = (addr: Address, topics: Hex[], data: Hex): Log => ({ address: addr, topics: topics as [Hex, ...Hex[]], data, logIndex: idx++, blockNumber: 1n, blockHash: '0x01', transactionHash: '0x02', transactionIndex: 0, removed: false }) as Log
 
-const userOp = (sender: Address, gas: bigint, hash: Hex = `0x${'ab'.repeat(32)}`) =>
-  log(EP, encodeEventTopics({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', args: { userOpHash: hash, sender, paymaster: '0x0000000000000000000000000000000000000000' } }) as Hex[], encodeAbiParameters([{ type: 'uint256' }, { type: 'bool' }, { type: 'uint256' }, { type: 'uint256' }], [0n, true, gas, 100_000n]))
+const userOp = (sender: Address, gas: bigint, hash: Hex = `0x${'ab'.repeat(32)}`, paymaster: Address = '0x0000000000000000000000000000000000000000') =>
+  log(EP, encodeEventTopics({ abi: entryPointV07Abi, eventName: 'UserOperationEvent', args: { userOpHash: hash, sender, paymaster } }) as Hex[], encodeAbiParameters([{ type: 'uint256' }, { type: 'bool' }, { type: 'uint256' }, { type: 'uint256' }], [0n, true, gas, 100_000n]))
 const poolCollect = (a0: bigint, a1: bigint) =>
   log(POOL, encodeEventTopics({ abi: poolAbi, eventName: 'Collect', args: { owner: NPM, tickLower: -10, tickUpper: 10 } }) as Hex[], encodeAbiParameters([{ type: 'address' }, { type: 'uint128' }, { type: 'uint128' }], [NPM, a0, a1]))
 const npmCollect = (tokenId: bigint, recipient: Address, a0: bigint, a1: bigint) =>
@@ -34,6 +34,16 @@ const decrease = (tokenId: bigint, a0: bigint, a1: bigint) =>
 
 const T = 1_792_655_000n // 2026-10-22T07:43:20Z, inside the snapshot's RECEIPT_DAYS window
 const op = (opId: string, facts?: OpFacts, txHash: Hex | null = '0xaa'): StoredOp => ({ opId, kind: 'reduce', state: 'confirmed', updatedAt: '2026-10-22T00:00:00Z', ...(txHash ? { txHash } : {}), ...(facts ? { facts } : {}) }) as StoredOp
+
+describe('factsFromLogs: who paid the gas (otto/mamoru#380)', () => {
+  test('a userOp paid by a paymaster is not a cost of the Safe; one with none is', () => {
+    const PM = '0x00000000000000000000000000000000000000cc' as Address
+    expect(factsFromLogs([userOp(SAFE, 7_000n)], SAFE, T).gasWei).toBe('7000')
+    expect(factsFromLogs([userOp(SAFE, 7_000n, undefined, PM)], SAFE, T).gasWei).toBe('0')
+    const h = `0x${'cd'.repeat(32)}` as Hex
+    expect(factsFromLogs([userOp(SAFE, 7_000n, h, PM)], SAFE, T, h).gasWei).toBe('0')
+  })
+})
 
 describe('factsFromLogs (otto/mamoru#129)', () => {
   test('gas is this Safe\'s actualGasCost only; a harvest-only collect is all fees', () => {
@@ -62,6 +72,22 @@ describe('factsFromLogs (otto/mamoru#129)', () => {
   test('a full unwind with no fees and a collect to another recipient record no fee', () => {
     const f = factsFromLogs([userOp(SAFE, 1n), decrease(7n, 100n, 200n), poolCollect(100n, 200n), npmCollect(7n, SAFE, 100n, 200n), poolCollect(1n, 1n), npmCollect(8n, OTHER, 1n, 1n)], SAFE, T)
     expect(f.fees).toEqual([])
+  })
+})
+
+describe('dayReceipts gas in USDC (otto/mamoru#380)', () => {
+  const at = '2026-11-15T10:00:00.000Z'
+  const one = (id: string, tx: string, gasWei: string, gasUsdc?: string): StoredOp => ({ opId: id, kind: 'enter', state: 'confirmed', updatedAt: at, txHash: tx as `0x${string}`, userOpHash: `0x${id}` as `0x${string}`, facts: { txHash: tx, at, gasWei, ...(gasUsdc === undefined ? {} : { gasUsdc }), fees: [], v: FACTS_VERSION } }) as StoredOp
+  test('the day sums the priced gas of each op; one unpriced op leaves the day unpriced, never 0', () => {
+    expect(dayReceipts([one('eng-a', '0xa1', '100', '300'), one('eng-b', '0xb1', '50', '150')])[0]).toMatchObject({ gasWei: '150', gasUsdc: '450' })
+    // a priced copy of the same transaction wins over an unpriced one that came first
+    expect(dayReceipts([one('eng-a', '0xa1', '100'), { ...one('eng-a', '0xa1', '100', '300'), opId: 'eng-a' }])[0]).toMatchObject({ gasUsdc: '300' })
+    // the same userOp read per userOp (priced) and as a whole transaction (unpriced), equal wei: the priced one stays
+    expect(dayReceipts([one('eng-a', '0xa1', '100', '300'), one('own-a', '0xa1', '100')])[0]).toMatchObject({ gasWei: '100', gasUsdc: '300' })
+    expect(dayReceipts([one('own-a', '0xa1', '100'), one('eng-a', '0xa1', '100', '300')])[0]).toMatchObject({ gasWei: '100', gasUsdc: '300' })
+    const mixed = dayReceipts([one('eng-a', '0xa1', '100', '300'), one('eng-b', '0xb1', '50')])[0]!
+    expect(mixed.gasWei).toBe('150')
+    expect(mixed.gasUsdc).toBeUndefined()
   })
 })
 
@@ -114,7 +140,7 @@ describe('priceFees and dayReceipts', () => {
     // Copies of both layouts (the receipt is being read again): the current collect once, unpriced until it is.
     const legacy = op('eng-l', { txHash: '0xc2', at, gasWei: '0', fees: [piece(undefined, '1')] }, '0xc2')
     const current = op('eng-c', { txHash: '0xc2', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(121, '1')] }, '0xc2')
-    expect(dayReceipts([legacy, current])[0]).toEqual({ day: '2026-11-15', gasWei: '0', positions: [{ tokenId: '7', collected0: '10', collected1: '0' }] })
+    expect(dayReceipts([legacy, current])[0]).toEqual({ day: '2026-11-15', gasWei: '0', gasUsdc: '0', positions: [{ tokenId: '7', collected0: '10', collected1: '0' }] })
     expect(dayReceipts([current])[0]!.collectedUsdc).toBe('1')
     // An unpriced copy does not hide a priced one.
     const unpriced = op('eng-u', { txHash: '0xc3', at, gasWei: '0', v: FACTS_VERSION, fees: [piece(5)] }, '0xc3')

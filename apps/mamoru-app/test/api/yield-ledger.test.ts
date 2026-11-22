@@ -268,6 +268,18 @@ describe('writeReceipts (otto/mamoru#129): the operator\'s per-day gas and colle
     expect(db.raw.query('SELECT COUNT(*) AS n FROM yield_ledger_position_collected').get()).toEqual({ n: 1 })
   })
 
+  test('gas in USDC (#380): a later unpriced op makes the day unknown again, not the stale sum; an unmigrated table keeps the receipts syncing', async () => {
+    const gas = () => db.raw.query('SELECT gas_paid_wei, gas_paid_usdc FROM yield_ledger_account_receipts WHERE day = ?').get(day) as Record<string, unknown>
+    await writeReceipts(db, withReceipts([{ day, gasWei: '100', gasUsdc: '300', positions: [] }]), now)
+    expect(gas()).toEqual({ gas_paid_wei: '100', gas_paid_usdc: 300 })
+    await writeReceipts(db, withReceipts([{ day, gasWei: '150', positions: [] }]), now)
+    expect(gas()).toEqual({ gas_paid_wei: '150', gas_paid_usdc: null })
+    db.raw.exec('ALTER TABLE yield_ledger_account_receipts DROP COLUMN gas_paid_usdc')
+    await writeReceipts(db, withReceipts([{ day, gasWei: '200', gasUsdc: '400', positions: [] }]), now)
+    expect(db.raw.query('SELECT gas_paid_wei FROM yield_ledger_account_receipts WHERE day = ?').get(day)).toEqual({ gas_paid_wei: '200' })
+    expect((db.raw.query('SELECT digest FROM yield_ledger_account_receipts WHERE day = ?').get(day) as { digest: string }).digest.startsWith('nogas:')).toBe(true) // rewritten once the column exists
+  })
+
   test('a day not priced yet keeps the stored USD figure but still takes the gas and raw amounts', async () => {
     await writeAccountSnapshot(db, snapshot(), now)
     await writeYieldLedger(db, snapshot(), now)

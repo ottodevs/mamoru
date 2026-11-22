@@ -8,6 +8,7 @@ import { buildDashboard, loadDashboardInput } from './dashboard.ts'
 import { ownedSleeve } from '../sleeves.ts'
 import { loadYieldLedger } from './yield.ts'
 import { loadValueSeries } from './value-series.ts'
+import { loadVsIdle } from './vs-idle.ts'
 
 export const accounts = new Hono<AppEnv>()
 
@@ -53,4 +54,17 @@ accounts.get('/:accountKey/value-series', async (c) => {
   if (!account) return accountNotFound(c)
   c.set('accountKey', account.account_key)
   return c.json(await loadValueSeries(c.env.DB, session.userId, c.var.now()))
+})
+
+// GET /api/accounts/:accountKey/vs-idle -> VsIdleView (otto/mamoru#380): the owner's net against leaving the net
+// deposited USDC idle, its rows and its daily series. Same ownership rule as the reads above.
+accounts.get('/:accountKey/vs-idle', async (c) => {
+  const session = await c.var.auth.current(c)
+  if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
+  const accountKey = c.req.param('accountKey')
+  if (!ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
+  const account = await ownedSleeve(c, session.userId, accountKey)
+  if (!account) return accountNotFound(c)
+  c.set('accountKey', account.account_key)
+  return c.json(await loadVsIdle(c.env.DB, session.userId, c.var.now()))
 })

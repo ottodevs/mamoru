@@ -89,6 +89,15 @@ export type OpFacts = {
  * userOp per handleOps (bundler.ts), so this matters only for a bundle someone else built. Without it (an owner
  * transaction, or an engine op stored before its hash was kept) the whole transaction counts.
  */
+/**
+ * otto/mamoru#380: gas counts as a cost of the user's Safe only when the Safe's own prefund paid it: a userOp with no
+ * paymaster (Base runs without one, bundler.ts). A userOp with a paymaster was paid by it, so no ETH of the Safe is
+ * counted. Owner transactions go through the relayer (no userOp of the Safe: gas 0 here, the relayer's subsidy is in
+ * acc.sponsored and is not a user cost; past the sponsorship limits the Safe refunds the relayer, which this does not
+ * see yet).
+ */
+const paidBySafe = (paymaster: Address | undefined) => !paymaster || /^0x0{40}$/i.test(paymaster)
+
 export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, userOpHash?: Hex, registry: Registry = baseRegistry): OpFacts {
   // otto/mamoru#358: the chain's own contracts; Monad's position manager is another address than Base's.
   const entryPoint = address('EntryPointV07', registry)
@@ -99,11 +108,11 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
     const i = opEvents.findIndex((e) => e.args.userOpHash.toLowerCase() === userOpHash.toLowerCase() && isAddressEqual(e.args.sender, safe))
     const own = opEvents[i]
     if (!own) return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: '0', fees: [], v: FACTS_VERSION }
-    gas = own.args.actualGasCost
+    gas = paidBySafe(own.args.paymaster) ? own.args.actualGasCost : 0n
     const from = i > 0 ? opEvents[i - 1]!.logIndex : -1
     logs = logs.filter((l) => l.logIndex !== null && l.logIndex > from && l.logIndex < own.logIndex)
   } else {
-    for (const e of opEvents) if (isAddressEqual(e.args.sender, safe)) gas += e.args.actualGasCost
+    for (const e of opEvents) if (isAddressEqual(e.args.sender, safe) && paidBySafe(e.args.paymaster)) gas += e.args.actualGasCost
   }
 
   // The pool emits its Collect right before the manager's: the nearest one earlier in the log names the pool.
@@ -273,6 +282,8 @@ export type PositionReceiptWire = { tokenId: string; collected0: string; collect
 export type DayReceiptWire = {
   day: string
   gasWei: string
+  /** otto/mamoru#380: the day's gas in raw USDC; absent while an op of the day is not priced yet. */
+  gasUsdc?: string
   /** Absent when a fee of the day is not priced yet: the reader leaves the column as it was. */
   collectedUsdc?: string
   positions: PositionReceiptWire[]
@@ -363,32 +374,40 @@ export function distinctFees(ops: readonly StoredOp[]): { fees: CountedFee[]; pe
  * reads only its own); an op that read the whole transaction (no userOp hash) holds all of the Safe's userOps, so the
  * transaction counts the larger of the two.
  */
-function dayGas(ops: readonly StoredOp[]): Map<string, bigint> {
-  const days = new Map<string, bigint>()
-  const txs = new Map<string, { day: string; whole: bigint; userOps: Map<string, bigint> }>()
+type Gas = { wei: bigint; usdc: bigint | null }
+const addGas = (x: Gas, y: Gas): Gas => ({ wei: x.wei + y.wei, usdc: x.usdc === null || y.usdc === null ? null : x.usdc + y.usdc })
+const gasOf = (f: OpFacts): Gas => ({ wei: BigInt(f.gasWei), usdc: f.gasUsdc === undefined ? (BigInt(f.gasWei) === 0n ? 0n : null) : BigInt(f.gasUsdc) })
+
+/** Gas per UTC day as wei and, when every counted op is priced (`gasUsdc`), as raw USDC (otto/mamoru#380: the Costs row). */
+function dayGas(ops: readonly StoredOp[]): Map<string, Gas> {
+  const days = new Map<string, Gas>()
+  const txs = new Map<string, { day: string; whole: Gas; userOps: Map<string, Gas> }>()
+  const zero: Gas = { wei: 0n, usdc: 0n }
   for (const op of ops) {
     const f = op.facts
     if (!f) continue
     const day = f.at.slice(0, 10)
-    const gas = BigInt(f.gasWei)
+    const gas = gasOf(f)
     const tx = txOf(op)
     if (!tx) {
-      days.set(day, (days.get(day) ?? 0n) + gas)
+      days.set(day, addGas(days.get(day) ?? zero, gas))
       continue
     }
-    const t = txs.get(tx) ?? { day, whole: 0n, userOps: new Map() }
+    const t = txs.get(tx) ?? { day, whole: zero, userOps: new Map() }
     txs.set(tx, t)
     const own = op.opId.startsWith('eng-') ? op.userOpHash?.toLowerCase() : undefined
     if (own) {
-      const seen = t.userOps.get(own) ?? 0n
-      t.userOps.set(own, gas > seen ? gas : seen)
-    }
-    else if (gas > t.whole) t.whole = gas
+      const seen = t.userOps.get(own) ?? zero
+      // Copies of one transaction have equal wei: a priced copy must not lose to an unpriced one that came first.
+      t.userOps.set(own, gas.wei > seen.wei || (gas.wei === seen.wei && seen.usdc === null) ? gas : seen)
+    } else if (gas.wei > t.whole.wei || (gas.wei === t.whole.wei && t.whole.usdc === null)) t.whole = gas
   }
   for (const t of txs.values()) {
-    let sum = 0n
-    for (const g of t.userOps.values()) sum += g
-    days.set(t.day, (days.get(t.day) ?? 0n) + (sum > t.whole ? sum : t.whole))
+    let sum: Gas = zero
+    for (const g of t.userOps.values()) sum = addGas(sum, g)
+    // Equal wei (the same userOp read both ways): keep the priced one, an unpriced copy must not hide it.
+    const pick = sum.wei > t.whole.wei || (sum.wei === t.whole.wei && t.whole.usdc === null && sum.usdc !== null) ? sum : t.whole
+    days.set(t.day, addGas(days.get(t.day) ?? zero, pick))
   }
   return days
 }
@@ -399,9 +418,9 @@ function dayGas(ops: readonly StoredOp[]): Map<string, bigint> {
  * that reached the chain are absent.
  */
 export function dayReceipts(ops: readonly StoredOp[]): DayReceiptWire[] {
-  const days = new Map<string, { gas: bigint; usdc: bigint; priced: boolean; positions: Map<string, { c0: bigint; c1: bigint; usdc: bigint; priced: boolean }> }>()
+  const days = new Map<string, { gas: Gas; usdc: bigint; priced: boolean; positions: Map<string, { c0: bigint; c1: bigint; usdc: bigint; priced: boolean }> }>()
   const day = (d: string) => {
-    const x = days.get(d) ?? { gas: 0n, usdc: 0n, priced: true, positions: new Map() }
+    const x = days.get(d) ?? { gas: { wei: 0n, usdc: 0n } as Gas, usdc: 0n, priced: true, positions: new Map() }
     days.set(d, x)
     return x
   }
@@ -426,7 +445,8 @@ export function dayReceipts(ops: readonly StoredOp[]): DayReceiptWire[] {
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([day, d]) => ({
       day,
-      gasWei: d.gas.toString(),
+      gasWei: d.gas.wei.toString(),
+      ...(d.gas.usdc !== null ? { gasUsdc: d.gas.usdc.toString() } : {}),
       ...(d.priced ? { collectedUsdc: d.usdc.toString() } : {}),
       positions: [...d.positions.entries()].map(([tokenId, p]) => ({ tokenId, collected0: p.c0.toString(), collected1: p.c1.toString(), ...(p.priced ? { collectedUsdc: p.usdc.toString() } : {}) })),
     }))

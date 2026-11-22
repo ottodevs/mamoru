@@ -29,39 +29,55 @@ export type ValueSeriesView = {
 const usd = (baseUnits: number) => Math.round(baseUnits / 10_000) / 100
 
 export async function loadValueSeries(db: Db, userId: string, now: Date): Promise<ValueSeriesView> {
+  return (await loadValueSeriesDetail(db, userId, now)).view
+}
+
+/**
+ * The series plus, per day, the uncollected fees inside each day's total (account_daily.fees_close_usdc, carried the
+ * same way, raw USDC): vs-idle.ts takes them out of a total, since pending fees are shown apart, not as earned.
+ */
+export async function loadValueSeriesDetail(db: Db, userId: string, now: Date): Promise<{ view: ValueSeriesView; pending: Map<string, number> }> {
+  const pending = new Map<string, number>()
   const sleeves = await sleevesOfUser(db, userId)
-  const perChain: { chainId: number; byDay: Map<string, number>; readAt: string | null }[] = []
+  const perChain: { chainId: number; byDay: Map<string, number>; fees: Map<string, number>; readAt: string | null }[] = []
   for (const s of sleeves) {
     const rows = (await db
-      .prepare('SELECT day, total_close_usdc FROM account_daily WHERE chain_id = ? AND account_key = ? ORDER BY day')
+      .prepare('SELECT day, total_close_usdc, fees_close_usdc FROM account_daily WHERE chain_id = ? AND account_key = ? ORDER BY day')
       .bind(s.chain_id, s.account_key)
-      .all<{ day: string; total_close_usdc: number }>()).results
+      .all<{ day: string; total_close_usdc: number; fees_close_usdc: number }>()).results
     if (!rows.length) continue
     const last = await db
       .prepare('SELECT read_at FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?')
       .bind(s.chain_id, s.account_key)
       .first<{ read_at: string }>()
-    perChain.push({ chainId: s.chain_id, byDay: new Map(rows.map((r) => [r.day, r.total_close_usdc])), readAt: last?.read_at ?? null })
+    perChain.push({ chainId: s.chain_id, byDay: new Map(rows.map((r) => [r.day, r.total_close_usdc])), fees: new Map(rows.map((r) => [r.day, r.fees_close_usdc])), readAt: last?.read_at ?? null })
   }
-  if (!perChain.length) return { asOf: null, points: [], chains: [], netDeposited: { usd: 0, status: 'none' } }
+  if (!perChain.length) return { view: { asOf: null, points: [], chains: [], netDeposited: { usd: 0, status: 'none' } }, pending }
 
   const days = [...new Set(perChain.flatMap((c) => [...c.byDay.keys()]))].sort()
   const firstDay = new Map(perChain.map((c) => [c.chainId, [...c.byDay.keys()].sort()[0]!]))
   const lastKnown = new Map<number, number>()
+  const lastFees = new Map<number, number>()
   const points: ValuePoint[] = days.map((day) => {
     let total = 0
     let partial = false
+    let fees = 0
     for (const c of perChain) {
       if (day < firstDay.get(c.chainId)!) continue
       const v = c.byDay.get(day)
       if (v === undefined) {
         partial = true
         total += lastKnown.get(c.chainId) ?? 0
+        fees += lastFees.get(c.chainId) ?? 0
       } else {
         lastKnown.set(c.chainId, v)
+        const f = c.fees.get(day) ?? 0
+        lastFees.set(c.chainId, f)
         total += v
+        fees += f
       }
     }
+    pending.set(day, fees)
     return { day, usd: usd(total), ...(partial ? { partial: true as const } : {}) }
   })
 
@@ -71,7 +87,7 @@ export async function loadValueSeries(db: Db, userId: string, now: Date): Promis
   const known = reads.filter((r): r is string => r !== null).sort()
   const stale = reads.some((r) => r === null || now.getTime() - Date.parse(r) > VALUE_STALE_MS)
   if (stale && points.length) points[points.length - 1] = { ...points[points.length - 1]!, partial: true }
-  return { asOf: known[0] ?? null, points, chains: perChain.map((c) => c.chainId), netDeposited }
+  return { view: { asOf: known[0] ?? null, points, chains: perChain.map((c) => c.chainId), netDeposited }, pending }
 }
 
 type Flow = { kind: 'in' | 'out' | 'gap'; t_s: number; usd: number; chain_id: number }
