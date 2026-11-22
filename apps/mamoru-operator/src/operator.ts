@@ -4404,7 +4404,7 @@ export class Operator {
     // otto/mamoru#155: a swap under its pool's TWAP is never refused. The plan (and the minimums the owner signs) stay
     // what they are without it; prepare adds the warning, and submit runs only with it accepted.
     const div = await this.divergenceOf(acc, r, slip, swaps, out ? { ...out, amountIn: pay } : undefined)
-    const ownerTx = await this.hold(acc, live, 'transfer', calls, summary, { meta: { amountUsdc: pay.toString(), ...(asset === 'USDC' ? {} : { asset }), to, ...(fee > 0n ? { feeUsdc: fee.toString(), ...(owed && owed.owedVaultUsdc > 0n ? { feeVaultUsdc: owed.owedVaultUsdc.toString() } : {}) } : {}) }, ...(div ? { divergence: div.warning, accepted: div.accepted } : {}) })
+    const ownerTx = await this.hold(acc, live, 'transfer', calls, summary, { meta: { amountUsdc: pay.toString(), ...(asset === 'USDC' ? {} : { asset }), to, ...(fee > 0n ? { feeUsdc: fee.toString(), ...(owed && owed.owedVaultUsdc > 0n ? { feeVaultUsdc: (owed.owedVaultUsdc < fee ? owed.owedVaultUsdc : fee).toString() } : {}) } : {}) }, ...(div ? { divergence: div.warning, accepted: div.accepted } : {}) })
     return {
       ...(div ? { divergence: div.warning } : {}),
       ...(fee > 0n ? { fee: { feeUsdc: fee.toString(), requestedUsdc: amount.toString(), sentUsdc: pay.toString() } } : {}),
