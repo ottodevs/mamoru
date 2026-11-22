@@ -82,12 +82,12 @@ export async function loadPoolEarnings(db: Db, sleeves: { chain_id: number; acco
       for (const r of mine) {
         // Only the chains whose samples are in `cap`, and nothing booked after the read the window ends at.
         if (!counted.has(r.chain)) continue
-        if (r.vault ? r.t > window.end : r.t - DAY_S + 1 > window.end) continue
-        // A day's collects are credited at its end, never after the read the window ends at (today's are before it).
+        // LP day rows: a day starting after the read is out. Vault rows accrue over [from, t]: only the part up to the read counts.
+        if (!r.vault && r.t - DAY_S + 1 > window.end) continue
         const at = Math.min(r.t, window.end)
         if (at <= window.start) continue
-        const span = r.vault && r.from != null ? at - r.from : 0
-        const share = span > 0 ? (at - Math.max(r.from!, window.start)) / span : 1
+        const total = r.vault && r.from != null ? r.t - r.from : 0
+        const share = total > 0 ? Math.max(0, at - Math.max(r.from!, window.start)) / total : 1
         inWindow += net(r.usd / 1e6, r.t) * share
       }
       aprPct = Math.round((inWindow / cap) * YEAR_S * 1000) / 10

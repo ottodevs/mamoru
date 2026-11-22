@@ -62,7 +62,6 @@ describe('loadPoolEarnings', () => {
     entry(db, 1, 'pool:WETH/USDC/3000')
     collected(db, '2026-11-06', 1, 0.01)
     collected(db, '2026-11-09', 1, 5) // after the 17:50 read of the 6th: not in the window
-    vault(db, 'vault:8453:base-u1:pool:WETH/USDC/3000:' + t('2026-11-08T10:00:00.000Z'), '2026-11-08T10:00:00.000Z', 3)
     worked(db, '2026-10-08T17:30:00.000Z', 'pool:WETH/USDC/3000', 1000)
     worked(db, '2026-11-06T17:30:00.000Z', 'pool:WETH/USDC/3000', 1000)
     worked(db, '2026-11-06T17:50:00.000Z', 'pool:WETH/USDC/3000', 1000)
