@@ -73,8 +73,8 @@ function flow(db: ReturnType<typeof seed>, chain: number, key: string, id: strin
   db.raw.exec(`INSERT INTO account_flows (chain_id, account_key, flow_id, kind, t_s, usd, updated_at) VALUES (${chain}, '${key}', '${id}', '${kind}', ${Date.parse(at) / 1000}, ${usdc * USDC}, '${at}')`)
 }
 
-const cover = (db: ReturnType<typeof seed>, key = 'base-u1') =>
-  db.raw.exec(`INSERT INTO account_flows (chain_id, account_key, flow_id, kind, t_s, usd, updated_at) VALUES (8453, '${key}', 'cover:0', 'cover', 1, 0, 'x')`)
+const cover = (db: ReturnType<typeof seed>, key = 'base-u1', chain = 8453) =>
+  db.raw.exec(`INSERT INTO account_flows (chain_id, account_key, flow_id, kind, t_s, usd, updated_at) VALUES (${chain}, '${key}', 'cover:0', 'cover', 1, 0, 'x')`)
 
 describe('net deposited (otto/mamoru#380)', () => {
   test('each day carries the cumulative in minus out up to its end; the total is the net now', async () => {
@@ -143,6 +143,8 @@ describe('net deposited (otto/mamoru#380)', () => {
     flow(db, 8453, 'base-u1', 'in:0xa:0', 'in', '2026-11-05T01:00:00.000Z', 100)
     flow(db, 143, 'monad-u1', 'in:0xb:0', 'in', '2026-11-05T02:00:00.000Z', 50)
     cover(db)
+    expect((await loadValueSeries(db, 'u1', NOW)).netDeposited.status).toBe('partial') // Monad is not vouched
+    cover(db, 'monad-u1', 143)
     expect((await loadValueSeries(db, 'u1', NOW)).netDeposited).toEqual({ usd: 150, status: 'complete', since: '2026-11-05' })
   })
 })
@@ -180,5 +182,16 @@ describe('GET /api/accounts/:key/value-series (STATS-S10)', () => {
     const res = await h.request(`/api/accounts/${owner.accountKey}/value-series`, { cookie: sessionCookie(a) })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ asOf: null, points: [], chains: [], netDeposited: { usd: 0, status: 'none' } })
+  })
+})
+
+describe('flows before the migration', () => {
+  test('a missing account_flows table leaves the Total value series working, baseline unknown', async () => {
+    const db = seed()
+    daily(db, '2026-11-05', 8453, 'base-u1', 100 * USDC)
+    db.raw.exec('DROP TABLE account_flows')
+    const v = await loadValueSeries(db, 'u1', NOW)
+    expect(v.points).toEqual([{ day: '2026-11-05', usd: 100, partial: true }])
+    expect(v.netDeposited).toEqual({ usd: 0, status: 'none' })
   })
 })

@@ -16,7 +16,10 @@ export async function writeFlows(db: Db, snapshot: { chainId: number; receipts?:
     if (!r.flows?.length) continue
     const account = await resolve(snapshot.chainId, r.safe.toLowerCase())
     if (!account) continue
+    // Only what D1 does not hold yet: the operator sends its whole history on every tick.
+    const known = new Set((await db.prepare('SELECT flow_id FROM account_flows WHERE chain_id = ? AND account_key = ?').bind(snapshot.chainId, account.accountKey).all<{ flow_id: string }>()).results.map((x) => x.flow_id))
     const stmts = r.flows
+      .filter((f) => !known.has(f.id))
       .filter((f) => Number.isFinite(f.t) && /^\d+$/.test(f.usdc) && (f.kind === 'gap' || f.kind === 'cover' ? BigInt(f.usdc) === 0n : (f.kind === 'in' || f.kind === 'out') && BigInt(f.usdc) > 0n))
       .map((f) => db.prepare(INSERT).bind(snapshot.chainId, account.accountKey, f.id, f.kind, Math.floor(f.t), Number(f.usdc), at))
     offered += stmts.length

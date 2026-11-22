@@ -66,7 +66,7 @@ export async function loadValueSeries(db: Db, userId: string, now: Date): Promis
     return { day, usd: usd(total), ...(partial ? { partial: true as const } : {}) }
   })
 
-  const netDeposited = applyFlows(points, await flowsOf(db, sleeves))
+  const netDeposited = applyFlows(points, await flowsOf(db, sleeves), firstDay)
 
   const reads = perChain.map((c) => c.readAt)
   const known = reads.filter((r): r is string => r !== null).sort()
@@ -75,13 +75,18 @@ export async function loadValueSeries(db: Db, userId: string, now: Date): Promis
   return { asOf: known[0] ?? null, points, chains: perChain.map((c) => c.chainId), netDeposited }
 }
 
-type Flow = { kind: 'in' | 'out' | 'gap' | 'cover'; t_s: number; usd: number }
+type Flow = { kind: 'in' | 'out' | 'gap' | 'cover'; t_s: number; usd: number; chain_id: number }
 
 async function flowsOf(db: Db, sleeves: { chain_id: number; account_key: string }[]): Promise<Flow[]> {
   const out: Flow[] = []
   for (const s of sleeves) {
-    const rows = (await db.prepare('SELECT kind, t_s, usd FROM account_flows WHERE chain_id = ? AND account_key = ? ORDER BY t_s').bind(s.chain_id, s.account_key).all<Flow>()).results
-    out.push(...rows)
+    try {
+      const rows = (await db.prepare('SELECT kind, t_s, usd, chain_id FROM account_flows WHERE chain_id = ? AND account_key = ? ORDER BY t_s').bind(s.chain_id, s.account_key).all<Flow>()).results
+      out.push(...rows)
+    } catch (e) {
+      // Not migrated yet: the Total value chart must keep working; the baseline is simply unknown.
+      if (!/no such table/i.test(e instanceof Error ? e.message : String(e))) throw e
+    }
   }
   return out.sort((a, b) => a.t_s - b.t_s)
 }
@@ -92,10 +97,10 @@ const signedOf = (f: Flow) => (f.kind === 'in' ? f.usd : f.kind === 'out' ? -f.u
 /**
  * Sets `deposited` on every point (cumulative in - out up to the end of its UTC day, signed: more out than in is a
  * negative baseline, the gains taken out) and says how far the flows can be trusted. `complete` needs evidence, not
- * only a first flow: the operator's `cover` row, no operator `gap` row, no value before the first flow, and the first day's value explained by what
+ * only a first flow: the operator's `cover` row for every chain with value, no operator `gap` row, no value before the first flow, and the first day's value explained by what
  * was deposited by then (a deposit the operator never kept would leave the first day's value far above it).
  */
-function applyFlows(points: ValuePoint[], flows: Flow[]): NetDeposited {
+function applyFlows(points: ValuePoint[], flows: Flow[], firstDayOf: Map<number, string>): NetDeposited {
   const money = flows.filter((f) => f.kind === 'in' || f.kind === 'out')
   if (!money.length) return { usd: 0, status: 'none' }
   const sinceDay = new Date(money[0]!.t_s * 1000).toISOString().slice(0, 10)
@@ -108,12 +113,12 @@ function applyFlows(points: ValuePoint[], flows: Flow[]): NetDeposited {
   }
   for (; i < money.length; i++) net += signedOf(money[i]!)
   const first = points[0]
-  // Value before the first known flow, a first day that the flows do not explain (more than 5 % or 1 USDC apart), or a gap
-  // the operator named: the money came in where the operator did not see it.
-  const unexplained = first !== undefined && (first.day < sinceDay || Math.abs(first.usd - (first.deposited ?? 0)) > Math.max(1, 0.05 * first.usd))
+  // Value before the first known flow, or a gap the operator named: the money came in where the operator did not see it.
+  const unexplained = first !== undefined && first.day < sinceDay
   // `complete` also needs the operator's word that its flows are gap-free from before the first value (a `cover` row,
   // otto/mamoru#438; not sent yet, so today every account is partial and a reader shows n/a).
-  const covered = first !== undefined && flows.some((f) => f.kind === 'cover' && f.t_s <= Date.parse(`${first.day}T23:59:59.000Z`) / 1000)
+  // Every chain that has value needs its own cover row from before that chain's first value.
+  const covered = firstDayOf.size > 0 && [...firstDayOf].every(([chain, day]) => flows.some((f) => f.kind === 'cover' && f.chain_id === chain && f.t_s <= Date.parse(`${day}T23:59:59.000Z`) / 1000))
   const partial = unexplained || !covered || flows.some((f) => f.kind === 'gap')
   return { usd: usd(net), status: partial ? 'partial' : 'complete', since: sinceDay }
 }

@@ -53,7 +53,7 @@ export function accountFlows(deposits: readonly DepositRow[] | undefined, ops: r
       else if (!needsFacts(op)) byId.set(`gap:${op.opId}`, { id: `gap:${op.opId}`, t: nowS, kind: 'gap', usdc: '0' })
       continue
     }
-    const id = `out:${op.txHash!.toLowerCase()}`
+    const id = `out:${op.txHash!.toLowerCase()}:${op.opId}`
     const fee = op.feeUsdc && /^\d+$/.test(op.feeUsdc) ? BigInt(op.feeUsdc) : 0n
     if (!byId.has(id)) byId.set(id, { id, t, kind: 'out', usdc: (BigInt(op.amountUsdc) + fee).toString() })
   }

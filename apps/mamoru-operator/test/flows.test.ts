@@ -17,7 +17,7 @@ describe('accountFlows', () => {
     expect(flows).toEqual([
       { id: 'in:0xa1:3', t: Date.parse('2026-11-08T10:00:00.000Z') / 1000, kind: 'in', usdc: '500000' },
       { id: 'in:0xb1:0', t: Date.parse('2026-11-09T10:00:00.000Z') / 1000, kind: 'in', usdc: '2000000' },
-      { id: 'out:0xc1', t: Date.parse('2026-11-10T10:00:00.000Z') / 1000, kind: 'out', usdc: '720000' },
+      { id: 'out:0xc1:own-1', t: Date.parse('2026-11-10T10:00:00.000Z') / 1000, kind: 'out', usdc: '720000' },
     ])
   })
 
@@ -41,7 +41,7 @@ describe('accountFlows', () => {
     const o = op({ opId: 'own-7', txHash: '0xe7' as `0x${string}`, amountUsdc: '1000000', updatedAt: '2026-11-11T00:03:00.000Z' })
     expect(accountFlows([], [o])).toEqual([]) // receipt not read yet: next snapshot
     o.facts = facts('0xe7', mined) as never
-    expect(accountFlows([], [o])).toEqual([{ id: 'out:0xe7', t: Date.parse(mined) / 1000, kind: 'out', usdc: '1000000' }])
+    expect(accountFlows([], [o])).toEqual([{ id: 'out:0xe7:own-7', t: Date.parse(mined) / 1000, kind: 'out', usdc: '1000000' }])
   })
 
   test('a receipt given up on, a confirmed withdrawal with no transaction, and a deposit list at its cap are gaps', () => {
