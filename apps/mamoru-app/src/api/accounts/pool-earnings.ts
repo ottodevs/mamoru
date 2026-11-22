@@ -4,11 +4,12 @@
 // - Earned: lifetime, per pool (`pool:WETH/USDC/3000`) or vault (`vault:gtUSDCp`), every chain of the owner. A pool that
 //   re-ranged keeps what its burned positions collected (collected fees are keyed by token id, read through the entry's pool).
 // - APR 30d: that pool's income of the last 30 days over the capital that worked in it in that window times its time
-//   (worked samples, in range only), annualised. Null (the app says n/a) when nothing worked in the pool or the window
-//   was observed under 28 days, never a figure.
+//   (worked samples, in range only), annualised, the income being that of the same sampled intervals. Null (the app says
+//   n/a) when nothing worked in the pool or any contributing sleeve was sampled under COVERAGE_MIN of the window.
 import type { Db } from '../env.ts'
 import { MAMORU_FEE_BPS, MAMORU_FEE_FROM } from './vs-idle.ts'
 import { loadWorked } from './worked.ts'
+import { COVERAGE_MIN, coverage, sampledIntervals, sampledShare, type Interval } from './sampled.ts'
 
 const DAY_S = 86_400
 const MONTH_S = 30 * DAY_S
@@ -60,14 +61,25 @@ export async function loadPoolEarnings(db: Db, sleeves: { chain_id: number; acco
   }
   const base = sleeves.find((s) => s.chain_id === 8453) ?? sleeves[0]
   const worked = base ? await loadWorked(db, base.chain_id, base.account_key) : null
+  // The capital-time below exists only where samples were taken: the window counts when every contributing sleeve
+  // (Base plus the chains loadWorked says contributed) has most of it sampled (COVERAGE_MIN), and the income counted is
+  // the income of those same sampled intervals (sampled.ts), never the whole 30 days over a partial capital-time.
   let window: { start: number; end: number } | null = null
+  const intervals = new Map<number, Interval[]>()
   if (worked && base) {
     const end = Math.floor(Date.parse(worked.asOf) / 1000)
     const start = end - MONTH_S
-    const span = await db.prepare('SELECT MIN(t_s) AS lo, MAX(t_s) AS hi FROM account_worked_samples WHERE chain_id = ? AND account_key = ? AND t_s > ? AND t_s <= ?').bind(base.chain_id, base.account_key, start, end).first<{ lo: number | null; hi: number | null }>()
-    if (Number.isFinite(end) && span?.lo != null && span.hi != null && span.hi - span.lo >= 28 * DAY_S) window = { start, end }
+    if (Number.isFinite(end)) {
+      let enough = (worked.chains?.month ?? []).every((c) => sleeves.some((sl) => sl.chain_id === c)) // a contributing chain we cannot check is not enough
+      for (const sl of sleeves) {
+        if (sl.chain_id !== base.chain_id && !(worked.chains?.month ?? []).includes(sl.chain_id)) continue
+        const iv = await sampledIntervals(db, sl.chain_id, sl.account_key, start, end)
+        if (coverage(iv, start, end) < COVERAGE_MIN) enough = false
+        intervals.set(sl.chain_id, iv)
+      }
+      if (enough) window = { start, end }
+    }
   }
-  const counted = new Set([base?.chain_id ?? 8453, ...(worked?.chains?.month ?? [])])
   const capital = new Map((worked?.month ?? []).map((p) => [p.pool, p.usdSeconds / 1e6]))
   // A pool that worked but collected nothing yet is 0 earned and 0 %, not unmeasured.
   const pools = [...new Set([...rows.map((r) => r.pool), ...(window ? [...capital].filter(([, c]) => c > 0).map(([p]) => p) : [])])].sort()
@@ -80,14 +92,9 @@ export async function loadPoolEarnings(db: Db, sleeves: { chain_id: number; acco
     if (window && cap > 0) {
       let inWindow = 0
       for (const r of mine) {
-        // Only the chains whose samples are in `cap`, and nothing booked after the read the window ends at.
-        if (!counted.has(r.chain)) continue
-        // LP day rows: a day starting after the read is out. Vault rows accrue over [from, t]: only the part up to the read counts.
-        if (!r.vault && r.t - DAY_S + 1 > window.end) continue
-        const at = Math.min(r.t, window.end)
-        if (at <= window.start) continue
-        const total = r.vault && r.from != null ? r.t - r.from : 0
-        const share = total > 0 ? Math.max(0, at - Math.max(r.from!, window.start)) / total : 1
+        const iv = intervals.get(r.chain)
+        if (!iv) continue // a chain whose samples are not in the capital-time
+        const share = sampledShare(iv, { kind: r.vault ? 'span' : 'day', t: r.t, from: r.from }, window.start, window.end)
         inWindow += net(r.usd / 1e6, r.t) * share
       }
       aprPct = Math.round((inWindow / cap) * YEAR_S * 1000) / 10
