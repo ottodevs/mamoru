@@ -531,6 +531,12 @@ export type EngineConfig = {
    * nothing is sold. Absent: none.
    */
   harvested?: (balances: Observation['balances'], block: bigint) => Observation['harvested'] | null
+  /**
+   * otto/mamoru#413 (spec 012 savings-layer.md): the account's savings books at every review, given the balances and the
+   * vaults just read (the operator keeps what a balance below them took off; savings.ts clampSavings). Decide clips them
+   * to what is held again (`Observation.savings`). Undefined: no savings, set as absent. Absent: none (Monad).
+   */
+  savings?: (balances: Observation['balances'], vaults: Observation['vaults'], block: bigint) => Observation['savings'] | undefined
 
   /**
    * otto/mamoru#215: the account's value on other chains for the policy's `remoteBuckets` (its sleeve there valued at the
@@ -1113,6 +1119,9 @@ export class Engine {
     const weekAgo = obs.block.timestamp - 7n * 86_400n
     const recent = this.reranges.filter((r) => r.at > weekAgo)
     obs = { ...obs, lastRerangeAt: this.lastRerangeAt, ...(recent.length ? { recentReranges: recent } : {}), ...this.cfg.peerPositions?.(), ...shadowInputsOf(this.cfg.policy, this.cfg), ...(cap ? { cap: { ...cap, reinvestUsdc: this.reinvestOf(obs) } } : {}), ...(this.cfg.exitOptIn?.() === true ? { exitOptIn: true } : {}), ...harvestedObs(this.cfg.harvested?.(obs.balances, obs.block.number), obs.balances) }
+    // otto/mamoru#413: the savings books, read after the balances and vaults they are kept within.
+    const books = this.cfg.savings?.(obs.balances, obs.vaults, obs.block.number)
+    if (books) obs = { ...obs, savings: books }
     if (this.outOfRangeSeed) {
       const seed = this.outOfRangeSeed
       this.outOfRangeSeed = undefined

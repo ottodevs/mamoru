@@ -30,6 +30,7 @@ const vaultEventsAbi = parseAbi([
   'event Deposit(address indexed sender, address indexed owner, uint256 assets, uint256 shares)',
   'event Withdraw(address indexed sender, address indexed receiver, address indexed owner, uint256 assets, uint256 shares)',
 ])
+const erc20TransferAbi = parseAbi(['event Transfer(address indexed from, address indexed to, uint256 value)'])
 const npmEventsAbi = parseAbi([
   'event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)',
   'event DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)',
@@ -78,6 +79,11 @@ export type OpFacts = {
   block?: string
   /** spec 012 HRV-R5: vault flows of this Safe in the op. Absent: none. */
   vaultFlows?: VaultFlow[]
+  /**
+   * otto/mamoru#413: USDC this Safe received less what it sent in the op (raw, signed decimal): what a harvest sale paid
+   * into savings. Absent: 0, or facts read before it existed (those ops are older than the savings books).
+   */
+  usdcNet?: string
 }
 
 /**
@@ -141,7 +147,16 @@ export function factsFromLogs(logs: Log[], safe: Address, blockTime: bigint, use
     const vault = vaults.find((v) => isAddressEqual(e.address, v.address))!.name
     vaultFlows.push({ vault, kind: e.eventName === 'Deposit' ? 'deposit' : 'withdraw', assets: e.args.assets.toString(), shares: e.args.shares.toString(), logIndex: e.logIndex })
   }
-  return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: gas.toString(), fees, v: FACTS_VERSION, ...(vaultFlows.length ? { vaultFlows } : {}) }
+  // otto/mamoru#413: the Safe's net USDC in the op (a harvest sale's proceeds), from the token's own Transfer logs.
+  const usdc = registry.entries.find((x) => x.name === 'USDC')?.address
+  let usdcNet = 0n
+  if (usdc) {
+    for (const e of parseEventLogs({ abi: erc20TransferAbi, logs: logs.filter((l) => isAddressEqual(l.address, usdc)) })) {
+      if (isAddressEqual(e.args.to, safe)) usdcNet += e.args.value
+      if (isAddressEqual(e.args.from, safe)) usdcNet -= e.args.value
+    }
+  }
+  return { at: new Date(Number(blockTime) * 1000).toISOString(), gasWei: gas.toString(), fees, v: FACTS_VERSION, ...(vaultFlows.length ? { vaultFlows } : {}), ...(usdcNet !== 0n ? { usdcNet: usdcNet.toString() } : {}) }
 }
 
 /**

@@ -11,6 +11,7 @@ import type { SponsorEntry } from './sponsorship.ts'
 import type { OpFacts } from './yield-receipts.ts'
 import type { OneAuthState } from './one-auth.ts'
 import type { ReleaseState } from './release.ts'
+import type { SavingsCuts, SavingsOut } from './savings.ts'
 import type { AnnounceRecord } from './readiness.ts'
 
 /** An op as GET /ops serves it, plus what the operator keeps: repeat count of an identical failure, and for a confirmed engine op the session and calls it used (ledger replay on restart). */
@@ -61,6 +62,14 @@ export type StoredOp = OpView & {
   userOpHash?: Hex
   /** otto/mamoru#129: an op's gas and collected fees, read once from its receipt (yield-receipts.ts). */
   facts?: OpFacts
+  /**
+   * otto/mamoru#413 (spec 012 savings-layer.md), engine ops stored by the savings code: `savingsIn` on a harvest or a
+   * harvest sale (its USDC is savings), `savings` on a savings deposit (its shares are tagged savings). Owner withdrawal:
+   * `savingsOut`, what it takes from the savings books when it confirms (computed at prepare). savings.ts reads them.
+   */
+  savingsIn?: true
+  savings?: true
+  savingsOut?: SavingsOut
   /** spec 012 (#305 review): how many times its receipt was not found, and since when (ms); cleared once read (yield-receipts.ts gaveUp). */
   factsMisses?: { txHash: string; count: number; first: number }
   /**
@@ -130,6 +139,8 @@ export type AccountState = {
    * tokens out outside Mamoru) lowers the counter for good and principal sent back later is never sold (harvested.ts).
    */
   harvestedCut?: Record<string, { since: number; cut: string }>
+  /** otto/mamoru#413: what reads with a balance below the savings books took off, per epoch (savings.ts clampSavings). */
+  savingsCuts?: SavingsCuts
   /** Spec 006: the cap (base units) the account's current grants were sized for, from its last confirmed activation or renewal. Absent: LIVE_CAP_USDC. */
   signedCapUsdc?: string
   accountKey: string

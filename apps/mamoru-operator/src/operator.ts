@@ -71,6 +71,7 @@ import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-us
 import { bridgeLeftOf } from './bridge-left.ts'
 import { SpendHold, SPEND_HOLD_PROBE_MS, isSpend, spendDenialOf } from './window-hold.ts'
 import { clampHarvested, harvestedOf } from './harvested.ts'
+import { clampSavings, savingsObs } from './savings.ts'
 import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
@@ -2156,6 +2157,23 @@ export class Operator {
   }
 
   /** The policy the account was activated with; accounts activated before policy ids were stored run conservador-live-v1. */
+  /** otto/mamoru#413: the account keeps savings books: its policy has a vault bucket (Base v7/v8; never Monad). */
+  private savingsBooked(acc: AccountState): boolean {
+    return this.policyOf(acc).buckets.some((b) => (b.vaults?.length ?? 0) > 0)
+  }
+
+  /** otto/mamoru#413: the savings books for a review (Observation.savings), storing any cut a balance below them takes. */
+  private savingsForReview(acc: AccountState, balances: Observation['balances'], vaults: Observation['vaults'], block: bigint): Observation['savings'] | undefined {
+    if (!this.savingsBooked(acc)) return undefined
+    const read = { block: Number(block), usdc: balances[this.policyOf(acc).savingsAsset] ?? 0n, vaults: (vaults ?? []).map((v) => ({ name: v.name, shares: v.shares, assets: v.assets })) }
+    const r = clampSavings(acc.ops, this.cfg.registry, read, acc.savingsCuts)
+    if (JSON.stringify(r.cuts) !== JSON.stringify(acc.savingsCuts ?? { epoch: r.cuts.epoch, cuts: [] })) {
+      acc.savingsCuts = r.cuts
+      this.store.save()
+    }
+    return savingsObs(r.books)
+  }
+
   policyOf(acc: AccountState): PolicyVersion {
     if (!acc.policyId) return acc.active || acc.grants.length ? (POLICIES[LEGACY_POLICY] ?? this.cfg.policy) : this.cfg.policy
     // otto/mamoru#293: an account on V4 runs on its registry-resolved twin (enginePolicyOf); this is its static template.
@@ -8497,6 +8515,9 @@ export class Operator {
           }
           return r.harvested
         },
+        // otto/mamoru#413 (spec 012 savings-layer.md): the savings books from the stored ops at every review, within what
+        // the Safe holds; a balance below them is stored as a cut (acc.savingsCuts), so it is never re-tagged later.
+        savings: (balances, vaults, block) => this.savingsForReview(acc, balances, vaults, block),
         ...this.remoteOf(acc),
         ...this.depthShortFor(acc),
         ...this.opRoomFor(acc),
@@ -8877,6 +8898,7 @@ export class Operator {
         changed = true
       }
     }
+    const savingsBooked = this.savingsBooked(acc)
     for (const o of runner.engine.journal.ops) {
       const state = ENGINE_STATE[o.state]
       if (!state) continue
@@ -8896,6 +8918,9 @@ export class Operator {
         ...((o.state === 'confirmed' || o.lateIncluded) && o.permissionId && o.calls ? { permissionId: o.permissionId, calls: o.calls } : {}),
         ...(o.lateIncluded ? { lateIncluded: true } : {}),
         ...(o.intent.kind === 'rerange' ? { rerange: true as const } : {}),
+        // otto/mamoru#413: what the savings books count (savings.ts), only for an account whose policy keeps savings.
+        ...(savingsBooked && (o.intent.kind === 'harvest' || (o.intent.kind === 'enter_swap' && o.intent.harvestSale)) ? { savingsIn: true as const } : {}),
+        ...(o.intent.kind === 'vault_deposit' && o.intent.savings ? { savings: true as const } : {}),
       }
       // #218 (Sol r1): the confirmation may reach `onReranged` before this row exists; the engine's own list has the time.
       if (view.rerange && state === 'confirmed' && o.included) {
