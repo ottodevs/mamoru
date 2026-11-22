@@ -3,7 +3,7 @@ import type { StoredOp } from '../src/state.ts'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { StateStore } from '../src/state.ts'
+import { StateStore, stampVaultFeeFrom } from '../src/state.ts'
 import { YIELD_FEE_FROM, YIELD_FEE_MIN, vaultGrowth, yieldFee } from '../src/yield-fee.ts'
 
 const fee = (usdc?: string) => ({ tokenId: '1', pool: 'pool:WETH/USDC/3000', fee0: '1', fee1: '1', ...(usdc === undefined ? {} : { usdc }) })
@@ -302,5 +302,30 @@ describe('vault growth in the fee (otto/mamoru#433)', () => {
     const rest = flow('withdraw', 25_000_000n, 50_000_000n, '2026-11-26T00:00:00.000Z', { feeable: false })
     expect(vaultGrowth([dep, half], input(50_000_000n, 25_000_000n))).toBe(25_000_000n)
     expect(vaultGrowth([dep, half, rest], input(0n, 0n))).toBe(50_000_000n - 25_000_000n)
+  })
+
+  test('#433: vaultFeeFrom is stamped once, on a live boot only', () => {
+    const store = new StateStore(mkdtempSync(join(tmpdir(), 'vff-')))
+    expect(stampVaultFeeFrom(store, false)).toBe(false)
+    expect(store.state.vaultFeeFrom).toBeUndefined()
+    expect(stampVaultFeeFrom(store, true, new Date('2026-11-24T10:00:00Z'))).toBe(true)
+    expect(stampVaultFeeFrom(store, true, new Date('2026-12-01T00:00:00Z'))).toBe(false)
+    expect(new StateStore(store.dir).state.vaultFeeFrom).toBe('2026-11-24T10:00:00.000Z')
+  })
+
+  test('#433: every skip says which vault and why; high-water keeps what was charged', () => {
+    const skips: string[] = []
+    const onSkip = (v: string, why: string) => skips.push(`${v}:${why}`)
+    const dep = flow('deposit', 100_000_000n, 100_000_000n, D1)
+    vaultGrowth([dep], { from: FROM, now: [], onSkip })
+    vaultGrowth([dep], { from: FROM, now: [{ name: V, shares: 150_000_000n, assets: 1n }], onSkip })
+    vaultGrowth([flow('withdraw', 1n, 5n, D1)], { from: FROM, now: [{ name: V, shares: 0n, assets: 0n }], onSkip })
+    vaultGrowth([dep], { from: 'bad', now: [], onSkip })
+    vaultGrowth([{ ...dep, facts: undefined } as StoredOp], { from: FROM, now: [], onSkip })
+    expect(skips).toEqual([`${V}:vault_unread`, `${V}:unexplained_shares`, `${V}:unexplained_shares`, ':bad_start', ':receipts_unread'])
+    // Growth fell after a fee on 20 was charged: nothing refunded, nothing new until growth passes what was charged.
+    const ops = [dep, withdrawal('confirmed', '2000000')]
+    expect(yieldFee(ops, undefined, undefined, 0n, input(100_000_000n, 110_000_000n)).owedUsdc).toBe(0n)
+    expect(yieldFee(ops, undefined, undefined, 0n, input(100_000_000n, 130_000_000n)).owedUsdc).toBe(1_000_000n)
   })
 })

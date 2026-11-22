@@ -2190,6 +2190,17 @@ export class Operator {
     return Array.isArray(scope) && (scope.includes(acc.accountKey.toLowerCase()) || scope.includes(String(acc.ctx.address).toLowerCase()))
   }
 
+  private vaultFeeSkipLogged = new Map<string, number>()
+
+  /** otto/mamoru#433: a vault left out of the fee because its history does not reconcile: one log line per account, vault and reason an hour. */
+  private noteVaultFeeSkip(accountKey: string, vault: string, why: string): void {
+    const key = `${accountKey}|${vault}|${why}`
+    const now = Date.now()
+    if (now - (this.vaultFeeSkipLogged.get(key) ?? 0) < 3_600_000) return
+    this.vaultFeeSkipLogged.set(key, now)
+    console.log(`[fee] vault growth not charged for ${accountKey}${vault ? ` (${vault})` : ''}: ${why}`)
+  }
+
   /** otto/mamoru#371: whether the yield fee applies to this account now (the scoped `yield_fee` flag); yield-receipts marks facts with it. */
   yieldFeeScope(accountKey: string): boolean {
     const acc = this.store.state.accounts[accountKey]
@@ -4325,7 +4336,7 @@ export class Operator {
     // told what they receive; a withdrawal no larger than the fee pays no fee (it is owed on the next one).
     // otto/mamoru#391: the home charges the fee its remote Safes owe too (their money comes home to be withdrawn here); a
     // remote chain charges none, so nothing is charged twice.
-    const owed = this.inScope(acc, 'yield_fee') && this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID ? yieldFee(acc.ops, YIELD_FEE_BPS, YIELD_FEE_FROM, await this.remoteFeeBase(acc), this.store.state.vaultFeeFrom ? { from: this.store.state.vaultFeeFrom, now: (r.vaults ?? []).map((v) => ({ name: v.name, shares: v.shares, assets: v.assets })) } : undefined) : null
+    const owed = this.inScope(acc, 'yield_fee') && this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID ? yieldFee(acc.ops, YIELD_FEE_BPS, YIELD_FEE_FROM, await this.remoteFeeBase(acc), this.store.state.vaultFeeFrom ? { from: this.store.state.vaultFeeFrom, now: (r.vaults ?? []).map((v) => ({ name: v.name, shares: v.shares, assets: v.assets })), onSkip: (vault, why) => this.noteVaultFeeSkip(acc.accountKey, vault, why) } : undefined) : null
     let fee = owed?.owedUsdc ?? 0n
     let pay = amount
     const planFor = async (total: bigint) => {

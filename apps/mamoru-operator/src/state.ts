@@ -309,3 +309,14 @@ export function loadOrCreateKey(file: string, generate: () => Hex): Hex {
   chmodSync(file, 0o600)
   return k
 }
+
+/**
+ * otto/mamoru#433: stamps `vaultFeeFrom` once, and only on a live boot (never a dry-run or a check against a state dir):
+ * a stamp taken early would count vault flows before the real rollout. Returns whether it stamped.
+ */
+export function stampVaultFeeFrom(store: Pick<StateStore, 'state' | 'save'>, live: boolean, now: Date = new Date()): boolean {
+  if (!live || store.state.vaultFeeFrom) return false
+  store.state.vaultFeeFrom = now.toISOString()
+  store.save()
+  return true
+}

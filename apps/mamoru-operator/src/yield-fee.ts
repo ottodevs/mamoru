@@ -58,7 +58,13 @@ export type VaultNow = { name: string; shares: bigint; assets: bigint }
  * on the first boot that has this code: nothing earlier is ever charged). `now` holds the vaults read at the same block as
  * the withdrawal; a vault absent from it (unreadable) counts nothing.
  */
-export type VaultFeeInput = { from: string; now: readonly VaultNow[] }
+export type VaultFeeInput = {
+  from: string
+  now: readonly VaultNow[]
+  /** Called for each vault left uncharged because its history does not reconcile (or the whole account: vault ''), with why. */
+  onSkip?: (vault: string, reason: VaultSkip) => void
+}
+export type VaultSkip = 'bad_start' | 'receipts_unread' | 'vault_unread' | 'unexplained_shares' | 'burn_exceeds_inventory'
 
 const ceilDiv = (a: bigint, b: bigint): bigint => (a + b - 1n) / b
 
@@ -77,12 +83,22 @@ const ceilDiv = (a: bigint, b: bigint): bigint => (a + b - 1n) / b
  * still unread, the vault was read, and the flows never burn more shares than the inventory holds nor leave more than
  * the account holds now (so shares held before the first flow read, or moved in without a flow, leave the vault uncharged).
  * Basis rounds up, value and realized assets round down.
+ *
+ * High-water: the fee is owed as max(0, fee − charged) (yieldFee). What a withdrawal already charged is never refunded when
+ * growth later falls, and nothing new is charged until the growth exceeds what was already charged. `onSkip` names each
+ * vault left out and why, so a history that stops reconciling is seen, not silent.
  */
 export function vaultGrowth(ops: readonly StoredOp[], input: VaultFeeInput): bigint {
   const since = Math.max(Date.parse(YIELD_FEE_FROM), Date.parse(input.from))
-  if (!Number.isFinite(since)) return 0n
+  if (!Number.isFinite(since)) {
+    input.onSkip?.('', 'bad_start')
+    return 0n
+  }
   // A receipt still to be read can hold a flow: the history is not whole.
-  if (ops.some(needsFacts)) return 0n
+  if (ops.some(needsFacts)) {
+    input.onSkip?.('', 'receipts_unread')
+    return 0n
+  }
   // A transaction counts only when every stored copy of it was read in scope.
   const txFeeable = new Map<string, boolean>()
   for (const op of ops) {
@@ -105,11 +121,17 @@ export function vaultGrowth(ops: readonly StoredOp[], input: VaultFeeInput): big
   let total = 0n
   for (const vault of vaults) {
     const held = input.now.find((v) => v.name === vault)
-    if (!held) continue
+    if (!held) {
+      input.onSkip?.(vault, 'vault_unread')
+      continue
+    }
     const mine = flows.filter((x) => x.flow.vault === vault)
     const net = mine.reduce((n, x) => n + (x.flow.kind === 'deposit' ? BigInt(x.flow.shares) : -BigInt(x.flow.shares)), 0n)
     // The flows must explain every share held: a transfer in, an unread deposit or older shares make the history unreconciled.
-    if (net !== held.shares) continue
+    if (net !== held.shares) {
+      input.onSkip?.(vault, 'unexplained_shares')
+      continue
+    }
     let all = 0n
     let shares = 0n // tracked
     let basis = 0n
@@ -141,7 +163,10 @@ export function vaultGrowth(ops: readonly StoredOp[], input: VaultFeeInput): big
       }
       all -= sh
     }
-    if (!whole) continue
+    if (!whole) {
+      input.onSkip?.(vault, 'burn_exceeds_inventory')
+      continue
+    }
     let gain = realized
     if (shares > 0n) gain += (shares * held.assets) / held.shares - basis
     if (gain > 0n) total += gain

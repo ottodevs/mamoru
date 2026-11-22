@@ -27,7 +27,7 @@ import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, proveChain, startRpcProxy,
 import { startServer } from './server.ts'
 import { readSnapshot, SnapshotLoop, snapshotIntervalMs, withBridges, type Snapshot } from './snapshot.ts'
 import { MULTICALL3, multicall3Of } from '@mamoru/rpc'
-import { StateStore, loadOrCreateKey } from './state.ts'
+import { StateStore, loadOrCreateKey, stampVaultFeeFrom } from './state.ts'
 import { EntryStore, withHoldValue } from './yield-entries.ts'
 import { withReceipts, type BlockTimeReader, type ReceiptReader, type ReceiptSource, type SafeBlockReader } from './yield-receipts.ts'
 import { EngineSettingsSource, type SettingsOverride } from './engine-settings.ts'
@@ -659,11 +659,8 @@ export async function bootOperator(o: BootOptions) {
   if (v8Policy) assertBootPolicies(policy, v8Policy, registry, { live, writes: writes.on })
   if (writes.on) assertWritePolicy(policy, registry, chainId)
   const store = new StateStore(o.stateDir)
-  // otto/mamoru#433: the vault growth fee starts counting here, once; flows dated before are never charged.
-  if (!store.state.vaultFeeFrom) {
-    store.state.vaultFeeFrom = new Date().toISOString()
-    store.save()
-  }
+  // otto/mamoru#433: the vault growth fee starts counting here, once, on a live boot only; flows dated before are never charged.
+  stampVaultFeeFrom(store, live)
   // Review round 2: an account already moved to the on-chain action policy needs that policy to resolve after a
   // restart (funding, engine, renewals and Stop all read it). Refused at boot, with the accounts named, rather than
   // failing on each of them later while their Safes hold positions.
