@@ -112,7 +112,7 @@ export async function loadVsIdle(db: Db, userId: string, now: Date, baselineComp
     realized += BigInt(earned.totalUsd) - BigInt(snap.fees_usdc)
     for (const n of earned.notCounted) if (n !== 'accrued-24h') notCounted.add(n) // that one belongs to the 24 h figure only
     income.push(...(await incomeRows(db, s.chain_id, s.account_key)))
-    const gas = await gasRows(db, s.chain_id, s.account_key)
+    const gas = await gasRows(db, s.chain_id, s.account_key, last.day)
     for (const g of gas) {
       if (g.gas_paid_usdc === null) {
         if (BigInt(g.gas_paid_wei) > 0n) gasKnown = false
@@ -176,9 +176,10 @@ async function netApr30d(db: Db, sleeves: { chain_id: number; account_key: strin
   return { pct: Math.round((earned / capitalSeconds) * YEAR_S * 1000) / 10, reason: null }
 }
 
-async function gasRows(db: Db, chainId: number, accountKey: string): Promise<{ gas_paid_wei: string; gas_paid_usdc: number | null }[]> {
+/** Gas of the days up to the value's last day: a later op is not in the balance shown. */
+async function gasRows(db: Db, chainId: number, accountKey: string, throughDay: string): Promise<{ gas_paid_wei: string; gas_paid_usdc: number | null }[]> {
   try {
-    return (await db.prepare('SELECT gas_paid_wei, gas_paid_usdc FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ?').bind(chainId, accountKey).all<{ gas_paid_wei: string; gas_paid_usdc: number | null }>()).results
+    return (await db.prepare('SELECT gas_paid_wei, gas_paid_usdc FROM yield_ledger_account_receipts WHERE chain_id = ? AND account_key = ? AND day <= ?').bind(chainId, accountKey, throughDay).all<{ gas_paid_wei: string; gas_paid_usdc: number | null }>()).results
   } catch (e) {
     if (!/no such (table|column)/i.test(e instanceof Error ? e.message : String(e))) throw e
     return [{ gas_paid_wei: '1', gas_paid_usdc: null }] // not migrated: gas is unknown, not zero

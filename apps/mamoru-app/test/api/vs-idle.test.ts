@@ -86,6 +86,8 @@ describe('loadVsIdle', () => {
     // net 5.80 = fees 5.00 + price move 1.50 - costs 0.50 - fee 0.20
     expect(v.breakdown).toEqual({ feesUsd: 5, priceMoveUsd: 1.5, costsUsd: -0.5, mamoruFeeUsd: -0.2, netUsd: 5.8 })
     expect(v.notCounted).toEqual([])
+    gasDay(db, '2026-11-07', '4000', 9) // after the last value day: not in the balance shown
+    expect((await loadVsIdle(db, 'u1', NOW, true)).breakdown!.costsUsd).toBe(-0.5)
     gasDay(db, '2026-11-04', '9000', null)
     const part = await loadVsIdle(db, 'u1', NOW, true)
     expect(part.notCounted).toEqual(['costs'])
