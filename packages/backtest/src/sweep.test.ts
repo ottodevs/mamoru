@@ -230,4 +230,23 @@ describe('ranked by net yield (otto/mamoru#164)', () => {
     expect(md).toContain('| train | 1000 | 1 | tight | 0.30 | 0.90 | -1.00 | 2.00 |')
     expect(md).toContain('| train | 1000 | 2 | base | -0.20 | 1.00 | -1.00 | 2.00 |')
   })
+
+  test(
+    'on real runs: vs hold is the end after gas less holding the mix, and the variant that nets more against hold ranks first',
+    () => {
+      const ds = syntheticDataset({ samples: 400, tick: (k, i) => (k === 0 ? 0 : -Math.round(800 * Math.sin(i / 40))), growth: [1n << 100n, 1n << 100n, 1n << 100n] })
+      const cells: Cell[] = []
+      for (const [variant, policy] of [['live', conservadorLiveV2], ['guards', conservadorLabGuardsV1]] as const) {
+        const r = runBacktest(ds, policy, { deposit: 1_000_000_000n })
+        // The sign the ranking relies on: positive when the run ended above holding the same mix, gas already paid.
+        expect(r.metrics.vsHodl).toBe(r.metrics.end - r.metrics.hodl)
+        cells.push({ window: 'w', split: 'train', regime: 'r', deposit: 1000, variant, policyId: policy.id, status: 'ok', metrics: cellMetrics(r, 6) })
+      }
+      const ranked = rankByNetYield(aggregate(cells))
+      expect(ranked[0]!.meanVsHoldPct).toBeGreaterThanOrEqual(ranked[1]!.meanVsHoldPct)
+      expect(ranked.map((a) => a.variant).sort()).toEqual(['guards', 'live'])
+    },
+    SLOW,
+  )
 })
+
