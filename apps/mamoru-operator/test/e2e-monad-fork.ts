@@ -37,7 +37,7 @@ const dir = mkdtempSync(join(tmpdir(), 'mamoru-operator-e2e-monad-'))
 const statePath = process.argv[2]
 const fork = statePath ? await startFromState(m, statePath, join(dir, 'anvil.log')) : await startMonadFork(m, join(dir, 'anvil.log'))
 log(statePath ? `plain anvil from ${statePath}, chain ${m.fork.chainId}` : `fork of Monad (${upstreamHost()}) at block ${m.fork.block}, lab chain id ${m.fork.chainId}`)
-// otto/mamoru#273: in front of anvil, what rpc.monad.xyz really serves (refused params, gasUsed = gas given, 100-block
+// otto/mamoru#273: in front of anvil, what rpc.monad.xyz really serves (no eth_simulateV1 since 22 Nov, 100-block
 // logs, unknown-block reads), from a profile at most 7 days old; MAMORU_E2E_CHAOS=1 adds 429s and a node behind writes.
 const chaos = process.env.MAMORU_E2E_CHAOS === '1' ? { rate429: 0.05, lag: { blocks: 3, requests: 4 } } : {}
 const enginePort = startEnginePort(fork.anvil.url, undefined, [], freshEmulation('monad', 'rpc.monad.xyz', chaos))

@@ -170,9 +170,10 @@ describe('#273 recorded profile', () => {
     const p = loadProfile('monad')
     expect(Object.keys(p.endpoints).sort()).toEqual(['drpc', 'monadinfra', 'rpc.monad.xyz', 'rpc1.monad.xyz', 'rpc3.monad.xyz'])
     expect(Date.parse(p.recordedAt)).toBeGreaterThan(0)
-    expect(p.endpoints['rpc.monad.xyz']!.simulateGasUsedIsLimit).toBe(true)
-    expect(p.endpoints['rpc.monad.xyz']!.simulateSenderNotEoa?.message).toBe('sender not eoa')
-    for (const k of ['rpc1.monad.xyz', 'rpc3.monad.xyz', 'monadinfra', 'drpc']) expect(p.endpoints[k]!.refusedMethods.eth_simulateV1).toBeDefined()
+    // Recorded 22 Nov: rpc.monad.xyz stopped serving eth_simulateV1 (it took it with validation on until then), so no
+    // public Monad endpoint simulates; each one caps eth_getLogs at 100 blocks or fewer.
+    for (const k of Object.keys(p.endpoints)) expect(p.endpoints[k]!.refusedMethods.eth_simulateV1).toBeDefined()
+    expect(p.endpoints['rpc.monad.xyz']!.getLogs?.maxSpan).toBe(100)
   })
 
   test('staleness: fresh within 7 days, refused after with the refresh command', () => {
