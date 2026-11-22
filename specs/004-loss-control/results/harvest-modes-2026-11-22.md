@@ -7,14 +7,14 @@ fees plus vault growth; fees still owed are not charged).
 
 ## Answer
 
-| Mode | Return after fee vs A, TEST (mean of 3 start offsets) | Savings built, 5 TEST windows | Gas vs A | Worst point vs deposit | In one line |
+| Mode | Return after fee vs A | Savings built (USD, sum of the 5 TEST windows) | Gas vs A | Worst point vs deposit (offset 0) | In one line |
 |---|---|---|---|---|---|
 | A, today (HRV-R3: harvest back by target weight) | 0 | 0 | 1,000: 12.3 USD · 100,000: 73 USD | -8.04 % / -7.93 % | Principal grows from fees. No savings. |
 | **B, savings in the Stable vault, outside the targets** | 1,000: **-0.11 pp** · 100,000: **-0.08 pp** | 1,000: **107.5 USD** · 100,000: **9,081 USD** (96-99 % of fees accrued) | 1,000: -44 % · 100,000: +45 % | -6.99 % / -7.84 % | What it promises: almost every fee ends up as USDC savings. It costs about a tenth of a point, which is inside the noise. |
 | C, reinvest in the same pool | -0.10 pp · -0.20 pp | 0 | -49 % · +39 % | -7.09 % / -7.84 % | No better than A, and no savings. |
 | D, C then B on the pool's APR | -0.10 pp · -0.16 pp | 1.1 USD · 112 USD | as C | as C | At the TRAIN thresholds it almost never switches, so it behaves as C. Not worth building. |
 
-- Over the 5 TEST windows (about 2.5 months) the "pp" are percentage points of the deposit. The worst point is the lowest
+- The first three columns are the mean of the three TEST start offsets (0, 30, 60 min; `robustness.md`): return after fee and gas averaged per window, savings and gas summed over the 5 windows. At offset 0 alone (`test-score.md`), B built 107.74 and 9,069.21 USD. Over the 5 TEST windows (about 2.5 months) the "pp" are percentage points of the deposit. The worst point is the lowest
   value of the account, savings included, net of gas, over all TEST windows at offset 0 (1,000 / 100,000).
 - **Recommendation: B, as decided.** Keep the swap trigger at k = 50 with the 7-day cap. Use 1 USDC as the smallest
   sweep for small accounts. Give large accounts a daily sweep or a size-scaled floor (see "B's thresholds"). Do not build
@@ -56,11 +56,13 @@ fees plus vault growth; fees still owed are not charged).
     charged: no mode pays the exit of its positions.
   - **C** is `compound`: collect, then `increaseLiquidity` into the same position with what fits its range. The rest stays
     in the account.
-  - **D** is the new `switch`, per pool. It acts as C while the pool's trailing fee APR (fees over the time-weighted value
+  - **D** is the new `switch`, per pool. A pool's APR counts only when its positions were held over at least half the
+    window; otherwise its mode stays. Added after review: TRAIN-d and TEST were re-run with it, and every cell came out byte-identical. It acts as C while the pool's trailing fee APR (fees over the time-weighted value
     of its positions) is at or above the exit threshold. Below it, it acts as B. It returns to C only above the enter
     threshold. Each pool starts in C and keeps it until it has a full APR window of history.
-- **New `engine` order:** an arm's operation now sits where the engine would put it. A re-range or merge first, then the
-  arm's harvest (the harvest slot), then `decide`'s other proposals. A vault deposit goes only on a review where `decide`
+- **New `engine` order:** an arm's operation now sits where the engine would put it. A re-range or merge first (a merge
+  is kind `rerange`), then the arm's harvest (the harvest slot), then `decide`'s other proposals. One review, one
+  operation, as in the engine: a review that re-ranges does not also harvest. A vault deposit goes only on a review where `decide`
   proposes nothing. The old order (the arm first, which delays a due re-range) stays the default, so earlier results
   reproduce.
 - **Metrics per cell:**

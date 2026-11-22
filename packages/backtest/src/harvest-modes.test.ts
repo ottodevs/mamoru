@@ -115,3 +115,17 @@ describe('engine order', () => {
     expect(engine.resultHash).not.toBe(first.resultHash)
   }, SLOW)
 })
+
+describe('switch APR coverage', () => {
+  test('a pool held over less than half the window has no APR, so its mode stays', () => {
+    const l = newLedger({ kind: 'switch', k: 20, sink: { kind: 'vault', sweepK: 0 }, aprSeconds: 86_400, exitBps: 1000, enterBps: 2000 })
+    const pool = 'pool:WETH/USDC/3000'
+    // Held for the first hour, then 20 hours with no position, then 2 hours at 1 %.
+    recordInterval(l, pool, 3600, 100_000n, 1000n * USDC, 3600)
+    recordInterval(l, pool, 23 * 3600, 1_000n, 1000n * USDC, 3600)
+    recordInterval(l, pool, 24 * 3600, 1_000n, 1000n * USDC, 3600)
+    expect(aprBps(l, pool, 24 * 3600)).toBeNull()
+    stepModes(l, 24 * 3600)
+    expect(l.mode.get(pool)).toBeUndefined()
+  })
+})

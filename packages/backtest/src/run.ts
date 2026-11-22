@@ -355,8 +355,10 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
       }
       return d
     }
-    // #413 `engine` order: `decide` first; its re-range (or merge) keeps the place it has ahead of harvests in the
-    // engine, the arm's harvest takes the harvest slot, and a vault deposit of savings waits for a review with nothing else.
+    // #413 `engine` order: `decide` first; its re-range keeps the place it has ahead of harvests in the engine (a merge
+    // is a re-range too: `mergeOf` proposes kind 'rerange', why 'merge'). As in the engine, one review makes one
+    // proposal, so on that review no harvest follows; the arm's harvest takes the harvest slot of the next review that
+    // has no re-range. A vault deposit of savings waits for a review where `decide` proposes nothing.
     const engineOrder = engineOrderUsed
     const pre = obs && engineOrder ? masked(obs) : null
     const labOps = obs && lab && pre?.proposal?.kind !== 'rerange' ? labHarvest(lab, w, ds, s, savings, policy.execution.slippageBps, (kind) => gasCost(ds, s, kind, gas, savings), !engineOrder || pre?.proposal === null) : null

@@ -124,7 +124,7 @@ export type HarvestLedger = {
   sweepGas: bigint
   vaultRemE18: bigint
   /** Switch arm (#413), per pool: fee intervals for the trailing APR, the pool's current mode, and how often it flipped. */
-  apr: Map<RegistryName, { first: number; xs: { time: number; fees: number; valueSeconds: number }[] }>
+  apr: Map<RegistryName, { first: number; xs: { time: number; dt: number; fees: number; valueSeconds: number }[] }>
   mode: Map<RegistryName, 'compound' | 'savings'>
   switches: number
 }
@@ -153,22 +153,33 @@ export function ruleOf(l: HarvestLedger, pool: RegistryName): Exclude<HarvestArm
 export function recordInterval(l: HarvestLedger, pool: RegistryName, time: number, fees: bigint, value: bigint, dt: number): void {
   if (l.arm.kind !== 'switch' || dt <= 0) return
   const h = l.apr.get(pool) ?? { first: time - dt, xs: [] }
-  h.xs.push({ time, fees: Number(fees), valueSeconds: Number(value) * dt })
+  h.xs.push({ time, dt, fees: Number(fees), valueSeconds: Number(value) * dt })
   while (h.xs.length && h.xs[0]!.time <= time - l.arm.aprSeconds) h.xs.shift()
   l.apr.set(pool, h)
 }
 
-/** Trailing fee APR of a pool in bps, or null before it has `aprSeconds` of history. */
+/** Share of the APR window a pool's positions must have been held over for its APR to count. */
+export const APR_MIN_COVERAGE = 0.5
+
+/**
+ * Trailing fee APR of a pool in bps over the last `aprSeconds`: null before the pool has that much history, or when its
+ * positions were held over less than `APR_MIN_COVERAGE` of the window (a pool with no position for most of it has no
+ * APR to read; its mode stays).
+ */
 export function aprBps(l: HarvestLedger, pool: RegistryName, now: number): number | null {
   if (l.arm.kind !== 'switch') return null
   const h = l.apr.get(pool)
   if (!h || now - h.first < l.arm.aprSeconds) return null
   let fees = 0
   let vs = 0
+  let held = 0
   for (const x of h.xs) {
+    if (x.time <= now - l.arm.aprSeconds) continue
     fees += x.fees
     vs += x.valueSeconds
+    held += x.dt
   }
+  if (held < l.arm.aprSeconds * APR_MIN_COVERAGE) return null
   return vs > 0 ? (fees * 365 * 86_400 * 10_000) / vs : 0
 }
 
