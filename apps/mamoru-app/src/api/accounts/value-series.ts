@@ -97,7 +97,9 @@ const signedOf = (f: Flow) => (f.kind === 'in' ? f.usd : f.kind === 'out' ? -f.u
  * Sets `deposited` on every point (cumulative in - out up to the end of its UTC day, signed: more out than in is a
  * negative baseline, the gains taken out). The net deposited is the RECORDED flows only and is always `partial`: the
  * operator keeps deposits for one day on a first look and 200 rows, so older money may be missing. What would make it
- * complete (per-chain coverage, gaps, a first-day check) is otto/mamoru#438; until then a reader labels it as recorded.
+ * complete (per-chain coverage, gaps, a first-day check) is otto/mamoru#438; until then a reader labels it as recorded and
+ * shows n/a for anything that needs a complete baseline (a withdrawal recorded without the principal it returned would
+ * otherwise read as a gain).
  */
 function applyFlows(points: ValuePoint[], flows: Flow[]): NetDeposited {
   const money = flows.filter((f) => f.kind === 'in' || f.kind === 'out')
@@ -107,7 +109,8 @@ function applyFlows(points: ValuePoint[], flows: Flow[]): NetDeposited {
   for (const p of points) {
     const endOfDay = Date.parse(`${p.day}T00:00:00.000Z`) / 1000 + DAY_S - 1
     while (i < money.length && money[i]!.t_s <= endOfDay) net += signedOf(money[i++]!)
-    p.deposited = usd(net)
+    // Before the first recorded flow the baseline is unknown, not zero: a zero would chart the whole balance as gain.
+    if (i > 0) p.deposited = usd(net)
   }
   for (; i < money.length; i++) net += signedOf(money[i]!)
   return { usd: usd(net), status: 'partial', since: new Date(money[0]!.t_s * 1000).toISOString().slice(0, 10) }

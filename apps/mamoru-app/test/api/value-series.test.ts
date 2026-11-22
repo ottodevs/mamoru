@@ -98,7 +98,8 @@ describe('net deposited (otto/mamoru#380)', () => {
     flow(db, 8453, 'base-u1', 'in:0xa:0', 'in', '2026-11-05T09:00:00.000Z', 20)
     const v = await loadValueSeries(db, 'u1', NOW)
     expect(v.netDeposited.status).toBe('partial')
-    expect(v.points[0]!.deposited).toBe(0)
+    expect(v.points[0]!.deposited).toBeUndefined() // unknown before the first recorded flow, never 0
+    expect(v.points[1]!.deposited).toBe(20)
   })
 
   test('more out than in is a negative baseline, not zero', async () => {
