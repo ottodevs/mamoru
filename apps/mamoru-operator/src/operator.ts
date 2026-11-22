@@ -71,7 +71,7 @@ import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-us
 import { bridgeLeftOf } from './bridge-left.ts'
 import { SpendHold, SPEND_HOLD_PROBE_MS, isSpend, spendDenialOf } from './window-hold.ts'
 import { clampHarvested, harvestedOf } from './harvested.ts'
-import { clampSavings, SAVINGS_ASSET, savingsObs } from './savings.ts'
+import { clampSavings, clipBooks, SAVINGS_ASSET, savingsObs, savingsOf, savingsOutOf, type SavingsOut } from './savings.ts'
 import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
@@ -904,7 +904,7 @@ type Prepared = {
   extend?: boolean
   base?: Hex[]
   /** transfer: what the history line shows. */
-  meta?: { amountUsdc: string; asset?: string; to: Hex; feeUsdc?: string; feeVaultUsdc?: string }
+  meta?: { amountUsdc: string; asset?: string; to: Hex; feeUsdc?: string; feeVaultUsdc?: string; savingsOut?: SavingsOut }
   /**
    * transfer (otto/mamoru#155): the price divergence warning this prepare returned, and each diverging swap with the
    * minimum its calldata carries. Submit runs only with this quoteId accepted and no live quote under a minimum.
@@ -2173,6 +2173,15 @@ export class Operator {
       this.store.save()
     }
     return savingsObs(r.books)
+  }
+
+  /** otto/mamoru#413 (SAV-R5): the savings-first split of a withdrawal of `amount` leaving the Safe, at the read `r`. */
+  private savingsOutFor(acc: AccountState, r: Pick<SafeRead, 'block' | 'vaults' | 'usdc'>, amount: bigint): SavingsOut | undefined {
+    if (!this.savingsBooked(acc)) return undefined
+    const vaults = (r.vaults ?? []).map((v) => ({ name: v.name, shares: v.shares, assets: v.assets }))
+    // Within what this read holds (review of #395): a split never assigns more pending than the idle USDC there is.
+    const books = clipBooks(savingsOf(acc.ops, this.cfg.registry, { atBlock: Number(r.block), rates: vaults, cuts: acc.savingsCuts }), r.usdc, vaults)
+    return savingsOutOf(books, amount, vaults)
   }
 
   policyOf(acc: AccountState): PolicyVersion {
@@ -4386,6 +4395,10 @@ export class Operator {
       else fee = 0n
     }
     const { reduce, swaps, vaultExits } = planned
+    // otto/mamoru#413 (spec 012 SAV-R5): what this withdrawal takes from the savings books, savings first (pending, then
+    // savings shares at this read's vault rate). Where the Safe pays from is unchanged; only the shares' tag moves. Stored
+    // on the op and applied when it confirms (savings.ts), never above what the books hold then.
+    const savingsOut = this.savingsOutFor(acc, r, pay + fee)
     const out = asset === 'USDC' ? undefined : await this.receiveQuote(asset, pay, r.block, slip)
     const deadline = (await this.client.getBlock()).timestamp + 1800n
     const calls = [
@@ -4423,7 +4436,7 @@ export class Operator {
     // otto/mamoru#155: a swap under its pool's TWAP is never refused. The plan (and the minimums the owner signs) stay
     // what they are without it; prepare adds the warning, and submit runs only with it accepted.
     const div = await this.divergenceOf(acc, r, slip, swaps, out ? { ...out, amountIn: pay } : undefined)
-    const ownerTx = await this.hold(acc, live, 'transfer', calls, summary, { meta: { amountUsdc: pay.toString(), ...(asset === 'USDC' ? {} : { asset }), to, ...(fee > 0n ? { feeUsdc: fee.toString(), ...(owed && owed.owedVaultUsdc > 0n ? { feeVaultUsdc: (owed.owedVaultUsdc < fee ? owed.owedVaultUsdc : fee).toString() } : {}) } : {}) }, ...(div ? { divergence: div.warning, accepted: div.accepted } : {}) })
+    const ownerTx = await this.hold(acc, live, 'transfer', calls, summary, { meta: { amountUsdc: pay.toString(), ...(asset === 'USDC' ? {} : { asset }), to, ...(fee > 0n ? { feeUsdc: fee.toString(), ...(owed && owed.owedVaultUsdc > 0n ? { feeVaultUsdc: (owed.owedVaultUsdc < fee ? owed.owedVaultUsdc : fee).toString() } : {}) } : {}), ...(savingsOut ? { savingsOut } : {}) }, ...(div ? { divergence: div.warning, accepted: div.accepted } : {}) })
     return {
       ...(div ? { divergence: div.warning } : {}),
       ...(fee > 0n ? { fee: { feeUsdc: fee.toString(), requestedUsdc: amount.toString(), sentUsdc: pay.toString() } } : {}),
