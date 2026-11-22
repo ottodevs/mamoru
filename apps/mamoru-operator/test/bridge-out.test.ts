@@ -477,4 +477,15 @@ describe('the Ethereum relayer balance is watched like the others (otto/mamoru#4
     expect(errs.filter((e) => e.includes('[relayer] bridge_out') && e.includes('is back'))).toHaveLength(1)
     expect(bo.relayers()[0]).toMatchObject({ wei: (10n ** 17n).toString(), low: false })
   })
+
+  test('a provider that never answers costs the balance read, never the tick', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bo-relayer-'))
+    const l1 = { getBalance: () => new Promise<bigint>(() => {}), getGasPrice: () => new Promise<bigint>(() => {}) } as unknown as import('viem').PublicClient
+    const bo = new BridgeOut(l1, { address: '0x7777777777777777777777777777777777777777' as const, send: async () => Promise.reject(new Error('unused')) }, dir, fetch, Date.now, undefined, () => false)
+    const t0 = Date.now()
+    await bo.tick()
+    expect(Date.now() - t0).toBeLessThan(2_000)
+    expect(bo.relayers()).toEqual([])
+  })
 })
+

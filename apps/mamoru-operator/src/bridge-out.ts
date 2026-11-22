@@ -218,6 +218,8 @@ export const MOVES_PER_ACCOUNT_DAY = 3
 /** Gas the deploy and the owner transaction used on the fork, with margin: the gas limits sent, and the spend bound. */
 export const DEPLOY_GAS = 700_000n
 export const EXEC_GAS = 300_000n
+/** otto/mamoru#440: the Ethereum relayer balance read gives up after this long. */
+export const RELAYER_READ_TIMEOUT_MS = 15_000
 /** A move left in 'sending' longer than this (the process stopped mid-send) is resolved from the chain. */
 export const SENDING_STALE_MS = 10 * 60_000
 /** An 'unconfirmed' move not executed after this stops blocking a new one (same Safe nonce: at most one runs). */
@@ -2379,11 +2381,17 @@ export class BridgeOut {
   async tickRelayer(): Promise<void> {
     if (this.now() - this.relayerReadAt < RELAYER_READ_MS) return
     this.relayerReadAt = this.now()
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      const [wei, price] = await Promise.all([this.l1.getBalance({ address: this.relayer.address }), this.l1.getGasPrice()])
+      // Bounded: a provider that accepts the request and never answers costs this read, never the tick.
+      const late = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error('timeout')), RELAYER_READ_TIMEOUT_MS)))
+      const [wei, price] = await Promise.race([Promise.all([this.l1.getBalance({ address: this.relayer.address }), this.l1.getGasPrice()]), late])
       this.relayerWatch.observe('bridge_out', ETHEREUM_CHAIN_ID, this.relayer.address, wei, 2n * ((DEPLOY_GAS + EXEC_GAS) * price * 2n), 'moves', new Date(this.now()).toISOString())
-    } catch (e) {
-      logErr('[bridge-out] relayer balance not read, last value kept:', e instanceof Error ? e.message : e)
+    } catch {
+      // Fixed text only: a viem error quotes the request URL, which carries the provider key.
+      logErr('[bridge-out] Ethereum relayer balance not read (L1 unreachable or slow), last value kept', undefined)
+    } finally {
+      clearTimeout(timer)
     }
   }
 
@@ -2394,7 +2402,8 @@ export class BridgeOut {
   }
 
   async tick(): Promise<void> {
-    await this.tickRelayer()
+    // Not awaited: the balance read never delays settlement, reconciliation or readiness (it bounds itself).
+    void this.tickRelayer()
     await this.settleReservations().catch((e) => logErr('[bridge-out] tick reservations:', e instanceof Error ? e.message : e))
     for (const accountKey of Object.keys(this.journal.siblings ?? {})) await this.reconcileSibling(accountKey).catch((e) => logErr('[bridge-out] tick sibling:', e instanceof Error ? e.message : e))
     for (const accountKey of Object.keys(this.journal.siblings ?? {})) await this.driveReadiness(accountKey).catch((e) => logErr('[bridge-out] tick sibling readiness:', e instanceof Error ? e.message : e))
