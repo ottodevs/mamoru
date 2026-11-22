@@ -57,6 +57,19 @@ describe('loadPoolEarnings', () => {
     expect(await loadPoolEarnings(db, SLEEVES)).toEqual([{ pool: 'pool:WETH/USDC/3000', earnedUsd: 0, aprPct: 0 }])
   })
 
+  test('APR ignores income booked after the read the window ends at, and chains without samples in it', async () => {
+    const db = seed()
+    entry(db, 1, 'pool:WETH/USDC/3000')
+    collected(db, '2026-11-06', 1, 0.01)
+    collected(db, '2026-11-09', 1, 5) // after the 17:50 read of the 6th: not in the window
+    vault(db, 'vault:8453:base-u1:pool:WETH/USDC/3000:' + t('2026-11-08T10:00:00.000Z'), '2026-11-08T10:00:00.000Z', 3)
+    worked(db, '2026-10-08T17:30:00.000Z', 'pool:WETH/USDC/3000', 1000)
+    worked(db, '2026-11-06T17:30:00.000Z', 'pool:WETH/USDC/3000', 1000)
+    worked(db, '2026-11-06T17:50:00.000Z', 'pool:WETH/USDC/3000', 1000)
+    const r = await loadPoolEarnings(db, SLEEVES)
+    expect(r[0]!.aprPct).toBe(23.7)
+  })
+
   test('nothing earned yet: no rows', async () => {
     expect(await loadPoolEarnings(seed(), SLEEVES)).toEqual([])
   })

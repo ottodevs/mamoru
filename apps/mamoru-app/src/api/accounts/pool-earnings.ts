@@ -16,13 +16,14 @@ const YEAR_S = 365 * DAY_S
 
 export type PoolEarning = { pool: string; earnedUsd: number; aprPct: number | null }
 
-type Row = { pool: string; t: number; usd: number; from?: number | null; vault: boolean }
+type Row = { pool: string; t: number; usd: number; from?: number | null; vault: boolean; chain: number }
 
 const net = (usd: number, t: number) => (t >= MAMORU_FEE_FROM ? usd * (1 - Number(MAMORU_FEE_BPS) / 10_000) : usd)
 const VAULT_YIELD = /^vault:\d+:[^:]+:(.+):\d+$/
 const VAULT_BACKFILL = /^vault-backfill:\d+:[^:]+:(.+)$/
 
 async function rowsOf(db: Db, chainId: number, accountKey: string): Promise<Row[]> {
+  // `chain` tags each row so the APR counts only the chains whose capital-time it divides by.
   const rows: Row[] = []
   const lp = (
     await db
@@ -35,7 +36,7 @@ async function rowsOf(db: Db, chainId: number, accountKey: string): Promise<Row[
       .all<{ pool: string; day: string; usd: number }>()
   ).results
   // A day's collects are credited at its end: the day is whole in the window or out of it.
-  for (const r of lp) rows.push({ pool: r.pool, t: Date.parse(`${r.day}T00:00:00.000Z`) / 1000 + DAY_S - 1, usd: r.usd, vault: false })
+  for (const r of lp) rows.push({ pool: r.pool, t: Date.parse(`${r.day}T00:00:00.000Z`) / 1000 + DAY_S - 1, usd: r.usd, vault: false, chain: chainId })
   const income = (
     await db
       .prepare("SELECT event_id, source, t_s, from_s, usd FROM yield_ledger_income WHERE chain_id = ? AND account_key = ? AND usd IS NOT NULL AND (source = 'vault-yield' OR event_id LIKE 'vault-backfill:%')")
@@ -44,7 +45,7 @@ async function rowsOf(db: Db, chainId: number, accountKey: string): Promise<Row[
   ).results
   for (const r of income) {
     const m = VAULT_YIELD.exec(r.event_id) ?? VAULT_BACKFILL.exec(r.event_id)
-    if (m) rows.push({ pool: m[1]!, t: r.t_s, usd: r.usd, from: r.from_s, vault: true })
+    if (m) rows.push({ pool: m[1]!, t: r.t_s, usd: r.usd, from: r.from_s, vault: true, chain: chainId })
   }
   return rows
 }
@@ -66,6 +67,7 @@ export async function loadPoolEarnings(db: Db, sleeves: { chain_id: number; acco
     const span = await db.prepare('SELECT MIN(t_s) AS lo, MAX(t_s) AS hi FROM account_worked_samples WHERE chain_id = ? AND account_key = ? AND t_s > ? AND t_s <= ?').bind(base.chain_id, base.account_key, start, end).first<{ lo: number | null; hi: number | null }>()
     if (Number.isFinite(end) && span?.lo != null && span.hi != null && span.hi - span.lo >= 28 * DAY_S) window = { start, end }
   }
+  const counted = new Set([base?.chain_id ?? 8453, ...(worked?.chains?.month ?? [])])
   const capital = new Map((worked?.month ?? []).map((p) => [p.pool, p.usdSeconds / 1e6]))
   // A pool that worked but collected nothing yet is 0 earned and 0 %, not unmeasured.
   const pools = [...new Set([...rows.map((r) => r.pool), ...(window ? [...capital].filter(([, c]) => c > 0).map(([p]) => p) : [])])].sort()
@@ -78,6 +80,9 @@ export async function loadPoolEarnings(db: Db, sleeves: { chain_id: number; acco
     if (window && cap > 0) {
       let inWindow = 0
       for (const r of mine) {
+        // Only the chains whose samples are in `cap`, and nothing booked after the read the window ends at.
+        if (!counted.has(r.chain)) continue
+        if (r.vault ? r.t > window.end : r.t - DAY_S + 1 > window.end) continue
         // A day's collects are credited at its end, never after the read the window ends at (today's are before it).
         const at = Math.min(r.t, window.end)
         if (at <= window.start) continue
