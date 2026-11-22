@@ -240,7 +240,7 @@ describe('ranked by net yield (otto/mamoru#164)', () => {
         const r = runBacktest(ds, policy, { deposit: 1_000_000_000n })
         // The sign the ranking relies on: positive when the run ended above holding the same mix, gas already paid.
         expect(r.metrics.vsHodl).toBe(r.metrics.end - r.metrics.hodl)
-        cells.push({ window: 'w', split: 'train', regime: 'r', deposit: 1000, variant, policyId: policy.id, status: 'ok', metrics: cellMetrics(r, 6) })
+        cells.push({ window: 'w', split: 'train', regime: 'r', deposit: 1000, variant, policyId: policy.policyId, status: 'ok', metrics: cellMetrics(r, 6) })
       }
       const ranked = rankByNetYield(aggregate(cells))
       expect(ranked[0]!.meanVsHoldPct).toBeGreaterThanOrEqual(ranked[1]!.meanVsHoldPct)
