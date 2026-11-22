@@ -1,17 +1,17 @@
 import type { PublicClient } from 'viem'
-import { BASE_CHAIN_ID, ReasonError, chainOf, isChainId, type Address, type ChainId, type FundingView } from '@mamoru/domain'
+import { BASE_CHAIN_ID, ReasonError, chainOf, isChainId, secondsToBlocks, type Address, type ChainId, type FundingView } from '@mamoru/domain'
 import { address, entry, erc20Abi, erc4626Abi, nonfungiblePositionManagerAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
 import { Batch, PRICE_SHARES, balanceRead, blockNumberRead, contractRead, createDeployedChecker, multicall3Of, tokenIdReads, type Handle } from '@mamoru/rpc'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 
 /**
  * Stand-in for the chain's `safe` tag in `isSafeDeployed`, without the eth_getBlockByNumber a real one would
- * cost: a sighting this many blocks behind the one just read is treated as confirmed. ~450 blocks is about 15
- * minutes at Base's ~2 s blocks, the same order as Ethereum L1 finality; a reorg past it would be extraordinary.
+ * cost: a sighting this much chain time behind the block just read is treated as confirmed. 15 minutes (450 blocks on
+ * Base, 3,000 on Monad: otto/mamoru#417), the same order as Ethereum L1 finality; a reorg past it would be extraordinary.
  * Its own checker (not the engine's `isDeployed`): a confirmation accepted on this looser, heuristic basis can
  * never let the engine's observe() skip eth_getCode on its own, stricter terms, whatever either one decides.
  */
-const SAFE_SIGHTING_LAG = 450n
+const SAFE_SIGHTING_SECONDS = 900
 const isSafeDeployed = createDeployedChecker()
 
 /**
@@ -234,7 +234,8 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
     const v = h.maybe()
     return v === null ? retry() : Promise.resolve(v)
   }
-  const safeNumber = blockNumber > SAFE_SIGHTING_LAG ? blockNumber - SAFE_SIGHTING_LAG : 0n
+  const lag = secondsToBlocks(registry.chainId, SAFE_SIGHTING_SECONDS)
+  const safeNumber = blockNumber > lag ? blockNumber - lag : 0n
   const [deployed, eth, nfts, balances, slots] = await Promise.all([
     isSafeDeployed(client, safe, blockNumber, safeNumber),
     needAt(ethRead, () => client.getBalance({ address: safe, blockNumber })),

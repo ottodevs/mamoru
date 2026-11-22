@@ -18,7 +18,7 @@ import { MultiBaasPoolIndex } from './multibaas-index.ts'
 import { buildPoolView, displayedBlocks, type PoolHistory } from './pool-view.ts'
 import type { Anchor } from './provenance.ts'
 
-/** Stats window: 1,800 blocks, about one hour at two seconds per block on Base. */
+/** Stats window: 1,800 blocks. About one hour on Base (2 s blocks), about 9 minutes on Monad (300 ms blocks). */
 export const WINDOW_BLOCKS = 1800
 
 /**

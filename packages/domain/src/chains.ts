@@ -85,6 +85,20 @@ export function chainOf(chainId: number): ChainDescriptor {
 }
 
 /**
+ * otto/mamoru#417: `seconds` of chain time in blocks of `chainId` at its reference block time, rounded up, so a wait or
+ * window written in seconds lasts as long on Monad (300 ms) as on Base (2 s).
+ */
+export function secondsToBlocks(chainId: number, seconds: number): bigint {
+  const ms = BigInt(chainOf(chainId).blockTimeMs)
+  return (BigInt(seconds) * 1000n + ms - 1n) / ms
+}
+
+/** otto/mamoru#417: how many blocks of `chainId` fit in `seconds` (a bigint span of chain time), rounded down. */
+export function blocksIn(chainId: number, seconds: bigint): bigint {
+  return (seconds * 1000n) / BigInt(chainOf(chainId).blockTimeMs)
+}
+
+/**
  * FR-CHN-003: every chain id the lab must refuse, derived from the descriptors:
  * each supported chain and each of its test networks. Never written by hand.
  */

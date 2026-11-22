@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, pad, parseAbi, parseAbiItem, parseEventLogs, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type ReturnHomeInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { BASE_CHAIN_ID, blocksIn, chainOf, isChainId, overCap, secondsToBlocks, ReasonError, type AccountContext, type Address, type RemoteSpec, type ReturnHomeInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, baseRegistry, tokenMessengerV2Abi, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
@@ -180,8 +180,11 @@ const EXECUTION_FAILURE = keccak256(stringToHex('ExecutionFailure(bytes32,uint25
 const GUARD_STORAGE_SLOT = '0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8'
 /** otto/mamoru#163: the range search's pages per settle pass (its checkpoint carries it on next pass). */
 const SCAN_PAGES_PER_PASS = 20
-/** otto/mamoru#163: blocks above the evidence a settlement waits for (~24 s on Base), and the evidence block still canonical. */
-const SETTLE_CONFIRMATIONS = 12n
+/**
+ * otto/mamoru#163: chain time above the evidence a settlement waits for (12 blocks on Base), and the evidence block still
+ * canonical. otto/mamoru#417: in seconds, so Monad waits as long (80 blocks), not 12 of its 300 ms blocks.
+ */
+const SETTLE_SECONDS = 24
 /** The Safe tx that spent an op's Safe nonce, read from the spending block's own logs. */
 /** otto/mamoru#212/#332: what this chain holds for the account, and the read of its Safe it comes from. */
 type LocalTotal = { total: bigint; safe: Address; block: bigint }
@@ -227,14 +230,10 @@ const ARM_CAP_HOLD_MS = 300_000
 const ARM_BUDGET_HOLD_MS = 600_000
 /** Minimum gap between two receipt reconciliation passes of one account. */
 const RECONCILE_EVERY_MS = 20_000
-/** Base produces a block every 2 s; used to place a failure time on the chain when no tx hash was kept. */
-const BLOCK_SECONDS = 2n
 /** Blocks added before the handover time when looking for the block an activation executed in (clock and block-time slack). */
 const ACTIVATION_SEARCH_MARGIN = 60n
 /** Passes the search for that block is tried before the account is started from the search floor. */
 const RECOVER_TRIES = 3
-/** Blocks past an unproven head (5 min on Base) the engine of an activation recovered without historical state starts at. */
-const RECOVER_HEAD_MARGIN = 150n
 const PREPARE_TTL_MS = 5 * 60_000
 /** On top of the policy reserve: the first userOp prefund leaves the Safe's balance into its EntryPoint deposit. */
 const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
@@ -246,8 +245,8 @@ const TOP_UP_MARGIN_WEI = 200_000_000_000_000n
 const ACTIVATION_GAS_WEI = 200_000_000_000_000n
 /** While an activation waits for the relayer to be funded, it is logged at most this often per account. */
 const RELAYER_LOW_LOG_MS = 3_600_000
-/** Blocks of deposit progress (~10 min on Base) before it is written to the state file. */
-const DEPOSITS_SAVE_BLOCKS = 300n
+/** Chain time of deposit progress (300 blocks on Base) before it is written to the state file (otto/mamoru#417: in seconds). */
+const DEPOSITS_SAVE_SECONDS = 600
 /** How long a POST waits for the owner transaction before answering with the op as it stands; the SPA polls /ops. */
 const POST_WAIT_MS = 15_000
 /** How often the armed-activation watcher runs a pass; one request for every Safe due in that pass. */
@@ -1075,6 +1074,15 @@ export class Operator {
   private readonly refillHeld = new Map<string, string>()
   private readonly gasReserveAlertOverride = gasReserveAlertOverrideFromEnv()
   private relayerBalanceCache: { at: number; value: bigint } | null = null
+  /** otto/mamoru#417: the chain whose block time turns seconds into blocks (Base for a config without a registry). */
+  private get timeChain(): number {
+    return this.cfg.registry?.chainId ?? BASE_CHAIN_ID
+  }
+  /** otto/mamoru#417: the block-count waits of this operator's chain, from their durations in seconds. */
+  private get blocks(): { settle: bigint; depositsSave: bigint } {
+    const chainId = this.timeChain
+    return { settle: secondsToBlocks(chainId, SETTLE_SECONDS), depositsSave: secondsToBlocks(chainId, DEPOSITS_SAVE_SECONDS) }
+  }
   /** otto/mamoru#412: the maxFeePerGas the relayer check last read (RELAYER_BALANCE_CACHE_MS), and when it last logged a hold. */
   private relayerGasPriceCache: { at: number; value: bigint } | null = null
   private relayerShortLoggedAt = 0
@@ -2624,7 +2632,7 @@ export class Operator {
       if (added.length) acc.deposits = rows
       if (w.cursor !== undefined) {
         acc.depositsSeen = { safe: at, block: w.cursor.toString() }
-        if (added.length || w.saved === undefined || w.cursor - w.saved >= DEPOSITS_SAVE_BLOCKS) {
+        if (added.length || w.saved === undefined || w.cursor - w.saved >= this.blocks.depositsSave) {
           this.store.save()
           w.saved = w.cursor
         }
@@ -4590,7 +4598,7 @@ export class Operator {
 
   /**
    * otto/mamoru#15: the block that proves an activation's reserve swap can never run, or null. One block B, read by
-   * hash, SETTLE_CONFIRMATIONS below the head and still canonical (finalAt), whose own timestamp is past the swap's
+   * hash, SETTLE_SECONDS of blocks below the head and still canonical (finalAt), whose own timestamp is past the swap's
    * deadline and at which the Safe nonce is still the op's: up to B the SafeTx did not run, and from B on SwapRouter02
    * refuses the swap ("Transaction too old"), and with it the whole execTransaction (safeTxGas 0: GS013). Any read that
    * fails, or a B not past the deadline yet, is null: no conclusion.
@@ -4599,8 +4607,8 @@ export class Operator {
     if (op.kind !== 'activate' || !op.reserveDeadline || op.safeNonce === undefined) return null
     try {
       const head = await this.client.getBlockNumber({ cacheTime: 0 })
-      if (head < SETTLE_CONFIRMATIONS) return null
-      const b = await this.client.getBlock({ blockNumber: head - SETTLE_CONFIRMATIONS })
+      if (head < this.blocks.settle) return null
+      const b = await this.client.getBlock({ blockNumber: head - this.blocks.settle })
       if (!b.hash || b.number === null || b.timestamp <= BigInt(op.reserveDeadline)) return null
       if ((await this.nonceAtHash(acc.ctx.address as Address, b.hash)) > BigInt(op.safeNonce)) return null
       return (await this.finalAt(b.number, b.hash)) ? b.number : null
@@ -4629,7 +4637,7 @@ export class Operator {
       // From before the op's first handover (the Safe nonce was N or lower then), widened until it is.
       const top = await this.client.getBlock({ blockNumber: upTo })
       const since = BigInt(Math.floor((op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt)) / 1000))
-      let back = (top.timestamp > since ? (top.timestamp - since) / BLOCK_SECONDS : 0n) + 150n
+      let back = (top.timestamp > since ? blocksIn(this.timeChain, top.timestamp - since) : 0n) + 150n
       let lo = upTo > back ? upTo - back : 0n
       let loNonce = await nonceAt(lo)
       while (loNonce > n && lo > 0n) {
@@ -4649,7 +4657,7 @@ export class Operator {
         }
       }
       // One view, by hash: X's header, the Safe nonce at X and at its parent (X must cross N on that very chain), and
-      // X's own logs. Final only once X is SETTLE_CONFIRMATIONS deep and still canonical.
+      // X's own logs. Final only once X is SETTLE_SECONDS of blocks deep and still canonical.
       const x = await this.client.getBlock({ blockNumber: hi })
       if (!x.hash || !x.parentHash || x.number === null) return null
       const [atX, atParent] = [await this.nonceAtHash(safe, x.hash), await this.nonceAtHash(safe, x.parentHash)]
@@ -4758,12 +4766,12 @@ export class Operator {
   }
 
   /**
-   * otto/mamoru#163: whether block `number` with `hash` is final enough to settle on: at least SETTLE_CONFIRMATIONS
+   * otto/mamoru#163: whether block `number` with `hash` is final enough to settle on: at least SETTLE_SECONDS of blocks
    * below the head, and still the block at that height (read again by number, same hash).
    */
   private async finalAt(number: bigint, hash: Hex): Promise<boolean> {
     const head = await this.client.getBlockNumber({ cacheTime: 0 })
-    if (head < number + SETTLE_CONFIRMATIONS) return false
+    if (head < number + this.blocks.settle) return false
     const again = await this.client.getBlock({ blockNumber: number })
     return again.hash?.toLowerCase() === hash.toLowerCase()
   }
@@ -4772,7 +4780,7 @@ export class Operator {
   private async firstSendBlock(op: StoredOp, upTo: bigint): Promise<bigint> {
     const top = await this.client.getBlock({ blockNumber: upTo })
     const since = BigInt(Math.floor((op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt)) / 1000))
-    const back = (top.timestamp > since ? (top.timestamp - since) / BLOCK_SECONDS : 0n) + 150n
+    const back = (top.timestamp > since ? blocksIn(this.timeChain, top.timestamp - since) : 0n) + 150n
     return upTo > back ? upTo - back : 0n
   }
 
@@ -5569,7 +5577,7 @@ export class Operator {
         // first block with the grant enabled, searched from just before the transaction was first handed over.
         const head = await this.client.getBlockNumber()
         const since = a.sentAt ?? (Date.parse(op.updatedAt) || Date.now())
-        const back = BigInt(Math.ceil(Math.max(0, Date.now() - since) / 1000)) / BLOCK_SECONDS + ACTIVATION_SEARCH_MARGIN
+        const back = blocksIn(this.timeChain, BigInt(Math.ceil(Math.max(0, Date.now() - since) / 1000))) + ACTIVATION_SEARCH_MARGIN
         const floor = head > back ? head - back : 0n
         let block: bigint
         let depositsFrom: bigint | undefined
@@ -6363,7 +6371,7 @@ export class Operator {
     // else its creation, else its time; to a day past the latest handover.
     const blockAt = (ms: number) => {
       const t = BigInt(Math.floor(ms / 1000))
-      const lag = head.timestamp > t ? (head.timestamp - t) / BLOCK_SECONDS : 0n
+      const lag = head.timestamp > t ? blocksIn(this.timeChain, head.timestamp - t) : 0n
       return head.number > lag ? head.number - lag : 0n
     }
     const at = blockAt(op.broadcastAt ?? op.sentAt ?? Date.parse(op.updatedAt))
@@ -8523,12 +8531,12 @@ export class Operator {
         // a day behind while no app is open; the engine finds deposits for its own use from its observation.
         void this.watchDeposits(acc, acc.ctx.address as Address, DEPOSIT_IDLE_SCAN_MS)
         // Persist how far deposits were read, so a restart or a failed review does not rescan from activation.
-        if (runner.engine.depositsAfter - BigInt(acc.depositsAfter) >= DEPOSITS_SAVE_BLOCKS) {
+        if (runner.engine.depositsAfter - BigInt(acc.depositsAfter) >= this.blocks.depositsSave) {
           acc.depositsAfter = runner.engine.depositsAfter.toString()
           this.store.save()
         }
         // otto/mamoru#389: the position history as well (a restart read it again from activation, 2-3.7M blocks on Base).
-        if (runner.engine.historyThrough - savedThrough(acc) >= DEPOSITS_SAVE_BLOCKS) {
+        if (runner.engine.historyThrough - savedThrough(acc) >= this.blocks.depositsSave) {
           acc.historyCursor = runner.engine.storedHistory()
           this.store.save()
         }

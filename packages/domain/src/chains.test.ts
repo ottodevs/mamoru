@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { BASE_CHAIN_ID, BASE_SEPOLIA_CHAIN_ID, chainOf, FORBIDDEN_LAB_CHAIN_IDS, isChainId, ReasonError, SUPPORTED_CHAINS } from './index.ts'
+import { BASE_CHAIN_ID, blocksIn, secondsToBlocks, BASE_SEPOLIA_CHAIN_ID, chainOf, FORBIDDEN_LAB_CHAIN_IDS, isChainId, ReasonError, SUPPORTED_CHAINS } from './index.ts'
 
 function code(fn: () => unknown): string | undefined {
   try {
@@ -60,5 +60,20 @@ describe('FORBIDDEN_LAB_CHAIN_IDS', () => {
     expect(FORBIDDEN_LAB_CHAIN_IDS).toContain(143)
     expect(FORBIDDEN_LAB_CHAIN_IDS).toContain(10143)
     for (const lab of [31337, 31338]) expect(FORBIDDEN_LAB_CHAIN_IDS).not.toContain(lab)
+  })
+})
+
+describe('secondsToBlocks and blocksIn (otto/mamoru#417)', () => {
+  test('a duration lasts as long on every chain: 24 s is 12 Base blocks and 80 Monad blocks; a partial block rounds up', () => {
+    expect(secondsToBlocks(8453, 24)).toBe(12n)
+    expect(secondsToBlocks(143, 24)).toBe(80n)
+    expect(secondsToBlocks(8453, 900)).toBe(450n)
+    expect(secondsToBlocks(143, 900)).toBe(3_000n)
+    expect(secondsToBlocks(8453, 1)).toBe(1n)
+  })
+  test('blocksIn rounds a span of chain time down; an unsupported chain is refused', () => {
+    expect(blocksIn(8453, 601n)).toBe(300n)
+    expect(blocksIn(143, 3n)).toBe(10n)
+    expect(code(() => secondsToBlocks(1, 24))).toBe('CHAIN_UNSUPPORTED')
   })
 })
