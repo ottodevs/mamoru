@@ -49,6 +49,14 @@ describe('loadPoolEarnings', () => {
     expect(r).toEqual([{ pool: 'pool:WETH/USDC/3000', earnedUsd: 0.01, aprPct: 23.7 }])
   })
 
+  test('a pool that worked a full window and collected nothing is 0 earned, 0 %', async () => {
+    const db = seed()
+    worked(db, '2026-10-08T17:30:00.000Z', 'pool:WETH/USDC/3000', 1000)
+    worked(db, '2026-11-06T17:30:00.000Z', 'pool:WETH/USDC/3000', 1000)
+    worked(db, '2026-11-06T17:50:00.000Z', 'pool:WETH/USDC/3000', 1000)
+    expect(await loadPoolEarnings(db, SLEEVES)).toEqual([{ pool: 'pool:WETH/USDC/3000', earnedUsd: 0, aprPct: 0 }])
+  })
+
   test('nothing earned yet: no rows', async () => {
     expect(await loadPoolEarnings(seed(), SLEEVES)).toEqual([])
   })

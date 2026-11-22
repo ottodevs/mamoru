@@ -57,7 +57,6 @@ export async function loadPoolEarnings(db: Db, sleeves: { chain_id: number; acco
     if (/no such table/i.test(e instanceof Error ? e.message : String(e))) return []
     throw e
   }
-  if (!rows.length) return []
   const base = sleeves.find((s) => s.chain_id === 8453) ?? sleeves[0]
   const worked = base ? await loadWorked(db, base.chain_id, base.account_key) : null
   let window: { start: number; end: number } | null = null
@@ -68,7 +67,9 @@ export async function loadPoolEarnings(db: Db, sleeves: { chain_id: number; acco
     if (Number.isFinite(end) && span?.lo != null && span.hi != null && span.hi - span.lo >= 28 * DAY_S) window = { start, end }
   }
   const capital = new Map((worked?.month ?? []).map((p) => [p.pool, p.usdSeconds / 1e6]))
-  const pools = [...new Set(rows.map((r) => r.pool))].sort()
+  // A pool that worked but collected nothing yet is 0 earned and 0 %, not unmeasured.
+  const pools = [...new Set([...rows.map((r) => r.pool), ...(window ? [...capital].filter(([, c]) => c > 0).map(([p]) => p) : [])])].sort()
+  if (!pools.length) return []
   return pools.map((pool) => {
     const mine = rows.filter((r) => r.pool === pool)
     const earned = mine.reduce((n, r) => n + net(r.usd / 1e6, r.t), 0)
