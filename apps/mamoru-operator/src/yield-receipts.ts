@@ -22,6 +22,7 @@ import { address, baseRegistry, entryPointV07Abi, nameOf, type Registry } from '
 import { inUsdc, nativePricePool } from './chain.ts'
 import type { StoredOp } from './state.ts'
 import { accountFlows, type FlowWire } from './flows.ts'
+import type { FlowCoverWire } from './flow-cover.ts'
 import type { DepositRow } from './deposits.ts'
 import type { Snapshot } from './snapshot.ts'
 
@@ -458,7 +459,7 @@ export type VaultFlowWire = VaultFlow & { id: string; t: number; block?: number 
 /** `incomplete`: a receipt was given up on (gaveUp), so `explained` may be short: the Worker counts the vault as partial. */
 export type AccountVaultWire = { flows: VaultFlowWire[]; explained: Record<string, string> | null; incomplete?: true }
 /** otto/mamoru#380: `flows` are the account's external USDC flows (flows.ts), whole as the operator keeps them. */
-export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire; flows?: FlowWire[] }
+export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire; flows?: FlowWire[]; /** otto/mamoru#438: what the operator vouches of those flows (flow-cover.ts). */ cover?: FlowCoverWire }
 
 /** The fee events of stored ops with facts of the current layout; an op's step says whether it was a harvest. */
 export function incomeEvents(ops: readonly StoredOp[]): IncomeEventWire[] {

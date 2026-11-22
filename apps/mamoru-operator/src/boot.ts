@@ -29,6 +29,7 @@ import { readSnapshot, SnapshotLoop, snapshotIntervalMs, withBridges, type Snaps
 import { MULTICALL3, multicall3Of } from '@mamoru/rpc'
 import { StateStore, loadOrCreateKey } from './state.ts'
 import { EntryStore, withHoldValue } from './yield-entries.ts'
+import { coverSource, transfersTo, withCover } from './flow-cover.ts'
 import { withReceipts, type BlockTimeReader, type ReceiptReader, type ReceiptSource, type SafeBlockReader } from './yield-receipts.ts'
 import { EngineSettingsSource, type SettingsOverride } from './engine-settings.ts'
 import { PeerExposure, parsePeerOperators } from './exposure.ts'
@@ -849,7 +850,9 @@ export async function bootOperator(o: BootOptions) {
     }
     const ledger = withYieldLedger(o.stateDir, read, receipts)
     // spec 013 plan §3.5: the CCTP journals ride on the Base snapshot, so the Worker counts USDC in flight once.
-    const withJournals = async () => withBridges(await ledger(), () => bridgeMonad?.burns() ?? [], () => returnHome?.returns() ?? [])
+    // otto/mamoru#438: and what the operator vouches of each account's flows (flow-cover.ts), on the same transport and budget.
+    const cover = coverSource(store, operator, transfersTo(snapshotClient), async (blockNumber) => (await snapshotClient.getBlock({ blockNumber })).timestamp, registry, () => budget.over())
+    const withJournals = async () => withCover(withBridges(await ledger(), () => bridgeMonad?.burns() ?? [], () => returnHome?.returns() ?? []), cover)
     snapshot = new SnapshotLoop(withJournals, snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
   }
   // otto/mamoru#343 phase B: Monad capital is measured for the worked APY like Base's, from the same readSnapshot over the
@@ -884,8 +887,9 @@ export async function bootOperator(o: BootOptions) {
       safeBlock: async () => (await snapshotClient.getBlock({ blockTag: 'safe' })).number,
     }
     const readMonad = () => readSnapshot(snapshotClient, multicall3Monad, chainId, registry, operator.snapshotTargets())
+    const cover = coverSource(store, operator, transfersTo(snapshotClient), async (blockNumber) => (await snapshotClient.getBlock({ blockNumber })).timestamp, registry, () => budget.over())
     monadSnapshot = new SnapshotLoop(
-      async () => withReceipts(await readMonad(), receipts.source, receipts.readReceipt, receipts.blockTime, receipts.safeBlock, tried, registry),
+      async () => withCover(await withReceipts(await readMonad(), receipts.source, receipts.readReceipt, receipts.blockTime, receipts.safeBlock, tried, registry), cover),
       MONAD_SNAPSHOT_MS,
       () => budget.over(),
     )

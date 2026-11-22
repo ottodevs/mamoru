@@ -57,6 +57,7 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, POSITION_DUST_USDC, amountsForLiquidity, idleTokens, inUsdc, livePool, nativePricePool, positionUsdc, positionView, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
+import { coverAfterLook, mergeMints, mintsOf, type CoverAccount, type MintRow } from './flow-cover.ts'
 import { balanceMoves, DEPOSIT_CONFIRM_BLOCKS, DEPOSIT_PAGE_BLOCKS, depositId, depositOpView, depositRange, depositsOf, mergeDeposits, readTransfersIn, type DepositRow } from './deposits.ts'
 import { exposureOf, joinReads, totalOf, type ChainExposure, type Covered, type ExposureWire, type PeerExposure, type PeerRead } from './exposure.ts'
 import { closeCalls, planReduce, planVaultExit, routeOf, swapBackCalls, vaultExitCalls, type SwapBack, type VaultExit } from './unwind.ts'
@@ -1160,6 +1161,17 @@ export class Operator {
   }
 
   /** The Safes the snapshot loop reads (otto/mamoru#136): every active or armed account. */
+  /** otto/mamoru#438: every account of the state file with the USDC its deposit look reads, for flow-cover.ts. */
+  coverAccounts(): CoverAccount[] {
+    return Object.values(this.store.state.accounts).flatMap((acc) => {
+      try {
+        return [{ acc, usdc: address(this.policyOf(acc).savingsAsset, this.cfg.registry) }]
+      } catch {
+        return []
+      }
+    })
+  }
+
   snapshotTargets(): SnapshotTarget[] {
     return Object.values(this.store.state.accounts)
       .filter((a) => a.active || !!a.armed)
@@ -2596,8 +2608,13 @@ export class Operator {
     const foundAt = now()
     const found: DepositRow[] = []
     const moves: string[] = []
+    // otto/mamoru#438: the USDC minted to the Safe (never a deposit) and where this look started, for the flow cover.
+    const mints: MintRow[] = []
+    const cursorBefore = w.cursor
+    let rangeFrom: bigint | undefined
     try {
       const range = depositRange(w.cursor, head, DEPOSIT_PAGES_PER_PASS)
+      rangeFrom = range?.from
       let arriving: DepositRow[] | null = range ? null : []
       const above: DepositRow[] = []
       if (range) {
@@ -2606,6 +2623,7 @@ export class Operator {
           const logs = await readTransfersIn(this.client, usdc, safe, from, to)
           const rows = depositsOf(logs, safe, this.cfg.registry, foundAt, ownTx)
           found.push(...rows.filter((d) => BigInt(d.block) <= line))
+          mints.push(...mintsOf(logs, safe, foundAt, ownTx).filter((m) => BigInt(m.block) <= line))
           moves.push(...balanceMoves(logs, safe))
           above.push(...rows.filter((d) => BigInt(d.block) > line))
           if (to === head) arriving = above
@@ -2622,9 +2640,13 @@ export class Operator {
       // What the pages that answered found is kept, and the cursor stays where they ended.
       const { rows, added } = mergeDeposits(acc.deposits ?? [], found)
       if (added.length) acc.deposits = rows
+      if (mints.length) acc.flowMints = mergeMints(acc.flowMints ?? [], mints)
+      const cover = rangeFrom !== undefined && w.cursor !== cursorBefore ? coverAfterLook(acc.flowCover, at, cursorBefore, rangeFrom) : acc.flowCover
+      const coverMoved = cover !== acc.flowCover
+      acc.flowCover = cover
       if (w.cursor !== undefined) {
         acc.depositsSeen = { safe: at, block: w.cursor.toString() }
-        if (added.length || w.saved === undefined || w.cursor - w.saved >= DEPOSITS_SAVE_BLOCKS) {
+        if (added.length || mints.length || coverMoved || w.saved === undefined || w.cursor - w.saved >= DEPOSITS_SAVE_BLOCKS) {
           this.store.save()
           w.saved = w.cursor
         }
