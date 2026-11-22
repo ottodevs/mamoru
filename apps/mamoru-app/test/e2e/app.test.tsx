@@ -112,12 +112,10 @@ describe('routes', () => {
     }
     const one: FundingView = { ...funded, positions: [{ tokenId: '1', pool: 'pool:USDC/cbBTC/500', liquidity: '1', inRange: true, amountUsdc: '5000000', amountCbbtc: '0', valueUsdc: '5000000' }] }
     const { text, html } = await renderRoute('/', fixtureSession, one, { apy })
-    expect(text).toContain('5.9% Monthly rate APY · 30-day avg')
-    expect(text).toContain('Current rate APY · 24h avg')
-    expect(text).toContain('Monthly: DefiLlama')
-    expect(text).toContain('24h avg: GeckoTerminal/DefiLlama')
-    expect(html).toContain('aria-label="Rate sources"')
-    expect(text).toContain('Total earned')
+    // otto/mamoru#380: the headline is vs idle USDC and one rate, APR · 30-day avg; Current rate and Monthly rate are gone.
+    expect(text).toContain('vs idle USDC')
+    expect(text).toContain('APR · 30-day avg')
+    expect(text).not.toContain('Total earned')
     expect(text).not.toContain('Saves automatically')
     expect(text).toContain('Balanced · USDC/cbBTC')
     expect(html).not.toContain('aria-label="Sources and method"')
@@ -880,13 +878,13 @@ describe('live balance down', () => {
     expect(html).toContain('sum past')
     // Review round 2: nothing below reads the cached funding as current — no cards with actions, no rates from it.
     expect(text).not.toContain('Working capital')
-    expect(text).toContain('no live read')
+    expect(text).toContain('vs idle USDC n/a')
   })
   test('never loaded in this tab: the D1 snapshot is the past reading', async () => {
     const { text } = await renderRoute('/', fixtureSession, undefined, { fundingDown: true, lastBalance })
     expect(text).toContain('6.00')
     expect(text).toContain('Last reading 3 h ago')
-    expect(text).toContain('no live read')
+    expect(text).toContain('vs idle USDC n/a')
   })
   test('never loaded, a retry in flight: still the past reading and the notice, never 0.00 with Add on', async () => {
     const { text, html } = await renderRoute('/', fixtureSession, undefined, { fundingDown: 'retrying', lastBalance })

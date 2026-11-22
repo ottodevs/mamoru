@@ -6,6 +6,7 @@ import { bucketOf, currentRate, DAY_S, idleReason, monthlyRate, MONTH_S, positio
 import { agoText, Balance, Idle, Indicators, Working } from '../../src/web/routes/home.tsx'
 import { registries } from '@mamoru/registry'
 import { render } from './render.ts'
+import type { VsIdleView } from '../../src/web/api/client.ts'
 
 // otto/mamoru#193: the dashboard's rates and the idle/working split.
 
@@ -389,29 +390,59 @@ describe('idle and working split', () => {
   })
 })
 
-// otto/mamoru#198, spec 013: Total earned sits under the total value as its gain; not measured yet says so, never a guess.
-describe('total earned with the value', () => {
+// otto/mamoru#380: vs idle USDC is the headline next to the total value; not known says n/a, never a guess.
+const vsIdle = (over: Partial<VsIdleView> = {}): VsIdleView => ({
+  asOf: '2026-11-19T10:00:00.000Z',
+  totalUsd: 985.31,
+  netDeposited: { usd: 974.76, status: 'complete', since: '2026-10-21' },
+  since: '2026-10-21',
+  breakdown: { feesUsd: 6.62, priceMoveUsd: 5.1, costsUsd: -0.62, mamoruFeeUsd: -0.55, netUsd: 10.55 },
+  pendingUsd: 0,
+  savingsUsd: 0,
+  apr: { pct: 33.9, reason: null },
+  status: 'complete',
+  notCounted: [],
+  series: [],
+  ...over,
+})
+describe('vs idle USDC with the value', () => {
   const s = split(fixtureFunding, null)
-  test('a known figure is a gain in USDC', () => {
-    const { text } = render(<Balance s={s} earnedSoFarUsd="42000" onAdd={() => {}} onWithdraw={() => {}} />)
-    expect(text).toContain('Total earned +0.04 USDC')
+  const noop = { onAdd: () => {}, onWithdraw: () => {} }
+  test('the net in USDC, the day it starts, the APR and the deposited line under the total', () => {
+    const { text } = render(<Balance s={s} vsIdle={vsIdle()} {...noop} />)
+    expect(text).toContain('vs idle USDC +10.55 USDC since 21 Oct')
+    expect(text).toContain('APR · 30-day avg')
+    expect(text).toContain('33.9%')
+    expect(text).toContain('deposited 974.76')
+    expect(text).not.toContain('Total earned')
   })
-  test('no figure yet: n/a and why', () => {
-    const { text } = render(<Balance s={s} earnedSoFarUsd={null} onAdd={() => {}} onWithdraw={() => {}} />)
-    expect(text).toContain('Total earned n/a not measured yet')
-    expect(text).not.toContain('+')
+  test('the breakdown adds up: fees, price move, costs, Mamoru fee, net; negative rows stone, a negative net red', () => {
+    const { text, html } = render(<Balance s={s} vsIdle={vsIdle({ breakdown: { feesUsd: 6.62, priceMoveUsd: -9.8, costsUsd: -0.62, mamoruFeeUsd: -0.55, netUsd: -4.35 } })} {...noop} />)
+    expect(text).toContain('Fees earned +6.62')
+    expect(text).toContain('Price move −9.80')
+    expect(text).toContain('Costs −0.62')
+    expect(text).toContain('Mamoru fee 10 % −0.55')
+    expect(text).toContain('Net −4.35')
+    expect(html).toContain('pv-num neg')
+    expect(html).toMatch(/data-testid="bd-net"[^>]*><td>Net<\/td><td class="v alert">/)
+    expect(text).not.toContain('explain')
   })
-  test('a loss is a red pill with a minus, a gain a green one, and the day the ledger starts', () => {
-    const gain = render(<Balance s={s} earnedSoFarUsd="42000" earnedSince="2026-10-12" onAdd={() => {}} onWithdraw={() => {}} />)
-    expect(gain.html).toContain('pf-delta pos')
-    expect(gain.text).toContain('+0.04 USDC since 12 Oct')
-    const loss = render(<Balance s={s} earnedSoFarUsd="-3120000" onAdd={() => {}} onWithdraw={() => {}} />)
-    expect(loss.html).toContain('pf-delta neg')
-    expect(loss.text).toContain('−3.12 USDC')
-    expect(loss.text).not.toContain('since')
+  test('costs not measured say n/a; no figure yet: n/a, no breakdown, no deposited line', () => {
+    const costs = render(<Balance s={s} vsIdle={vsIdle({ breakdown: { feesUsd: 1, priceMoveUsd: 1, costsUsd: null, mamoruFeeUsd: -0.1, netUsd: 1.9 } })} {...noop} />)
+    expect(costs.text).toContain('Costs n/a')
+    const none = render(<Balance s={s} vsIdle={vsIdle({ breakdown: null, netDeposited: { usd: 0, status: 'none' } })} {...noop} />)
+    expect(none.text).toContain('vs idle USDC n/a')
+    expect(none.text).not.toContain('Breakdown')
+    expect(none.text).not.toContain('deposited')
+    const unloaded = render(<Balance s={s} {...noop} />)
+    expect(unloaded.text).toContain('vs idle USDC n/a')
+  })
+  test('APR: the account\'s own once it has 30 days, the Mamoru average before, n/a when nothing is known', () => {
+    expect(render(<Balance s={s} vsIdle={vsIdle({ apr: { pct: null, reason: 'first-30-days' } })} mamoruAprPct={5.9} {...noop} />).text).toContain('5.9%')
+    expect(render(<Balance s={s} vsIdle={vsIdle({ apr: { pct: null, reason: 'not-measured' } })} mamoruAprPct={5.9} {...noop} />).text).not.toContain('5.9%')
   })
   test('the section is named by "Total value" alone, not the (i) text', () => {
-    const { html } = render(<Balance s={s} earnedSoFarUsd="42000" onAdd={() => {}} onWithdraw={() => {}} />)
+    const { html } = render(<Balance s={s} vsIdle={vsIdle()} {...noop} />)
     expect(html).toContain('<span id="total-title">Total value</span>')
   })
 })

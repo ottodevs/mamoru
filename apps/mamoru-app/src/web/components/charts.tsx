@@ -26,7 +26,7 @@ export function scale(vmax: number): { top: number; ticks: number[] } {
 }
 
 /** Monotone cubic (Fritsch-Carlson): smooth, never overshoots, so a flat stretch stays flat. */
-function monotone(pts: [number, number][]): string {
+export function monotone(pts: [number, number][]): string {
   const n = pts.length
   if (n === 0) return ''
   if (n === 1) return `M${pts[0]![0]},${pts[0]![1]}`

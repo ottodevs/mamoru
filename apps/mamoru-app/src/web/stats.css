@@ -168,3 +168,56 @@
 
 /* The Portfolio's balance block stacks: actions, then the value and its chart. */
 .balance.pf { display: block; }
+
+/* otto/mamoru#380: Portfolio "vs idle USDC" block (mock v8): hero row, then breakdown and chart on one grid. */
+.pv { margin-top: 0; }
+.pv-hero, .pv-body { display: grid; grid-template-columns: minmax(0, 480px) minmax(0, 1fr); gap: 4rem; }
+.pv-hero { align-items: start; }
+.pv-body { margin-top: 3.5rem; }
+.pv-lbl { margin: 0; font-family: var(--font-mono); font-size: .8125rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: var(--color-ink); }
+.pv-pair { position: relative; display: grid; grid-template-columns: 1fr 1fr; }
+.pv-pair::before { content: ''; position: absolute; left: -2rem; top: 0; bottom: 0; width: 1px; background: #c9c1af; }
+.pv-stat + .pv-stat { padding-left: 2.5rem; border-left: 1px solid #c9c1af; }
+.pv-num { margin: 1rem 0 0; font-family: var(--font-serif); font-size: 3.5rem; line-height: 1; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pv-num.pos { color: var(--color-emerald); }
+.pv-num.neg { color: var(--color-alert); }
+.pv-num.na { color: var(--color-muted); font-size: 2.2rem; }
+.pv-unit { font-size: 1.25rem; margin-left: .375rem; color: inherit; }
+.pv-cap { margin: .75rem 0 0; font-family: var(--font-mono); font-size: .8125rem; color: var(--color-stone); }
+.pv-total .sum { font-size: 5rem; line-height: 1; margin-top: 1rem; }
+.pv-total .pv-cap { margin-top: .75rem; }
+.pv-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: .9375rem; }
+.pv-table td { height: 2.75rem; }
+.pv-table td.v { text-align: right; font-variant-numeric: tabular-nums; }
+.pv-table .pos { color: var(--color-emerald); }
+.pv-table .neg { color: var(--color-stone); }
+.pv-table .alert { color: var(--color-alert); }
+.pv-table tr.tot td { border-top: 1.5px solid var(--color-ink); font-weight: 700; height: 3.5rem; }
+.pv-head { height: 2.5rem; display: flex; align-items: center; justify-content: space-between; margin-bottom: .75rem; }
+.pv-h { font-family: var(--font-mono); font-size: .9375rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: var(--color-ink); }
+.pv-head .rng { display: flex; gap: 1.5rem; }
+.pv-head .rng button { all: unset; cursor: pointer; font-family: var(--font-mono); font-size: .8125rem; letter-spacing: .1em; color: var(--color-stone); padding: .375rem 0; }
+.pv-head .rng button[aria-pressed="true"] { color: var(--color-ink); font-weight: 700; box-shadow: inset 0 -2px 0 var(--color-emerald); }
+.pv-chart { display: flex; flex-direction: column; }
+.pv-plot { position: relative; margin: 1rem 9rem 0 0; }
+.pv-plot svg { display: block; width: 100%; overflow: visible; }
+.pv-base { position: absolute; left: 100%; margin-left: 1rem; font-family: var(--font-mono); font-size: .75rem; color: var(--color-stone); white-space: nowrap; }
+.pv-ax { display: flex; justify-content: space-between; margin: .75rem 9rem 0 0; font-family: var(--font-mono); font-size: .75rem; letter-spacing: .1em; color: var(--color-stone); }
+@media (max-width: 600px) {
+  .pv-hero, .pv-body { grid-template-columns: 1fr; gap: 2rem; }
+  .pv-pair::before { display: none; }
+  .pv-stat + .pv-stat { padding-left: 1.25rem; }
+  .pv-num { font-size: 2.5rem; }
+  .pv-num.na { font-size: 1.8rem; }
+  .pv-total .sum { font-size: 3.75rem; }
+  .pv-body { margin-top: 2.5rem; }
+  .pv-body > .pv-chart { order: -1; }
+  .pv-h { display: none; }
+  .pv-left .pv-head { display: none; }
+  .pv-head { justify-content: flex-end; margin: 0; }
+  .pv-plot { margin-right: 6rem; }
+  .pv-ax { margin-right: 6rem; }
+}
+
+.site-mark { display: inline-flex; flex: none; opacity: .9; }
+.site-mark:hover { opacity: 1; }
