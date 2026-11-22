@@ -6,6 +6,7 @@ import { metricsSignature } from '@mamoru/operator-auth'
 import { classifyEngineError, EngineHealthTracker, RpcMetrics } from '../src/metrics.ts'
 import type { Operator } from '../src/operator.ts'
 import { startServer } from '../src/server.ts'
+import { QuotaBook } from '../src/quota.ts'
 import { baseRegistry } from '@mamoru/registry'
 
 type MetricsPayload = {
@@ -68,6 +69,38 @@ function boot() {
   const server = startServer(op, { secret: SECRET, hostname: '127.0.0.1', port: 0, rpcMetrics, gitSha: '5efba44', bootedAt: Date.now() - 123_000 })
   return { server, base: `http://127.0.0.1:${server.port}` }
 }
+
+describe('GET /metrics provider states and budgets (otto/mamoru#418)', () => {
+  test('each provider by host-free label with its state, and its use against its monthly budget; no URL or key anywhere', async () => {
+    const op = fakeOperator()
+    const rpcMetrics = new RpcMetrics(tmpDir())
+    rpcMetrics.recordRequest('alchemy.com', 'eth_call', false)
+    const quota = new QuotaBook()
+    const spent = 'https://base-mainnet.g.alchemy.com/v2/secret-key-1'
+    quota.register(spent, 'alchemy.com', 'chain')
+    quota.register('https://abc.base-mainnet.quiknode.pro/secret-key-2/', 'quiknode.pro', 'chain')
+    quota.mark(spent, 'alchemy.com', 'Monthly capacity limit exceeded', Date.UTC(2030, 0, 1))
+    const server = startServer(op, { secret: SECRET, hostname: '127.0.0.1', port: 0, rpcMetrics, quota, gitSha: '5efba44', bootedAt: Date.now() })
+    try {
+      const sig = await metricsSignature(SECRET, 'GET', '/metrics', Math.floor(Date.now() / 60_000))
+      const res = await fetch(`http://127.0.0.1:${server.port}/metrics`, { headers: { 'x-mamoru-sig': sig } })
+      const text = await res.text()
+      expect(text).not.toContain('secret-key')
+      expect(text).not.toContain('base-mainnet')
+      const rpc = (JSON.parse(text) as { rpc: { providers: unknown[]; budget: { provider: string; used: number; budget: number | null; unit: string }[] } }).rpc
+      expect(rpc.providers).toEqual([
+        { proxy: 'chain', label: 'alchemy.com', state: 'exhausted', until: '2030-01-01T00:00:00.000Z' },
+        { proxy: 'chain', label: 'quiknode.pro', state: 'ok', until: null },
+      ])
+      expect(rpc.budget.map((b) => [b.provider, b.used, b.budget, b.unit])).toEqual([
+        ['alchemy.com', 26, 30_000_000, 'cu'],
+        ['quiknode.pro', 0, 80_000_000, 'credits'],
+      ])
+    } finally {
+      server.stop(true)
+    }
+  })
+})
 
 describe('GET /metrics auth', () => {
   test('a correctly-signed request for the current minute is accepted', async () => {

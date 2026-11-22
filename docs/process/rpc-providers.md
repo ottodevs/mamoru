@@ -8,6 +8,38 @@ token is ever written in this repository, in a ticket or in a log.
 | Operator | Base (8453) | `RPC_URL`, `MAMORU_RPC_FALLBACKS`, `MAMORU_RPC_TRUSTED` in the operator env file | Alchemy, then QuickNode, then public nodes (never for decision reads) |
 | App Worker (`mamoru-app`, `mamoru-app-beta`) | Ethereum (1), read-only, wrong-network notice | secret `ETHEREUM_RPC_URLS` | Alchemy, then QuickNode |
 
+## Operator: quotas, budgets and the read spread
+
+Set in the operator env file, read at boot. Labels are host-free: the provider's registrable domain
+(`alchemy.com`, `quiknode.pro`), with `#1`, `#2` when one proxy has several keys of it.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `MAMORU_RPC_WEIGHTS` | 1 each | `quiknode.pro=3,alchemy.com=1`: the share of pinned reads (and heads) each trusted provider starts, by label or domain. 0 keeps a provider out of the spread; it stays a fallback. |
+| `MAMORU_RPC_MONTHLY_BUDGET` | `alchemy.com=30000000,quiknode.pro=80000000` | Units per quota cycle by domain: Alchemy CU, QuickNode credits, requests for any other. Merged over the defaults; 0 turns one off. |
+| `MAMORU_RPC_QUOTA_RESET_DAY` | 1 | `quiknode.pro=14`: the day of the month (UTC, 1 to 28) a provider's quota resets on, its billing cycle. |
+
+- **Spent quota.** An answer that says the plan is spent (Alchemy's 429 "Monthly capacity limit exceeded", a 402,
+  "insufficient credits", "quota exceeded") parks that provider until its reset: the time the answer gives (a
+  `Retry-After` header, a date after "reset" in the message, within 40 days), else the next reset day at 00:00 UTC.
+  One request a day asks it again, and a good answer clears the mark. The mark is kept in `stateDir/rpc-quota.json`
+  by a hash of the URL. One `[alert]` line on the first refusal. When every provider a call may use is parked, one
+  request a minute asks one of them; every other request fails at once with "every provider for this call is out of
+  quota until ...", without a request.
+- **Burst limit or failure.** An ordinary 429 keeps the provider out of the read spread for 10 s, a 5xx or a timeout
+  for 30 s; it is still asked after the others. A method the provider does not serve, or a range it refuses, is not a
+  failure.
+- **Budget.** Each provider's use in its cycle is counted (`stateDir/rpc-usage.json`, `budget`). One `[alert]` line at
+  70% and one at 90% per cycle, with the forecast date at the cycle's average rate. Only the Base proxy is counted;
+  the Monad and Ethereum proxies of the operator are not.
+- **Spread.** A read pinned to a block, and `eth_blockNumber`, start at a trusted provider drawn by weight among those
+  not cooling. A read pinned to block N starts only at a provider that has shown block N (its head, or a block it
+  returned), so a read and the simulation of the same decision see a block every provider asked has. For 30 s the
+  served head does not step back when a provider behind the last one answers. Reads by tag or hash (nonces,
+  receipts), sends and `eth_getLogs` keep the order they had. Public fallbacks never serve a decision read.
+- `/metrics` `rpc.providers`: each provider of each proxy (`chain`, `monad`, `l1`) as `ok`, `burst_limited`,
+  `failing` or `exhausted`, with `until`. `rpc.budget`: use, budget, percentage, cycle, reset and forecast by domain.
+
 ## App Worker: `ETHEREUM_RPC_URLS`
 
 - A list of `https` URLs separated by commas, tried in the order written. At most three are used; anything

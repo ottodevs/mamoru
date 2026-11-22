@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { BudgetBook, type BudgetSnapshot } from './rpc-budget.ts'
 
 // ---- Alchemy compute-unit estimate -----------------------------------------------------------
 
@@ -327,8 +328,12 @@ export class RpcMetrics {
   /** Log ranges per provider since this process started (in memory only, like the engine health). */
   private logRanges = new Map<string, LogRangeCounters>()
 
-  constructor(private readonly stateDir: string) {
+  /** otto/mamoru#418: each provider's use in its quota cycle against its monthly budget, persisted with the counters. */
+  private readonly budget: BudgetBook
+
+  constructor(private readonly stateDir: string, budget?: BudgetBook) {
     this.file = join(stateDir, 'rpc-usage.json')
+    this.budget = budget ?? new BudgetBook()
     this.load()
   }
 
@@ -337,6 +342,7 @@ export class RpcMetrics {
     try {
       const raw = JSON.parse(readFileSync(this.file, 'utf8')) as { cumulative?: unknown; ring?: unknown }
       if (raw.cumulative && typeof raw.cumulative === 'object' && !Array.isArray(raw.cumulative)) this.cumulative.load(raw.cumulative as RpcSnapshot)
+      this.budget.load((raw as { budget?: unknown }).budget)
       const comp = (raw as { components?: { cumulative?: unknown; ring?: unknown } }).components
       if (comp?.cumulative && typeof comp.cumulative === 'object' && !Array.isArray(comp.cumulative)) this.byComponent.load(comp.cumulative as RpcSnapshot)
       if (Array.isArray(comp?.ring)) {
@@ -408,7 +414,9 @@ export class RpcMetrics {
       c.requests++
       c.cuEstimate += cu
     }
-    this.maybePersist(now)
+    // An alert line crossed is saved at once: a restart must not page again for it.
+    if (this.budget.record(provider, method, now)) this.persist(now)
+    else this.maybePersist(now)
   }
 
   recordError(provider: string, method: string, cls: ErrorClass, now: number = Date.now()): void {
@@ -446,7 +454,7 @@ export class RpcMetrics {
         cumulative: this.byComponent.toJSON(),
         ring: [...this.byComponentRing.entries()].sort(([a], [b]) => a - b).map(([hourStart, b]) => ({ hourStart, data: b.toJSON() })),
       }
-      writeFileSync(tmp, JSON.stringify({ cumulative: this.cumulative.toJSON(), ring, components }, null, 1), { mode: 0o600 })
+      writeFileSync(tmp, JSON.stringify({ cumulative: this.cumulative.toJSON(), ring, components, budget: this.budget.toJSON() }, null, 1), { mode: 0o600 })
       renameSync(tmp, this.file)
     } catch (e) {
       console.error(`[metrics] failed to persist ${this.file}: ${redactedLine(e)}`)
@@ -461,6 +469,11 @@ export class RpcMetrics {
   /** QuickNode API credits spent in the clock hour of `now` (requests to quiknode.pro providers, at a flat rate). */
   creditsThisHour(now: number = Date.now()): number {
     return (this.ring.get(Math.floor(now / HOUR_MS) * HOUR_MS)?.requestsOf(isQuickNode) ?? 0) * QUICKNODE_CREDITS_PER_CALL
+  }
+
+  /** otto/mamoru#418: each provider's use in its current quota cycle against its monthly budget, with a forecast. */
+  budgetSnapshot(now: number = Date.now()): BudgetSnapshot {
+    return this.budget.snapshot(now)
   }
 
   cuEstimateTotal(): number {

@@ -116,8 +116,13 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
       logRanges: rpc.logRanges,
       // The same requests by component (engine reviews, armed watcher, operator, relayer) and method.
       byComponent: rpc.byComponent,
-      // otto/mamoru#418: providers passed over because their quota is spent, with when they are asked again.
+      // otto/mamoru#418: providers passed over because their quota is spent, until their reset, with when they are asked again.
       quota: quota?.snapshot() ?? [],
+      // otto/mamoru#418, #420: every provider of each proxy by host-free label: ok, burst_limited, failing (a few seconds out
+      // of the read spread) or exhausted (until its reset).
+      providers: quota?.providers() ?? [],
+      // otto/mamoru#418: each provider's use in its quota cycle against its monthly budget, with the forecast exhaustion.
+      budget: rpcMetrics.budgetSnapshot?.() ?? [],
       // otto/mamoru#419: reads answered without a provider, per proxy: shared while in flight, and kept under the finalized block.
       cache: rpcCache?.() ?? null,
       note: 'cuEstimate is a static per-method estimate (see metrics.ts CU_TABLE), not Alchemy\'s billed figure',

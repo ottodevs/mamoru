@@ -688,6 +688,7 @@ export async function bootOperator(o: BootOptions) {
       idleTimeoutSec: SIDE_IDLE_TIMEOUT_SEC,
       chainId: BRIDGE_MONAD_CHAIN_ID,
       quota,
+      name: 'monad',
       readCache: true,
     })
     const monadUrl = `${monadProxy.url}c/bridge-monad`
@@ -921,6 +922,7 @@ export async function bootOperator(o: BootOptions) {
       idleTimeoutSec: SIDE_IDLE_TIMEOUT_SEC,
       chainId: ETHEREUM_CHAIN_ID,
       quota,
+      name: 'l1',
       readCache: true,
     })
     const l1Url = `${l1Proxy.url}c/bridge-out`

@@ -131,6 +131,11 @@ account keys are shortened to 8 chars. Example (values illustrative):
   not have the block). A rejected range is read whole by the next provider; when none is accepted the
   review fails with `OBS_RPC_UNAVAILABLE`. A rising `no_witness` means reviews are failing for lack of a
   second provider that answers.
+- **Provider states and budgets** (otto/mamoru#418, #420): `rpc.providers` lists each provider of each proxy by
+  host-free label as `ok`, `burst_limited` (10 s), `failing` (30 s) or `exhausted` (until its quota resets);
+  `rpc.quota` keeps the exhausted ones with their next recheck. `rpc.budget` is each provider domain's use in its
+  quota cycle against `MAMORU_RPC_MONTHLY_BUDGET`, with `forecastExhaustedAt` at the cycle's average rate
+  (`countedSince` later than `cycleStart` means the count began mid-cycle). See `docs/process/rpc-providers.md`.
 - **Persistence**: the cumulative counters and the 48h ring are both persisted to
   `stateDir/rpc-usage.json`, written atomically (tmp file + rename, 0600) at most once a minute and once
   more on a clean shutdown, so a restart does not lose history. The 48h ring is sparse (only hours with

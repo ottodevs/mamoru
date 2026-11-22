@@ -1,10 +1,10 @@
 import type { Server } from 'bun'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { ReadCache, blockParam as pinnedBlockParam, type ReadCacheStats } from './read-cache.ts'
+import { ReadCache, blockParam as pinnedBlockParam, isRead, pinnedBlock, type ReadCacheStats } from './read-cache.ts'
 
 const TRACE_TAGS = new Set(['latest', 'pending', 'safe', 'finalized', 'earliest'])
 import { classifyRpcError, componentOf, redactSecrets, safeMetrics, type Component, type LogRangeOutcome, type RpcMetrics } from './metrics.ts'
-import { QuotaBook, quotaExhausted } from './quota.ts'
+import { domainOfLabel, nextReset, QuotaBook, quotaExhausted, resetDaysFromEnv, resetFromAnswer } from './quota.ts'
 
 type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
 
@@ -118,6 +118,36 @@ export function trustedFromEnv(env: Env = process.env): string[] {
   return (env.MAMORU_RPC_TRUSTED ?? '').split(',').map((u) => u.trim()).filter(Boolean)
 }
 
+/**
+ * otto/mamoru#420: MAMORU_RPC_WEIGHTS="quiknode.pro=3,alchemy.com=1": the share of reads each trusted provider starts,
+ * by host-free label (`alchemy.com#2`) or provider domain (`alchemy.com`). A provider not named weighs 1; 0 keeps it
+ * out of the spread (it is still a fallback). Read when the proxy starts.
+ */
+export function weightsFromEnv(env: Env = process.env): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const pair of (env.MAMORU_RPC_WEIGHTS ?? '').split(',')) {
+    const [label, w] = pair.split('=').map((x) => x.trim())
+    const n = Number(w)
+    if (label && w && Number.isFinite(n) && n >= 0) out[label.toLowerCase()] = n
+  }
+  return out
+}
+
+/**
+ * The block a read is pinned to (#420): the explicit number of a state read or block read (as the read cache knows
+ * them), or of a simulation or gas estimate. Null for a tag, a hash or none.
+ */
+function pinnedAt(msg: { method: string; params?: unknown[] }): bigint | null {
+  const n = pinnedBlock(msg)
+  if (n !== null) return n
+  if (msg.method !== 'eth_simulateV1' && msg.method !== 'eth_estimateGas') return null
+  const p = msg.params?.[1]
+  return typeof p === 'string' && /^0x[0-9a-fA-F]+$/.test(p) ? BigInt(p) : null
+}
+
+/** How long a served head is held when a provider behind it answers a lower tip: the served head never steps back meanwhile. */
+const HEAD_HOLD_MS = 30_000
+
 /** How long a block hash answered by a trusted provider may witness a log range: one review's worth of requests. */
 const WITNESS_TTL_MS = 15_000
 
@@ -188,6 +218,8 @@ function retriable(status: number, body: any): boolean {
   if (status === 429 || status >= 500) return true
   const e = body?.error
   if (!e) return false
+  // otto/mamoru#418: a spent plan (a 402, "insufficient credits") is never the answer: another provider may have one.
+  if (quotaExhausted(status, e)) return true
   return e.code === 429 || e.code === -32005 || /rate|capacity|limit exceeded|compute units|too many|throughput|timeout|temporar/i.test(String(e.message)) || methodUnserved(e)
 }
 
@@ -293,6 +325,14 @@ export type RpcProxyOptions = {
   witnessTtlMs?: number
   /** otto/mamoru#418: providers out of quota, shared by every proxy of the operator; unset: a book of this proxy only, kept in memory. */
   quota?: QuotaBook
+  /** otto/mamoru#418: day of the month each provider's quota resets on, by domain; default MAMORU_RPC_QUOTA_RESET_DAY (else the 1st). */
+  quotaResetDays?: Record<string, number>
+  /** otto/mamoru#420: read weights by label or domain; default MAMORU_RPC_WEIGHTS (else 1 each). */
+  weights?: Record<string, number>
+  /** Tests: the draw for the weighted spread, in [0, 1). */
+  random?: () => number
+  /** This proxy's name in /metrics (`chain`, `monad`, `l1`). */
+  name?: string
   /** otto/mamoru#419: share identical reads in flight and keep pinned reads under the finalized block (default off; the operator's boot turns it on). */
   readCache?: boolean
   /** Tests: the upstream transport. */
@@ -371,19 +411,35 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const maxLogRange = opts.maxLogRange ?? Number(process.env.MAMORU_LOG_RANGE ?? 10)
   const metrics = opts.metrics
   const quota = opts.quota ?? new QuotaBook()
-  /** otto/mamoru#418: a refusal that says the quota is spent marks the provider; any good answer clears it. */
-  const noteQuota = (url: string, sentAt: number, status: number | undefined, err: any) => {
-    if (!err) quota.clear(url, sentAt)
-    else if (quotaExhausted(status, err)) quota.mark(url, labelOf(url), providerWords(err?.message).slice(0, 60))
+  const resetDays = opts.quotaResetDays ?? resetDaysFromEnv()
+  /**
+   * otto/mamoru#418: a refusal that says the quota is spent parks the provider until its reset (the time its answer
+   * gives, else its cycle's: Alchemy the first of the month, UTC); any good answer clears it. #420: an ordinary rate
+   * limit or a failure takes it out of the read spread for a few seconds (a method it does not serve does not).
+   */
+  const noteQuota = (url: string, sentAt: number, status: number | undefined, err: any, retryAfter?: string | null) => {
+    if (!err) return quota.clear(url, sentAt)
+    const label = labelOf(url)
+    if (quotaExhausted(status, err)) {
+      const now = Date.now()
+      quota.mark(url, label, providerWords(err?.message).slice(0, 60), resetFromAnswer(err?.message, retryAfter, now) ?? nextReset(domainOfLabel(label), now, resetDays), now)
+    } else if (!methodUnserved(err) && !RANGE_REFUSAL.test(String(err?.message ?? '')) && (status === undefined || retriable(status, { error: err }))) quota.backoff(url, label, classifyRpcError(status, err) === 'rateCapacity' ? 'burst_limited' : 'failing')
   }
   /**
-   * The providers of `list` not out of quota; all of them when every one is (a spent provider still beats none). Then
-   * there is no recheck gate on purpose: every request needs an answer and none can come from elsewhere, and a refused
-   * request spends no quota; the first good answer clears the mark and the normal path is back.
+   * The providers of `list` not out of quota. When every one is, only one request a minute asks one of them (a refusal
+   * misread as a quota, or a plan raised, is found within the minute); every other request gets an empty list and fails
+   * at once: there is nowhere else a decision read may come from, and asking a spent plan again answers nothing.
    */
   const live = <T>(list: T[], urlOf: (x: T) => string): T[] => {
     const up = list.filter((x) => !quota.skip(urlOf(x)))
-    return up.length ? up : list
+    if (up.length || !list.length) return up
+    const probe = quota.probeOne(list.map(urlOf))
+    return probe === null ? [] : list.filter((x) => urlOf(x) === probe)
+  }
+  /** The answer when every provider of a call is out of quota: when the first of them resets. Never names a URL. */
+  const allSpent = (urls: readonly string[], id: unknown) => {
+    const at = Math.min(...urls.map((u) => quota.until(u) ?? Number.POSITIVE_INFINITY))
+    return { jsonrpc: '2.0', id: id ?? null, error: { code: 429, message: `every provider for this call is out of quota${Number.isFinite(at) ? ` until ${new Date(at).toISOString()}` : ''}` } }
   }
   /** The component that made the request being served: the path the proxy was called on (`/c/<component>`), for the counters only. */
   const caller = new AsyncLocalStorage<Component>()
@@ -401,17 +457,74 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const providers = local ? [upstream] : [...trusted, ...fallbacks.filter((f) => !trusted.includes(f))]
   const labels = labelProviders(providers)
   const labelOf = (url: string) => labels.get(url) ?? registrableDomain(new URL(url).hostname)
+  for (const url of providers) quota.register(url, labelOf(url), opts.name ?? 'chain')
+  /** otto/mamoru#420: each trusted provider's read weight, by its label first, then its domain; 1 when not named. */
+  const weightTable = opts.weights ?? weightsFromEnv()
+  const weightOf = (url: string): number => {
+    const label = labelOf(url).toLowerCase()
+    return weightTable[label] ?? weightTable[domainOfLabel(label)] ?? 1
+  }
+  const random = opts.random ?? Math.random
+  /**
+   * otto/mamoru#420: the highest block each provider has shown it has (its eth_blockNumber, a block it returned). A read
+   * pinned to block N starts only at a provider that has shown N: the head the proxy served came from one provider, and a
+   * provider behind it would answer the same decision on a block it does not have ("0x", null, "header not found").
+   */
+  const tips = new Map<string, bigint>()
+  const noteTip = (url: string, n: unknown) => {
+    if (typeof n !== 'string' || !/^0x[0-9a-fA-F]+$/.test(n)) return
+    const v = BigInt(n)
+    if ((tips.get(url) ?? -1n) < v) tips.set(url, v)
+  }
   const logRanges = opts.logRanges ?? logRangesFromEnv()
   // The upstream keeps its setting (Alchemy or MAMORU_LOG_RANGE: chunks of maxLogRange); every other provider has its own range.
   const logProviders = providers.map((url, i) => ({ url, logRange: i === 0 && chunkLogs ? maxLogRange : logRangeOf(url, logRanges) }))
-  async function post(url: string, body: unknown, timeoutMs = providerTimeoutMs): Promise<{ status: number; json: any }> {
+  async function post(url: string, body: unknown, timeoutMs = providerTimeoutMs): Promise<{ status: number; json: any; retryAfter: string | null }> {
     const res = await send(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) })
     let json: any = null
     try {
       json = await res.json()
     } catch {}
-    return { status: res.status, json }
+    return { status: res.status, json, retryAfter: res.headers?.get?.('retry-after') ?? null }
   }
+  /**
+   * otto/mamoru#420: the provider that answered each head the proxy served, by block number (the last HEAD_SOURCES).
+   * A decision reads the head once and pins every read and its guard simulation to it: they all start at the provider
+   * that gave that head, so one decision sees one provider's view of that block, never two forks of it. The spread is
+   * by head: each eth_blockNumber is drawn by weight.
+   */
+  const headSource = new Map<string, string>()
+  const HEAD_SOURCES = 512
+  // The first provider to give a head keeps it: a decision that already read it is pinned there.
+  const noteHeadSource = (n: bigint, url: string) => {
+    if (headSource.has(String(n))) return
+    headSource.set(String(n), url)
+    while (headSource.size > HEAD_SOURCES) headSource.delete(headSource.keys().next().value as string)
+  }
+  /**
+   * otto/mamoru#420: the order a read tries the trusted providers in. A read pinned to a head the proxy served starts at
+   * the provider that served it, while that one is not cooling. Otherwise the first is drawn by weight among those not
+   * cooling (burst limit, failure) that, for a read pinned to a block, have shown that block; the rest follow in the
+   * configured order, those of weight 0 last. No provider eligible: the configured order, as before.
+   */
+  function spread(base: string[], at: bigint | null): string[] {
+    const w = base.map((u) => (quota.cooling(u) || (at !== null && (tips.get(u) ?? -1n) < at) ? 0 : weightOf(u)))
+    const sticky = at === null ? undefined : headSource.get(String(at))
+    const s = sticky === undefined ? -1 : base.indexOf(sticky)
+    if (s >= 0 && !quota.cooling(sticky!)) return [sticky!, ...base.filter((_, j) => j !== s && w[j]! > 0), ...base.filter((_, j) => j !== s && w[j]! <= 0)]
+    const total = w.reduce((a, b) => a + b, 0)
+    if (!(total > 0)) return demote(base)
+    let r = random() * total
+    let pick = w.findIndex((x) => x > 0)
+    for (let i = 0; i < base.length; i++) {
+      if (w[i]! <= 0) continue
+      pick = i
+      if ((r -= w[i]!) < 0) break
+    }
+    return [base[pick]!, ...base.filter((_, j) => j !== pick && w[j]! > 0), ...base.filter((_, j) => j !== pick && w[j]! <= 0)]
+  }
+  /** The configured order with the providers in a short backoff moved to the end (still tried, after the others). */
+  const demote = (base: string[]): string[] => [...base.filter((u) => !quota.cooling(u)), ...base.filter((u) => quota.cooling(u))]
   /**
    * Block hashes a trusted provider answered in the last WITNESS_TTL_MS, by block number: the engine reads the
    * blocks of its observation through raw() right before it asks for logs, and that answer can witness a log
@@ -433,12 +546,27 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
    * On a rate/capacity refusal, move to the next provider at once; two passes over the list. The list is the
    * trusted providers, or every provider for a send. Always returns a result/error object.
    */
-  async function raw(body: any, isChunk = false, start = 0): Promise<any> {
+  async function raw(body: any, isChunk = false, start = 0, answered?: { url?: string }): Promise<any> {
     let last: any = null
-    const base = live(ANY_PROVIDER.has(body?.method) ? providers : trusted, (u) => u)
-    // `start` rotates the list: a retry asks the next provider first.
-    const list = [...base.slice(start % base.length), ...base.slice(0, start % base.length)]
-    const all = [...list, ...list]
+    const isSend = ANY_PROVIDER.has(body?.method)
+    const pool = isSend ? providers : trusted
+    const base = live(pool, (u) => u)
+    if (!base.length) return allSpent(pool, body?.id)
+    // `start` rotates the list: a retry asks the next provider first. A send keeps the configured order (#420: its
+    // fan-out is unchanged); a read pinned to a block, and the head itself, start at a provider drawn by weight.
+    const at = pinnedAt(body ?? {})
+    let list =
+      start > 0
+        ? [...base.slice(start % base.length), ...base.slice(0, start % base.length)]
+        : isSend
+          ? base
+          : (at !== null && isRead(body.method)) || body?.method === 'eth_blockNumber'
+            ? spread(base, at)
+            : demote(base)
+    // A spent provider let through to be asked again (its daily recheck, its reset) goes first, or it may never be asked.
+    if (list.some((u) => quota.down(u))) list = [...list.filter((u) => quota.down(u)), ...list.filter((u) => !quota.down(u))]
+    // The one request of a minute that asks a spent provider again (see `live`) is one request, not two passes.
+    const all = base.length === 1 && pool.every((u) => quota.down(u)) ? list : [...list, ...list]
     for (const [pi, url] of all.entries()) {
       const label = labelOf(url)
       const tries = 1
@@ -450,15 +578,19 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
           if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk, Date.now(), caller.getStore()))
           const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
           if (errObj && metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(r.status, errObj)))
-          noteQuota(url, sentAt, r.status, errObj)
+          noteQuota(url, sentAt, r.status, errObj, r.retryAfter)
           if (wellFormed(r.json) && !retriable(r.status, r.json)) {
             if (body.method === 'eth_getBlockByNumber') remember(url, r.json.result)
+            if (body.method === 'eth_blockNumber') noteTip(url, r.json.result)
+            else if (body.method === 'eth_getBlockByNumber') noteTip(url, r.json.result?.number)
+            if (answered) answered.url = url
             return r.json
           }
           last = errObj
         } catch (e) {
           if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk, Date.now(), caller.getStore()))
           last = { code: -32603, message: (e as Error).message.split('\n')[0] }
+          quota.backoff(url, label, 'failing')
           if (metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(undefined, last)))
         }
         if (attempt + 1 < tries) await Bun.sleep(400 * 2 ** attempt)
@@ -485,7 +617,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   /** One request to one provider, no fallback: the result, or a throw carrying the RPC error. */
   async function ask(url: string, method: string, params: unknown[], isChunk = false, timeoutMs = providerTimeoutMs): Promise<any> {
     const label = labelOf(url)
-    let r: { status: number; json: any }
+    let r: { status: number; json: any; retryAfter: string | null }
     const sentAt = Date.now()
     try {
       r = await post(url, { jsonrpc: '2.0', id: ++id, method, params }, timeoutMs)
@@ -496,8 +628,11 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     }
     if (metrics) safeMetrics(() => metrics.recordRequest(label, method, isChunk, Date.now(), caller.getStore()))
     const rpc = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
-    noteQuota(url, sentAt, r.status, rpc)
-    if (!rpc) return r.json.result
+    noteQuota(url, sentAt, r.status, rpc, r.retryAfter)
+    if (!rpc) {
+      if (method === 'eth_getBlockByNumber') noteTip(url, r.json.result?.number)
+      return r.json.result
+    }
     if (metrics) safeMetrics(() => metrics.recordError(label, method, classifyRpcError(r.status, rpc)))
     throw Object.assign(new Error(String(rpc.message)), { rpc, status: r.status })
   }
@@ -644,7 +779,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     // Where set, never the keyed fallback for a range that takes it many requests (#367).
     const cap = opts.keyedLogMaxRequests
     const order = live(cap === undefined ? allowed : allowed.filter((x) => !trustedFallbacks.includes(x.p.url) || x.n <= cap), (x) => x.p.url).sort((a, b) => a.t - b.t || (a.n === b.n ? a.i - b.i : a.n < b.n ? -1 : 1))
-    let last: any = null
+    let last: any = order.length ? null : allSpent(allowed.map((x) => x.p.url), null).error
     // What the caller is told when nothing is accepted: a range that was read but not witnessed says more than a provider being down.
     let unwitnessed: any = null
     for (const [k, { p }] of [...order, ...order].entries()) {
@@ -672,10 +807,25 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   // A load-balanced provider answers from nodes a block or two apart: a head read from one node and a call pinned
   // to it on another gives "0x", null fields or "block not found". Serve `latest` a few blocks behind the tip.
   const lag = opts.headLag ?? BigInt(process.env.MAMORU_HEAD_LAG ?? 3)
+  /**
+   * otto/mamoru#420: the head comes from whichever trusted provider the spread drew, so a provider a block behind
+   * another could step the served head back. For HEAD_HOLD_MS a lower answer serves the last head again: every read
+   * pinned to it starts at a provider that has shown that block (see `tips`). Past that the provider's answer is taken
+   * as is, so one wrong answer cannot hold the head for longer.
+   */
+  let served: { n: bigint; at: number } | null = null
   async function head(): Promise<bigint> {
-    const tip = BigInt(await one('eth_blockNumber', []))
+    const answered: { url?: string } = {}
+    const r = await raw({ jsonrpc: '2.0', id: ++id, method: 'eth_blockNumber', params: [] }, false, 0, answered)
+    if (r.error) throw Object.assign(new Error(r.error.message), { rpc: r.error })
+    const tip = BigInt(r.result)
     cache?.noteHead(tip)
-    return tip - lag
+    const now = Date.now()
+    const n = tip - lag
+    if (served && n < served.n && now - served.at < HEAD_HOLD_MS && now >= served.at) return served.n
+    served = { n, at: now }
+    if (answered.url) noteHeadSource(n, answered.url)
+    return n
   }
   const cache = opts.readCache !== true ? null : new ReadCache(() => one('eth_getBlockByNumber', ['finalized', false]))
   // otto/mamoru#419: MAMORU_RPC_TRACE_SAMPLE=N logs one request in N with its component, method, block tag and, for a
