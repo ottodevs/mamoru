@@ -173,11 +173,18 @@ describe('clampSavings: never above what the Safe holds, and kept down', () => {
     expect(savingsOf(readOps, baseRegistry, { cuts: r.cuts }).vaults[VAULT]!.shares).toBe(held - 5n)
   })
 
-  test('review of #395: an unread deposit with no rate at all keeps its assets pending, and no cap is stored', () => {
-    const ops = [harvest(1, 10n * USDC), deposit(2, 10n * USDC, false)]
+  test('review of #395: an unread deposit with no rate keeps its assets pending; caps still hold once its receipt lands', () => {
+    // Harvest 10, a deposit of 4 unread and unpriced, 6 leave outside the books: the read holds 0.
+    const ops = [harvest(1, 10n * USDC), deposit(5, 4n * USDC, false)]
     const r = clampSavings(ops, baseRegistry, { block: 10, usdc: 0n, vaults: [] })
     expect(r.books.unpriced).toBe(true)
-    expect(r.cuts.cuts).toEqual([])
+    expect(r.books.pending).toBe(0n)
+    expect(r.cuts.cuts).toEqual([{ block: 10, usdc: '0' }])
+    // The owner deposits 100; the receipt is read: 10 - 4 = 6 under the cap of 0 at block 10, never 6 of the owner's.
+    const landed = [harvest(1, 10n * USDC), deposit(5, 4n * USDC)]
+    const later = clampSavings(landed, baseRegistry, { block: 14, usdc: 100n * USDC, vaults: read(sharesFor(4n * USDC)) }, r.cuts)
+    expect(later.books.pending).toBe(0n)
+    expect(later.books.vaults[VAULT]!.basis).toBe(4n * USDC)
     // With an earlier receipt of the same vault, its rate prices the new one.
     const withHistory = [harvest(1, 20n * USDC), deposit(2, 10n * USDC), deposit(3, 10n * USDC, false)]
     expect(savingsOf(withHistory, baseRegistry).vaults[VAULT]!.shares).toBe(2n * sharesFor(10n * USDC))

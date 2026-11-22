@@ -32,7 +32,7 @@ export type SavingsBooks = {
   vaults: Record<string, { shares: bigint; basis: bigint }>
   /** A savings op is confirmed whose receipt is not read yet: a figure may be short until it is. */
   partial: boolean
-  /** A savings deposit not read yet could not be priced (its vault unread, no earlier rate): no cap is stored meanwhile. */
+  /** A savings deposit not read yet could not be priced (its vault unread, no earlier rate): its assets are still pending. */
   unpriced?: true
 }
 
@@ -173,7 +173,8 @@ export function savingsOf(ops: readonly StoredOp[], registry: Registry, opts: { 
       const r = vault ? opts.rates?.find((v) => v.name === vault) : undefined
       const rate = r && r.assets > 0n ? r : vault ? lastRate.get(vault) : undefined
       if (!vault || !rate || assets === 0n) {
-        // No rate at all (review of #395): the assets stay pending rather than vanish; no cap is stored meanwhile.
+        // No rate at all (review of #395): the assets stay pending rather than vanish. Caps still apply: when the receipt
+        // is read, its deposit runs before any cap of a later block, which then bounds the result.
         unpriced = true
         continue
       }
@@ -194,8 +195,6 @@ export function clampSavings(ops: readonly StoredOp[], registry: Registry, read:
   const first = savingsOf(ops, registry, { atBlock: read.block, rates: read.vaults, cuts: stored })
   // Caps of an older epoch are dropped: a Stop emptied what they applied to.
   const kept: SavingsCuts = { epoch: first.epoch, cuts: stored?.epoch === first.epoch ? [...stored.cuts] : [] }
-  // A deposit that could not be priced keeps its assets in pending for now: no cap from books known to be off.
-  if (first.unpriced) return { books: clipBooks(first, read.usdc, read.vaults), cuts: kept }
   const cut: SavingsCut = { block: read.block }
   // A balance the read did not return is no sign the USDC left (review of #395): no cap from a missing entry.
   if (read.usdc !== undefined && first.pending > read.usdc) cut.usdc = read.usdc.toString()
