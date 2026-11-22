@@ -216,13 +216,16 @@ describe('vault growth in the fee (otto/mamoru#433)', () => {
     // 100 in for 100 shares; 40 shares redeemed for 50 (realized 10); 60 left worth 72 (unrealized 12): growth 22.
     const ops = [flow('deposit', 100_000_000n, 100_000_000n, D1), flow('withdraw', 50_000_000n, 40_000_000n, D2)]
     expect(vaultGrowth(ops, input(60_000_000n, 72_000_000n))).toBe(22_000_000n)
-    // The same without the redemption having been read yet: the held shares cap the tracked ones (under-charges).
-    expect(vaultGrowth([ops[0]!], input(60_000_000n, 72_000_000n))).toBe(12_000_000n)
+    // The redemption not read: the flows explain more shares than held, the history does not reconcile, nothing is charged.
+    expect(vaultGrowth([ops[0]!], input(60_000_000n, 72_000_000n))).toBe(0n)
   })
 
   test('no double charge with collected fees: a harvest swept into the vault has its entry value as basis', () => {
     // 10 USDC of fees collected (fee 1), swept in at 10 (basis 10), still 10 a day later: no vault growth.
-    const ops = [harvest(D1, '10000000'), flow('deposit', 10_000_000n, 10_000_000n, D1)]
+    const h = harvest(D1, '10000000')
+    h.facts!.txHash = h.txHash
+    h.facts!.v = 2
+    const ops = [h, flow('deposit', 10_000_000n, 10_000_000n, D1)]
     expect(yieldFee(ops, undefined, undefined, 0n, input(10_000_000n, 10_000_000n))).toMatchObject({ collectedUsdc: 10_000_000n, vaultGrowthUsdc: 0n, feeUsdc: 1_000_000n })
     // It then grows by 1: only the growth adds to the base.
     expect(yieldFee(ops, undefined, undefined, 0n, input(10_000_000n, 11_000_000n))).toMatchObject({ vaultGrowthUsdc: 1_000_000n, feeUsdc: 1_100_000n })
@@ -238,7 +241,7 @@ describe('vault growth in the fee (otto/mamoru#433)', () => {
     expect(vaultGrowth([flow('deposit', 1n, 1n, '2026-11-04T00:00:00.000Z')], input(1n, 100n, '2026-11-01T00:00:00.000Z'))).toBe(0n)
     // A loss refunds nothing and is not netted against another vault's growth.
     expect(vaultGrowth([flow('deposit', 100_000_000n, 100_000_000n, D1)], input(100_000_000n, 90_000_000n))).toBe(0n)
-    // An unreadable vault counts only what it realized; an absent start counts none.
+    // An unreadable vault counts nothing (its unknown loss could be hiding); an absent start counts none.
     expect(vaultGrowth([flow('deposit', 100n, 100n, D1)], { from: FROM, now: [] })).toBe(0n)
     expect(vaultGrowth([flow('deposit', 100n, 100n, D1)], { from: 'bad', now: [{ name: V, shares: 100n, assets: 200n }] })).toBe(0n)
     expect(yieldFee([flow('deposit', 100n, 100n, D1)]).vaultGrowthUsdc).toBe(0n)
@@ -254,5 +257,37 @@ describe('vault growth in the fee (otto/mamoru#433)', () => {
 
   test('a redemption below the fee minimum owes nothing', () => {
     expect(yieldFee([flow('deposit', 1_000_000n, 1_000_000n, D1)], undefined, undefined, 0n, input(1_000_000n, 1_050_000n)).owedUsdc).toBe(0n)
+  })
+
+  test('review of #383: an unread or out-of-scope redemption never turns principal into growth', () => {
+    const dep1 = flow('deposit', 100_000_000n, 100_000_000n, D1)
+    const dep2 = flow('deposit', 200_000_000n, 100_000_000n, D2 + '')
+    // Redeemed whole at 100, then 100 shares bought for 200: held 100 shares worth 200, no yield at all.
+    const full = flow('withdraw', 100_000_000n, 100_000_000n, '2026-11-24T12:00:00.000Z')
+    expect(vaultGrowth([dep1, full, dep2], input(100_000_000n, 200_000_000n))).toBe(0n)
+    // Receipt of the redemption missing: nothing charged until it is read.
+    expect(vaultGrowth([dep1, dep2], input(100_000_000n, 200_000_000n))).toBe(0n)
+    const unread = { ...full, facts: undefined } as StoredOp
+    expect(vaultGrowth([dep1, unread, dep2], input(100_000_000n, 200_000_000n))).toBe(0n)
+    // Redemption out of the fee's scope still retires the basis.
+    const outScope = flow('withdraw', 100_000_000n, 100_000_000n, '2026-11-24T12:00:00.000Z', { feeable: false })
+    expect(vaultGrowth([dep1, outScope, dep2], input(100_000_000n, 200_000_000n))).toBe(0n)
+    // Only the in-scope part is charged: redeem half out of scope (gain forgone), the rest grows by 10.
+    const half = flow('withdraw', 60_000_000n, 50_000_000n, D2, { feeable: false })
+    expect(vaultGrowth([dep1, half], input(50_000_000n, 60_000_000n))).toBe(10_000_000n)
+  })
+
+  test('review of #383: an unreadable vault never adds a fee after a loss was counted', () => {
+    const ops = [flow('deposit', 100_000_000n, 100_000_000n, D1), flow('withdraw', 100_000_000n, 50_000_000n, D2)]
+    expect(vaultGrowth(ops, input(50_000_000n, 25_000_000n))).toBe(25_000_000n)
+    expect(vaultGrowth(ops, { from: FROM, now: [] })).toBe(0n)
+  })
+
+  test('review of #383: copies of one transaction must all be in scope', () => {
+    const a = flow('deposit', 100_000_000n, 100_000_000n, D1, { tx: '0xbb' })
+    const other = { ...flow('deposit', 1n, 1n, D1, { tx: '0xbb', feeable: false }), opId: 'eng-other' } as StoredOp
+    other.facts!.vaultFlows = []
+    expect(vaultGrowth([a], input(100_000_000n, 120_000_000n))).toBe(20_000_000n)
+    expect(vaultGrowth([a, other], input(100_000_000n, 120_000_000n))).toBe(0n)
   })
 })

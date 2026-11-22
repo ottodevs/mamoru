@@ -17,7 +17,7 @@
 // uncharged. See vaultGrowth below for the basis rules.
 
 import type { StoredOp } from './state.ts'
-import { distinctFees, FACTS_VERSION, type VaultFlow } from './yield-receipts.ts'
+import { distinctFees, FACTS_VERSION, needsFacts, type VaultFlow } from './yield-receipts.ts'
 
 /** 10 % of the yield, in basis points. */
 export const YIELD_FEE_BPS = 1_000n
@@ -56,7 +56,7 @@ export type VaultNow = { name: string; shares: bigint; assets: bigint }
 /**
  * otto/mamoru#433: what the vault fee needs. `from` is when the operator started charging vault growth (ISO, stamped once
  * on the first boot that has this code: nothing earlier is ever charged). `now` holds the vaults read at the same block as
- * the withdrawal; a vault absent from it (unreadable) counts only what its redemptions already realized.
+ * the withdrawal; a vault absent from it (unreadable) counts nothing.
  */
 export type VaultFeeInput = { from: string; now: readonly VaultNow[] }
 
@@ -65,59 +65,82 @@ const ceilDiv = (a: bigint, b: bigint): bigint => (a + b - 1n) / b
 /**
  * otto/mamoru#433: growth of the account's vault shares, raw USDC, per vault summed.
  *
- * Cost basis is kept by average cost over the account's own flows (ERC-4626 Deposit/Withdraw of its shares, read from
- * receipts) that were taken while the account was in the fee's scope (`feeable`, every copy of the transaction) and are
- * dated at or after both YIELD_FEE_FROM and `input.from`: a deposit's basis is its assets at entry, so USDC a harvest
- * swept into a vault (already charged when collected) is never charged twice. A redemption realizes
- * assets − the basis of the shares it burns; what is still held is valued at its share price now, less its basis.
- * Per vault the total is realized + unrealized, never below zero, so a loss on a vault is not netted against another's
- * gain and a drop in price never refunds. When in doubt the owner is not charged: shares held before the start have no
- * basis and no growth (a redemption of more shares than tracked realizes nothing on the excess), the held shares cap the
- * tracked ones (a redemption not read yet is never counted as growth), basis rounds up, value rounds down.
+ * Every flow of the account (ERC-4626 Deposit/Withdraw of its shares, from receipts) keeps the share inventory right;
+ * only some are *counted*: those of a transaction every stored copy of which was read in the fee's scope (`feeable`) and
+ * dated at or after both YIELD_FEE_FROM and `input.from`. Counted deposits form the tracked lot: its basis is the assets
+ * at entry, so USDC a harvest swept into a vault (charged when collected) is never charged twice. Any redemption burns
+ * the tracked lot pro rata to the shares it holds in the vault (counted or not, so basis retires with the shares); only a
+ * counted one realizes assets minus the basis it burns. What is still held is valued at the share price of `input.now`.
+ * Per vault the total is realized + unrealized, never below zero.
+ *
+ * A vault contributes nothing (the owner is not charged) unless its history reconciles: no receipt of the account is
+ * still unread, the vault was read, and the flows never burn more shares than the inventory holds nor leave more than
+ * the account holds now. Shares held before the first flow read are an uncounted opening lot: no basis, no growth.
+ * Basis rounds up, value and realized assets round down.
  */
 export function vaultGrowth(ops: readonly StoredOp[], input: VaultFeeInput): bigint {
   const since = Math.max(Date.parse(YIELD_FEE_FROM), Date.parse(input.from))
   if (!Number.isFinite(since)) return 0n
-  // One flow per transaction log (two stored ops can read the same transaction); counted only if every copy was feeable.
-  const byId = new Map<string, { flow: VaultFlow; t: number; block: number; feeable: boolean }>()
+  // A receipt still to be read can hold a flow: the history is not whole.
+  if (ops.some(needsFacts)) return 0n
+  // A transaction counts only when every stored copy of it was read in scope.
+  const txFeeable = new Map<string, boolean>()
+  for (const op of ops) {
+    const tx = (op.txHash ?? op.facts?.txHash)?.toLowerCase()
+    if (tx) txFeeable.set(tx, (txFeeable.get(tx) ?? true) && op.facts?.feeable === true && op.facts.txHash?.toLowerCase() === tx)
+  }
+  const byId = new Map<string, { flow: VaultFlow; t: number; block: number; counted: boolean }>()
   for (const op of ops) {
     const f = op.facts
     if (!f?.txHash || (f.v ?? 1) < FACTS_VERSION) continue
+    const tx = f.txHash.toLowerCase()
     const t = Date.parse(f.at)
     for (const flow of f.vaultFlows ?? []) {
-      const id = `${f.txHash.toLowerCase()}:${flow.logIndex}`
-      const prev = byId.get(id)
-      if (prev) prev.feeable &&= f.feeable === true
-      else byId.set(id, { flow, t, block: Number(f.block ?? 0), feeable: f.feeable === true })
+      const id = `${tx}:${flow.logIndex}`
+      if (!byId.has(id)) byId.set(id, { flow, t, block: Number(f.block ?? 0), counted: txFeeable.get(tx) === true && t >= since })
     }
   }
-  const flows = [...byId.values()].filter((x) => x.feeable && x.t >= since).sort((a, b) => a.t - b.t || a.block - b.block || a.flow.logIndex - b.flow.logIndex)
-  const book = new Map<string, { shares: bigint; basis: bigint; realized: bigint }>()
-  for (const { flow } of flows) {
-    const b = book.get(flow.vault) ?? { shares: 0n, basis: 0n, realized: 0n }
-    const shares = BigInt(flow.shares)
-    const assets = BigInt(flow.assets)
-    if (flow.kind === 'deposit') {
-      b.shares += shares
-      b.basis += assets
-    } else if (b.shares > 0n && shares > 0n) {
-      const take = shares < b.shares ? shares : b.shares
-      const basis = take === b.shares ? b.basis : ceilDiv(b.basis * take, b.shares)
-      b.realized += (assets * take) / shares - basis
-      b.shares -= take
-      b.basis -= basis
-    }
-    book.set(flow.vault, b)
-  }
+  const flows = [...byId.values()].sort((a, b) => a.t - b.t || a.block - b.block || a.flow.logIndex - b.flow.logIndex)
+  const vaults = new Set(flows.map((x) => x.flow.vault))
   let total = 0n
-  for (const [vault, b] of book) {
-    let gain = b.realized
+  for (const vault of vaults) {
     const held = input.now.find((v) => v.name === vault)
-    if (held && b.shares > 0n && held.shares > 0n) {
-      const tracked = b.shares < held.shares ? b.shares : held.shares
-      const basis = tracked === b.shares ? b.basis : ceilDiv(b.basis * tracked, b.shares)
-      gain += (tracked * held.assets) / held.shares - basis
+    if (!held) continue
+    const mine = flows.filter((x) => x.flow.vault === vault)
+    const net = mine.reduce((n, x) => n + (x.flow.kind === 'deposit' ? BigInt(x.flow.shares) : -BigInt(x.flow.shares)), 0n)
+    if (net > held.shares) continue
+    let all = held.shares - net // the opening lot, held before the first flow read
+    let shares = 0n // tracked
+    let basis = 0n
+    let realized = 0n
+    let whole = true
+    for (const { flow, counted } of mine) {
+      const sh = BigInt(flow.shares)
+      const assets = BigInt(flow.assets)
+      if (flow.kind === 'deposit') {
+        all += sh
+        if (counted) {
+          shares += sh
+          basis += assets
+        }
+        continue
+      }
+      if (sh > all || sh === 0n) {
+        whole = false
+        break
+      }
+      const take = (sh * shares) / all
+      if (take > 0n) {
+        const part = take === shares ? basis : ceilDiv(basis * take, shares)
+        if (counted) realized += (assets * take) / sh - part
+        basis -= part
+        shares -= take
+      }
+      all -= sh
     }
+    if (!whole || all !== held.shares) continue
+    let gain = realized
+    if (shares > 0n) gain += (shares * held.assets) / held.shares - basis
     if (gain > 0n) total += gain
   }
   return total
