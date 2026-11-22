@@ -140,49 +140,80 @@ describe('loadVsIdle', () => {
 })
 
 describe('APR · 30-day avg', () => {
-  const worked = (db: Db, at: string, value: number) =>
-    db.raw.exec(`INSERT INTO account_worked_samples (chain_id, account_key, read_at, t_s, pool, value_usd, in_range) VALUES (8453, 'base-u1', '${at}', ${t(at)}, 'pool:WETH/USDC/3000', ${value * U}, 1)`)
-
-  test('real net APR: income of the window net of the fee over the capital-time that worked, annualised', async () => {
+  const END = '2026-11-06T17:50:00.000Z'
+  /** A sample every 20 minutes from `fromIso` to END, skipping [hole[0], hole[1]) when given. */
+  const run = (db: Db, fromIso: string, chain = 8453, key = 'base-u1', hole?: [string, string]) => {
+    const rows: string[] = []
+    for (let x = t(fromIso); x <= t(END); x += 1200) {
+      if (hole && x >= t(hole[0]) && x < t(hole[1])) continue
+      rows.push(`(${chain}, '${key}', '${new Date(x * 1000).toISOString()}', ${x}, 'pool:WETH/USDC/3000', ${1000 * U}, 1)`)
+    }
+    db.raw.exec(`INSERT INTO account_worked_samples (chain_id, account_key, read_at, t_s, pool, value_usd, in_range) VALUES ${rows.join(',')}`)
+  }
+  const old = () => {
     const db = seed()
     daily(db, '2026-09-01', 1000, 0)
     daily(db, '2026-11-06', 1000, 0)
     latest(db, 0, 1000)
-    flow(db, 'in:0xa:0', 'in', '2026-08-30T09:00:00.000Z', 1000)
-    worked(db, '2026-10-08T17:30:00.000Z', 1000) // observed across the window (the interval to the next is a gap: no capital-time)
-    worked(db, '2026-11-06T17:30:00.000Z', 1000)
-    worked(db, '2026-11-06T17:50:00.000Z', 1000)
-    income(db, '0xh:0', '2026-11-06T17:40:00.000Z', 0.01) // 0.009 net; 1000 USDC x 1200 s
-    expect((await loadVsIdle(db, 'u1', NOW)).apr).toEqual({ pct: 23.7, reason: null })
+    return db
+  }
+  const month = '2026-10-07T17:50:00.000Z' // END minus 30 days
+  const monad = `INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at) VALUES ('monad-u1', 'u1', 143, '0x00000000000000000000000000000000000000b1', '[]', 'c2', '0x1', '0x2', '1', 'v1', '2026-10-01T00:00:00.000Z')`
+
+  test('real net APR: income of the sampled window over the capital-time of the same intervals, annualised', async () => {
+    const db = old()
+    run(db, month)
+    income(db, '0xh:0', '2026-10-20T10:10:00.000Z', 2.5) // before the fee: whole; 1000 USDC x 30 days
+    expect((await loadVsIdle(db, 'u1', NOW)).apr).toEqual({ pct: 3, reason: null })
   })
 
-  test('an account younger than 30 days has none (the app shows the Mamoru average); nothing worked is not measured', async () => {
-    const db = funded()
-    expect((await loadVsIdle(db, 'u1', NOW)).apr).toEqual({ pct: null, reason: 'not-measured' })
-    const old = seed()
-    daily(old, '2026-09-01', 1000, 0)
-    daily(old, '2026-11-06', 1000, 0)
-    latest(old, 0, 1000)
-    worked(old, '2026-10-08T17:30:00.000Z', 1000)
-    worked(old, '2026-11-06T17:30:00.000Z', 1000)
-    worked(old, '2026-11-06T17:50:00.000Z', 1000)
-    expect((await loadVsIdle(old, 'u1', NOW)).apr).toEqual({ pct: 0, reason: null })
-    // two recent samples only: the income of the month has no capital-time behind it, so no figure
-    const sparse = seed()
-    daily(sparse, '2026-09-01', 1000, 0)
-    daily(sparse, '2026-11-06', 1000, 0)
-    latest(sparse, 0, 1000)
-    worked(sparse, '2026-11-06T17:30:00.000Z', 1000)
-    worked(sparse, '2026-11-06T17:50:00.000Z', 1000)
-    income(sparse, '0xh:0', '2026-11-05T12:00:00.000Z', 30)
+  test('income booked where nothing was sampled is not counted (the same intervals as the capital-time)', async () => {
+    const db = old()
+    run(db, month, 8453, 'base-u1', ['2026-10-20T00:00:00.000Z', '2026-10-22T00:00:00.000Z']) // a 2-day hole: coverage still above the minimum
+    income(db, '0xh:0', '2026-10-21T10:10:00.000Z', 2.5) // inside the hole
+    expect((await loadVsIdle(db, 'u1', NOW)).apr).toEqual({ pct: 0, reason: null })
+  })
+
+  test('a window sampled under the minimum is not measured; a young account has none; nothing sampled is not measured', async () => {
+    const sparse = old()
+    run(sparse, '2026-10-30T00:00:00.000Z') // 7 of 30 days
+    income(sparse, '0xh:0', '2026-11-05T12:10:00.000Z', 30)
     expect((await loadVsIdle(sparse, 'u1', NOW)).apr).toEqual({ pct: null, reason: 'not-measured' })
     const young = seed()
     daily(young, '2026-10-20', 1000, 0)
     daily(young, '2026-11-06', 1000, 0)
     latest(young, 0, 1000)
-    worked(young, '2026-11-06T17:30:00.000Z', 1000)
-    worked(young, '2026-11-06T17:50:00.000Z', 1000)
+    run(young, '2026-10-30T00:00:00.000Z')
     expect((await loadVsIdle(young, 'u1', NOW)).apr).toEqual({ pct: null, reason: 'first-30-days' })
+    expect((await loadVsIdle(funded(), 'u1', NOW)).apr).toEqual({ pct: null, reason: 'not-measured' })
+  })
+
+  test('every contributing sleeve must be sampled enough; a chain with no samples in the window is left out with its income', async () => {
+    const thin = old()
+    thin.raw.exec(monad)
+    run(thin, month)
+    run(thin, '2026-11-01T00:00:00.000Z', 143, 'monad-u1') // contributes capital, 5 of 30 days
+    income(thin, '0xh:0', '2026-10-20T10:10:00.000Z', 2.5)
+    expect((await loadVsIdle(thin, 'u1', NOW)).apr).toEqual({ pct: null, reason: 'not-measured' })
+    const none = old()
+    none.raw.exec(monad)
+    run(none, month)
+    income(none, '0xh:0', '2026-10-20T10:10:00.000Z', 2.5)
+    none.raw.exec(`INSERT INTO yield_ledger_income (event_id, chain_id, account_key, env, source, t_s, from_s, usd, updated_at) VALUES ('0xm:0', 143, 'monad-u1', 'prod', 'harvest', ${t('2026-10-21T10:10:00.000Z')}, NULL, ${5 * U}, 'x')`)
+    expect((await loadVsIdle(none, 'u1', NOW)).apr).toEqual({ pct: 3, reason: null })
+  })
+})
+
+describe('a sleeve with value but no snapshot', () => {
+  test('makes fees and costs partial (n/a), never silently 0', async () => {
+    const db = funded()
+    db.raw.exec(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at) VALUES ('monad-u1', 'u1', 143, '0x00000000000000000000000000000000000000b1', '[]', 'c2', '0x1', '0x2', '1', 'v1', '2026-10-01T00:00:00.000Z')`)
+    expect((await loadVsIdle(db, 'u1', NOW, true)).breakdown!.feesUsd).toBe(5) // a sleeve that never had value is not a gap
+    db.raw.exec(`INSERT INTO account_daily (day, chain_id, address, account_key, env, block_open, block_close, total_open_usdc, total_close_usdc, idle_close_usdc, lp_close_usdc, fees_open_usdc, fees_close_usdc) VALUES ('2026-11-06', 143, 'monad-u1', 'monad-u1', 'prod', 1, 1, ${10 * U}, ${10 * U}, 0, ${10 * U}, 0, 0)`)
+    const v = await loadVsIdle(db, 'u1', NOW, true)
+    expect(v.breakdown).toBeNull()
+    expect(v.notCounted).toEqual(expect.arrayContaining(['fees', 'costs']))
+    expect(v.status).toBe('partial')
   })
 })
 
@@ -198,21 +229,6 @@ describe('fee base and APR chains', () => {
     db.raw.exec(`INSERT INTO yield_ledger_income (event_id, chain_id, account_key, env, source, t_s, from_s, usd, updated_at) VALUES ('vault-backfill:8453:base-u1:vault:gtUSDCp', 8453, 'base-u1', 'prod', 'backfill', ${t('2026-11-06T10:00:00.000Z')}, NULL, ${50 * U}, 'x')`)
     const v = await loadVsIdle(db, 'u1', NOW, true)
     expect(v.breakdown!.mamoruFeeUsd).toBe(-0.2) // 10 % of the 2 USDC harvest only
-  })
-
-  test('APR counts income only of the chains whose samples are in the capital-time', async () => {
-    const db = seed()
-    daily(db, '2026-09-01', 1000, 0)
-    daily(db, '2026-11-06', 1000, 0)
-    latest(db, 0, 1000)
-    db.raw.exec(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, policy_version, created_at) VALUES ('monad-u1', 'u1', 143, '0x00000000000000000000000000000000000000b1', '[]', 'c2', '0x1', '0x2', '1', 'v1', '2026-10-01T00:00:00.000Z')`)
-    for (const at of ['2026-10-08T17:30:00.000Z', '2026-11-06T17:30:00.000Z', '2026-11-06T17:50:00.000Z']) {
-      db.raw.exec(`INSERT INTO account_worked_samples (chain_id, account_key, read_at, t_s, pool, value_usd, in_range) VALUES (8453, 'base-u1', '${at}', ${t(at)}, 'pool:WETH/USDC/3000', ${1000 * U}, 1)`)
-    }
-    db.raw.exec(`INSERT INTO yield_ledger_income (event_id, chain_id, account_key, env, source, t_s, from_s, usd, updated_at) VALUES ('0xm:0', 143, 'monad-u1', 'prod', 'harvest', ${t('2026-11-06T17:40:00.000Z')}, NULL, ${10000} , 'x')`)
-    income(db, '0xh:0', '2026-11-06T17:40:00.000Z', 0.01)
-    // Monad has no samples in the window: its income is not divided by Base capital alone
-    expect((await loadVsIdle(db, 'u1', NOW, true)).apr).toEqual({ pct: 23.7, reason: null })
   })
 })
 

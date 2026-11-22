@@ -405,7 +405,9 @@ function dayGas(ops: readonly StoredOp[]): Map<string, Gas> {
   for (const t of txs.values()) {
     let sum: Gas = zero
     for (const g of t.userOps.values()) sum = addGas(sum, g)
-    days.set(t.day, addGas(days.get(t.day) ?? zero, sum.wei > t.whole.wei ? sum : t.whole))
+    // Equal wei (the same userOp read both ways): keep the priced one, an unpriced copy must not hide it.
+    const pick = sum.wei > t.whole.wei || (sum.wei === t.whole.wei && t.whole.usdc === null && sum.usdc !== null) ? sum : t.whole
+    days.set(t.day, addGas(days.get(t.day) ?? zero, pick))
   }
   return days
 }

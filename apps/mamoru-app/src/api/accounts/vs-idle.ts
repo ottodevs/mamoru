@@ -25,6 +25,7 @@ import type { Db } from '../env.ts'
 import { loadEarned } from '../earned.ts'
 import { sleevesOfUser } from './store.ts'
 import { loadWorked } from './worked.ts'
+import { COVERAGE_MIN, coverage, sampledIntervals, sampledShare, type Interval } from './sampled.ts'
 import { loadValueSeriesDetail, type NetDeposited } from './value-series.ts'
 
 /** Mamoru's yield fee, 10 %. Mirrors the operator's rule (apps/mamoru-operator/src/yield-fee.ts); read here, never charged here. */
@@ -109,7 +110,12 @@ export async function loadVsIdle(db: Db, userId: string, now: Date, baselineComp
     const earned = await loadEarned(db, s.chain_id, s.account_key)
     const snap = await db.prepare('SELECT fees_usdc FROM account_snapshot_latest WHERE chain_id = ? AND account_key = ?').bind(s.chain_id, s.account_key).first<{ fees_usdc: number }>()
     if (!earned || !snap) {
-      if (snap || earned) earnedKnown = false
+      // A sleeve with value rows but no snapshot or income read cannot be counted: its fees and gas are unknown, never 0.
+      const hasValue = await db.prepare('SELECT 1 AS x FROM account_daily WHERE chain_id = ? AND account_key = ? LIMIT 1').bind(s.chain_id, s.account_key).first<{ x: number }>()
+      if (snap || earned || hasValue) {
+        earnedKnown = false
+        gasKnown = false
+      }
       continue
     }
     realized += BigInt(Math.round(Number(earned.totalUsd))) - BigInt(Math.round(snap.fees_usdc))
@@ -165,18 +171,22 @@ async function netApr30d(db: Db, sleeves: { chain_id: number; account_key: strin
   const end = Math.floor(Date.parse(worked.asOf) / 1000)
   const start = end - MONTH_S
   if (!Number.isFinite(end) || Date.parse(`${firstDay}T00:00:00.000Z`) / 1000 > start) return { pct: null, reason: 'first-30-days' }
-  // Observation coverage: the capital-time of the denominator only exists where samples were taken, the income of the
-  // numerator does not care. A window observed for under 28 of its 30 days is not measured, never a figure.
-  const span = await db.prepare('SELECT MIN(t_s) AS lo, MAX(t_s) AS hi FROM account_worked_samples WHERE chain_id = ? AND account_key = ? AND t_s > ? AND t_s <= ?').bind(base!.chain_id, base!.account_key, start, end).first<{ lo: number | null; hi: number | null }>()
-  if (span?.lo == null || span.hi == null || span.hi - span.lo < 28 * DAY_S) return { pct: null, reason: 'not-measured' }
+  // The capital-time below only exists where samples were taken, so the income counted is the income of those same
+  // sampled intervals (per sleeve), and every contributing sleeve must have most of the window sampled (COVERAGE_MIN).
+  const intervals = new Map<number, Interval[]>()
+  for (const sl of sleeves) {
+    if (!counted.has(sl.chain_id)) continue
+    const iv = await sampledIntervals(db, sl.chain_id, sl.account_key, start, end)
+    if (coverage(iv, start, end) < COVERAGE_MIN) return { pct: null, reason: 'not-measured' }
+    intervals.set(sl.chain_id, iv)
+  }
   const capitalSeconds = worked.month.reduce((n, p) => n + p.usdSeconds, 0) / 1e6
   if (!(capitalSeconds > 0)) return { pct: null, reason: 'not-measured' }
   let earned = 0
   for (const r of income) {
     // History rows hold income of days before per-event detail: no time inside the window to credit.
-    if (r.source === 'backfill' || r.t_s <= start || r.t_s > end) continue
-    const span = r.source === 'vault-yield' && r.from_s != null ? r.t_s - r.from_s : 0
-    const share = span > 0 ? (r.t_s - Math.max(r.from_s!, start)) / span : 1
+    if (r.source === 'backfill') continue
+    const share = sampledShare(intervals.get(r.chain_id ?? base!.chain_id) ?? [], { kind: r.source === 'vault-yield' ? 'span' : 'point', t: r.t_s, from: r.from_s }, start, end)
     const gross = (r.usd / 1e6) * share
     earned += r.t_s >= MAMORU_FEE_FROM ? gross * (1 - Number(MAMORU_FEE_BPS) / 10_000) : gross
   }

@@ -82,6 +82,9 @@ describe('dayReceipts gas in USDC (otto/mamoru#380)', () => {
     expect(dayReceipts([one('eng-a', '0xa1', '100', '300'), one('eng-b', '0xb1', '50', '150')])[0]).toMatchObject({ gasWei: '150', gasUsdc: '450' })
     // a priced copy of the same transaction wins over an unpriced one that came first
     expect(dayReceipts([one('eng-a', '0xa1', '100'), { ...one('eng-a', '0xa1', '100', '300'), opId: 'eng-a' }])[0]).toMatchObject({ gasUsdc: '300' })
+    // the same userOp read per userOp (priced) and as a whole transaction (unpriced), equal wei: the priced one stays
+    expect(dayReceipts([one('eng-a', '0xa1', '100', '300'), one('own-a', '0xa1', '100')])[0]).toMatchObject({ gasWei: '100', gasUsdc: '300' })
+    expect(dayReceipts([one('own-a', '0xa1', '100'), one('eng-a', '0xa1', '100', '300')])[0]).toMatchObject({ gasWei: '100', gasUsdc: '300' })
     const mixed = dayReceipts([one('eng-a', '0xa1', '100', '300'), one('eng-b', '0xb1', '50')])[0]!
     expect(mixed.gasWei).toBe('150')
     expect(mixed.gasUsdc).toBeUndefined()
