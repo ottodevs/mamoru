@@ -3,7 +3,7 @@ import { decodeFunctionData, getAddress, type Hex } from 'viem'
 import type { StopInput } from '@mamoru/domain'
 import { address, baseRegistry, erc4626Abi, monadRegistry } from '@mamoru/registry'
 import { stopBatch } from '../live/index.ts'
-import { buildStop, stopCalls, swapBackCalls, vaultExitCalls } from './index.ts'
+import { buildStop, parseRefundPolicy, refundMismatch, stopCalls, stopSummaryMismatch, swapBackCalls, vaultExitCalls } from './index.ts'
 
 // otto/mamoru#430: the one Stop builder of the operator and the Worker.
 
@@ -65,5 +65,45 @@ describe('buildStop', () => {
     const i = input({ chainId: 143, positions: [], deadline: '0', vaultExits: [], swaps: [], revokes: [`0x${'01'.repeat(32)}`, `0x${'02'.repeat(32)}`] })
     expect(stopCalls(i, monadRegistry)).toHaveLength(2)
     expect(buildStop(i, monadRegistry).safeTxHash).toMatch(/^0x[0-9a-f]{64}$/)
+  })
+})
+
+describe('what the Worker checks besides the hash', () => {
+  const lines = [
+    "Revoke the engine's 1 session grant(s)",
+    'Close and burn position #42 (USDC/cbBTC 0.05%)',
+    'Take 7.00 USDC out of Morpho · Gauntlet USDC Prime',
+    'Swap 1500 cbBTC units to at least 1.40 USDC',
+    'Everything stays in your Safe as USDC',
+  ]
+  test('the summary of the operator, line by line', () => {
+    expect(stopSummaryMismatch(input(), lines, baseRegistry)).toBeNull()
+    expect(stopSummaryMismatch(input(), [...lines.slice(0, 2), lines[2]!.replace('7.00', '70.00'), ...lines.slice(3)], baseRegistry)).toBe('vault vault:gtUSDCp')
+    expect(stopSummaryMismatch(input(), [lines[1]!, ...lines.slice(2)], baseRegistry)).toBe('revocations')
+    expect(stopSummaryMismatch(input(), [...lines, 'Send 1 USDC to a friend'], baseRegistry)).toBe('unexpected line 6')
+    expect(stopSummaryMismatch(input(), 'Stop', baseRegistry)).toBe('summary is not a list of lines')
+  })
+  test("amounts are cut to the cent, never rounded up, as the operator's fmtUsdc writes them", () => {
+    const i = input({ vaultExits: [{ vault: 'vault:gtUSDCp', mode: 'redeem', assets: '12345678', shares: '1' }], swaps: [{ token: 'cbBTC', pool: 'pool:USDC/cbBTC/500', amountIn: '1500', amountOutMinimum: '1409999' }] })
+    const at = (vault: string, swap: string) => [lines[0]!, lines[1]!, `Take ${vault} USDC out of Morpho · Gauntlet USDC Prime`, `Swap 1500 cbBTC units to at least ${swap} USDC`, lines[4]!]
+    expect(stopSummaryMismatch(i, at('12.34', '1.40'), baseRegistry)).toBeNull()
+    expect(stopSummaryMismatch(i, at('12.35', '1.40'), baseRegistry)).toBe('vault vault:gtUSDCp')
+    expect(stopSummaryMismatch(i, at('12.34', '1.41'), baseRegistry)).toBe('swap cbBTC')
+  })
+  test('a Safe-paid Stop on Monad names the most it costs, in MON', () => {
+    const i = input({ chainId: 143, positions: [], deadline: '0', vaultExits: [], swaps: [], refund: { safeTxGas: '4000000', baseGas: '120000', gasPrice: '200000000000', refundReceiver: `0x${'ab'.repeat(20)}` } })
+    const fee = "Your Safe pays this transaction's network fee to Mamoru's relayer, at most about 0.824 MON (sponsored transactions are used up until 2026-11-23T10:00:00.000Z)"
+    expect(stopSummaryMismatch(i, ["Revoke the engine's 1 session grant(s)", 'Your positions and tokens stay in your Safe as they are; Stop again closes them', fee], monadRegistry)).toBeNull()
+    expect(stopSummaryMismatch(i, ["Revoke the engine's 1 session grant(s)", 'Your positions and tokens stay in your Safe as they are; Stop again closes them'], monadRegistry)).toBe('fee line')
+  })
+  test('the refund policy: its relayer, at most its gas price; none for a chain it does not name', () => {
+    const policy = parseRefundPolicy(` 8453:0x${'ab'.repeat(20)}:1000000000 , 143:0x${'cd'.repeat(20)}:300000000000, bad, 10:0x${'00'.repeat(20)}:1`)
+    expect([...policy.keys()]).toEqual([8453, 143])
+    const paid = (r: Partial<NonNullable<StopInput['refund']>>) => input({ refund: { safeTxGas: '1', baseGas: '1', gasPrice: '1000000000', refundReceiver: `0x${'ab'.repeat(20)}`, ...r } })
+    expect(refundMismatch(input(), undefined)).toBeNull()
+    expect(refundMismatch(paid({}), policy.get(8453))).toBeNull()
+    expect(refundMismatch(paid({ gasPrice: '1000000001' }), policy.get(8453))).toBe('refund gas price')
+    expect(refundMismatch(paid({ refundReceiver: `0x${'cd'.repeat(20)}` }), policy.get(8453))).toBe('refund receiver')
+    expect(refundMismatch(paid({}), policy.get(10))).toBe('a refund on a chain with no refund policy')
   })
 })

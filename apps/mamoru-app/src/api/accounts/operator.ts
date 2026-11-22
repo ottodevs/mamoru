@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono'
 import type { AccountContext, MigrateV4Input, RemoteSpec, ReturnHomeInput, StopInput } from '@mamoru/domain'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
 import { buildReturnHome } from '@mamoru/account/return-home'
-import { buildStop } from '@mamoru/account/stop'
+import { buildStop, parseRefundPolicy, refundMismatch, stopSummaryMismatch } from '@mamoru/account/stop'
 import { registryFor, type Registry } from '@mamoru/registry'
 import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
@@ -227,10 +227,12 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
    * otto/mamoru#430: a Stop is passed on only when the Worker, with the same builder (buildStop, every target from the
    * chain's pinned registry), gets the same Safe tx from the operator's `stop` input on this row's own Safe and chain. That
    * builder only revokes sessions, closes positions, takes vault shares out and swaps back to USDC, all paid to the Safe
-   * itself; any other call, target, Safe, chain or value gives another hash. Anything else: 502 BUILD_MISMATCH, nothing signed.
+   * itself; any other call, target, Safe, chain or value gives another hash. A refund (a Safe-paid Stop) goes only to the
+   * relayer STOP_REFUND_POLICY names for the chain, at no more than its gas price; and the summary the owner reads must say
+   * exactly what the input builds (stopSummaryMismatch). Anything else: 502 BUILD_MISMATCH, nothing signed.
    */
   const checkStop = (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Response | null => {
-    let body: { safe?: unknown; chainId?: unknown; safeTxHash?: unknown; stop?: StopInput } | null
+    let body: { safe?: unknown; chainId?: unknown; safeTxHash?: unknown; summary?: unknown; stop?: StopInput } | null
     try {
       body = JSON.parse(text)
     } catch {
@@ -247,7 +249,16 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     } catch (e) {
       return refusedBuild(c, row, `build: ${e instanceof Error ? e.message : String(e)}`)
     }
-    return typeof body.safeTxHash === 'string' && hash.toLowerCase() === body.safeTxHash.toLowerCase() ? null : refusedBuild(c, row, 'hash')
+    if (typeof body.safeTxHash !== 'string' || hash.toLowerCase() !== body.safeTxHash.toLowerCase()) return refusedBuild(c, row, 'hash')
+    const refund = refundMismatch(input, parseRefundPolicy(c.env.STOP_REFUND_POLICY).get(row.chain_id))
+    if (refund) return refusedBuild(c, row, refund)
+    let said: string | null
+    try {
+      said = stopSummaryMismatch(input, body.summary, registryOf(row.chain_id))
+    } catch (e) {
+      said = `summary: ${e instanceof Error ? e.message : String(e)}`
+    }
+    return said ? refusedBuild(c, row, `summary: ${said}`) : null
   }
   const refusedBuild = (c: Context<AppEnv>, row: AccountRow, why: string) => {
     console.error(`one-authorization prepare refused for ${row.account_key}: ${why}`)

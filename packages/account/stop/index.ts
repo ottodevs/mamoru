@@ -9,7 +9,7 @@
 // Every call is the Safe acting on its own funds: nothing a Stop builds pays anyone but the Safe. The operator chooses the
 // amounts (minimums, shares) from its chain reads; the targets come from the chain's pinned registry.
 import { encodeFunctionData, getAddress, hashTypedData, type Hex } from 'viem'
-import type { Address, StopInput } from '@mamoru/domain'
+import { chainOf, isChainId, type Address, type StopInput } from '@mamoru/domain'
 import { address, entry, erc4626Abi, type Registry } from '@mamoru/registry'
 import { uniswapV3 } from '@mamoru/uniswap-v3'
 import { ownerSafeTx, stopBatch, type LivePosition } from '../live/index.ts'
@@ -121,4 +121,90 @@ export function buildStop(input: StopInput, registry: Registry): { safeTx: WireS
   }
   const safeTxHash = hashTypedData(safeTxTypedData(getAddress(input.safe), input.chainId, tx))
   return { safeTx, safeTxHash, calls }
+}
+
+// ---- what the owner reads before signing a Stop (otto/mamoru#430 review) ---------------------------------------------
+
+const usdc = (v: bigint): string => {
+  const t = v.toString().padStart(7, '0')
+  return `${t.slice(0, -6)}.${t.slice(-6, -4)}`
+}
+const units18 = (v: bigint): string => {
+  const t = v.toString().padStart(19, '0')
+  const frac = t.slice(-18).slice(0, 6).replace(/0+$/, '')
+  return frac ? `${t.slice(0, -18)}.${frac}` : t.slice(0, -18)
+}
+
+/** The fixed lines of a revoke-only Stop (the operator's planRevokeOnly): positions readable, or not. */
+export const REVOKE_ONLY_LINES = [
+  'Your positions and tokens stay in your Safe as they are; Stop again closes them',
+  'Your positions could not be read just now: they stay in your Safe as they are, and Stop again closes them',
+] as const
+
+/**
+ * Whether `summary`, the lines the owner reads before signing, says exactly what `input` builds, line by line, in the
+ * operator's own words (planFullStop, planRevokeOnly, feePlan): the number of revocations, each position closed (by its
+ * token id, labelled as a pool of the registry), each vault exit and swap with its amounts, and the fee line exactly when
+ * the Safe pays a refund, with the most it can cost. Free numbers only where the input has none (what a vault cannot pay
+ * now, how many positions stay, until when sponsorship is used up). Null when it does; else what does not match.
+ */
+export function stopSummaryMismatch(input: StopInput, summary: unknown, registry: Registry): string | null {
+  if (!Array.isArray(summary) || !summary.every((l) => typeof l === 'string')) return 'summary is not a list of lines'
+  const lines = summary as string[]
+  let i = 0
+  const take = (ok: (l: string) => boolean): boolean => {
+    if (i < lines.length && ok(lines[i]!)) {
+      i++
+      return true
+    }
+    return false
+  }
+  const exact = (want: string) => take((l) => l === want)
+  const revokes = input.revokes.length
+  const revokeOnly = !input.positions.length && !input.vaultExits.length && !input.swaps.length && input.deadline === '0'
+  if (revokeOnly) {
+    if (!exact(`Revoke the engine's ${revokes} session grant(s)`)) return 'revocations'
+    if (!take((l) => (REVOKE_ONLY_LINES as readonly string[]).includes(l))) return 'revoke-only'
+  } else {
+    if (revokes && !exact(`Revoke the engine's ${revokes} session grant(s)`)) return 'revocations'
+    const pools = registry.entries.filter((e) => e.kind === 'pool').map((e) => `${e.token0}/${e.token1} ${(e.fee! / 10_000).toFixed(2)}%`)
+    for (const p of input.positions) if (!take((l) => pools.some((label) => l === `Close and burn position #${p.tokenId} (${label})`))) return `position ${p.tokenId}`
+    for (const x of input.vaultExits) {
+      const label = entry(x.vault, registry).label ?? x.vault.replace(/^vault:/, '')
+      if (!exact(`Take ${usdc(BigInt(x.assets))} USDC out of ${label}`)) return `vault ${x.vault}`
+    }
+    take((l) => /^[0-9]+\.[0-9]{2} USDC stays in a lending vault that cannot pay it out right now: Stop again later to take it$/.test(l))
+    for (const sw of input.swaps) if (!exact(`Swap ${BigInt(sw.amountIn)} ${sw.token} units to at least ${usdc(BigInt(sw.amountOutMinimum))} USDC`)) return `swap ${sw.token}`
+    if (!exact('Everything stays in your Safe as USDC')) return 'closing line'
+    take((l) => /^[1-9][0-9]* more position\(s\) stay in your Safe: Stop again to close them$/.test(l))
+  }
+  if (input.refund) {
+    const fee = (BigInt(input.refund.safeTxGas) + BigInt(input.refund.baseGas)) * BigInt(input.refund.gasPrice)
+    const symbol = isChainId(input.chainId) ? chainOf(input.chainId).native.symbol : 'ETH'
+    const head = `Your Safe pays this transaction's network fee to Mamoru's relayer, at most about ${units18(fee)} ${symbol} (sponsored transactions are used up until `
+    if (!take((l) => l.startsWith(head) && /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z\)$/.test(l.slice(head.length)))) return 'fee line'
+  }
+  return i === lines.length ? null : `unexpected line ${i + 1}`
+}
+
+/**
+ * Who a Safe-paid Stop may refund, and at most at what gas price, per chain: `chainId:receiver:maxGasPriceWei`, comma
+ * separated (the Worker's STOP_REFUND_POLICY). A malformed entry is skipped: that chain then has no policy.
+ */
+export function parseRefundPolicy(text: string | undefined): Map<number, { receiver: Address; maxGasPrice: bigint }> {
+  const out = new Map<number, { receiver: Address; maxGasPrice: bigint }>()
+  for (const part of (text ?? '').split(',').map((t) => t.trim()).filter(Boolean)) {
+    const m = /^([0-9]+):(0x[0-9a-fA-F]{40}):([0-9]+)$/.exec(part)
+    if (!m || BigInt(m[2]!) === 0n || BigInt(m[3]!) === 0n) continue
+    out.set(Number(m[1]), { receiver: getAddress(m[2]!), maxGasPrice: BigInt(m[3]!) })
+  }
+  return out
+}
+
+/** Null when `input` refunds nobody, or only `policy`'s receiver at no more than its gas price; else why not. */
+export function refundMismatch(input: StopInput, policy: { receiver: Address; maxGasPrice: bigint } | undefined): string | null {
+  if (!input.refund) return null
+  if (!policy) return 'a refund on a chain with no refund policy'
+  if (typeof input.refund.refundReceiver !== 'string' || input.refund.refundReceiver.toLowerCase() !== policy.receiver.toLowerCase()) return 'refund receiver'
+  return dec(input.refund.gasPrice, 'gasPrice') > policy.maxGasPrice ? 'refund gas price' : null
 }

@@ -29,6 +29,10 @@ export type Env = {
   // chain (CHAIN_MISMATCH), so a Monad sleeve is forwarded here, signed with the same OPERATOR_SECRET. Unset: every
   // operator route of a Monad sleeve answers OPERATOR_UNAVAILABLE and nothing is sent.
   OPERATOR_URL_143?: string
+  // Var, optional (otto/mamoru#430): who a Safe-paid Stop may refund and at most at what gas price, per chain, as
+  // `chainId:relayerAddress:maxGasPriceWei` separated by commas (packages/account/stop parseRefundPolicy). A Stop whose
+  // Safe pays a refund on a chain without an entry is refused (BUILD_MISMATCH); a Stop Mamoru pays needs none.
+  STOP_REFUND_POLICY?: string
   // Secret. Read-only Ethereum Mainnet RPC pool for the wrong-network notice (accounts/other-chains.ts): https URLs
   // separated by commas, tried in order (docs/process/rpc-providers.md). Unset: nothing is read.
   ETHEREUM_RPC_URLS?: string

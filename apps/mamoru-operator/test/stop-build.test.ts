@@ -2,10 +2,10 @@
 // Worker can rebuild it on the row's own Safe and chain before the owner signs.
 import { describe, expect, test } from 'bun:test'
 import type { Hex } from 'viem'
-import { buildStop } from '@mamoru/account/stop'
+import { buildStop, refundMismatch, stopSummaryMismatch } from '@mamoru/account/stop'
 import { baseRegistry } from '@mamoru/registry'
 import type { OwnerTxToSign } from '@mamoru/domain'
-import { SAFE, ctx, quiet, sign, world } from './owner-world.ts'
+import { RELAYER, SAFE, ctx, quiet, sign, world } from './owner-world.ts'
 
 const GRANT = { name: 'enter-swap', permissionId: `0x${'aa'.repeat(32)}` as Hex, grant: {} as never }
 
@@ -14,6 +14,9 @@ function rebuilds(tx: OwnerTxToSign) {
   expect(tx.stop!.safe.toLowerCase()).toBe(SAFE.toLowerCase())
   expect(tx.stop!.chainId).toBe(8453)
   expect(buildStop(tx.stop!, baseRegistry).safeTxHash).toBe(tx.safeTxHash)
+  // What the Worker checks besides the hash: the summary says exactly what the input builds, and a refund pays the relayer.
+  expect(stopSummaryMismatch(tx.stop!, tx.summary, baseRegistry)).toBeNull()
+  expect(refundMismatch(tx.stop!, { receiver: RELAYER, maxGasPrice: 10n ** 12n })).toBeNull()
 }
 
 describe('a prepared Stop carries the builder input it was built from (#430)', () => {
@@ -51,5 +54,20 @@ describe('a prepared Stop carries the builder input it was built from (#430)', (
     rebuilds(tx)
     expect(tx.stop!.refund).toBeDefined()
     expect(BigInt(tx.stop!.refund!.gasPrice)).toBeGreaterThan(0n)
+  })
+
+  test('a Stop that leaves positions for later, and one whose positions cannot be read', async () => {
+    const w = world(5_000_000n)
+    w.chain.deployed = true
+    const acc = w.op.account(ctx).acc
+    acc.grants = [GRANT]
+    w.chain.positions = Array.from({ length: 12 }, (_, i) => ({ tokenId: BigInt(i + 1), liquidity: 1_000_000_000n }))
+    const many = await w.op.prepareStop(ctx)
+    expect(many.summary.some((l) => /more position\(s\) stay/.test(l))).toBe(true)
+    rebuilds(many)
+    w.knobs.npmDown = true
+    const { out } = await quiet(() => w.op.prepareStop(ctx))
+    expect(out.summary[1]).toContain('could not be read')
+    rebuilds(out)
   })
 })
