@@ -235,8 +235,9 @@ describe('vault growth in the fee (otto/mamoru#433)', () => {
     const early = flow('deposit', 100_000_000n, 100_000_000n, '2026-11-22T00:00:00.000Z')
     expect(vaultGrowth([early], input(100_000_000n, 150_000_000n))).toBe(0n)
     expect(vaultGrowth([flow('deposit', 100_000_000n, 100_000_000n, D1, { feeable: false })], input(100_000_000n, 150_000_000n))).toBe(0n)
-    // Shares held before the start: their redemption realizes nothing, and the growth is not counted.
+    // Shares held before the first flow read: their redemption realizes nothing, and the growth is not counted.
     expect(vaultGrowth([flow('withdraw', 150_000_000n, 100_000_000n, D1)], input(0n, 0n))).toBe(0n)
+    expect(vaultGrowth([flow('deposit', 100_000_000n, 100_000_000n, D1)], input(150_000_000n, 300_000_000n))).toBe(0n)
     // A deposit before YIELD_FEE_FROM stays out even with an earlier start.
     expect(vaultGrowth([flow('deposit', 1n, 1n, '2026-11-04T00:00:00.000Z')], input(1n, 100n, '2026-11-01T00:00:00.000Z'))).toBe(0n)
     // A loss refunds nothing and is not netted against another vault's growth.
@@ -289,5 +290,17 @@ describe('vault growth in the fee (otto/mamoru#433)', () => {
     other.facts!.vaultFlows = []
     expect(vaultGrowth([a], input(100_000_000n, 120_000_000n))).toBe(20_000_000n)
     expect(vaultGrowth([a, other], input(100_000_000n, 120_000_000n))).toBe(0n)
+  })
+
+  test('review of #383 round 2: shares moved in without a flow, and an out-of-scope loss', () => {
+    const dep = flow('deposit', 100_000_000n, 100_000_000n, D1)
+    const full = flow('withdraw', 100_000_000n, 100_000_000n, D2)
+    // 100 shares transferred in afterwards, worth 200: the history does not reconcile, nothing is charged.
+    expect(vaultGrowth([dep, full], input(100_000_000n, 200_000_000n))).toBe(0n)
+    // 100 in; 50 shares out for 100 (+50); the other 50 fall to 25 (-25): growth 25. Redeemed out of scope at 25: still 25, not 50.
+    const half = flow('withdraw', 100_000_000n, 50_000_000n, D1 + '')
+    const rest = flow('withdraw', 25_000_000n, 50_000_000n, '2026-11-26T00:00:00.000Z', { feeable: false })
+    expect(vaultGrowth([dep, half], input(50_000_000n, 25_000_000n))).toBe(25_000_000n)
+    expect(vaultGrowth([dep, half, rest], input(0n, 0n))).toBe(50_000_000n - 25_000_000n)
   })
 })

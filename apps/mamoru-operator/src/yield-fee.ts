@@ -70,12 +70,12 @@ const ceilDiv = (a: bigint, b: bigint): bigint => (a + b - 1n) / b
  * dated at or after both YIELD_FEE_FROM and `input.from`. Counted deposits form the tracked lot: its basis is the assets
  * at entry, so USDC a harvest swept into a vault (charged when collected) is never charged twice. Any redemption burns
  * the tracked lot pro rata to the shares it holds in the vault (counted or not, so basis retires with the shares); only a
- * counted one realizes assets minus the basis it burns. What is still held is valued at the share price of `input.now`.
+ * counted one realizes assets minus the basis it burns (an uncounted one realizes a loss, never a gain). What is still held is valued at the share price of `input.now`.
  * Per vault the total is realized + unrealized, never below zero.
  *
  * A vault contributes nothing (the owner is not charged) unless its history reconciles: no receipt of the account is
  * still unread, the vault was read, and the flows never burn more shares than the inventory holds nor leave more than
- * the account holds now. Shares held before the first flow read are an uncounted opening lot: no basis, no growth.
+ * the account holds now (so shares held before the first flow read, or moved in without a flow, leave the vault uncharged).
  * Basis rounds up, value and realized assets round down.
  */
 export function vaultGrowth(ops: readonly StoredOp[], input: VaultFeeInput): bigint {
@@ -108,8 +108,9 @@ export function vaultGrowth(ops: readonly StoredOp[], input: VaultFeeInput): big
     if (!held) continue
     const mine = flows.filter((x) => x.flow.vault === vault)
     const net = mine.reduce((n, x) => n + (x.flow.kind === 'deposit' ? BigInt(x.flow.shares) : -BigInt(x.flow.shares)), 0n)
-    if (net > held.shares) continue
-    let all = held.shares - net // the opening lot, held before the first flow read
+    // The flows must explain every share held: a transfer in, an unread deposit or older shares make the history unreconciled.
+    if (net !== held.shares) continue
+    let all = 0n
     let shares = 0n // tracked
     let basis = 0n
     let realized = 0n
@@ -132,13 +133,15 @@ export function vaultGrowth(ops: readonly StoredOp[], input: VaultFeeInput): big
       const take = (sh * shares) / all
       if (take > 0n) {
         const part = take === shares ? basis : ceilDiv(basis * take, shares)
-        if (counted) realized += (assets * take) / sh - part
+        const diff = (assets * take) / sh - part
+        // Out of scope a gain is forgone, but a loss still counts: basis retired uncounted never hides one.
+        if (counted || diff < 0n) realized += diff
         basis -= part
         shares -= take
       }
       all -= sh
     }
-    if (!whole || all !== held.shares) continue
+    if (!whole) continue
     let gain = realized
     if (shares > 0n) gain += (shares * held.assets) / held.shares - basis
     if (gain > 0n) total += gain
