@@ -12,7 +12,8 @@
     "e2e:multipool": "bun test/e2e-multipool.ts",
     "e2e:overcap": "bun test/e2e-overcap.ts",
     "e2e:depth": "bun test/e2e-depth.ts",
-    "e2e:all": "bun test/e2e-all.ts"
+    "e2e:all": "bun test/e2e-all.ts",
+    "fork:return-home": "bun test/return-home-fork.ts"
   },
   "dependencies": {
     "@mamoru/account": "workspace:*",
