@@ -831,7 +831,7 @@ export async function bootOperator(o: BootOptions) {
     const read = (): Promise<Snapshot> => readSnapshot(snapshotClient, multicall3, chainId, registry, operator.snapshotTargets())
     const receipts = {
       source: {
-        accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops })),
+        accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops, deposits: a.deposits })),
         save: () => store.save(),
         // otto/mamoru#371: facts taken while the account is in the yield fee's scope are the fee's base.
         feeScope: (accountKey: string) => operator.yieldFeeScope(accountKey),
@@ -867,7 +867,7 @@ export async function bootOperator(o: BootOptions) {
     const tried = new Map<string, number>()
     const receipts = {
       source: {
-        accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops })),
+        accounts: () => Object.values(store.state.accounts).map((a) => ({ accountKey: a.accountKey, safe: a.ctx.address, ops: a.ops, deposits: a.deposits })),
         save: () => store.save(),
         // otto/mamoru#391: Monad yield owes the fee too, from facts read from here on (facts read before had no scope and
         // stay uncharged). Only with engine settings: without them no scope is known.

@@ -21,6 +21,8 @@ import { isChainId, chainOf } from '@mamoru/domain'
 import { address, baseRegistry, entryPointV07Abi, nameOf, type Registry } from '@mamoru/registry'
 import { inUsdc, nativePricePool } from './chain.ts'
 import type { StoredOp } from './state.ts'
+import { accountFlows, type FlowWire } from './flows.ts'
+import type { DepositRow } from './deposits.ts'
 import type { Snapshot } from './snapshot.ts'
 
 const poolCollectAbi = parseAbi(['event Collect(address indexed owner, address recipient, int24 indexed tickLower, int24 indexed tickUpper, uint128 amount0, uint128 amount1)'])
@@ -432,7 +434,7 @@ export function dayReceipts(ops: readonly StoredOp[]): DayReceiptWire[] {
 
 /** What the snapshot wrapper needs from the operator: every account it has stored (stopped ones too), and a way to persist them. */
 export type ReceiptSource = {
-  accounts(): { accountKey: string; safe: Address; ops: StoredOp[] }[]
+  accounts(): { accountKey: string; safe: Address; ops: StoredOp[]; /** otto/mamoru#380: USDC sent to the Safe from outside (deposits.ts), for the flows on the wire. */ deposits?: DepositRow[] }[]
   save(): void
   /** otto/mamoru#371: whether the account is in the yield fee's scope now. Absent: never (no fee on this chain). */
   feeScope?(accountKey: string): boolean
@@ -455,7 +457,8 @@ export type VaultFlowWire = VaultFlow & { id: string; t: number; block?: number 
  */
 /** `incomplete`: a receipt was given up on (gaveUp), so `explained` may be short: the Worker counts the vault as partial. */
 export type AccountVaultWire = { flows: VaultFlowWire[]; explained: Record<string, string> | null; incomplete?: true }
-export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire }
+/** otto/mamoru#380: `flows` are the account's external USDC flows (flows.ts), whole as the operator keeps them. */
+export type AccountReceiptsWire = { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire; flows?: FlowWire[] }
 
 /** The fee events of stored ops with facts of the current layout; an op's step says whether it was a harvest. */
 export function incomeEvents(ops: readonly StoredOp[]): IncomeEventWire[] {
@@ -551,9 +554,10 @@ export async function withReceipts(snapshot: Snapshot, source: ReceiptSource, re
     .map((a) => {
       const events = incomeEvents(a.ops)
       const vault = vaultWire(a.ops)
-      return { safe: a.safe, days: dayReceipts(a.ops), ...(events.length ? { events } : {}), ...(vault ? { vault } : {}) }
+      const flows = accountFlows(a.deposits, a.ops)
+      return { safe: a.safe, days: dayReceipts(a.ops), ...(events.length ? { events } : {}), ...(vault ? { vault } : {}), ...(flows.length ? { flows } : {}) }
     })
     // An account with no day yet still goes out when its vault state is unknown: "pending" must reach the Worker, not "none".
-    .filter((r) => r.days.length > 0 || r.vault !== undefined || r.events !== undefined)
+    .filter((r) => r.days.length > 0 || r.vault !== undefined || r.events !== undefined || r.flows !== undefined)
   return { ...snapshot, receipts }
 }

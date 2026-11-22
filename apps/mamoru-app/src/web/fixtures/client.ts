@@ -395,9 +395,9 @@ export const fixtureClient: ApiClient = {
     const start = Date.UTC(2026, 9, 12)
     const points = Array.from({ length: 26 }, (_, i) => {
       const base = 1000 + (i >= 6 ? 400 : 0) + (i >= 13 ? 300 : 0) + (i >= 21 ? 800 : 0)
-      return { day: new Date(start + i * 864e5).toISOString().slice(0, 10), usd: Math.round((base * (1 + i * 0.0009) + (i % 4) * 0.6) * 100) / 100 }
+      return { day: new Date(start + i * 864e5).toISOString().slice(0, 10), usd: Math.round((base * (1 + i * 0.0009) + (i % 4) * 0.6) * 100) / 100, deposited: base }
     })
-    return delay({ asOf: new Date().toISOString(), points, chains: [8453] })
+    return delay({ asOf: new Date().toISOString(), points, chains: [8453], netDeposited: { usd: 2500, status: 'complete' as const, since: points[0]!.day } })
   },
   yieldLedger: () =>
     delay({

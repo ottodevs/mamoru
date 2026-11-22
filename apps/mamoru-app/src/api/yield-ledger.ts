@@ -5,6 +5,7 @@
 import { metricsSignature } from '@mamoru/operator-auth'
 import type { Db } from './env.ts'
 import { writeIncome, type AccountVaultWire, type IncomeEventWire } from './income-ledger.ts'
+import { writeFlows, type FlowWire } from './flows-ledger.ts'
 
 export type OperatorFetch = (input: string, init: RequestInit) => Promise<Response>
 
@@ -85,7 +86,7 @@ export type SnapshotWire = {
    * yield-receipts.ts), the last few days only, including accounts the snapshot did not read (stopped). Absent from
    * an operator older than this field.
    */
-  receipts?: { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire}[]
+  receipts?: { safe: string; days: DayReceiptWire[]; events?: IncomeEventWire[]; vault?: AccountVaultWire; flows?: FlowWire[] }[]
   /** Spec 013 plan §3.5: CCTP transfers between an account's Safes (Base operator only). Absent: journals not read. */
   bridges?: BridgeWire[]
 }
@@ -443,6 +444,7 @@ export async function pullYieldLedger(db: Db, operatorUrl: string, operatorSecre
   await writeWorkedSamples(db, snapshot, now)
   await writeReceipts(db, snapshot, now)
   await writeIncomeSafely(db, snapshot, now)
+  await writeFlowsSafely(db, snapshot, now)
   await writeStatsFactsSafely(db, snapshot, now)
   return { accounts: accounts.written, positions: positions.written }
 }
@@ -456,6 +458,15 @@ async function writeIncomeSafely(db: Db, snapshot: SnapshotWire, now: Date): Pro
     await writeIncome(db, snapshot, now, (chainId, address) => resolveAccount(db, chainId, address))
   } catch (e) {
     console.error('yield-ledger: income not written', e instanceof Error ? e.message : String(e))
+  }
+}
+
+/** otto/mamoru#380: the external USDC flows (flows-ledger.ts). A failure (the table not migrated yet) is logged and leaves every other table of the pull written. */
+async function writeFlowsSafely(db: Db, snapshot: SnapshotWire, now: Date): Promise<void> {
+  try {
+    await writeFlows(db, snapshot, now, (chainId, address) => resolveAccount(db, chainId, address))
+  } catch (e) {
+    console.error('yield-ledger: flows not written', e instanceof Error ? e.message : String(e))
   }
 }
 
@@ -476,6 +487,7 @@ export async function pullWorkedSamples(db: Db, chainId: number, operatorUrl: st
   const samples = await writeWorkedSamples(db, snapshot, now)
   await writeReceipts(db, snapshot, now)
   await writeIncomeSafely(db, snapshot, now)
+  await writeFlowsSafely(db, snapshot, now)
   await writeStatsFactsSafely(db, snapshot, now)
   return samples
 }

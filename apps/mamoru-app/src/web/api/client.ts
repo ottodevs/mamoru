@@ -32,7 +32,13 @@ import type {
 } from '@mamoru/domain'
 
 /** `GET /api/accounts/:key/value-series` (src/api/accounts/value-series.ts). */
-export type ValueSeriesView = { asOf: string | null; points: { day: string; usd: number; partial?: true }[]; chains: number[] }
+export type ValueSeriesView = {
+  asOf: string | null
+  points: { day: string; usd: number; partial?: true; deposited?: number }[]
+  chains: number[]
+  /** otto/mamoru#380: net deposited now (USDC sent minus withdrawn); `status` says how far the flows reach. */
+  netDeposited: { usd: number; status: 'complete' | 'partial' | 'none'; since?: string }
+}
 
 // Every call goes to same-origin /api (FR-DSH-019). The SPA never reaches RPC, bundler or MultiBaas.
 export type ApiClient = {
