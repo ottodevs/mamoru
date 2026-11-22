@@ -154,6 +154,26 @@ export function reusablePosition(obs: Observation, policy: PolicyVersion, pool: 
 }
 
 /**
+ * The smallest entry and the smallest vault deposit. otto/mamoru#195: whether a bucket takes an entry at all, and how
+ * small that entry may be, also needs k times what its swap and mint cost in gas now. Only that decision: the swap, the
+ * sale of idle volatile and the mint inside an entry keep `minEntry`, so a gas price never strands a conversion an
+ * entry or a re-range needs. otto/mamoru#210: a vault deposit also has to earn its own two operations back (#186
+ * condition 4).
+ */
+function floorsOf(obs: Observation, policy: PolicyVersion): { entryMin: bigint; vaultMin: bigint } {
+  const minEntry = policy.minEntry ?? DEFAULT_MIN_ENTRY
+  const byGas = policy.minEntryGasMultiple ? BigInt(policy.minEntryGasMultiple) * ENTRY_OPS * opCostInSavings(obs, policy.savingsAsset) : 0n
+  const entryMin = byGas > minEntry ? byGas : minEntry
+  const vaultMin = policy.vaultMinDeposit !== undefined && policy.vaultMinDeposit > entryMin ? policy.vaultMinDeposit : entryMin
+  return { entryMin, vaultMin }
+}
+
+/** otto/mamoru#413 (SAV-R2): the smallest vault deposit, the one allocation uses; the savings deposit waits under it. */
+export function vaultFloorOf(obs: Observation, policy: PolicyVersion): bigint {
+  return floorsOf(obs, policy).vaultMin
+}
+
+/**
  * Target weights (policy `allocation: 'target-weights'`). Every bucket is valued in the savings asset at the TWAP:
  * its positions (amounts at the TWAP plus what `collect` returns) and the idle volatile token of its pool. The
  * account total adds the free savings, so idle capital counts toward the targets and is always re-invested.
@@ -173,13 +193,7 @@ export function allocate(obs: Observation, policy: PolicyVersion, unsafeDeposit:
   /** 0 when savings is token0 of the proposal's pool, else 1. */
   const savingsSide = (p: { pool: string }) => (obs.pools.find((x) => x.name === p.pool)?.token0 === savings ? 0 : 1)
   const minEntry = policy.minEntry ?? DEFAULT_MIN_ENTRY
-  // otto/mamoru#195: whether a bucket takes an entry at all, and how small that entry may be, also needs k times what
-  // its swap and mint cost in gas now. Only that decision: the swap, the sale of idle volatile and the mint inside an
-  // entry keep `minEntry`, so a gas price never strands a conversion an entry or a re-range needs.
-  const byGas = policy.minEntryGasMultiple ? BigInt(policy.minEntryGasMultiple) * ENTRY_OPS * opCostInSavings(obs, savings) : 0n
-  const entryMin = byGas > minEntry ? byGas : minEntry
-  // otto/mamoru#210: a vault deposit also has to earn its own two operations back (#186 condition 4).
-  const vaultMin = policy.vaultMinDeposit !== undefined && policy.vaultMinDeposit > entryMin ? policy.vaultMinDeposit : entryMin
+  const { entryMin, vaultMin } = floorsOf(obs, policy)
   const free = safeSavings(obs, policy)
   // otto/mamoru#415: buckets ops paused for new money until a set time; local and remote alike.
   const paused = pausedBuckets(obs, policy)

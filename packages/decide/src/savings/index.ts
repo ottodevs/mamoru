@@ -1,0 +1,74 @@
+import type { ReasonCode } from '@mamoru/domain'
+import { grantKeyFor, type PolicyVersion } from '@mamoru/policy'
+import { vaultFloorOf } from '../allocate/index.ts'
+import { reinvestFits } from '../harvest/index.ts'
+import type { Observation, VaultDepositProposal } from '../types.ts'
+import { bucketVaults } from '../value.ts'
+
+// otto/mamoru#413 (spec 012 savings-layer.md): harvested USDC is savings, kept in the Stable bucket's vault as shares
+// tagged savings, outside the bucket weights. The operator keeps the books (`Observation.savings`); here they are only
+// read: taken off the account for every bucket decision, and spent by the savings deposit alone.
+
+/** Pending savings the Safe holds now: the books' amount, never above the savings asset held. */
+export function savingsPending(obs: Observation, policy: PolicyVersion): bigint {
+  const pending = obs.savings?.pending ?? 0n
+  if (pending <= 0n) return 0n
+  const held = obs.balances[policy.savingsAsset] ?? 0n
+  return pending < held ? pending : held
+}
+
+/**
+ * SAV-R4: the observation without the savings layer, what allocation, the drain band, idle sales and entries see:
+ * pending savings off the savings asset, savings shares off each vault (their assets and the vault's limits at the
+ * vault's rate, floored, so the bucket is never counted above what it holds). The result has no `savings`, so taking
+ * it off twice changes nothing. Without `obs.savings` the same object, and every decision hashes as before.
+ */
+export function bucketObs(obs: Observation, policy: PolicyVersion): Observation {
+  if (!obs.savings) return obs
+  const { savings: _books, ...rest } = obs
+  const asset = policy.savingsAsset
+  const pending = savingsPending(obs, policy)
+  const balances = pending > 0n ? { ...obs.balances, [asset]: (obs.balances[asset] ?? 0n) - pending } : obs.balances
+  const vaults = obs.vaults?.map((v) => {
+    const own = obs.savings!.shares[v.name] ?? 0n
+    const tagged = own < v.shares ? (own > 0n ? own : 0n) : v.shares
+    if (tagged === 0n) return v
+    const shares = v.shares - tagged
+    const assets = v.shares === 0n ? 0n : (v.assets * shares) / v.shares
+    return { ...v, shares, assets, maxWithdraw: v.maxWithdraw < assets ? v.maxWithdraw : assets, maxRedeem: v.maxRedeem < shares ? v.maxRedeem : shares }
+  })
+  return { ...rest, balances, ...(vaults ? { vaults } : {}) }
+}
+
+export type SavingsSweep = { proposal: VaultDepositProposal | null; wait: { bucket: string; code: ReasonCode } | null }
+
+/**
+ * SAV-R2: pending savings go into the Stable bucket's vault, tagged savings, once they reach the vault floor (the
+ * same `max(vaultMinDeposit, entry floor)` an allocation deposit needs). Less waits and adds up with the next harvests,
+ * silently (nothing to report until it can go). Within what the vault takes now, the V4 vault ratio (`vaultRoom`) and
+ * the V4 room reserve (HRV-R7). Never with an unsafe deposit, an unread vault the policy names, or the bucket frozen
+ * (`still`: a fall or a depeg holds the stables bucket still). Absent `obs.savings`: nothing.
+ */
+export function savingsSweepOf(obs: Observation, policy: PolicyVersion, still?: ReadonlySet<string>): SavingsSweep {
+  const none: SavingsSweep = { proposal: null, wait: null }
+  if (!obs.savings || obs.deposits.some((d) => !d.safe)) return none
+  const b = policy.buckets.find((x) => (x.vaults?.length ?? 0) > 0 && x.preference > 0) ?? policy.buckets.find((x) => (x.vaults?.length ?? 0) > 0)
+  if (!b || still?.has(b.id)) return none
+  const named = new Set(b.vaults ?? [])
+  if (obs.vaultsUnread?.some((v) => named.has(v))) return none
+  const pending = savingsPending(obs, policy)
+  const floor = vaultFloorOf(obs, policy)
+  if (pending < floor) return none
+  const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
+  const open = bucketVaults(obs, b).filter((v) => v.maxDeposit >= floor)
+  const v = open.find((x) => live(grantKeyFor(policy, 'vault-supply', x.name))) ?? open[0]
+  if (!v) return { proposal: null, wait: { bucket: b.id, code: 'DECIDE_WAIT_VAULT_LIQUIDITY' } }
+  let assets = pending < v.maxDeposit ? pending : v.maxDeposit
+  const ratioRoom = obs.budget?.vaultRoom
+  if (ratioRoom !== undefined && ratioRoom < assets) {
+    if (ratioRoom < floor) return { proposal: null, wait: { bucket: b.id, code: 'DECIDE_WAIT_BUDGET' } }
+    assets = ratioRoom
+  }
+  if (!reinvestFits(obs, policy, assets)) return { proposal: null, wait: { bucket: b.id, code: 'DECIDE_WAIT_BUDGET' } }
+  return { proposal: { kind: 'vault_deposit', grant: grantKeyFor(policy, 'vault-supply', v.name) as `vault-supply:${string}`, bucket: b.id, pool: v.name, vault: v.name, assets, savings: true }, wait: null }
+}

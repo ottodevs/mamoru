@@ -8,6 +8,7 @@ import { fallFreezeOf } from './guard/index.ts'
 import { pausedBuckets } from './guard/pause.ts'
 import { depeggedPool, depegExitOf } from './guard/depeg.ts'
 import { estimateFees, harvestOf, harvestSaleOf, principalObs } from './harvest/index.ts'
+import { bucketObs, savingsSweepOf } from './savings/index.ts'
 import { weightTargets } from './rebalance/weights.ts'
 import { releaseOf } from './release/index.ts'
 import { chainExitStep } from './guard/chain-exit.ts'
@@ -22,6 +23,7 @@ import { poolDepthShadowRisk } from './shadow-pool-depth.ts'
 export type * from './types.ts'
 export { capRoomOf, placedOf, withinCap } from './cap.ts'
 export { estimateFees, harvestSaleOf, principalObs, reinvestFits, HARVEST_SALE_AGE_SECONDS, REINVEST_RESERVE_BPS } from './harvest/index.ts'
+export { bucketObs, savingsPending, savingsSweepOf } from './savings/index.ts'
 export { safeSavings } from './enter/index.ts'
 export { amountsForLiquidity, bucketVaults, inSavings, poolTvlInSavings, vaultValue, volatileOf } from './value.ts'
 export { PACKAGING_STABLES_DAY_PCT, PACKAGING_TVL_DROP_PCT, PACKAGING_VOLUME_RULES, poolStatsShadowRisk } from './shadow-pool-stats.ts'
@@ -78,9 +80,13 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
   // entries size from `entryObs`. Re-range, harvest, reduce, merges and idle sales read the observation as it is.
   // otto/mamoru#107 (spec 012 HRV-R1): entries and idle sales see the Safe without its harvested volatile, which only
   // the harvest sale takes. Without `obs.harvested`, `held` is `obs` itself.
-  const held = principalObs(obs)
+  // otto/mamoru#413 (spec 012 SAV-R4): every bucket decision also sees the account without its savings layer (pending
+  // savings and savings shares), so the targets are computed on bucket principal only. The cap still counts savings
+  // as placed: they never add room for new money. Without `obs.savings`, `held` is `principal`.
+  const principal = principalObs(obs)
+  const held = bucketObs(principal, given)
   const entryObs = withinCap(held, given)
-  const room = capRoomOf(held, given)
+  const room = capRoomOf(principal, given)
   // Lab (#101 experiment 6): every step reads the scaled preferences; the decision still names the policy as given.
   const targets = weightTargets(obs, given)
   const policy: PolicyVersion = targets ? { ...given, buckets: targets } : given
@@ -272,7 +278,12 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     const sale = exit || reranges.length || harvests.length || !obs.harvested ? null : harvestSaleOf(obs, policy, new Set([...frozenPools, ...policy.buckets.filter((b) => frozen.has(b.id)).flatMap((b) => b.pools)]))
     if (sale) for (const w of sale.waits) buckets.push(w)
     const sold = sale?.proposal ?? null
-    let reduce = exit || reranges.length || harvests.length || sold ? null : reduceOf(obs, policy, policyPools, lab)
+    // otto/mamoru#413 (SAV-R2): pending savings go into the Stable vault, tagged savings, right after the harvest sale.
+    const sweep = exit || reranges.length || harvests.length || sold ? null : savingsSweepOf(obs, policy, frozen)
+    if (sweep?.wait) buckets.push(sweep.wait)
+    const swept = sweep?.proposal ?? null
+    // SAV-R4: the drain band reads the bucket books only, so it never redeems savings back to the pools.
+    let reduce = exit || reranges.length || harvests.length || sold || swept ? null : reduceOf(bucketObs(obs, given), policy, policyPools, lab)
     // otto/mamoru#400: the sweep fills the vault to just under the drain line, so its own interest (or a fall in the
     // other buckets) crosses it within minutes. A redeem whose savings the next allocation would only put back in a vault,
     // or leave idle, is not made: it would undo the sweep every review (b22428c7, 13 Nov: 72 vault ops in a day). A
@@ -280,7 +291,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
     if (reduce?.proposal?.kind === 'vault_redeem' && policy.allocation === 'target-weights' && redeemReturns(reduce.proposal)) reduce = { code: null, proposal: null }
     // otto/mamoru#210: a vault that cannot pay out its excess yet says so on its bucket.
     if (reduce?.code === 'DECIDE_WAIT_VAULT_LIQUIDITY') buckets.push({ bucket: 'stables', code: reduce.code })
-    const idle = exit || reranges.length || harvests.length || sold || reduce?.proposal ? null : idleConvertOf(held, policy, policyPools, keep)
+    const idle = exit || reranges.length || harvests.length || sold || swept || reduce?.proposal ? null : idleConvertOf(held, policy, policyPools, keep)
     // otto/mamoru#278: an open release (the home account wants savings back) is all this Safe does until it is sent.
     // Every pool of a frozen bucket, not only the guard's own, and the depegged one.
     const release = releaseOf(obs, policy, policyPools, new Set([...frozenPools, ...policy.buckets.filter((b) => frozen.has(b.id)).flatMap((b) => b.pools)]))
@@ -296,7 +307,7 @@ export function decide(obs: Observation, given: PolicyVersion): Decision {
       proposal = exit ?? leaving.proposal
       reason = exit ? PROPOSAL_CODE[exit.kind] : leaving.code
     } else {
-      proposal = exit ?? reranges[0] ?? harvests[0] ?? sold ?? reduce?.proposal ?? idle ?? entries[0] ?? null
+      proposal = exit ?? reranges[0] ?? harvests[0] ?? sold ?? swept ?? reduce?.proposal ?? idle ?? entries[0] ?? null
       reason = proposal === sold && sold ? 'DECIDE_HARVEST' : proposal ? PROPOSAL_CODE[proposal.kind] : holdReason()
     }
   }

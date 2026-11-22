@@ -87,6 +87,14 @@ export type Observation = {
    */
   harvested?: Partial<Record<RegistryName, { amount: bigint; since: number }>>
   /**
+   * otto/mamoru#413 (spec 012 SAV-R1, R3): the account's savings books. `pending`: harvested USDC (raw) in the Safe not
+   * yet deposited as savings; `shares`: the vault shares tagged savings, per vault. Both are already in `balances` and
+   * `vaults`: allocation, the drain band and every entry see the account without them (`bucketObs`); only the savings
+   * deposit spends `pending`. The operator keeps each never above what is held; decide clips again. Absent: no savings
+   * (Monad, a policy with no vault bucket), and the observation hashes as before.
+   */
+  savings?: { pending: bigint; shares: Partial<Record<RegistryName, bigint>> }
+  /**
    * otto/mamoru#107 (spec 012 HRV-R7): MamoruActionPolicyV4's spending room on this chain (min of `budgetLeft`'s windows,
    * less a margin), raw savings units; 0 when the read failed. `vaultRoom`: what the vault buckets may still take under
    * the policy's vault ratio of C. Absent: not V4 (no read; the chain's own checks apply).
@@ -444,6 +452,8 @@ export type VaultDepositProposal = {
   vault: RegistryName
   /** Raw savings units. */
   assets: bigint
+  /** otto/mamoru#413 (SAV-R2): harvested USDC deposited as savings; its shares are tagged savings in the books. */
+  savings?: true
 }
 
 /** otto/mamoru#210: shares of a vault bucket redeemed to the account: vault.redeem(shares, account, account). */
