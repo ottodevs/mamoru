@@ -26,6 +26,7 @@ import { loadEarned } from '../earned.ts'
 import { sleevesOfUser } from './store.ts'
 import { loadWorked } from './worked.ts'
 import { COVERAGE_MIN, coverage, sampledIntervals, sampledShare, type Interval } from './sampled.ts'
+import { loadPoolEarnings, type PoolEarning } from './pool-earnings.ts'
 import { loadValueSeriesDetail, type NetDeposited } from './value-series.ts'
 
 /** Mamoru's yield fee, 10 %. Mirrors the operator's rule (apps/mamoru-operator/src/yield-fee.ts); read here, never charged here. */
@@ -66,6 +67,8 @@ export type VsIdleView = {
   breakdown: { feesUsd: number; priceMoveUsd: number | null; costsUsd: number; mamoruFeeUsd: number; netUsd: number | null } | null
   /** Uncollected fees inside the total value, shown apart from `breakdown`. */
   pendingUsd: number
+  /** Per pool or vault: what it earned the owner (net) and its APR 30d, for the Working capital table. */
+  pools: PoolEarning[]
   /** Savings layer inside the figures above (otto/mamoru#413 seam, 0 until the ledger tags it). */
   savingsUsd: number
   /** APR · 30-day avg, net of the fee (see the header). */
@@ -93,7 +96,7 @@ export async function loadVsIdle(db: Db, userId: string, now: Date, baselineComp
   const { view, pending } = await loadValueSeriesDetail(db, userId, now)
   const complete = baselineComplete ?? isComplete(view.netDeposited)
   const last = view.points.at(-1)
-  const empty: VsIdleView = { asOf: view.asOf, totalUsd: last?.usd ?? null, netDeposited: view.netDeposited, since: view.points[0]?.day ?? null, breakdown: null, pendingUsd: last ? usd(toCents(BigInt(pending.get(last.day) ?? 0))) : 0, savingsUsd: SAVINGS_USD_UNTIL_TAGGED, apr: { pct: null, reason: 'not-measured' }, status: 'partial', notCounted: [], series: [] }
+  const empty: VsIdleView = { asOf: view.asOf, totalUsd: last?.usd ?? null, netDeposited: view.netDeposited, since: view.points[0]?.day ?? null, breakdown: null, pendingUsd: last ? usd(toCents(BigInt(pending.get(last.day) ?? 0))) : 0, savingsUsd: SAVINGS_USD_UNTIL_TAGGED, pools: [], apr: { pct: null, reason: 'not-measured' }, status: 'partial', notCounted: [], series: [] }
   if (!last) return empty
   const notCounted = new Set<NotCounted>()
   // The value itself is stale or carries a chain forward (value-series `partial`): the figure is an estimate.
@@ -130,6 +133,7 @@ export async function loadVsIdle(db: Db, userId: string, now: Date, baselineComp
   }
   if (!earnedKnown) notCounted.add('fees')
   if (!gasKnown) notCounted.add('costs')
+  empty.pools = await loadPoolEarnings(db, sleeves)
   empty.apr = await netApr30d(db, sleeves, income, view.points[0]?.day ?? null)
   const status = (): 'complete' | 'partial' => (notCounted.size ? 'partial' : 'complete')
   const out = { ...empty, notCounted: [...notCounted].sort(), status: status() }

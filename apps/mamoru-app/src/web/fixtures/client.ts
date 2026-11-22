@@ -414,6 +414,7 @@ export const fixtureClient: ApiClient = {
       breakdown: { feesUsd: 0.5, priceMoveUsd: 0.25, costsUsd: -0.1, mamoruFeeUsd: -0.05, netUsd: 0.6 },
       pendingUsd: 0,
       savingsUsd: 0,
+      pools: [],
       apr: { pct: 33.9, reason: null },
       status: 'complete' as const,
       notCounted: [],

@@ -93,8 +93,8 @@ describe('routes', () => {
     expect(text).toContain('Idle capital 10.00 USDC waiting to be placed')
     expect(text).toContain('Stop allocation')
     // Rates not loaded: n/a with the reason, never a figure.
-    expect(text).toContain('Current rate n/a')
-    expect(text).toContain('Monthly rate n/a')
+    expect(text).toContain('APR 30d')
+    expect(text).toContain('APR 30d n/a')
     expect(text).not.toContain('UTC')
   })
   // otto/mamoru#198: the two rates under the balance, figure over "APY · what", sources behind (i); earned so

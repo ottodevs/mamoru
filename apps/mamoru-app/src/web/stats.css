@@ -218,3 +218,6 @@
   .pv-plot { margin-right: 6rem; }
   .pv-ax { margin-right: 6rem; }
 }
+
+/* otto/mamoru#413 seam: the savings layer next to the Stable amount, small and green. */
+.wc-savings { font-size: .72rem; color: var(--color-emerald); margin-left: .35rem; }
