@@ -51,6 +51,7 @@ import { MESSAGE_TRANSMITTER_V2 } from '../src/cctp.ts'
 import { signedCall, warmPrepare } from './e2e-client.ts'
 import { DEFAULT_SPONSOR, SPONSOR_BOUNDS, type SponsorPolicy } from '../src/sponsorship.ts'
 import { clearProductionEnv, e2eUpstream } from './e2e-env.ts'
+import { simulateCalls } from '@mamoru/rpc'
 
 const REPO = join(import.meta.dir, '../../..')
 /** The beta account's balance (USDC equivalent) on 31 Oct. */
@@ -354,6 +355,14 @@ try {
   const prep = await worker<OwnerTxToSign & { remote?: RemoteOffer }>('POST', '/renew/prepare', {})
   check(prep.status === 200 && !!prep.json.remote, 'Worker renew/prepare: 200 with the remote Safe offer', `${prep.status} ${JSON.stringify(prep.json).slice(0, 160)}`)
   const offer = prep.json.remote!
+  // otto/mamoru#446: what the operator plans the move on now (eth_estimateGas of the owner's pre-validated
+  // execTransaction), against the simulateAndRevert figure it used before (x9/8 + 300k) and, below, the receipt.
+  const heldTx = (bo as unknown as { prepared: Map<string, { tx: { to: Address; value: bigint; data: Hex; operation: number; nonce: bigint } }> }).prepared.get(prep.json.prepareId)!.tx
+  const [moveOwner] = await base.client.readContract({ address: ctx.address, abi: safeAbi, functionName: 'getOwners' })
+  const preValidated = concat([pad(moveOwner!, { size: 32 }), pad('0x00', { size: 32 }), '0x01'])
+  const execArgs = [heldTx.to, heldTx.value, heldTx.data, heldTx.operation, 0n, 0n, 0n, '0x0000000000000000000000000000000000000000', '0x0000000000000000000000000000000000000000', preValidated] as const
+  const moveEst = await base.client.estimateGas({ account: moveOwner!, to: ctx.address, data: encodeFunctionData({ abi: safeAbi, functionName: 'execTransaction', args: execArgs }) })
+  const [sar] = await simulateCalls(base.client as never, [{ from: privateKeyToAccount(generatePrivateKey()).address, to: ctx.address, data: encodeFunctionData({ abi: parseAbi(['function simulateAndRevert(address, bytes)']), functionName: 'simulateAndRevert', args: [heldTx.to, heldTx.data] }) }], await base.client.getBlockNumber())
   log(`v6 approval summary:\n    ${prep.json.summary.join('\n    ')}`)
   verifyRemote(ctx, offer)
   check(offer.chainId === 143 && offer.spec.policyId === 'live-wmon-usdc-monad-v6', 'the offer is the Safe the owner\'s keys give on Monad (verifyRemote)', offer.address)
@@ -365,6 +374,9 @@ try {
   const migrated = await waitOp(sub.json.opId, 'the v5 -> v6 owner transaction')
   const migrationGas = (await base.client.getTransactionReceipt({ hash: migrated.txHash as Hex })).gasUsed
   gasReport.push(`move v5 -> v6 (one tx): ${migrationGas}`)
+  gasReport.push(`move v5 -> v6 planning (#446): eth_estimateGas pre-validated ${moveEst} -> planned ${moveEst + 300_000n}; simulateAndRevert ${sar?.gasUsed} -> old planned ${sar ? (sar.gasUsed * 9n) / 8n + 300_000n : 'n/a'}; receipt ${migrationGas}`)
+  log(gasReport.at(-1)!)
+  check(migrationGas <= moveEst, 'the receipt stays within the pre-validated estimate the operator plans on', `${migrationGas} <= ${moveEst}`)
   const after = await funding()
   check(!after.approval?.missing && !after.approval?.upgrade && accState().policyId === 'conservador-live-v6', 'the account runs conservador-live-v6, nothing missing', `gas ${migrationGas}`)
   const safeNonce1 = await base.client.readContract({ address: ctx.address, abi: safeAbi, functionName: 'nonce' })

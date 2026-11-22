@@ -114,6 +114,9 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
      */
     monad: false,
     sarOk: true as boolean | null,
+    /** otto/mamoru#446: what eth_estimateGas of the owner's pre-validated execTransaction answers (null: refused), and each request. */
+    ownerEstimate: null as bigint | ((data: Hex) => bigint) | null,
+    estimates: [] as { account: unknown; to: string; data: Hex; blockNumber?: bigint }[],
   }
   const npmCalls: string[] = []
   /** Canonical block hashes, and the height each one is at. */
@@ -141,6 +144,11 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
       return { number: n, hash: (a.blockNumber !== undefined ? knobs.blockHashes.get(n) : undefined) ?? hashOf(n), parentHash: knobs.parents.get(n) ?? hashOf(n - 1n), timestamp: knobs.blockTime }
     },
     getGasPrice: async () => knobs.gasPrice,
+    estimateGas: async (a: { account: unknown; to: string; data: Hex; blockNumber?: bigint }) => {
+      knobs.estimates.push(a)
+      if (knobs.ownerEstimate === null) throw new Error('execution reverted')
+      return typeof knobs.ownerEstimate === 'function' ? knobs.ownerEstimate(a.data) : knobs.ownerEstimate
+    },
     getTransactionReceipt: async ({ hash }: { hash: string }) => {
       const r = knobs.receipts.get(hash.toLowerCase())
       if (r) return r

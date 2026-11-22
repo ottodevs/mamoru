@@ -144,6 +144,17 @@ async function estimateLikeOperator(lab: Lab, safe: Address, tx: SafeTx, relayer
 }
 
 /**
+ * otto/mamoru#446: the operator's pre-sign estimate now (operator.ts ownerTxGasEstimate): eth_estimateGas of the owner's
+ * execTransaction from the owner with the pre-validated signature (r = owner, s = 0, v = 1), + PASSKEY_VERIFY_GAS.
+ */
+async function estimatePreValidated(lab: Lab, safe: Address, tx: SafeTx): Promise<{ est: bigint; limit: bigint }> {
+  const [owner] = await lab.client.readContract({ address: safe, abi: safeAbi, functionName: 'getOwners' })
+  const signatures = concat([pad(owner!, { size: 32 }), pad('0x00', { size: 32 }), '0x01'])
+  const est = await lab.client.estimateGas({ account: owner!, to: safe, data: execTransactionData(tx, signatures) })
+  return { est, limit: est + PASSKEY_VERIFY_GAS }
+}
+
+/**
  * ONE owner Safe transaction: the owner (the shared signer contract, impersonated) approves `safeTxHash`, then a relayer
  * sends execTransaction with the v=1 approved-hash signature and `gas`. Throws unless the Safe has one owner, threshold 1.
  */
@@ -365,7 +376,10 @@ try {
   const relayerB = privateKeyToAccount(relayerKeyB).address
   const estV8 = await estimateLikeOperator(base, BASE_SAFE, ms, relayerB)
   check(!!estV8, "the operator's pre-sign simulation of the move succeeds", estV8 ? `${estV8.sim} -> limit ${estV8.limit}` : 'no answer')
+  const preV8 = await estimatePreValidated(base, BASE_SAFE, ms)
   const exV8 = await runAsOwner(base, BASE_SAFE, ms, t.safeTxHash, estV8?.limit ?? 16_000_000n)
+  console.log(`v8 move gas (#446): eth_estimateGas pre-validated ${preV8.est} -> planned ${preV8.limit}; simulateAndRevert ${estV8?.sim} -> old planned ${estV8?.limit}; receipt ${exV8.receipt.gasUsed}`)
+  check(exV8.receipt.gasUsed <= preV8.est, 'the receipt stays within the pre-validated estimate the operator plans on', `${exV8.receipt.gasUsed} <= ${preV8.est}`)
   const evV8 = executions(exV8.receipt, BASE_SAFE)
   const after = (await base.client.readContract({ address: address('SmartSession', baseRegistry), abi: permissionIdsAbi, functionName: 'getPermissionIDs', args: [BASE_SAFE] })) as Hex[]
   const v8Gas = exV8.receipt.gasUsed

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, pad, parseAbi, parseAbiItem, parseEventLogs, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { concat, decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, pad, parseAbi, parseAbiItem, parseEventLogs, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type ReturnHomeInput, type StopInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, baseRegistry, tokenMessengerV2Abi, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
@@ -3026,6 +3026,27 @@ export class Operator {
   }
 
   /**
+   * otto/mamoru#446 (#259 b): the gas the owner's Safe transaction carrying `calls` needs, as eth_estimateGas of that
+   * very execTransaction sent by an owner with a pre-validated signature (`r` = the owner, `s` = 0, `v` = 1: the Safe
+   * takes a hash its sender approves). On Base this measured within 33k of the signed transaction's estimate, the
+   * difference being the WebAuthn check, which PASSKEY_VERIFY_GAS covers. The SAR figure (×9/8 + 300k) came to ~1.6x
+   * the receipt and split the v5 -> v6 move into two signatures. Null when it cannot be read (an undeployed Safe, a
+   * batch that reverts, a node that will not estimate from a contract): ownerTxGasLimit then, as before.
+   */
+  private async ownerTxGasEstimate(live: LiveAccount, calls: Parameters<typeof ownerSafeTx>[0], block: bigint): Promise<bigint | null> {
+    const owner = live.owners[0]
+    if (!owner || !calls.length) return null
+    try {
+      const approved = concat([pad(owner, { size: 32 }), pad('0x00', { size: 32 }), '0x01'])
+      const est = await this.client.estimateGas({ account: owner, to: live.safe, data: execData(ownerSafeTx(calls, 0n, this.cfg.registry), approved), blockNumber: block })
+      // otto/mamoru#287: a chain that reports the whole gas given measured nothing.
+      return est > 0n && est < SIM_CALL_GAS ? est + PASSKEY_VERIFY_GAS : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * otto/mamoru#151: the gas limit the owner's Safe transaction carrying `calls` needs, or null when it cannot be read.
    * The batch runs in one simulation in the Safe's own context: `Safe.simulateAndRevert(MultiSendCallOnly, multiSend)`
    * delegatecalls the batch exactly as execTransaction does, then reverts, so no refund is netted out of the gas used
@@ -3278,10 +3299,11 @@ export class Operator {
       const calls = [...revocationCalls(revokes, this.cfg.registry), ...a.batch.calls]
       const fallback = overheadGas + a.stored.reduce((n, g) => n + estimateSessionGas(g.grant.actions.length), 0n)
       // The gas LIMIT the owner transaction needs, before refunds (a revoke clears storage: t8-fork measured
-      // eth_estimateGas 13.78M against a receipt of 11.31M on the v5 move's first transaction), from one simulation of
-      // the whole batch in the Safe's own context. Not available (an undeployed Safe): the per-call simulation, bounded
+      // eth_estimateGas 13.78M against a receipt of 11.31M on the v5 move's first transaction): eth_estimateGas of the
+      // owner's execTransaction itself, pre-validated (otto/mamoru#446), else one simulation of the whole batch in the
+      // Safe's own context. Neither available (an undeployed Safe): the per-call simulation, bounded
       // up by 5/4 (EIP-3529: a refund is at most 1/5 of the gas before it), else the static estimate.
-      const limit = await this.ownerTxGasLimit(live, calls, r.block)
+      const limit = (await this.ownerTxGasEstimate(live, calls, r.block)) ?? (await this.ownerTxGasLimit(live, calls, r.block))
       const sim = limit === null ? await this.activationGasOf(live, calls, a.stored.length, r.block, fallback) : { gas: limit, simulated: true }
       const gas = limit !== null || !sim.simulated ? sim.gas : (sim.gas * 5n) / 4n
       built.set(ks.length, { a, calls, gas, simulated: sim.simulated })

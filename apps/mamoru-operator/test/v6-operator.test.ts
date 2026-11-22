@@ -284,6 +284,63 @@ describe('owner transactions of a v6 approval', () => {
     expect(p.provisioned).toEqual([])
   })
 
+  test('#446: the move is planned on eth_estimateGas of the owner\'s pre-validated execTransaction, not the SAR figure', async () => {
+    const p = fakePeer()
+    const w = world(0n, cfg6(p.peer))
+    running(w, v5)
+    ready(w)
+    chain(w, 7n)
+    // Under the target: one owner transaction, as the owner was promised.
+    w.knobs.ownerEstimate = V4_TX_GAS_TARGET - 400_000n
+    expectOneV6Transaction(w, await w.op.prepareRenew(ctx))
+    const asked = w.knobs.estimates.at(-1)!
+    const owner = getAddress(ctx.owners[0]!)
+    expect(getAddress(asked.account as Address)).toBe(owner)
+    expect(getAddress(asked.to)).toBe(getAddress(ctx.address))
+    const exec = decodeFunctionData({ abi: parseAbi(['function execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)']), data: asked.data })
+    // r = the owner, s = 0, v = 1: a hash the sender approves, no passkey needed to measure.
+    expect(exec.args[9]).toBe(`${pad(owner, { size: 32 })}${'0'.repeat(64)}01`.toLowerCase() as Hex)
+    expect(asked.blockNumber).toBeDefined()
+    // Over the target even for one session: refused whole, never handed out over Base's cap.
+    w.knobs.ownerEstimate = V4_TX_GAS_TARGET
+    await expect(w.op.prepareRenew(ctx)).rejects.toMatchObject({ code: 'RENEWAL_TOO_LARGE' })
+    // A node that will not estimate: the simulation path as before (here every grant fits one transaction).
+    w.knobs.ownerEstimate = null
+    expectOneV6Transaction(w, await w.op.prepareRenew(ctx))
+  })
+
+  test('#446: a move that does not fit one transaction lands in steps; the next step is offered, never a hold for good', async () => {
+    const p = fakePeer()
+    const w = world(0n, cfg6(p.peer))
+    const acc = running(w, v5)
+    ready(w)
+    chain(w, 7n)
+    // Every grant together is over the target; any shorter batch fits: the move takes a later step.
+    w.knobs.ownerEstimate = 1_000_000n
+    await w.op.prepareRenew(ctx)
+    const whole = w.knobs.estimates.at(-1)!.data.length
+    w.knobs.ownerEstimate = (data) => (data.length >= whole ? V4_TX_GAS_TARGET : 1_000_000n)
+    const t = await w.op.prepareRenew(ctx)
+    expect(t.move).toBe(true)
+    const first = priv(w.op).prepared.get(t.prepareId)!
+    const names = first.grants!.map((g) => g.name)
+    expect(names).toEqual(['manage-any:pool:USDC/USDT/100', 'manage-any:pool:WETH/USDC/3000', 'manage-any:pool:USDC/cbBTC/500'])
+    expect(t.summary.join('\n')).toMatch(/takes 2 steps: after this one, one more/)
+    // Step 1 lands as a confirmed renewal applies it: the account is on v6 with these grants.
+    acc.grants = first.grants!
+    acc.policyId = 'conservador-live-v6'
+    const view = (w.op as unknown as { approvalView(a: AccountState): { missing?: number; upgrade?: unknown } | null }).approvalView(acc)
+    expect(view?.missing).toBe(1)
+    // The renew row now offers the rest as an extension of the same approval: one more signature, bridge-out in it.
+    const next = await w.op.prepareRenew(ctx)
+    const second = priv(w.op).prepared.get(next.prepareId)!
+    expect(second.extend).toBe(true)
+    expect(second.grants!.map((g) => g.name)).toEqual(['bridge-out'])
+    expect(next.summary[0]).toMatch(/^Finish Mamoru's approval/)
+    acc.grants = [...acc.grants, ...second.grants!]
+    expect((w.op as unknown as { approvalView(a: AccountState): { missing?: number } | null }).approvalView(acc)?.missing).toBeFalsy()
+  })
+
   test('renewal: the mint recipient of bridge-out is the remote Safe the owner is shown, and that is the Safe these keys and the Monad session key give', async () => {
     const p = fakePeer()
     const w = world(0n, cfg6(p.peer))
