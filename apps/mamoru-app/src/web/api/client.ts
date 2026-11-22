@@ -44,7 +44,7 @@ export type VsIdleView = {
   /** APR · 30-day avg, the owner's real net APR; null for the first 30 days (show the Mamoru average) or while nothing worked. */
   apr: { pct: number | null; reason: 'first-30-days' | 'not-measured' | null }
   status: 'complete' | 'partial'
-  notCounted: ('flows' | 'fees' | 'vault-yield' | 'history' | 'costs')[]
+  notCounted: ('flows' | 'fees' | 'vault-yield' | 'history' | 'costs' | 'value')[]
   series: { day: string; netUsd: number }[]
 }
 

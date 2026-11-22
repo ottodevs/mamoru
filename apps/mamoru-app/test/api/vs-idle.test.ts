@@ -76,6 +76,18 @@ describe('loadVsIdle', () => {
     expect(v.status).toBe('complete')
   })
 
+  test('income newer than the balance read is not in the fee yet; a stale or carried value is named', async () => {
+    const db = funded()
+    income(db, '0xh3:0', '2026-11-06T17:55:00.000Z', 100) // after the 17:50 read
+    const v = await loadVsIdle(db, 'u1', NOW)
+    expect(v.breakdown!.netUsd).toBe(5.8)
+    expect(v.breakdown!.mamoruFeeUsd).toBe(-0.2)
+    expect(v.notCounted).toEqual(['costs'])
+    const stale = await loadVsIdle(db, 'u1', new Date('2026-11-08T18:00:00.000Z'))
+    expect(stale.notCounted).toEqual(['costs', 'value'])
+    expect(stale.status).toBe('partial')
+  })
+
   test('a loss shows negative: price move carries it', async () => {
     const db = seed()
     daily(db, '2026-11-06', 970, 0)
@@ -118,6 +130,7 @@ describe('APR · 30-day avg', () => {
     daily(db, '2026-11-06', 1000, 0)
     latest(db, 0, 1000)
     flow(db, 'in:0xa:0', 'in', '2026-08-30T09:00:00.000Z', 1000)
+    worked(db, '2026-10-08T17:30:00.000Z', 1000) // observed across the window (the interval to the next is a gap: no capital-time)
     worked(db, '2026-11-06T17:30:00.000Z', 1000)
     worked(db, '2026-11-06T17:50:00.000Z', 1000)
     income(db, '0xh:0', '2026-11-06T17:40:00.000Z', 0.01) // 0.009 net; 1000 USDC x 1200 s
@@ -131,9 +144,19 @@ describe('APR · 30-day avg', () => {
     daily(old, '2026-09-01', 1000, 0)
     daily(old, '2026-11-06', 1000, 0)
     latest(old, 0, 1000)
+    worked(old, '2026-10-08T17:30:00.000Z', 1000)
     worked(old, '2026-11-06T17:30:00.000Z', 1000)
     worked(old, '2026-11-06T17:50:00.000Z', 1000)
     expect((await loadVsIdle(old, 'u1', NOW)).apr).toEqual({ pct: 0, reason: null })
+    // two recent samples only: the income of the month has no capital-time behind it, so no figure
+    const sparse = seed()
+    daily(sparse, '2026-09-01', 1000, 0)
+    daily(sparse, '2026-11-06', 1000, 0)
+    latest(sparse, 0, 1000)
+    worked(sparse, '2026-11-06T17:30:00.000Z', 1000)
+    worked(sparse, '2026-11-06T17:50:00.000Z', 1000)
+    income(sparse, '0xh:0', '2026-11-05T12:00:00.000Z', 30)
+    expect((await loadVsIdle(sparse, 'u1', NOW)).apr).toEqual({ pct: null, reason: 'not-measured' })
     const young = seed()
     daily(young, '2026-10-20', 1000, 0)
     daily(young, '2026-11-06', 1000, 0)

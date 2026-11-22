@@ -8,7 +8,8 @@
 // - fees earned: REALIZED yield only (Ot, 22 Nov): collected fees plus vault share growth, the income ledger's total
 //   without the uncollected fees it adds (earned.ts). Pending fees are `pendingUsd`, apart, neither earned nor charged.
 // - Mamoru fee: MAMORU_FEE_BPS of the income realized from MAMORU_FEE_FROM on, never earlier. This is the one place the
-//   figure is made; the operator-side fee rule (otto/mamoru#433) replaces `mamoruFeeUsdc` here, nothing else reads it.
+//   figure is made. A fee already paid left the Safe in a withdrawal, which the flows count as out (flows.ts), so the
+//   whole fee owed is subtracted here once. The operator-side fee rule (otto/mamoru#433) replaces `mamoruFeeUsdc` here, nothing else reads it.
 // - APR, 30-day average: the owner's real net APR, not the pool rate: realized income of the last 30 days, net of the
 //   fee, over the capital that worked in that window times its time (worked.ts, in range only), annualised. Null for the
 //   first 30 days of the account ('first-30-days': the app shows the Mamoru average then) and while nothing worked.
@@ -37,7 +38,7 @@ export function mamoruFeeUsdc(income: readonly IncomeRow[], until: number): bigi
   return (base * MAMORU_FEE_BPS) / 10_000n
 }
 
-export type NotCounted = 'flows' | 'fees' | 'vault-yield' | 'history' | 'costs'
+export type NotCounted = 'flows' | 'fees' | 'vault-yield' | 'history' | 'costs' | 'value'
 /** `pct` null: `first-30-days` (the account is younger than the window) or `not-measured` (no worked capital or no read yet). */
 /**
  * otto/mamoru#413 seam: harvested yield kept in the Stable vault as a separate savings layer. It is already inside total
@@ -79,6 +80,8 @@ export async function loadVsIdle(db: Db, userId: string, now: Date): Promise<VsI
   const empty: VsIdleView = { asOf: view.asOf, totalUsd: last?.usd ?? null, netDeposited: view.netDeposited, since: view.points[0]?.day ?? null, breakdown: null, pendingUsd: last ? usd(toCents(BigInt(pending.get(last.day) ?? 0))) : 0, savingsUsd: SAVINGS_USD_UNTIL_TAGGED, apr: { pct: null, reason: 'not-measured' }, status: 'partial', notCounted: [], series: [] }
   if (!last) return empty
   const notCounted = new Set<NotCounted>(['costs'])
+  // The value itself is stale or carries a chain forward (value-series `partial`): the figure is an estimate.
+  if (last.partial) notCounted.add('value')
   if (view.netDeposited.status !== 'complete') notCounted.add('flows')
 
   const sleeves = await sleevesOfUser(db, userId)
@@ -103,7 +106,9 @@ export async function loadVsIdle(db: Db, userId: string, now: Date): Promise<VsI
   if (view.netDeposited.status !== 'complete' || !earnedKnown) return out
 
   const dayEnd = (day: string) => Date.parse(`${day}T00:00:00.000Z`) / 1000 + 86_400
-  const feeAt = (day: string) => toCents(mamoruFeeUsdc(income, dayEnd(day)))
+  // Income newer than the balance read is not in the value yet: the fee is cut at that read, as earned.ts cuts the income.
+  const readS = view.asOf ? Math.floor(Date.parse(view.asOf) / 1000) : Number.MAX_SAFE_INTEGER
+  const feeAt = (day: string) => toCents(mamoruFeeUsdc(income, Math.min(dayEnd(day), Number.isFinite(readS) ? readS + 1 : dayEnd(day))))
   const netAt = (day: string, total: number, deposited: number) => cents(total) - toCents(BigInt(pending.get(day) ?? 0)) - cents(deposited) - feeAt(day)
   const series = view.points.filter((p) => p.deposited !== undefined).map((p) => ({ day: p.day, netUsd: usd(netAt(p.day, p.usd, p.deposited!)) }))
   // The last point is today's running read: the figure shown now is that point, and the rows add up to it.
@@ -130,6 +135,10 @@ async function netApr30d(db: Db, sleeves: { chain_id: number; account_key: strin
   const end = Math.floor(Date.parse(worked.asOf) / 1000)
   const start = end - MONTH_S
   if (!Number.isFinite(end) || Date.parse(`${firstDay}T00:00:00.000Z`) / 1000 > start) return { pct: null, reason: 'first-30-days' }
+  // Observation coverage: the capital-time of the denominator only exists where samples were taken, the income of the
+  // numerator does not care. A window observed for under 28 of its 30 days is not measured, never a figure.
+  const span = await db.prepare('SELECT MIN(t_s) AS lo, MAX(t_s) AS hi FROM account_worked_samples WHERE chain_id = ? AND account_key = ? AND t_s > ? AND t_s <= ?').bind(base!.chain_id, base!.account_key, start, end).first<{ lo: number | null; hi: number | null }>()
+  if (span?.lo == null || span.hi == null || span.hi - span.lo < 28 * DAY_S) return { pct: null, reason: 'not-measured' }
   const capitalSeconds = worked.month.reduce((n, p) => n + p.usdSeconds, 0) / 1e6
   if (!(capitalSeconds > 0)) return { pct: null, reason: 'not-measured' }
   let earned = 0
