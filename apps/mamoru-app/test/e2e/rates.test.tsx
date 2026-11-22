@@ -427,7 +427,20 @@ describe('vs idle USDC with the value', () => {
     expect(html).toMatch(/data-testid="bd-net"[^>]*><td>Net<\/td><td class="v alert">/)
     expect(text).not.toContain('explain')
   })
-  test('no figure yet: n/a, no breakdown, no deposited line', () => {
+  test('a baseline that is not complete: vs idle, price move, Net and the chart are n/a; fees, costs, the fee and APR show', () => {
+    const series = [{ day: '2026-11-18', netUsd: 0 }, { day: '2026-11-19', netUsd: 1 }]
+    const part = render(<Balance s={s} vsIdle={vsIdle({ netDeposited: { usd: 974.76, status: 'partial', since: '2026-10-21' }, breakdown: { feesUsd: 6.62, priceMoveUsd: null, costsUsd: -0.62, mamoruFeeUsd: -0.55, netUsd: null }, series })} {...noop} />)
+    expect(part.text).toContain('vs idle USDC n/a')
+    expect(part.text).toContain('Fees earned +6.62')
+    expect(part.text).toContain('Price move n/a')
+    expect(part.text).toContain('Costs −0.62')
+    expect(part.text).toContain('Mamoru fee 10 % −0.55')
+    expect(part.text).toContain('Net n/a')
+    expect(part.text).toContain('33.9%')
+    expect(part.text).not.toContain('deposited')
+    expect(part.text).not.toContain('Net over time')
+  })
+  test('no figure at all (loading, failed): n/a, no breakdown, no deposited line', () => {
     const none = render(<Balance s={s} vsIdle={vsIdle({ breakdown: null, netDeposited: { usd: 0, status: 'none' } })} {...noop} />)
     expect(none.text).toContain('vs idle USDC n/a')
     expect(none.text).not.toContain('Breakdown')

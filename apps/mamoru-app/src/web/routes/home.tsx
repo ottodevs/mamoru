@@ -265,7 +265,7 @@ export function Balance({
         </div>
         <VsIdleHead v={vsIdle} mamoruAprPct={mamoruAprPct} />
         </div>
-        {vsIdle?.breakdown && vsIdle.netDeposited.status === 'complete' ? <VsIdleBody v={vsIdle} /> : null}
+        {vsIdle?.breakdown ? <VsIdleBody v={vsIdle} /> : null}
       </div>
     </section>
   )

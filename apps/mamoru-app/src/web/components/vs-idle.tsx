@@ -63,6 +63,7 @@ export function VsIdleHead({ v, mamoruAprPct }: { v: VsIdleView | null | undefin
 /** The breakdown rows; they add up to Net by construction (the API). Negative rows stay stone, the Net row goes red. */
 export function Breakdown({ v }: { v: VsIdleView }) {
   const b = v.breakdown!
+  // Price move and Net need a complete baseline: until then they say n/a (otto/mamoru#438), the other rows stand.
   const row = (label: string, n: number | null, testid: string) => (
     <tr key={label} data-testid={testid}>
       <td>{label}</td>
@@ -78,7 +79,7 @@ export function Breakdown({ v }: { v: VsIdleView }) {
         {row(vsIdleCopy.fee, b.mamoruFeeUsd, 'bd-fee')}
         <tr className="tot" data-testid="bd-net">
           <td>{vsIdleCopy.net}</td>
-          <td className={`v ${b.netUsd < 0 ? 'alert' : 'pos'}`}>{signed(b.netUsd)}</td>
+          <td className={`v ${b.netUsd === null ? 'neg' : b.netUsd < 0 ? 'alert' : 'pos'}`}>{b.netUsd === null ? vsIdleCopy.na : signed(b.netUsd)}</td>
         </tr>
       </tbody>
     </table>
@@ -98,7 +99,7 @@ export function VsIdleBody({ v }: { v: VsIdleView }) {
         </div>
         <Breakdown v={v} />
       </div>
-      <NetChart series={v.series} deposited={v.netDeposited.usd} />
+      {v.series.length > 1 && v.netDeposited.status === 'complete' ? <NetChart series={v.series} deposited={v.netDeposited.usd} /> : null}
     </div>
   )
 }
