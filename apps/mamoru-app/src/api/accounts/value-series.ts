@@ -75,7 +75,7 @@ export async function loadValueSeries(db: Db, userId: string, now: Date): Promis
   return { asOf: known[0] ?? null, points, chains: perChain.map((c) => c.chainId), netDeposited }
 }
 
-type Flow = { kind: 'in' | 'out'; t_s: number; usd: number }
+type Flow = { kind: 'in' | 'out' | 'gap'; t_s: number; usd: number }
 
 async function flowsOf(db: Db, sleeves: { chain_id: number; account_key: string }[]): Promise<Flow[]> {
   const out: Flow[] = []
@@ -87,23 +87,30 @@ async function flowsOf(db: Db, sleeves: { chain_id: number; account_key: string 
 }
 
 const DAY_S = 86_400
+const signedOf = (f: Flow) => (f.kind === 'in' ? f.usd : f.kind === 'out' ? -f.usd : 0)
 
-/** Sets `deposited` on every point (cumulative in - out up to the end of its UTC day) and says how far the flows can be trusted. */
+/**
+ * Sets `deposited` on every point (cumulative in - out up to the end of its UTC day, signed: more out than in is a
+ * negative baseline, the gains taken out) and says how far the flows can be trusted. `complete` needs evidence, not
+ * only a first flow: no operator `gap` row, no value before the first flow, and the first day's value explained by what
+ * was deposited by then (a deposit the operator never kept would leave the first day's value far above it).
+ */
 function applyFlows(points: ValuePoint[], flows: Flow[]): NetDeposited {
-  if (!flows.length) return { usd: 0, status: 'none' }
-  const sinceDay = new Date(flows[0]!.t_s * 1000).toISOString().slice(0, 10)
+  const money = flows.filter((f) => f.kind !== 'gap')
+  if (!money.length) return { usd: 0, status: 'none' }
+  const sinceDay = new Date(money[0]!.t_s * 1000).toISOString().slice(0, 10)
   let net = 0
   let i = 0
   for (const p of points) {
     const endOfDay = Date.parse(`${p.day}T00:00:00.000Z`) / 1000 + DAY_S - 1
-    while (i < flows.length && flows[i]!.t_s <= endOfDay) {
-      net += flows[i]!.kind === 'in' ? flows[i]!.usd : -flows[i]!.usd
-      i++
-    }
-    p.deposited = usd(Math.max(net, 0))
+    while (i < money.length && money[i]!.t_s <= endOfDay) net += signedOf(money[i++]!)
+    p.deposited = usd(net)
   }
-  for (; i < flows.length; i++) net += flows[i]!.kind === 'in' ? flows[i]!.usd : -flows[i]!.usd
-  // Value before the first known flow: the money came in before the operator's reach (early deposits were never kept).
-  const partial = points[0] !== undefined && points[0].day < sinceDay
-  return { usd: usd(Math.max(net, 0)), status: partial ? 'partial' : 'complete', since: sinceDay }
+  for (; i < money.length; i++) net += signedOf(money[i]!)
+  const first = points[0]
+  // Value before the first known flow, a first day that the flows do not explain (more than 5 % or 1 USDC apart), or a gap
+  // the operator named: the money came in where the operator did not see it.
+  const unexplained = first !== undefined && (first.day < sinceDay || Math.abs(first.usd - (first.deposited ?? 0)) > Math.max(1, 0.05 * first.usd))
+  const partial = unexplained || flows.some((f) => f.kind === 'gap')
+  return { usd: usd(net), status: partial ? 'partial' : 'complete', since: sinceDay }
 }

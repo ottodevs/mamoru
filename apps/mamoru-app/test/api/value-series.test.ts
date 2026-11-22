@@ -69,7 +69,7 @@ describe('loadValueSeries', () => {
   })
 })
 
-function flow(db: ReturnType<typeof seed>, chain: number, key: string, id: string, kind: 'in' | 'out', at: string, usdc: number) {
+function flow(db: ReturnType<typeof seed>, chain: number, key: string, id: string, kind: 'in' | 'out' | 'gap', at: string, usdc: number) {
   db.raw.exec(`INSERT INTO account_flows (chain_id, account_key, flow_id, kind, t_s, usd, updated_at) VALUES (${chain}, '${key}', '${id}', '${kind}', ${Date.parse(at) / 1000}, ${usdc * USDC}, '${at}')`)
 }
 
@@ -101,13 +101,34 @@ describe('net deposited (otto/mamoru#380)', () => {
     expect(v.points[0]!.deposited).toBe(0)
   })
 
+  test('a first day the flows do not explain, and an operator gap, are partial; more out than in is a negative baseline, not zero', async () => {
+    const db = seed()
+    daily(db, '2026-11-05', 8453, 'base-u1', 1020 * USDC)
+    daily(db, '2026-11-06', 8453, 'base-u1', 1030 * USDC)
+    latest(db, 8453, 'base-u1', '2026-11-06T17:50:00.000Z')
+    flow(db, 8453, 'base-u1', 'in:0xa:0', 'in', '2026-11-05T09:00:00.000Z', 20) // the 1,000 deposited before it was never kept
+    expect((await loadValueSeries(db, 'u1', NOW)).netDeposited.status).toBe('partial')
+
+    const ok = seed()
+    daily(ok, '2026-11-05', 8453, 'base-u1', 100 * USDC)
+    daily(ok, '2026-11-06', 8453, 'base-u1', 0)
+    latest(ok, 8453, 'base-u1', '2026-11-06T17:50:00.000Z')
+    flow(ok, 8453, 'base-u1', 'in:0xa:0', 'in', '2026-11-05T09:00:00.000Z', 100)
+    flow(ok, 8453, 'base-u1', 'out:0xb', 'out', '2026-11-06T09:00:00.000Z', 110)
+    const v = await loadValueSeries(ok, 'u1', NOW)
+    expect(v.points.map((p) => p.deposited)).toEqual([100, -10])
+    expect(v.netDeposited).toEqual({ usd: -10, status: 'complete', since: '2026-11-05' })
+    ok.raw.exec(`INSERT INTO account_flows (chain_id, account_key, flow_id, kind, t_s, usd, updated_at) VALUES (8453, 'base-u1', 'gap:deposits-cap', 'gap', 1, 0, 'x')`)
+    expect((await loadValueSeries(ok, 'u1', NOW)).netDeposited.status).toBe('partial')
+  })
+
   test('Base and Monad flows of one owner are summed', async () => {
     const db = seed()
     daily(db, '2026-11-05', 8453, 'base-u1', 100 * USDC)
     daily(db, '2026-11-05', 143, 'monad-u1', 50 * USDC)
     flow(db, 8453, 'base-u1', 'in:0xa:0', 'in', '2026-11-05T01:00:00.000Z', 100)
-    flow(db, 143, 'monad-u1', 'in:0xb:0', 'in', '2026-11-05T02:00:00.000Z', 40)
-    expect((await loadValueSeries(db, 'u1', NOW)).netDeposited).toEqual({ usd: 140, status: 'complete', since: '2026-11-05' })
+    flow(db, 143, 'monad-u1', 'in:0xb:0', 'in', '2026-11-05T02:00:00.000Z', 50)
+    expect((await loadValueSeries(db, 'u1', NOW)).netDeposited).toEqual({ usd: 150, status: 'complete', since: '2026-11-05' })
   })
 })
 
@@ -118,14 +139,17 @@ describe('writeFlows', () => {
     const snap = {
       chainId: 8453,
       receipts: [
-        { safe: '0x00000000000000000000000000000000000000B1', flows: [{ id: 'in:0xa:0', t: 1_762_000_000, kind: 'in' as const, usdc: '2000000' }, { id: 'out:0xb', t: 1_762_000_100, kind: 'out' as const, usdc: '0' }] },
+        { safe: '0x00000000000000000000000000000000000000B1', flows: [{ id: 'in:0xa:0', t: 1_762_000_000, kind: 'in' as const, usdc: '2000000' }, { id: 'out:0xb', t: 1_762_000_100, kind: 'out' as const, usdc: '0' }, { id: 'gap:x', t: 1_762_000_200, kind: 'gap' as const, usdc: '0' }, { id: 'gap:bad', t: 1_762_000_200, kind: 'gap' as const, usdc: '5' }] },
         { safe: '0x00000000000000000000000000000000000000ff', flows: [{ id: 'in:0xc:0', t: 1_762_000_000, kind: 'in' as const, usdc: '5' }] },
       ],
     }
     await writeFlows(db, snap, NOW, resolve)
     await writeFlows(db, snap, new Date('2026-11-07T00:00:00.000Z'), resolve)
-    const rows = db.raw.query('SELECT account_key, flow_id, kind, usd, updated_at FROM account_flows').all()
-    expect(rows).toEqual([{ account_key: 'base-u1', flow_id: 'in:0xa:0', kind: 'in', usd: 2_000_000, updated_at: NOW.toISOString() }])
+    const rows = db.raw.query('SELECT account_key, flow_id, kind, usd, updated_at FROM account_flows ORDER BY flow_id').all()
+    expect(rows).toEqual([
+      { account_key: 'base-u1', flow_id: 'gap:x', kind: 'gap', usd: 0, updated_at: NOW.toISOString() },
+      { account_key: 'base-u1', flow_id: 'in:0xa:0', kind: 'in', usd: 2_000_000, updated_at: NOW.toISOString() },
+    ])
   })
 })
 
