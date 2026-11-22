@@ -41,7 +41,10 @@ export const REASON_CODES = [
   'SESSION_ACTION_POLICY_MISMATCH',
   'REMOTE_SAFE_MISMATCH',
   // otto/mamoru#311: a one-authorization prepare whose Safe tx the Worker does not rebuild the same (buildMigrateV4).
+  // otto/mamoru#430: also a Stop whose Safe tx makes a call a Stop does not make, or amounts the Worker's reads refuse.
   'BUILD_MISMATCH',
+  // otto/mamoru#430: the Worker could not read the chain to check a Stop's swaps or refund; nothing signed, retryable.
+  'STOP_CHECK_UNAVAILABLE',
   // T7: basefee leaves no room under a v4 session's MamoruGasPolicy maxFeePerGas cap; the engine waits.
   'GAS_PRICE_OVER_CAP',
   // Pre-chequeo de política en el motor

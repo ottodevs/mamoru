@@ -107,8 +107,10 @@ class ReadError extends Error {}
 
 const HEX = /^0x([0-9a-f]{2})*$/i
 const WORD = /^0x[0-9a-f]{64}$/i
+const QUANTITY = /^0x[0-9a-f]{1,64}$/i
 
-async function rpc(fetcher: ChainFetch, url: string, method: string, params: unknown[]): Promise<string> {
+/** One JSON-RPC call. `quantity`: the answer is a QUANTITY (eth_gasPrice: no leading zeros, any length), not DATA. */
+export async function rpc(fetcher: ChainFetch, url: string, method: string, params: unknown[], quantity = false): Promise<string> {
   let res: Response
   let body: unknown
   try {
@@ -125,7 +127,7 @@ async function rpc(fetcher: ChainFetch, url: string, method: string, params: unk
   if (!res.ok) throw new ReadError(`rpc http ${res.status}`)
   const answer = body as { result?: unknown; error?: unknown } | null
   if (typeof answer !== 'object' || answer === null || Array.isArray(answer) || answer.error !== undefined) throw new ReadError('rpc call failed')
-  if (typeof answer.result !== 'string' || !HEX.test(answer.result)) throw new ReadError('rpc answer is not hex')
+  if (typeof answer.result !== 'string' || !(quantity ? QUANTITY : HEX).test(answer.result)) throw new ReadError('rpc answer is not hex')
   return answer.result
 }
 

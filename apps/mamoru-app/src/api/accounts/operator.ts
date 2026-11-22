@@ -2,7 +2,7 @@ import { Hono, type Context } from 'hono'
 import type { AccountContext, Address, MigrateV4Input, RemoteSpec, ReturnHomeInput } from '@mamoru/domain'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
 import { buildReturnHome } from '@mamoru/account/return-home'
-import { whyNotStop } from '@mamoru/account/stop-check'
+import { readStop, whyNotStopBounds } from '@mamoru/account/stop-check'
 import { registryFor, type Registry } from '@mamoru/registry'
 import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
@@ -12,6 +12,7 @@ import { ownersOf, type AccountRow } from './store.ts'
 import { BASE, ownedSleeve } from '../sleeves.ts'
 import { defaultRemoteRegistry, remoteOf, upsertRemoteSleeve, verifyRemote, type RemoteRegistry } from '../remote.ts'
 import { chainFundingResponse, fundingRpcUrls, type ChainFunding } from './chain-funding.ts'
+import { readStopBounds } from './stop-reads.ts'
 
 // Live funds (sprint amendment 2026-09-26 21:40): after the device session proves it owns the account,
 // the Worker forwards the same route to the operator with a signed account context (app-api.ts AccountContext).
@@ -226,22 +227,33 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
   /**
    * otto/mamoru#430: a Stop is planned from what the operator reads at that block, so it cannot be rebuilt from inputs. It
    * is passed on only when its Safe tx (`safeTx`) is this row's own Safe on its own chain, hashes to what the owner is asked
-   * to sign, and makes only the calls a Stop makes, every one paying the Safe itself (whyNotStop). A Stop without `safeTx`
-   * (an operator older than this check) is refused too: 502 BUILD_MISMATCH, nothing signed.
+   * to sign, and makes only the calls a Stop makes, every one paying the Safe itself (readStop); and when its amounts hold
+   * against what the Worker reads itself: each swap's minimum out against QuoterV2, a Safe-paid refund's gas price against
+   * the chain's (whyNotStopBounds). A Stop without `safeTx` (an operator older than this check) is refused too: 502
+   * BUILD_MISMATCH, nothing signed. Reads that cannot be had: 503 STOP_CHECK_UNAVAILABLE, retryable.
    */
   const checkStop = async (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Promise<Response | null> => {
-    let body: Parameters<typeof whyNotStop>[2]
+    let body: Parameters<typeof readStop>[2]
     try {
       body = JSON.parse(text)
     } catch {
       return refusedBuild(c, row, 'not JSON')
     }
-    let why: string | null
+    let registry: Registry
+    let needs: ReturnType<typeof readStop>
     try {
-      why = whyNotStop(row.address as Address, row.chain_id, body, registryOf(row.chain_id))
+      registry = registryOf(row.chain_id)
+      needs = readStop(row.address as Address, row.chain_id, body, registry)
     } catch (e) {
-      why = `stop: ${e instanceof Error ? e.message : String(e)}`
+      return refusedBuild(c, row, `stop: ${e instanceof Error ? e.message : String(e)}`)
     }
+    if ('why' in needs) return refusedBuild(c, row, `stop ${needs.why}`)
+    const read = chain ? await readStopBounds(chain.fetch, fundingRpcUrls(c.env, row.chain_id), registry, needs) : null
+    if (!read) {
+      console.error(`stop prepare for ${row.account_key} not checked: no chain read`)
+      return apiError(c, 503, 'Mamoru could not check this Stop against the chain just now. Nothing was signed. Try again in a minute.', 'STOP_CHECK_UNAVAILABLE')
+    }
+    const why = whyNotStopBounds(needs, read)
     return why ? refusedBuild(c, row, `stop ${why}`) : null
   }
   const refusedBuild = (c: Context<AppEnv>, row: AccountRow, why: string) => {

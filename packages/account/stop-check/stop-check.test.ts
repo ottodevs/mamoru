@@ -5,7 +5,7 @@ import { address, baseRegistry, erc20Abi, erc4626Abi, monadRegistry, multiSendCa
 import { uniswapV3 } from '@mamoru/uniswap-v3'
 import { ownerSafeTx, stopBatch } from '../live/index.ts'
 import { safeTxTypedData, type MultiSendCall, type SafeTx } from '../safe/index.ts'
-import { STOP_MAX_BASE_GAS, whyNotStop } from './index.ts'
+import { readStop, STOP_MAX_BASE_GAS, STOP_MIN_OUT_BPS, whyNotStop, whyNotStopBounds, type StopNeeds } from './index.ts'
 
 // otto/mamoru#430: the Worker reads a Stop's Safe tx and passes it only when every call is one a Stop makes, paying the Safe.
 
@@ -16,13 +16,13 @@ const ids: Hex[] = [`0x${'01'.repeat(32)}`, `0x${'02'.repeat(32)}`]
 const strip = (c: { to: Address; value: bigint; data: Hex }): MultiSendCall => ({ to: c.to, value: c.value, data: c.data })
 
 /** What planFullStop builds: revokes, close and burn, a vault redeem, a swap back to USDC (approve, swap, approve 0). */
-function stopCalls(reg: Registry, token = 'cbBTC'): MultiSendCall[] {
+function stopCalls(reg: Registry, token = 'cbBTC', fee = 500): MultiSendCall[] {
   const { approve, exactInputSingle } = uniswapV3(reg)
   const vault = reg.entries.find((e) => e.kind === 'vault')
   return [
     ...stopBatch({ account: SAFE, permissionIds: ids, positions: [{ tokenId: 7n, liquidity: 1_000n, amount0Min: 1n, amount1Min: 1n }], deadline: 1_800_000_000n, registry: reg }),
     ...(vault ? [{ to: vault.address, value: 0n, data: encodeFunctionData({ abi: erc4626Abi, functionName: 'redeem', args: [5n, SAFE, SAFE] }) }] : []),
-    ...[approve(token, 'SwapRouter02', 50_000n), exactInputSingle({ account: SAFE, tokenIn: token, tokenOut: 'USDC', fee: 500, amountIn: 50_000n, amountOutMinimum: 1n }), approve(token, 'SwapRouter02', 0n)].map(strip),
+    ...[approve(token, 'SwapRouter02', 50_000n), exactInputSingle({ account: SAFE, tokenIn: token, tokenOut: 'USDC', fee, amountIn: 50_000n, amountOutMinimum: 1n }), approve(token, 'SwapRouter02', 0n)].map(strip),
   ]
 }
 
@@ -54,7 +54,7 @@ describe('whyNotStop (otto/mamoru#430)', () => {
   })
 
   test('the same on Monad (WMON back to USDC, no vault in its registry): admitted', () => {
-    expect(whyNotStop(SAFE, 143, batch(stopCalls(monadRegistry, 'WMON'), monadRegistry), monadRegistry)).toBeNull()
+    expect(whyNotStop(SAFE, 143, batch(stopCalls(monadRegistry, 'WMON', 3000), monadRegistry), monadRegistry)).toBeNull()
   })
 
   test('a revoke-only Stop (one plain CALL): admitted', () => {
@@ -125,5 +125,40 @@ describe('whyNotStop (otto/mamoru#430)', () => {
     expect(whyNotStop(SAFE, 8453, { ...body, safe: THIEF }, baseRegistry)).toBe('safe')
     expect(whyNotStop(SAFE, 8453, { ...body, chainId: 143 }, baseRegistry)).toBe('chain')
     expect(whyNotStop(SAFE, 8453, { ...body, safeTx: undefined }, baseRegistry)).toBe('no safeTx')
+  })
+
+  test('a swap on a fee tier with no pool in the registry (one anyone could create thin): refused', () => {
+    const swap = { to: router, value: 0n, data: encodeFunctionData({ abi: swapRouter02Abi, functionName: 'exactInputSingle', args: [{ tokenIn: address('cbBTC', baseRegistry), tokenOut: usdc, fee: 10_000, recipient: SAFE, amountIn: 1n, amountOutMinimum: 0n, sqrtPriceLimitX96: 0n }] }) }
+    expect(whyNotStop(SAFE, 8453, batch([...stopCalls(baseRegistry), swap]), baseRegistry)).toContain('swap pool')
+  })
+
+  test('a refund that forwards no gas to the calls (they fail, the refund is paid): refused', () => {
+    const tx = { ...ownerSafeTx(stopCalls(baseRegistry), 4n, baseRegistry), refund: { safeTxGas: 0n, baseGas: 100_000n, gasPrice: 20_000_000n, refundReceiver: RELAYER } }
+    expect(whyNotStop(SAFE, 8453, offer(tx), baseRegistry)).toBe('refund')
+  })
+
+  test('readStop names what the Worker must read: every swap and a refund gas price', () => {
+    const tx = { ...ownerSafeTx(stopCalls(baseRegistry), 4n, baseRegistry), refund: { safeTxGas: 900_000n, baseGas: 100_000n, gasPrice: 20_000_000n, refundReceiver: RELAYER } }
+    const r = readStop(SAFE, 8453, offer(tx), baseRegistry) as StopNeeds
+    expect(r.swaps).toEqual([{ tokenIn: address('cbBTC', baseRegistry), tokenOut: usdc, fee: 500, amountIn: 50_000n, amountOutMinimum: 1n }])
+    expect(r.refundGasPrice).toBe(20_000_000n)
+  })
+})
+
+describe('whyNotStopBounds (otto/mamoru#430)', () => {
+  const needs = (min: bigint, gas: bigint | null = null): StopNeeds => ({ swaps: [{ tokenIn: THIEF, tokenOut: THIEF, fee: 500, amountIn: 1n, amountOutMinimum: min }], refundGasPrice: gas })
+  test('a minimum out within the room of the Worker quote: admitted; under it (a sandwich): refused', () => {
+    const quote = 1_000_000n
+    expect(whyNotStopBounds(needs((quote * STOP_MIN_OUT_BPS) / 10_000n), { quotes: [quote], gasPrice: null })).toBeNull()
+    expect(whyNotStopBounds(needs((quote * STOP_MIN_OUT_BPS) / 10_000n - 1n), { quotes: [quote], gasPrice: null })).toBe('swap 0 minimum out')
+    expect(whyNotStopBounds(needs(0n), { quotes: [quote], gasPrice: null })).toBe('swap 0 minimum out')
+  })
+  test('a refund gas price up to three times the chain\'s: admitted; above, or unread: refused', () => {
+    expect(whyNotStopBounds({ swaps: [], refundGasPrice: 30n }, { quotes: [], gasPrice: 10n })).toBeNull()
+    expect(whyNotStopBounds({ swaps: [], refundGasPrice: 31n }, { quotes: [], gasPrice: 10n })).toBe('refund gas price')
+    expect(whyNotStopBounds({ swaps: [], refundGasPrice: 30n }, { quotes: [], gasPrice: null })).toBe('refund gas price')
+  })
+  test('a quote missing for a swap: refused', () => {
+    expect(whyNotStopBounds(needs(1n), { quotes: [], gasPrice: null })).toBe('quotes')
   })
 })
