@@ -12,11 +12,10 @@
 // ERC-20-mode layout at the Chainlink ETH/USD price. No API key, nothing sent to a real chain.
 //
 // Run: nix shell nixpkgs#foundry --command bun apps/mamoru-operator/test/e2e-l1-userop.ts
-// Upstream RPCs: L1_RPC_URL / BASE_RPC_URL, or QUICKNODE_ETH_MAINNET_HTTP / QUICKNODE_BASE_MAINNET_HTTP from
-// ~/.config/quicknode/endpoints.env (never printed).
+// Upstream RPCs: E2E_L1_RPC_URL / E2E_RPC_URL, else public nodes (e2e-env.ts); never the live operator's.
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { concat, createPublicClient, encodeAbiParameters, encodeFunctionData, http, keccak256, numberToHex, pad, parseAbi, parseEventLogs, sliceHex, toHex, type Hex } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
@@ -38,6 +37,7 @@ import { Relayer } from '../src/relayer.ts'
 import { HttpError } from '../src/operator.ts'
 import { checkPimlicoErc20, L1Bundler, MAX_CONSTANT_FEE, PIMLICO_ERC20_PAYMASTER_V07, RpcRefused, type Erc20Paymaster, type GasPrice } from '../src/paymaster.ts'
 import { fundUsdc } from './fork-funding.ts'
+import { clearProductionEnv, e2eUpstream } from './e2e-env.ts'
 
 const CHAINLINK_ETH_USD = '0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419' as const
 const AMOUNT = 150_000_000n
@@ -72,13 +72,10 @@ const pmAbi = parseAbi([
 ])
 const chainlinkAbi = parseAbi(['function latestRoundData() view returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80)'])
 
-for (const [env, name] of [['L1_RPC_URL', 'QUICKNODE_ETH_MAINNET_HTTP'], ['BASE_RPC_URL', 'QUICKNODE_BASE_MAINNET_HTTP']] as const) {
-  if (process.env[env]) continue
-  const file = join(homedir(), '.config/quicknode/endpoints.env')
-  const line = existsSync(file) ? readFileSync(file, 'utf8').split('\n').find((l) => l.startsWith(`${name}=`)) : undefined
-  if (!line) throw new Error(`set ${env}`)
-  process.env[env] = line.slice(line.indexOf('=') + 1).replace(/^["']|["']$/g, '').trim()
-}
+// otto/mamoru#450: never the live operator's providers.
+const upstreams = { L1_RPC_URL: e2eUpstream('l1'), BASE_RPC_URL: e2eUpstream('base') }
+clearProductionEnv()
+Object.assign(process.env, upstreams)
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-e2e-l1-userop-'))
 function fork(env: 'L1_RPC_URL' | 'BASE_RPC_URL', chainId: number) {
   const proxy = startForkProxy(env)

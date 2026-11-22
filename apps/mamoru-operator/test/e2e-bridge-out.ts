@@ -3,10 +3,10 @@
 // stubbed: a deposit id made on the fork can collide with a real one on mainnet.
 //
 // Run: nix shell nixpkgs#foundry --command bun apps/mamoru-operator/test/e2e-bridge-out.ts
-// Upstream RPC: L1_RPC_URL, or QUICKNODE_ETH_MAINNET_HTTP from ~/.config/quicknode/endpoints.env (never printed).
+// Upstream RPC: E2E_L1_RPC_URL, else a public Ethereum node (e2e-env.ts); never the live operator's.
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPublicClient, http, toHex, type Hex } from 'viem'
 import type { AccountContext, OwnerSignature, OwnerTxToSign } from '@mamoru/domain'
@@ -22,6 +22,7 @@ import { BridgeOut, L1_USDC, ACROSS_SPOKE_POOL, type Fetch } from '../src/bridge
 import { HttpError } from '../src/operator.ts'
 import { Relayer } from '../src/relayer.ts'
 import { fundUsdc } from './fork-funding.ts'
+import { clearProductionEnv, e2eUpstream } from './e2e-env.ts'
 
 /** anvil's first dev account, funded on every fork. */
 const DEV_KEY: Hex = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
@@ -38,12 +39,10 @@ const code = async (p: Promise<unknown>): Promise<string> =>
     (e) => (e instanceof HttpError ? e.code : `unexpected: ${e instanceof Error ? e.message.slice(0, 200) : String(e)}`),
   )
 
-if (!process.env.L1_RPC_URL) {
-  const file = join(homedir(), '.config/quicknode/endpoints.env')
-  const line = existsSync(file) ? readFileSync(file, 'utf8').split('\n').find((l) => l.startsWith('QUICKNODE_ETH_MAINNET_HTTP=')) : undefined
-  if (!line) throw new Error('set L1_RPC_URL')
-  process.env.L1_RPC_URL = line.slice(line.indexOf('=') + 1).replace(/^["']|["']$/g, '').trim()
-}
+// otto/mamoru#450: never the live operator's provider.
+const l1Upstream = e2eUpstream('l1')
+clearProductionEnv()
+process.env.L1_RPC_URL = l1Upstream
 const proxy = startForkProxy('L1_RPC_URL')
 const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })
 const port = portProbe.port as number

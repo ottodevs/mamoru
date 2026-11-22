@@ -1,7 +1,7 @@
 // Requests per review on real Base state: one observe() through Multicall3 and one with unbatched reads, at the
 // same block of an anvil fork, for an account that holds at least 3 Uniswap v3 positions.  The account: MAMORU_E2E_ACCOUNT or a pinned one. The two observations
 // must be equal; the request counts are printed. Never touches the live operator.
-// Upstream: RPC_URL or BASE_RPC_URL from the environment only; a public Base RPC when neither is set.
+// Upstream: E2E_RPC_URL, else a public Base RPC (e2e-env.ts); never the live operator's.
 import { mkdtempSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,8 +11,9 @@ import { baseRegistry, address, nonfungiblePositionManagerAbi } from '@mamoru/re
 import { historyCursor, observe, type ObserveInput } from '@mamoru/rpc'
 import { assertNoKeyInArgv, sanitizedEnv } from '../../../packages/scenarios/fork/anvil.ts'
 import { startForkProxy } from '../../../packages/scenarios/proxy/index.ts'
+import { e2eBaseEnv } from './e2e-env.ts'
 
-if (!process.env.RPC_URL) process.env.RPC_URL = process.env.BASE_RPC_URL ?? 'https://mainnet.base.org'
+e2eBaseEnv()
 /** Requests of one batched review, steady state (packages/rpc/test/observe-batch.test.ts). */
 const MAX_BATCHED = 12
 const HISTORY_BLOCKS = 1_500n

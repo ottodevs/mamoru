@@ -7,7 +7,7 @@
 //   under the v4 grants (swap + mint through MamoruActionPolicy) -> stop closes everything.
 // The two policies are deployed on the local anvil the way contracts/action-policy/script/Deploy.s.sol does it.
 //
-// RPC: BASE_FORK_RPC_URL (default https://mainnet.base.org, the public endpoint, never the operator's provider key),
+// RPC: E2E_RPC_URL (default https://mainnet.base.org, see e2e-env.ts; the public endpoint, never the operator's provider key),
 // through the loopback proxy. Run: PATH="$HOME/.foundry/bin:$PATH" bun apps/mamoru-operator/test/e2e-v4.ts
 import { randomBytes } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
@@ -30,8 +30,9 @@ import { readSafe } from '../src/chain.ts'
 import { DEFAULT_SPONSOR, SPONSOR_BOUNDS, type SponsorPolicy } from '../src/sponsorship.ts'
 import { signedCall } from './e2e-client.ts'
 import { catchUpClock, forkUpstreamArgs } from './fork-funding.ts'
+import { e2eBaseEnv } from './e2e-env.ts'
 
-process.env.RPC_URL = process.env.BASE_FORK_RPC_URL ?? 'https://mainnet.base.org'
+e2eBaseEnv()
 const DEPOSIT = 20_000_000n
 const t0 = Date.now()
 const log = (m: string) => console.log(`[e2e-v4 +${((Date.now() - t0) / 1000).toFixed(0)}s] ${m}`)

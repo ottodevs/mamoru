@@ -22,7 +22,7 @@
 //   nix shell nixpkgs#foundry --command bash -c 'export PATH=$HOME/.foundry/bin:$PATH;
 //     cd contracts/action-policy && ./install.sh && forge build --silent && cd ../.. &&
 //     bun apps/mamoru-operator/test/e2e-two-chain.ts'
-// Upstreams: BASE_FORK_RPC_URL (default https://mainnet.base.org), MONAD_RPC_URL (default https://rpc.monad.xyz), public,
+// Upstreams: E2E_RPC_URL (default https://mainnet.base.org, e2e-env.ts), MONAD_RPC_URL (default https://rpc.monad.xyz), public,
 // through loopback proxies. Nothing is broadcast anywhere but the two local anvils.
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
@@ -50,6 +50,7 @@ import { bootOperator } from '../src/boot.ts'
 import { MESSAGE_TRANSMITTER_V2 } from '../src/cctp.ts'
 import { signedCall, warmPrepare } from './e2e-client.ts'
 import { DEFAULT_SPONSOR, SPONSOR_BOUNDS, type SponsorPolicy } from '../src/sponsorship.ts'
+import { clearProductionEnv, e2eUpstream } from './e2e-env.ts'
 
 const REPO = join(import.meta.dir, '../../..')
 /** The beta account's balance (USDC equivalent) on 31 Oct. */
@@ -59,7 +60,7 @@ const PINNED_DEPLOYER: Address = '0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0'
 const PINNED_GUARDIAN: Address = '0xA8E6EF87e612fA5c54668Cc1fF0aC809e1321FdD'
 const V3_BASE: Address = '0xDD2E387B748420C6501EC96Ec48F87cDEdf16749'
 const GATE_V3_BASE: Address = '0xf939c0FF7F095BA2ED7DDaaCD2D75da9A8cdF4e7'
-/** Live Base operator env (~/.config/mamoru-operator/env, addresses only). */
+/** The live Base operator's contracts (public addresses). */
 const V1_BASE: Address = '0x0083A9ca619f22A4f29704F97981dfFe8CD35215'
 const GAS_POLICY_BASE: Address = '0x9EB9a72c5e7231374eD65f5a1fF3e38a39798866'
 const V2_BASE: Address = '0x9ef35e544C93A6722a13473AB9EF115f719bbE6B'
@@ -80,7 +81,9 @@ function check(ok: boolean, step: string, detail = ''): void {
 }
 
 // --- two forks --------------------------------------------------------------------------------------------------------
-if (!process.env.BASE_FORK_RPC_URL) process.env.BASE_FORK_RPC_URL = 'https://mainnet.base.org'
+const baseUpstream = e2eUpstream('base')
+clearProductionEnv()
+process.env.BASE_FORK_RPC_URL = baseUpstream
 if (!process.env.MONAD_RPC_URL) process.env.MONAD_RPC_URL = 'https://rpc.monad.xyz'
 const anvilBin = Bun.which('anvil') ?? join(homedir(), '.foundry/bin/anvil')
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-e2e-two-chain-'))

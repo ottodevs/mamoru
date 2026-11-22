@@ -2,7 +2,7 @@
 // oracle answer the full 24.5 h window `marketOf` needs, or does `observeGuardHistory` fall back to the rolling
 // series — and does that series survive a simulated restart. Prints the on-chain/fallback split and the request
 // count of the extra Multicall3 batch (the CU cost LC-T6 adds). Never touches the live operator.
-// Upstream: RPC_URL or BASE_RPC_URL from the environment only; a public Base RPC when neither is set.
+// Upstream: E2E_RPC_URL, else a public Base RPC (e2e-env.ts); never the live operator's.
 import { mkdtempSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,8 +12,9 @@ import { MULTICALL3, observeGuardHistory, type PoolGuardTarget } from '@mamoru/r
 import { assertNoKeyInArgv, sanitizedEnv } from '../../../packages/scenarios/fork/anvil.ts'
 import { startForkProxy } from '../../../packages/scenarios/proxy/index.ts'
 import { GuardHistoryStore } from '../src/guard-history-state.ts'
+import { e2eBaseEnv } from './e2e-env.ts'
 
-if (!process.env.RPC_URL) process.env.RPC_URL = process.env.BASE_RPC_URL ?? 'https://mainnet.base.org'
+e2eBaseEnv()
 const WINDOW_SECONDS = 1_800
 const LIVE_POOLS = ['pool:USDC/USDT/100', 'pool:USDC/cbBTC/500', 'pool:WETH/USDC/3000'] as const
 const log = (m: string) => console.log(`[guard-history] ${m}`)

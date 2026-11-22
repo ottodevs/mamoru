@@ -3,10 +3,10 @@
 // (the signed cap C a renewed account would have, so the policy's spending windows bind as in production), Start is not refused by size, the engine places what each pool's depth
 // allows and reports the rest as waiting (DECIDE_WAIT_DEPTH), then the owner's Stop brings everything back as USDC.
 // Opt-in, not in CI: a cold fork of Base and up to 10 min. Same harness as e2e-fork.ts (anvil fork of Base keeping
-// chain id 8453, upstream from RPC_URL or BASE_RPC_URL or ~/.config/mamoru-operator/env, the operator behind the
+// chain id 8453, upstream from E2E_RPC_URL or a public Base node (e2e-env.ts), the operator behind the
 // engine port that refuses anvil_* methods). Run: DEPOSIT_USDC=100000 bun test/e2e-depth.ts
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { toHex } from 'viem'
@@ -25,15 +25,10 @@ import { bootOperator } from '../src/boot.ts'
 import { DEFAULT_SPONSOR, SPONSOR_BOUNDS, type SponsorPolicy } from '../src/sponsorship.ts'
 import { signedCall, warmPrepare } from './e2e-client.ts'
 import { catchUpClock, forkUpstreamArgs, fundUsdc } from './fork-funding.ts'
+import { e2eBaseEnv } from './e2e-env.ts'
 
-const envFile = join(homedir(), '.config/mamoru-operator/env')
-if (!process.env.RPC_URL && existsSync(envFile)) {
-  for (const line of readFileSync(envFile, 'utf8').split('\n')) {
-    const m = /^\s*(?:export\s+)?([A-Z0-9_]+)=(.*)$/.exec(line)
-    if (m && process.env[m[1]!] === undefined) process.env[m[1]!] = m[2]!.replace(/^["']|["']$/g, '')
-  }
-}
-if (!process.env.RPC_URL && process.env.BASE_RPC_URL) process.env.RPC_URL = process.env.BASE_RPC_URL
+// otto/mamoru#450: never the live operator's env or provider; the live policy contracts set explicitly.
+e2eBaseEnv({ livePolicy: true })
 
 const DEPOSIT = BigInt(process.env.DEPOSIT_USDC ?? '10000') * 1_000_000n
 const POLICY = process.env.MAMORU_POLICY ?? 'conservador-live-v5'

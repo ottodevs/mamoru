@@ -1,19 +1,26 @@
 // Runs every e2e-*.ts one after the other, each under a timeout, and prints a PASS/FAIL table. Exit 1 when any fails.
-// Needs foundry on PATH and RPC_URL, BASE_RPC_URL, BASE_FORK_RPC_URL, L1_RPC_URL (public ones work). E2E_TIMEOUT_S: per script (default 900).
+// Needs foundry on PATH. Forks read E2E_RPC_URL (Base) and E2E_L1_RPC_URL (Ethereum), public nodes when unset, never the
+// live operator's providers: every script runs without its variables (otto/mamoru#450, e2e-env.ts). E2E_TIMEOUT_S: per
+// script (default 900).
 // Usage: bun run e2e:all [name ...]   (names without the e2e- prefix, e.g. fork v4)
 import { spawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { clearProductionEnv, PUBLIC_UPSTREAM } from './e2e-env.ts'
 
 const root = join(import.meta.dir, '../../..')
 const timeoutS = Number(process.env.E2E_TIMEOUT_S ?? 900)
 const logDir = process.env.E2E_LOG_DIR ?? join(process.env.TMPDIR ?? '/tmp', `mamoru-e2e-all-${Date.now()}`)
 mkdirSync(logDir, { recursive: true })
+// otto/mamoru#450: a shell that sourced the live operator's env passes none of it on.
+const scriptEnv = { ...process.env }
+clearProductionEnv(scriptEnv)
+console.log(`fork upstreams: Base ${process.env.E2E_RPC_URL ? 'E2E_RPC_URL' : PUBLIC_UPSTREAM.base}, Ethereum ${process.env.E2E_L1_RPC_URL ? 'E2E_L1_RPC_URL' : PUBLIC_UPSTREAM.l1}`)
 
-const NOT_SCRIPTS = new Set(['e2e-client.ts', 'e2e-all.ts'])
+const NOT_SCRIPTS = new Set(['e2e-client.ts', 'e2e-all.ts', 'e2e-env.ts'])
 const wanted = process.argv.slice(2)
 const scripts = readdirSync(import.meta.dir)
-  .filter((f) => /^e2e-.+\.ts$/.test(f) && !NOT_SCRIPTS.has(f))
+  .filter((f) => /^e2e-.+\.ts$/.test(f) && !f.endsWith('.test.ts') && !NOT_SCRIPTS.has(f))
   .filter((f) => wanted.length === 0 || wanted.includes(f.slice(4, -3)))
   .sort()
 
@@ -64,7 +71,7 @@ for (const f of scripts) {
   // One descriptor for both streams, new each run; each script leads its own process group (`detached`: setsid on Linux
   // and macOS, no external binary), so a timeout stops its anvil and proxies too, not only the bun process.
   const fd = openSync(log, 'w')
-  const proc = spawn('bun', [join('apps/mamoru-operator/test', f)], { cwd: root, stdio: ['ignore', fd, fd], env: process.env, detached: true })
+  const proc = spawn('bun', [join('apps/mamoru-operator/test', f)], { cwd: root, stdio: ['ignore', fd, fd], env: scriptEnv, detached: true })
   currentGroup = proc.pid
   const exited = new Promise<number | null>((resolve) => proc.on('exit', (c) => resolve(c)))
   const group = (sig: NodeJS.Signals) => {

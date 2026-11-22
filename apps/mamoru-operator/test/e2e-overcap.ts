@@ -1,11 +1,11 @@
 // E2E of a deposit over the cap (otto/mamoru#4): the owner arms with 0 USDC, 101.92 USDC lands, the operator holds the
 // approval and reports DEPOSIT_OVER_CAP instead of starting, the owner withdraws the excess from the still undeployed Safe, then starts.
 // Same harness as e2e-armed.ts: the live operator on an anvil fork of Base that keeps chain id 8453.
-// The upstream RPC comes from the environment only (RPC_URL or BASE_RPC_URL, or ~/.config/mamoru-operator/env)
+// The upstream RPC comes from the environment only (E2E_RPC_URL, else a public Base node; see e2e-env.ts)
 // and reaches anvil through a loopback proxy; the operator talks to anvil through the engine port, which
 // refuses anvil_* methods. Blocks advance by themselves (--block-time 1), so the operator runs unchanged.
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getAddress, toHex } from 'viem'
@@ -22,15 +22,10 @@ import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/we
 import { bootOperator } from '../src/boot.ts'
 import { signedCall, warmPrepare } from './e2e-client.ts'
 import { forkUpstreamArgs } from './fork-funding.ts'
+import { e2eBaseEnv } from './e2e-env.ts'
 
-const envFile = join(homedir(), '.config/mamoru-operator/env')
-if (!process.env.RPC_URL && existsSync(envFile)) {
-  for (const line of readFileSync(envFile, 'utf8').split('\n')) {
-    const m = /^\s*(?:export\s+)?([A-Z0-9_]+)=(.*)$/.exec(line)
-    if (m && process.env[m[1]!] === undefined) process.env[m[1]!] = m[2]!.replace(/^["']|["']$/g, '')
-  }
-}
-if (!process.env.RPC_URL && process.env.BASE_RPC_URL) process.env.RPC_URL = process.env.BASE_RPC_URL
+// otto/mamoru#450: never the live operator's env or provider; the live policy contracts set explicitly.
+e2eBaseEnv({ livePolicy: true })
 
 const DEPOSIT = 101_920_000n
 const EXCESS = DEPOSIT - LIVE_CAP_USDC
