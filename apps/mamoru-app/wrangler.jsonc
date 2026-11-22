@@ -27,7 +27,10 @@
     "MODE": "production",
     "CHAIN_ID": "8453",
     "CORE_DRY_RUN": "true",
-    "LIVE_FUNDS": "1"
+    "LIVE_FUNDS": "1",
+    // otto/mamoru#430: a Stop the Safe pays may refund only the operator's relayer on that chain, at no more than this gas
+    // price (wei): Base 1 gwei (the operator signs at most 0.1), Monad 1000 gwei (about 10x the floor). Public addresses.
+    "STOP_REFUND_POLICY": "8453:0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0:1000000000,143:0xE41175b9CEBD25b9F45B745C922002BC052B5C88:1000000000000"
   },
   // Ethereum RPC reads for the wrong-network notice, per account (accounts/other-chains.ts). ETHEREUM_RPC_URLS is a secret.
   // FEEDBACK_LIMIT (feedback.ts, otto/mamoru#72): 3 posts per 60 s, keyed by device session or a hashed IP. The
@@ -77,7 +80,8 @@
         "MODE": "production",
         "CHAIN_ID": "8453",
         "CORE_DRY_RUN": "true",
-        "LIVE_FUNDS": "1"
+        "LIVE_FUNDS": "1",
+        "STOP_REFUND_POLICY": "8453:0x8F7D5E4F206a91c58132b8f88c629b45d8dcb5A0:1000000000,143:0xE41175b9CEBD25b9F45B745C922002BC052B5C88:1000000000000"
         // Same D1 and operator as prod (see the canary note above): the `yield_ledger` ops flag is one row in the
         // shared D1, so flipping it on from /ops turns the cron on for both envs at once. Both pulling is harmless
         // (the writer upserts, it does not duplicate rows), it only doubles the read.
