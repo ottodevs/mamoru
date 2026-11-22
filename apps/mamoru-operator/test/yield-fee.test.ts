@@ -4,7 +4,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { StateStore } from '../src/state.ts'
-import { YIELD_FEE_FROM, YIELD_FEE_MIN, yieldFee } from '../src/yield-fee.ts'
+import { YIELD_FEE_FROM, YIELD_FEE_MIN, vaultGrowth, yieldFee } from '../src/yield-fee.ts'
 
 const fee = (usdc?: string) => ({ tokenId: '1', pool: 'pool:WETH/USDC/3000', fee0: '1', fee1: '1', ...(usdc === undefined ? {} : { usdc }) })
 const harvest = (at: string, ...usdc: (string | undefined)[]): StoredOp =>
@@ -61,7 +61,7 @@ describe('yieldFee (otto/mamoru#371)', () => {
 
   test('10 % of the priced yield collected since the fee started; nothing before', () => {
     const f = yieldFee([harvest('2026-11-04T23:59:59.000Z', '5000000'), harvest('2026-11-05T10:00:00.000Z', '2000000', '1000000')])
-    expect(f).toEqual({ collectedUsdc: 3_000_000n, unpriced: 0, feeUsdc: 300_000n, chargedUsdc: 0n, owedUsdc: 300_000n })
+    expect(f).toEqual({ collectedUsdc: 3_000_000n, vaultGrowthUsdc: 0n, unpriced: 0, feeUsdc: 300_000n, chargedUsdc: 0n, owedUsdc: 300_000n })
   })
 
   test('an unpriced fee is counted as pending, not owed yet', () => {
@@ -186,5 +186,73 @@ describe('the real wiring (otto/mamoru#371): Operator.yieldFeeScope and op stamp
       expect(w.op.yieldFeeScope(key)).toBe(inScope)
       expect((acc.ops.find((o) => o.kind === 'transfer') as { feeScoped?: true }).feeScoped).toBe(inScope ? true : undefined)
     }
+  })
+})
+
+describe('vault growth in the fee (otto/mamoru#433)', () => {
+  const V = 'vault:gtUSDCp'
+  const FROM = '2026-11-23T00:00:00.000Z'
+  let n = 0
+  const flow = (kind: 'deposit' | 'withdraw', assets: bigint, shares: bigint, at: string, opts: { feeable?: boolean; tx?: string } = {}): StoredOp => {
+    const txHash = opts.tx ?? `0x${(++n).toString(16).padStart(4, '0')}`
+    return { opId: `eng-v${n}`, kind: 'reduce', state: 'confirmed', updatedAt: at, txHash, facts: { txHash, v: 2, at, gasWei: '1', fees: [], ...(opts.feeable === false ? {} : { feeable: true as const }), vaultFlows: [{ vault: V, kind, assets: assets.toString(), shares: shares.toString(), logIndex: 1 }] } } as StoredOp
+  }
+  const input = (shares: bigint, assets: bigint, from = FROM) => ({ from, now: [{ name: V, shares, assets }] })
+  const D1 = '2026-11-24T00:00:00.000Z'
+  const D2 = '2026-11-25T00:00:00.000Z'
+
+  test('deposit, growth, withdrawal: 10 % of the growth', () => {
+    const ops = [flow('deposit', 100_000_000n, 100_000_000n, D1)]
+    // Still held: 100 USDC in, worth 120 now: growth 20, fee 2.
+    expect(yieldFee(ops, undefined, undefined, 0n, input(100_000_000n, 120_000_000n))).toMatchObject({ vaultGrowthUsdc: 20_000_000n, collectedUsdc: 0n, feeUsdc: 2_000_000n, owedUsdc: 2_000_000n })
+    // Redeemed whole at 120: the growth is realized, the same fee; nothing held.
+    const out = [...ops, flow('withdraw', 120_000_000n, 100_000_000n, D2)]
+    expect(yieldFee(out, undefined, undefined, 0n, input(0n, 0n))).toMatchObject({ vaultGrowthUsdc: 20_000_000n, feeUsdc: 2_000_000n })
+    // The fee that withdrawal paid (confirmed or in flight) is not charged again.
+    expect(yieldFee([...out, withdrawal('submitted', '2000000')], undefined, undefined, 0n, input(0n, 0n))).toMatchObject({ chargedUsdc: 2_000_000n, owedUsdc: 0n })
+  })
+
+  test('a partial redemption keeps the basis of what is left', () => {
+    // 100 in for 100 shares; 40 shares redeemed for 50 (realized 10); 60 left worth 72 (unrealized 12): growth 22.
+    const ops = [flow('deposit', 100_000_000n, 100_000_000n, D1), flow('withdraw', 50_000_000n, 40_000_000n, D2)]
+    expect(vaultGrowth(ops, input(60_000_000n, 72_000_000n))).toBe(22_000_000n)
+    // The same without the redemption having been read yet: the held shares cap the tracked ones (under-charges).
+    expect(vaultGrowth([ops[0]!], input(60_000_000n, 72_000_000n))).toBe(12_000_000n)
+  })
+
+  test('no double charge with collected fees: a harvest swept into the vault has its entry value as basis', () => {
+    // 10 USDC of fees collected (fee 1), swept in at 10 (basis 10), still 10 a day later: no vault growth.
+    const ops = [harvest(D1, '10000000'), flow('deposit', 10_000_000n, 10_000_000n, D1)]
+    expect(yieldFee(ops, undefined, undefined, 0n, input(10_000_000n, 10_000_000n))).toMatchObject({ collectedUsdc: 10_000_000n, vaultGrowthUsdc: 0n, feeUsdc: 1_000_000n })
+    // It then grows by 1: only the growth adds to the base.
+    expect(yieldFee(ops, undefined, undefined, 0n, input(10_000_000n, 11_000_000n))).toMatchObject({ vaultGrowthUsdc: 1_000_000n, feeUsdc: 1_100_000n })
+  })
+
+  test('nothing before the start, out of scope, or without a basis; never below zero', () => {
+    const early = flow('deposit', 100_000_000n, 100_000_000n, '2026-11-22T00:00:00.000Z')
+    expect(vaultGrowth([early], input(100_000_000n, 150_000_000n))).toBe(0n)
+    expect(vaultGrowth([flow('deposit', 100_000_000n, 100_000_000n, D1, { feeable: false })], input(100_000_000n, 150_000_000n))).toBe(0n)
+    // Shares held before the start: their redemption realizes nothing, and the growth is not counted.
+    expect(vaultGrowth([flow('withdraw', 150_000_000n, 100_000_000n, D1)], input(0n, 0n))).toBe(0n)
+    // A deposit before YIELD_FEE_FROM stays out even with an earlier start.
+    expect(vaultGrowth([flow('deposit', 1n, 1n, '2026-11-04T00:00:00.000Z')], input(1n, 100n, '2026-11-01T00:00:00.000Z'))).toBe(0n)
+    // A loss refunds nothing and is not netted against another vault's growth.
+    expect(vaultGrowth([flow('deposit', 100_000_000n, 100_000_000n, D1)], input(100_000_000n, 90_000_000n))).toBe(0n)
+    // An unreadable vault counts only what it realized; an absent start counts none.
+    expect(vaultGrowth([flow('deposit', 100n, 100n, D1)], { from: FROM, now: [] })).toBe(0n)
+    expect(vaultGrowth([flow('deposit', 100n, 100n, D1)], { from: 'bad', now: [{ name: V, shares: 100n, assets: 200n }] })).toBe(0n)
+    expect(yieldFee([flow('deposit', 100n, 100n, D1)]).vaultGrowthUsdc).toBe(0n)
+  })
+
+  test('a transaction read on two stored ops counts once, and only when every copy was feeable', () => {
+    const a = flow('deposit', 100_000_000n, 100_000_000n, D1, { tx: '0xaa' })
+    const b = { ...flow('deposit', 100_000_000n, 100_000_000n, D1, { tx: '0xAA' }), opId: 'own-dup' } as StoredOp
+    expect(vaultGrowth([a, b], input(100_000_000n, 110_000_000n))).toBe(10_000_000n)
+    const c = { ...b, facts: { ...b.facts!, feeable: undefined } } as StoredOp
+    expect(vaultGrowth([a, c], input(100_000_000n, 110_000_000n))).toBe(0n)
+  })
+
+  test('a redemption below the fee minimum owes nothing', () => {
+    expect(yieldFee([flow('deposit', 1_000_000n, 1_000_000n, D1)], undefined, undefined, 0n, input(1_000_000n, 1_050_000n)).owedUsdc).toBe(0n)
   })
 })

@@ -252,6 +252,11 @@ export type OperatorState = {
   oneAuthKeys?: Record<string, Hex>
   /** otto/mamoru#293: the block each of those keys was given at (the account's deposits are counted from there). */
   oneAuthKeyBlocks?: Record<string, string>
+  /**
+   * otto/mamoru#433: when this operator first booted with the vault growth fee (ISO, stamped once). Vault flows dated
+   * before it are never charged: no backfill. Absent: the fee counts no vault growth.
+   */
+  vaultFeeFrom?: string
 }
 
 const BIG = '$big'

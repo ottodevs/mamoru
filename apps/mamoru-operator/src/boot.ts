@@ -659,6 +659,11 @@ export async function bootOperator(o: BootOptions) {
   if (v8Policy) assertBootPolicies(policy, v8Policy, registry, { live, writes: writes.on })
   if (writes.on) assertWritePolicy(policy, registry, chainId)
   const store = new StateStore(o.stateDir)
+  // otto/mamoru#433: the vault growth fee starts counting here, once; flows dated before are never charged.
+  if (!store.state.vaultFeeFrom) {
+    store.state.vaultFeeFrom = new Date().toISOString()
+    store.save()
+  }
   // Review round 2: an account already moved to the on-chain action policy needs that policy to resolve after a
   // restart (funding, engine, renewals and Stop all read it). Refused at boot, with the accounts named, rather than
   // failing on each of them later while their Safes hold positions.

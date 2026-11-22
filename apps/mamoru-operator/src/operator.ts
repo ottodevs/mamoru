@@ -4325,7 +4325,7 @@ export class Operator {
     // told what they receive; a withdrawal no larger than the fee pays no fee (it is owed on the next one).
     // otto/mamoru#391: the home charges the fee its remote Safes owe too (their money comes home to be withdrawn here); a
     // remote chain charges none, so nothing is charged twice.
-    const owed = this.inScope(acc, 'yield_fee') && this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID ? yieldFee(acc.ops, YIELD_FEE_BPS, YIELD_FEE_FROM, await this.remoteFeeBase(acc)) : null
+    const owed = this.inScope(acc, 'yield_fee') && this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID ? yieldFee(acc.ops, YIELD_FEE_BPS, YIELD_FEE_FROM, await this.remoteFeeBase(acc), this.store.state.vaultFeeFrom ? { from: this.store.state.vaultFeeFrom, now: (r.vaults ?? []).map((v) => ({ name: v.name, shares: v.shares, assets: v.assets })) } : undefined) : null
     let fee = owed?.owedUsdc ?? 0n
     let pay = amount
     const planFor = async (total: bigint) => {
@@ -4385,7 +4385,7 @@ export class Operator {
         : [`Send ${fmtUsdc(pay)} USDC from your Safe to ${to}`]),
       ...(fee > 0n
         ? [
-            `Pay Mamoru's fee: ${fmtUsdc(fee)} USDC to Mamoru's relayer ${this.relayer.address}, ${Number(YIELD_FEE_BPS) / 100}% of the ${fmtUsdc(owed!.collectedUsdc)} USDC your positions earned since ${YIELD_FEE_FROM.slice(0, 10)}${owed!.chargedUsdc > 0n ? `, less ${fmtUsdc(owed!.chargedUsdc)} USDC already paid` : ''}`,
+            `Pay Mamoru's fee: ${fmtUsdc(fee)} USDC to Mamoru's relayer ${this.relayer.address}, ${Number(YIELD_FEE_BPS) / 100}% of the ${fmtUsdc(owed!.collectedUsdc + owed!.vaultGrowthUsdc)} USDC your positions earned${owed!.vaultGrowthUsdc > 0n ? ` (${fmtUsdc(owed!.vaultGrowthUsdc)} USDC of it vault growth)` : ''} since ${YIELD_FEE_FROM.slice(0, 10)}${owed!.chargedUsdc > 0n ? `, less ${fmtUsdc(owed!.chargedUsdc)} USDC already paid` : ''}`,
             ...(pay < amount ? [`The fee comes out of this withdrawal: your Safe cannot free ${fmtUsdc(amount + fee)} USDC, so ${fmtUsdc(pay)} USDC is sent`] : []),
           ]
         : []),
