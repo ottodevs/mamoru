@@ -10,7 +10,9 @@ App (Home card)          Worker                       Monad operator            
  | Review                 |                             |                            |
  | GET whats-new (base-v8)|---------------------------->|  (via Base: peer status)   |
  | tap Approve on Monad   |                             |                            |
- |-- return-home/prepare->| forward ------------------->| planReturnHome             |
+ |-- return-home/prepare->| fence ------------------------------------------------->| fence (lock, state)
+ |                        |<-- ok / BRIDGE_IN_FLIGHT ------------------------------| 
+ |                        | forward ------------------->| planReturnHome             |
  |                        |<-- safeTx, hash, input -----| (reads Safe, builds)       |
  |                        | checkReturnHome (RH-03)     |                            |
  |<-- summary, hash ------|                             |                            |
@@ -36,18 +38,18 @@ not wait for step A to confirm before preparing step B.
 
 - `planReturnHome` (built): refuses `NOT_A_REMOTE`, `STOP_IN_FLIGHT`, `GRANT_CHECK_UNAVAILABLE`, `NOT_DEPLOYED`,
   `MONAD_UNWIND_PENDING`, `NOTHING_TO_STOP`. Holds the Safe tx as a Stop.
-- **Change (RH-07):** when WMON above dust is held and the last decision's chain exit code is
-  `REMOTE_DEPTH_BELOW_BUDGET`, build the depth-held variant instead of refusing. `ReturnHomeInput` gains
-  `sell?: { amountIn, minOut, fee, quote, twapValue }`; `buildReturnHome` adds the approve and `exactInputSingle`
-  calls and burns `usdc + minOut`, `minOut` = QuoterV2 quote less 30 bps. Still refused if a position is open. When the
-  quote is over 300 bps under the TWAP value, `MONAD_DEPTH_TOO_LOW` and the plain path keeps the growth-only session
-  (`removeIds` empty) so the chain exit can sell later.
-- **Change (RH-11):** refuse `BRIDGE_IN_FLIGHT` while any Base → Monad `BridgeBurn` for the account is `sending`,
-  `burned` or `dropped` (a dropped one can be signed again), or `minted` without the mint read on the Safe; only
-  `failed` (receipt-proven revert) and a read mint are terminal. The Base operator, from the first `return-home`
-  prepare for its remote (held, signed or confirmed), refuses to sign, re-sign or broadcast any bridge to Monad for
-  the account, and drops held unsent ones; a userOp already broadcast is followed to its receipt and mint, and step A
-  waits for it.
+- **Change (RH-07):** a new owner kind `monad-sell` (step A0): builder `buildMonadSell` (approve + `exactInputSingle`,
+  `minOut` = QuoterV2 quote less 30 bps), held and settled as an owner op that changes no grant and keeps the account
+  active (not a Stop). `planReturnHome` keeps refusing `MONAD_UNWIND_PENDING` while WMON is held, except after a
+  `MONAD_DEPTH_TOO_LOW` refusal of A0, when it builds step A on the USDC alone.
+- **Change (RH-11), fence on Base first:** the Worker forwards `return-home/prepare` to the Monad operator only after the
+  Base operator answers `return-home/fence` for the account. The fence is taken under the Base account lock that the
+  bridge sender also holds, is written to state before the answer, and is permanent: from then the Base operator
+  signs, re-signs and broadcasts no bridge to Monad for the account and drops held unsent ones. A userOp already
+  broadcast is followed to its receipt and mint. The fence answer lists every Base → Monad `BridgeBurn` not terminal
+  (`sending`, `burned`, `dropped`, or `minted` without the mint read on the Safe; only `failed` with a proven revert
+  and a read mint are terminal); any → `BRIDGE_IN_FLIGHT`, nothing prepared. With the fence set no new one can appear,
+  so the check cannot race a signature.
 - Settle (built): the confirmed tx records the release `home-<tx>` (state `burned`, `owner.home`), marks the account
   inactive, records the revokes.
 - **Change:** after settle, read back `isSessionEnabled` for every id in the input and every id `sessionCreatedIds`
@@ -92,11 +94,11 @@ not wait for step A to confirm before preparing step B.
 
 | Case | Detection | Action |
 |---|---|---|
-| Depth-held Safe | prepare reads WMON > dust and the chain exit code | depth-held variant (RH-07) |
+| Depth-held Safe | prepare reads WMON > dust and the chain exit code | step A0 owner sale, then step A (RH-07) |
 | Circle attestation API down or slow | in flight > 2 h | alert; keep polling with backoff; anyone can mint once it is attested |
 | Mint reverts 3 times | ReturnHome counter | alert; message stays mintable to the same recipient |
 | Base → Monad bridge not terminal at prepare | Base bridge journal states | `BRIDGE_IN_FLIGHT`: step A waits for the mint (or the proven revert), then burns it with the rest (RH-11) |
-| Depth-held sale refused (`MONAD_DEPTH_TOO_LOW`) or reverts on price | Worker quote check / receipt | plain path: USDC home now, session kept for the chain exit, second step A later; a revert is atomic and re-prepared |
+| Step A0 refused (`MONAD_DEPTH_TOO_LOW`) or reverts on price | Worker quote check / receipt | A revert is atomic and re-prepared; when refused, step A on the USDC alone, the WMON stays the owner's for a withdrawal |
 | USDC reaches the Monad Safe after step A anyway (fault case under RH-11) | Monad exposure > dust with no session | alert; Home offers step A again as a send-only tx (one more prompt) |
 | Session found after settle | read-back | alert + revoke-only step A |
 | Step B reverts (enable's depth check, #410, on a Base pool) | simulation at prepare | prepare refuses with the policy's reason; v8 caps re-sized (Base pools are far deeper than a 25 % share of 10,000 today, see SCN-RH-07) |
