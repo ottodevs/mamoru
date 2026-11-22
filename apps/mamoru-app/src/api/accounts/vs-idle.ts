@@ -58,8 +58,8 @@ export type VsIdleView = {
   netDeposited: NetDeposited
   /** The first day with a value. */
   since: string | null
-  /** Rows in USDC (2 decimals), signed: fees earned +, price move ±, costs -, Mamoru fee -. Null while the baseline is not complete. */
-  breakdown: { feesUsd: number; priceMoveUsd: number; costsUsd: number; mamoruFeeUsd: number; netUsd: number } | null
+  /** Rows in USDC (2 decimals), signed: fees earned +, price move ±, costs -, Mamoru fee -. Price move and net are null while the baseline is not complete. */
+  breakdown: { feesUsd: number; priceMoveUsd: number | null; costsUsd: number; mamoruFeeUsd: number; netUsd: number | null } | null
   /** Uncollected fees inside the total value, shown apart from `breakdown`. */
   pendingUsd: number
   /** Savings layer inside the figures above (otto/mamoru#413 seam, 0 until the ledger tags it). */
@@ -76,15 +76,25 @@ const cents = (usd: number) => Math.round(usd * 100)
 const toCents = (raw: bigint) => Number((raw + (raw < 0n ? -5_000n : 5_000n)) / 10_000n)
 const usd = (c: number) => c / 100
 
-export async function loadVsIdle(db: Db, userId: string, now: Date): Promise<VsIdleView> {
+/**
+ * The net deposited can claim a gain only when it is complete (otto/mamoru#438 makes it so; value-series reports recorded
+ * flows only, `partial`, until then): a withdrawal recorded without the principal it returned would read as a gain.
+ * Without it, everything that needs the baseline (net, price move, the series) is null/empty and the app says n/a; fees
+ * earned, costs, the Mamoru fee and the APR do not need it and are still given. `baselineComplete` is how #438's
+ * evidence will reach this function; tests pass it to exercise the arithmetic.
+ */
+const isComplete = (nd: { status: string }) => nd.status === 'complete'
+
+export async function loadVsIdle(db: Db, userId: string, now: Date, baselineComplete?: boolean): Promise<VsIdleView> {
   const { view, pending } = await loadValueSeriesDetail(db, userId, now)
+  const complete = baselineComplete ?? isComplete(view.netDeposited)
   const last = view.points.at(-1)
   const empty: VsIdleView = { asOf: view.asOf, totalUsd: last?.usd ?? null, netDeposited: view.netDeposited, since: view.points[0]?.day ?? null, breakdown: null, pendingUsd: last ? usd(toCents(BigInt(pending.get(last.day) ?? 0))) : 0, savingsUsd: SAVINGS_USD_UNTIL_TAGGED, apr: { pct: null, reason: 'not-measured' }, status: 'partial', notCounted: [], series: [] }
   if (!last) return empty
   const notCounted = new Set<NotCounted>()
   // The value itself is stale or carries a chain forward (value-series `partial`): the figure is an estimate.
   if (last.partial) notCounted.add('value')
-  if (view.netDeposited.status !== 'complete') notCounted.add('flows')
+  if (!complete) notCounted.add('flows')
 
   const sleeves = await sleevesOfUser(db, userId)
   let realized = 0n
@@ -114,19 +124,20 @@ export async function loadVsIdle(db: Db, userId: string, now: Date): Promise<VsI
   empty.apr = await netApr30d(db, sleeves, income, view.points[0]?.day ?? null)
   const status = (): 'complete' | 'partial' => (notCounted.size ? 'partial' : 'complete')
   const out = { ...empty, notCounted: [...notCounted].sort(), status: status() }
-  if (view.netDeposited.status !== 'complete' || !earnedKnown) return out
+  if (!earnedKnown) return out
 
   const dayEnd = (day: string) => Date.parse(`${day}T00:00:00.000Z`) / 1000 + 86_400
   // Income newer than the balance read is not in the value yet: the fee is cut at that read, as earned.ts cuts the income.
   const readS = view.asOf ? Math.floor(Date.parse(view.asOf) / 1000) : Number.MAX_SAFE_INTEGER
   const feeAt = (day: string) => toCents(mamoruFeeUsdc(income, Math.min(dayEnd(day), Number.isFinite(readS) ? readS + 1 : dayEnd(day))))
   const netAt = (day: string, total: number, deposited: number) => cents(total) - toCents(BigInt(pending.get(day) ?? 0)) - cents(deposited) - feeAt(day)
-  const series = view.points.filter((p) => p.deposited !== undefined).map((p) => ({ day: p.day, netUsd: usd(netAt(p.day, p.usd, p.deposited!)) }))
-  // The last point is today's running read: the figure shown now is that point, and the rows add up to it.
-  const net = netAt(last.day, last.usd, last.deposited ?? view.netDeposited.usd)
   const fee = feeAt(last.day)
   const fees = toCents(realized)
   const costs = toCents(gasUsdc)
+  if (!complete) return { ...out, breakdown: { feesUsd: usd(fees), priceMoveUsd: null, costsUsd: usd(-costs), mamoruFeeUsd: usd(-fee), netUsd: null } }
+  const series = view.points.filter((p) => p.deposited !== undefined).map((p) => ({ day: p.day, netUsd: usd(netAt(p.day, p.usd, p.deposited!)) }))
+  // The last point is today's running read: the figure shown now is that point, and the rows add up to it.
+  const net = netAt(last.day, last.usd, last.deposited ?? view.netDeposited.usd)
   const breakdown = { feesUsd: usd(fees), priceMoveUsd: usd(net - fees + fee + costs), costsUsd: usd(-costs), mamoruFeeUsd: usd(-fee), netUsd: usd(net) }
   return { ...out, breakdown, series }
 }
