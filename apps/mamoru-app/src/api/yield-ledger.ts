@@ -427,7 +427,7 @@ export async function writeReceipts(db: Db, snapshot: SnapshotWire, now: Date): 
           `INSERT INTO yield_ledger_account_receipts (day, chain_id, address, account_key, env, gas_paid_wei, gas_paid_usdc, collected_usdc, digest, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(day, chain_id, address) DO UPDATE SET
-             account_key = excluded.account_key, env = excluded.env, gas_paid_wei = excluded.gas_paid_wei, gas_paid_usdc = excluded.gas_paid_usdc,
+             account_key = excluded.account_key, env = excluded.env, gas_paid_wei = excluded.gas_paid_wei, gas_paid_usdc = COALESCE(excluded.gas_paid_usdc, yield_ledger_account_receipts.gas_paid_usdc),
              collected_usdc = COALESCE(excluded.collected_usdc, yield_ledger_account_receipts.collected_usdc),
              digest = excluded.digest, updated_at = excluded.updated_at`,
         )
