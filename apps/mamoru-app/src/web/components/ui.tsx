@@ -3,11 +3,21 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type Reac
 import { encodeQr, qrPath } from '../lib/qr.ts'
 import { explorerTx, useChain } from '../lib/chain.tsx'
 
-export function Brand() {
-  return (
-    <Link to="/" className="brand">
+/** The mark and name. `site`: the Portfolio sends it to the website instead of back to the app (otto/mamoru#380). */
+export function Brand({ site }: { site?: string }) {
+  const inner = (
+    <>
       <img src="/mark-two-stones.png" width={36} height={36} alt="" />
       <span>Mamoru</span>
+    </>
+  )
+  return site ? (
+    <a href={site} className="brand" data-testid="brand-site">
+      {inner}
+    </a>
+  ) : (
+    <Link to="/" className="brand">
+      {inner}
     </Link>
   )
 }

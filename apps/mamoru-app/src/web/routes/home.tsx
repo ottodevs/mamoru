@@ -2,7 +2,7 @@ import type { ApyView, FundingView, WorkedView, Hex0x, MoneyInFlight, OpView, Ov
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { depositArrived, FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useEthereumSibling, useFreshFunding, useFunding, useOps, usePools, useSession, useValueSeries, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
+import { depositArrived, FUNDING_IDLE_MS, fundingInterval, queryKeys, useApy, useEthereumSibling, useFreshFunding, useFunding, useOps, usePools, useSession, useVsIdle, useWithdrawAssets, useYieldLedger } from '../api/queries.ts'
 import { AssetPicker } from '../components/asset-picker.tsx'
 import { PriceDivergenceNotice } from '../components/price-divergence-notice.tsx'
 import { WithdrawReview } from '../components/withdraw-review.tsx'
@@ -10,7 +10,8 @@ import { TokenMark } from '../components/token-mark.tsx'
 import { Brand, InfoPopover, Modal } from '../components/ui.tsx'
 import { AreaChart, dayLabel } from '../components/charts.tsx'
 import { MainTabs, TabBar } from '../components/nav.tsx'
-import type { ValueSeriesView } from '../api/client.ts'
+import type { VsIdleView } from '../api/client.ts'
+import { VsIdleBody, VsIdleHead, vsIdleDeposited } from '../components/vs-idle.tsx'
 import { downloadJson, kitFilename } from '../lib/download.ts'
 import { useDestination } from '../lib/ens.ts'
 import { decimalsOf, formatUnits, shortHex } from '../lib/format.ts'
@@ -171,64 +172,6 @@ function plural(n: number, one: string, many: string) {
 
 const pct = (v: number | null | undefined) => (v === null || v === undefined ? homeCopy.na : `${v.toFixed(1)}%`)
 
-/**
- * otto/mamoru#198, spec 013: Total earned, under the total value as its gain: a pill, green up or red down by its sign
- * (Ot and Brais, 6 Nov). Not measured yet says so, never a guess.
- */
-function Earned({ usd: earned, since }: { usd: string | null | undefined; since?: string | null }) {
-  const known = earned != null
-  const n = known ? Number(earned) : 0
-  const up = n >= 0
-  return (
-    <div className="pf-earned" data-testid="earned-so-far">
-      <span className="kicker text-[0.86rem]! font-bold tracking-[0.14em]! text-ink!">
-        {homeCopy.earnedSoFar} <InfoPopover label={`About "${homeCopy.earnedSoFar}"`}>{homeCopy.earnedTip}</InfoPopover>
-      </span>
-      <div className="row">
-        {known ? (
-          <span className={`pf-delta ${up ? 'pos' : 'neg'}`}>
-            <svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
-              <path d={up ? 'M7 2.5 12 9.5H2z' : 'M7 11.5 2 4.5h10z'} />
-            </svg>
-            <TweenUsd raw={String(Math.abs(n))} prefix={up ? '+' : '−'} countUp />
-            <span className="earned-unit">USDC</span>
-          </span>
-        ) : (
-          <span className="pf-delta na">{homeCopy.na}</span>
-        )}
-        {known && since ? <span className="pf-since">{homeCopy.since(dayLabel(since))}</span> : null}
-        {known ? null : <span className="earned-why">{homeCopy.earnedGap}</span>}
-      </div>
-    </div>
-  )
-}
-
-/** Spec 013: the owner's total value by day, schematic (no axes, no grid), value and day on hover or tap. */
-function ValueChart({ series }: { series: ValueSeriesView }) {
-  const [range, setRange] = useState(30)
-  const all = series.points.map((p) => ({ day: p.day, v: p.usd }))
-  const rows = range ? all.slice(-range) : all
-  if (rows.length < 2) return null
-  // Same unit as the total above it: USDC, two decimals.
-  const fmt = (v: number) => `${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`
-  return (
-    <div className="pf-chart">
-      <AreaChart rows={rows} h={190} axes={false} label={homeCopy.total} fmtTip={fmt} />
-      <div className="rng" role="group" aria-label="Range">
-        {[
-          { v: 7, l: '1W' },
-          { v: 30, l: '1M' },
-          { v: 0, l: 'All' },
-        ].map((o) => (
-          <button key={o.l} type="button" aria-pressed={range === o.v} onClick={() => setRange(o.v)}>
-            {o.l}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 /** How long ago an ISO time was, in the largest whole unit: "under a minute", "4 min", "3 h", "2 days". */
 export function agoText(iso: string, now: number = Date.now()): string {
   const min = Math.max(0, Math.floor((now - Date.parse(iso)) / 60_000))
@@ -241,9 +184,8 @@ export function agoText(iso: string, now: number = Date.now()): string {
 
 export function Balance({
   s,
-  earnedSoFarUsd,
-  earnedSince = null,
-  valueSeries = null,
+  vsIdle = null,
+  mamoruAprPct = null,
   onAdd,
   onWithdraw,
   past = null,
@@ -254,11 +196,10 @@ export function Balance({
   transfers = [],
 }: {
   s: Split | null
-  earnedSoFarUsd?: string | null
-  /** The first day the ledger counts earnings for (its earned series), shown as "since <day>"; none when unknown. */
-  earnedSince?: string | null
-  /** Spec 013: the owner's total value by day; the chart shows from two days. */
-  valueSeries?: ValueSeriesView | null
+  /** otto/mamoru#380: the net against idle USDC, its rows and series (GET .../vs-idle); null while it loads or fails (n/a). */
+  vsIdle?: VsIdleView | null
+  /** The Mamoru average the APR shows during the account's first 30 days. */
+  mamoruAprPct?: number | null
   onAdd: () => void
   onWithdraw: () => void
   /** otto/mamoru#208: set only while the live read fails; then it is what the balance shows, marked as past. */
@@ -288,15 +229,17 @@ export function Balance({
           {homeCopy.withdraw}
         </button>
       </div>
-      <div className="pf-main">
-        <div>
-          <p className="kicker text-[0.86rem]! font-bold tracking-[0.14em]! text-ink!">
+      <div className="pv">
+        <div className="pv-hero">
+        <div className="pv-total">
+          <p className="pv-lbl text-[0.86rem]! font-bold tracking-[0.14em]! text-ink!">
             <span id="total-title">{homeCopy.total}</span> <InfoPopover label={`About "${homeCopy.total}"`}>{homeCopy.totalTip}</InfoPopover>
           </p>
           <p className={`sum${shownPast ? ' past' : ''}`} data-testid="total">
             {shownPast ? usd(shownPast.totalUsd) : s ? <TweenUsd raw={total ?? s.total} countUp /> : '0.00'}
             <span className="unit">USDC</span>
           </p>
+          {vsIdle && vsIdle.netDeposited.status === 'complete' ? <p className="pv-cap" data-testid="deposited">deposited {vsIdleDeposited(vsIdle)}</p> : null}
           {shownPast ? (
             <p className="past-reading" data-testid="past-reading">
               {homeCopy.pastReading(agoText(shownPast.readAt))}
@@ -319,9 +262,10 @@ export function Balance({
               {chain.positions === 'listed' ? homeCopy.chainReading : homeCopy.chainIdleOnly}
             </p>
           ) : null}
-          <Earned usd={earnedSoFarUsd} since={earnedSince} />
         </div>
-        {valueSeries ? <ValueChart series={valueSeries} /> : null}
+        <VsIdleHead v={vsIdle} mamoruAprPct={mamoruAprPct} />
+        </div>
+        {vsIdle?.breakdown ? <VsIdleBody v={vsIdle} /> : null}
       </div>
     </section>
   )
@@ -1389,7 +1333,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const api = useApi()
   const ops = useOps(accountKey, true)
   const yieldLedger = useYieldLedger(accountKey)
-  const valueSeries = useValueSeries(accountKey)
+  const vsIdle = useVsIdle(accountKey)
   const opList = ops.data?.ops ?? []
   // An owner prepare that was never signed is not in flight; only armed or sent ops are. Keeps funding polling
   // fast (otto/mamoru#135) while one is on its way: an activation, renewal, transfer or stop.
@@ -1559,16 +1503,15 @@ export function HomeView({ accountKey }: { accountKey: string }) {
       <PullToRefresh onRefresh={() => manual.run({ note: false })} />
       <header className="mb-7 flex items-center justify-between gap-3">
         <div className="nav-left">
-          <Brand />
+          <Brand site="https://mamoru.lol" />
           <MainTabs />
         </div>
         <LiveSync chain={fromChain} updatedAt={funding.dataUpdatedAt} intervalMs={fundingInterval(funding.data, inFlight, FUNDING_IDLE_MS)} fetching={funding.isFetching} down={liveDown} note={manual.note} onRefresh={() => void manual.run()} />
       </header>
       <Balance
         s={s}
-        earnedSoFarUsd={yieldLedger.data?.earnedSoFarUsd}
-        earnedSince={yieldLedger.data?.earnedDaily?.[0]?.day ?? null}
-        valueSeries={valueSeries.data ?? null}
+        vsIdle={vsIdle.isError || past ? null : (vsIdle.data ?? null)}
+        mamoruAprPct={apy.data?.monthlyPct ?? null}
         onAdd={addMoney}
         onWithdraw={() => withdraw()}
         past={past}
@@ -1578,7 +1521,6 @@ export function HomeView({ accountKey }: { accountKey: string }) {
         scopeNote={past && !cached ? moneyCopy.pastScope : totalScopeNote(f, !!monadSleeve, false)}
         transfers={(f?.money?.inFlight ?? []).filter((t) => t.stage !== 'failed')}
       />
-      <Indicators f={noPositions ? undefined : whole?.f} apy={apy.data} price={price} worked={yieldLedger.data?.worked} otherChain={!!monadSleeve} noRead={(!f && liveDown) || noPositions} />
       <WrongNetwork accountKey={accountKey} startPending={canStart || oneOpen} />
       {past ? (
         <section className="card" data-testid="past-notice" role="status">

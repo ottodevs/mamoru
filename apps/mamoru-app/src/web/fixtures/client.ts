@@ -399,19 +399,20 @@ export const fixtureClient: ApiClient = {
     })
     return delay({ asOf: new Date().toISOString(), points, chains: [8453], netDeposited: { usd: 2500, status: 'partial' as const, since: points[0]!.day } })
   },
-  // otto/mamoru#380: the shape of the vs-idle read, with the figures of the agreed mock (net 10.55 on 974.76 deposited).
+  // otto/mamoru#380: the shape of the vs-idle read. The numbers add up with the funding fixture's Total value (20.00):
+  // net = total value - pending fees - net deposited - Mamoru fee owed = 20.00 - 0 - 19.35 - 0.05 = 0.60, and the rows
+  // add up to it: fees 0.50 + price move 0.25 - costs 0.10 - fee 0.05.
   vsIdle: () => {
     const start = Date.UTC(2026, 9, 21)
-    const shape = [0, 0.5, 0.7, 1.4, 1.8, 2, 2.9, 4.6, 6.3, 7.7, 8.2, 8.7, 9, 9.1, 9.2, 9.7, 11, 12.4, 13.8, 15.2, 15.5, 15.9, 16.7, 17.7, 18.4, 19.1, 19.8, 21.8, 23, 23.5, 24.8, 25.8, 26.9]
-    const k = 10.55 / shape[shape.length - 1]!
-    const series = shape.map((n, i) => ({ day: new Date(start + i * 864e5).toISOString().slice(0, 10), netUsd: Math.round(n * k * 100) / 100 }))
+    const shape = [0, 0.02, 0.03, 0.07, 0.09, 0.1, 0.14, 0.2, 0.26, 0.31, 0.33, 0.35, 0.36, 0.37, 0.37, 0.39, 0.43, 0.46, 0.5, 0.53, 0.54, 0.55, 0.57, 0.6]
+    const series = shape.map((n, i) => ({ day: new Date(start + i * 864e5).toISOString().slice(0, 10), netUsd: n }))
     return delay({
       asOf: new Date().toISOString(),
-      totalUsd: 985.31,
-      netDeposited: { usd: 974.76, status: 'complete' as const, since: series[0]!.day },
+      totalUsd: 20,
+      netDeposited: { usd: 19.35, status: 'complete' as const, since: series[0]!.day },
       since: series[0]!.day,
-      breakdown: { feesUsd: 6.62, priceMoveUsd: 5.1, costsUsd: -0.62, mamoruFeeUsd: -0.55, netUsd: 10.55 },
-      pendingUsd: 0.4,
+      breakdown: { feesUsd: 0.5, priceMoveUsd: 0.25, costsUsd: -0.1, mamoruFeeUsd: -0.05, netUsd: 0.6 },
+      pendingUsd: 0,
       savingsUsd: 0,
       apr: { pct: 33.9, reason: null },
       status: 'complete' as const,
