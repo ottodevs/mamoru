@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { concat, decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, pad, parseAbi, parseAbiItem, parseEventLogs, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type ReturnHomeInput, type StopInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type AccountSavings, type Address, type RemoteSpec, type ReturnHomeInput, type StopInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, baseRegistry, tokenMessengerV2Abi, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
@@ -71,7 +71,7 @@ import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-us
 import { bridgeLeftOf } from './bridge-left.ts'
 import { SpendHold, SPEND_HOLD_PROBE_MS, isSpend, spendDenialOf } from './window-hold.ts'
 import { clampHarvested, harvestedOf } from './harvested.ts'
-import { clampSavings, clipBooks, SAVINGS_ASSET, savingsObs, savingsOf, savingsOutOf, type SavingsOut } from './savings.ts'
+import { clampSavings, clipBooks, SAVINGS_ASSET, savingsObs, savingsOf, savingsOutOf, savingsView, type SavingsOut, type VaultRead } from './savings.ts'
 import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
@@ -2173,6 +2173,18 @@ export class Operator {
       this.store.save()
     }
     return savingsObs(r.books)
+  }
+
+  /**
+   * otto/mamoru#413: an account's savings figure (AccountSavings) at `block`, within what that read holds (`usdc`, the
+   * vaults, valued at their rates). Every account that keeps books gets one, zero included, so a figure that drops to
+   * nothing is written as such (review of #397). Undefined: unknown account, or no books (no vault bucket). Read only.
+   */
+  savingsFigure(accountKey: string, read: { usdc: bigint | undefined; vaults: VaultRead[] }, block: number): AccountSavings | undefined {
+    const acc = this.store.state.accounts[accountKey]
+    if (!acc || !this.savingsBooked(acc)) return undefined
+    const books = savingsOf(acc.ops, this.cfg.registry, { atBlock: block, rates: read.vaults, cuts: acc.savingsCuts })
+    return savingsView(clipBooks(books, read.usdc, read.vaults), read.vaults)
   }
 
   /** otto/mamoru#413 (SAV-R5): the savings-first split of a withdrawal of `amount` leaving the Safe, at the read `r`. */

@@ -5,6 +5,8 @@
 import { metricsSignature } from '@mamoru/operator-auth'
 import type { Db } from './env.ts'
 import { writeIncome, type AccountVaultWire, type IncomeEventWire } from './income-ledger.ts'
+import { writeSavings } from './savings-ledger.ts'
+import type { AccountSavings } from '@mamoru/domain'
 
 export type OperatorFetch = (input: string, init: RequestInit) => Promise<Response>
 
@@ -64,6 +66,8 @@ export type SafeWire = {
   vaultUsdc?: string
   /** Spec 013 A1-D2: `idleUsdc` per token at the read's prices. Absent from an operator older than the field. */
   tokensUsdc?: Record<string, string>
+  /** otto/mamoru#413: the account's savings layer (operator savings books). Absent: no books, or an older operator. */
+  savings?: AccountSavings
 }
 /** One UTC day's full totals, not a delta: writing them again is a no-op. `collectedUsdc` is absent while a fee of that day is unpriced. */
 export type DayReceiptWire = {
@@ -140,7 +144,7 @@ type ResolvedAccount = { accountKey: string; env: LedgerEnv }
  * is_test): a test account is 'test' whatever host created it, so /ops keeps it out of prod numbers. Before
  * migration 0007 (no env/is_test columns) every row stays 'unknown', as before.
  */
-async function resolveAccount(db: Db, chainId: number, address: string): Promise<ResolvedAccount | null> {
+export async function resolveAccount(db: Db, chainId: number, address: string): Promise<ResolvedAccount | null> {
   try {
     const row = await db.prepare('SELECT account_key, env, is_test FROM accounts WHERE chain_id = ? AND LOWER(address) = LOWER(?)').bind(chainId, address.toLowerCase()).first<{ account_key: string; env: string | null; is_test: number | null }>()
     if (!row) return null
@@ -444,7 +448,17 @@ export async function pullYieldLedger(db: Db, operatorUrl: string, operatorSecre
   await writeReceipts(db, snapshot, now)
   await writeIncomeSafely(db, snapshot, now)
   await writeStatsFactsSafely(db, snapshot, now)
+  await writeSavingsSafely(db, snapshot, now)
   return { accounts: accounts.written, positions: positions.written }
+}
+
+/** otto/mamoru#413: the savings layer; a failure (the table not migrated yet) is logged and leaves the other tables written. */
+async function writeSavingsSafely(db: Db, snapshot: SnapshotWire, now: Date): Promise<void> {
+  try {
+    await writeSavings(db, snapshot, now)
+  } catch (e) {
+    console.error('yield-ledger: savings not written', e instanceof Error ? e.message : String(e))
+  }
 }
 
 /**

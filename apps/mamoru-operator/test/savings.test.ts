@@ -265,3 +265,20 @@ describe('usdcNet: what a harvest sale paid into savings, from the receipt', () 
     expect(factsFromLogs([transfer('WETH', SAFE, OTHER, 1n)], SAFE, 1_700_000_000n).usdcNet).toBeUndefined()
   })
 })
+
+describe('withSavings: the figure rides on the snapshot', () => {
+  test('each Safe gets its account\'s figure, valued with that read\'s vaults; none or a throw leaves it without', async () => {
+    const { withSavings } = await import('../src/snapshot.ts')
+    const safe = (accountKey: string) => ({ accountKey, tokens: { USDC: 3n }, vaults: [{ name: VAULT, shares: 8n, valueUsdc: 10n }] }) as never
+    const snap = { chainId: 8453, block: 77n, readAt: 'x', pools: {}, calls: 1, safes: [safe('a'), safe('b'), safe('c')] }
+    const seen: unknown[] = []
+    const out = withSavings(snap, (key, vaults, block) => {
+      seen.push([key, vaults, block])
+      if (key === 'b') return undefined
+      if (key === 'c') throw new Error('boom')
+      return { usdc: '1', basisUsdc: '1', pendingUsdc: '1', vaults: [], status: 'counted' }
+    })
+    expect(out.safes.map((s) => (s as { savings?: unknown }).savings)).toEqual([{ usdc: '1', basisUsdc: '1', pendingUsdc: '1', vaults: [], status: 'counted' }, undefined, undefined])
+    expect(seen[0]).toEqual(['a', { usdc: 3n, vaults: [{ name: VAULT, shares: 8n, assets: 10n }] }, 77])
+  })
+})

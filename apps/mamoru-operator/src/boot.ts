@@ -25,7 +25,7 @@ import { L1Bundler, paymasterFromEnv } from './paymaster.ts'
 import { QuotaBook } from './quota.ts'
 import { L1_PUBLIC_FALLBACKS, MONAD_PUBLIC_FALLBACKS, proveChain, startRpcProxy, trustedFromEnv, urlsFromEnv, wrongChainCount } from './rpc-proxy.ts'
 import { startServer } from './server.ts'
-import { readSnapshot, SnapshotLoop, snapshotIntervalMs, withBridges, type Snapshot } from './snapshot.ts'
+import { readSnapshot, SnapshotLoop, snapshotIntervalMs, withBridges, withSavings, type Snapshot } from './snapshot.ts'
 import { MULTICALL3, multicall3Of } from '@mamoru/rpc'
 import { StateStore, loadOrCreateKey, stampVaultFeeFrom } from './state.ts'
 import { EntryStore, withHoldValue } from './yield-entries.ts'
@@ -860,7 +860,8 @@ export async function bootOperator(o: BootOptions) {
     }
     const ledger = withYieldLedger(o.stateDir, read, receipts)
     // spec 013 plan §3.5: the CCTP journals ride on the Base snapshot, so the Worker counts USDC in flight once.
-    const withJournals = async () => withBridges(await ledger(), () => bridgeMonad?.burns() ?? [], () => returnHome?.returns() ?? [])
+    // otto/mamoru#413: each account's savings figure rides on the same snapshot, from the operator's books at its block.
+    const withJournals = async () => withBridges(withSavings(await ledger(), (key, read, block) => operator.savingsFigure(key, read, block)), () => bridgeMonad?.burns() ?? [], () => returnHome?.returns() ?? [])
     snapshot = new SnapshotLoop(withJournals, snapshotIntervalMs(process.env.MAMORU_SNAPSHOT_MS), () => budget.over())
   }
   // otto/mamoru#343 phase B: Monad capital is measured for the worked APY like Base's, from the same readSnapshot over the

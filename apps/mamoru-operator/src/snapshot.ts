@@ -4,7 +4,7 @@
 // and staleness rules.
 
 import { decodeFunctionResult, encodeFunctionData, parseAbi, type PublicClient } from 'viem'
-import type { Address } from '@mamoru/domain'
+import type { AccountSavings, Address } from '@mamoru/domain'
 import { address, entry, erc20Abi, erc4626Abi, nonfungiblePositionManagerAbi, safeAbi, uniswapV3PoolAbi, type Registry } from '@mamoru/registry'
 import { BATCH_MAX_CALLS, Batch, PRICE_SHARES, balanceRead, contractRead, type Handle, type Read } from '@mamoru/rpc'
 import { feeGrowthInside, positionFees } from '@mamoru/uniswap-v3/fees'
@@ -101,6 +101,11 @@ export type SafeSnapshot = {
   vaultUsdc?: bigint
   /** idle + lp + accrued + owed + vaults: everything the Safe would hold if it collected now. */
   totalUsdc: bigint
+  /**
+   * otto/mamoru#413: the account's savings layer (savings.ts books at this read, vaults at its share prices). A part of
+   * idle and vaults above, never added to totalUsdc. Zero when empty. Absent: the account keeps no books (no vault bucket).
+   */
+  savings?: AccountSavings
 }
 
 export type Snapshot = {
@@ -158,6 +163,23 @@ export function bridgesWire(burns: readonly BurnLike[], returns: readonly Return
     })
   }
   return out
+}
+
+/**
+ * otto/mamoru#413: adds each account's savings figure to its Safe, from `of` (the operator's books at the snapshot's
+ * block, valued with the vaults this read). A figure that cannot be built leaves that Safe without one.
+ */
+export function withSavings<S extends Snapshot>(snapshot: S, of: (accountKey: string, read: { usdc: bigint | undefined; vaults: { name: string; shares: bigint; assets: bigint }[] }, block: number) => AccountSavings | undefined): S {
+  const safes = snapshot.safes.map((safe) => {
+    try {
+      const read = { usdc: safe.tokens.USDC, vaults: (safe.vaults ?? []).map((v) => ({ name: v.name, shares: v.shares, assets: v.valueUsdc })) }
+      const savings = of(safe.accountKey, read, Number(snapshot.block))
+      return savings ? { ...safe, savings } : safe
+    } catch {
+      return safe
+    }
+  })
+  return { ...snapshot, safes }
 }
 
 /** Adds the journals' transfers to a snapshot; a journal that cannot be read leaves `bridges` out (the Worker then marks partial). */
