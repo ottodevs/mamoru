@@ -61,6 +61,18 @@ export type SimConfig = {
    * result hash is the one of before. Present, the arm and its report are part of the hash.
    */
   harvest?: HarvestArm
+  /**
+   * Lab (otto/mamoru#413): the Stable vault's share price (assets per share, by Unix time) a harvest arm with a vault sink
+   * grows its savings with, geometric between readings. Required by such an arm; part of the hash when given.
+   */
+  vaultPrices?: readonly { time: number; price: number }[]
+  /**
+   * Lab (#413): where a harvest arm's own operation sits in a review. `first` (default, #178): before `decide`, which then
+   * waits for the next review. `engine`: as the engine orders them: `decide`'s re-range or merge first, then the arm's
+   * harvest (the harvest slot), then `decide`'s other proposals; a vault deposit of savings only on a review where
+   * `decide` proposes nothing.
+   */
+  labHarvestOrder?: 'first' | 'engine'
   /** First and last sample to replay, inclusive. Default: the whole dataset. */
   from?: number
   to?: number

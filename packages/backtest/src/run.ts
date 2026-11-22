@@ -1,11 +1,12 @@
 import { keccak256, stringToHex } from 'viem'
 import type { Hex } from '@mamoru/domain'
-import { amountsOf, canonicalJson, decide, pegDeviationBps, pegStep, PEG_CLEAR, stageStep, type Proposal } from '@mamoru/decide'
+import { amountsOf, canonicalJson, decide, pegDeviationBps, pegStep, PEG_CLEAR, stageStep, type Observation, type Proposal } from '@mamoru/decide'
 import { computeCaps, grantKey, policyHash, usageLimitFor, type Caps, type GrantTemplate, type PolicyVersion, type Price } from '@mamoru/policy'
 import { baseRegistry, entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
-import { accrueYield, compoundedShare, divertFees, driftStep, harvestReport, heldOutside, keepInKind, labHarvest, newLedger, poolLedger, recordCollect, recordEarned, type HarvestLedger } from './harvest.ts'
+import { accrueVault, accrueYield, compoundedShare, divertFees, driftStep, harvestReport, heldOutside, keepInKind, labHarvest, newLedger, poolLedger, recordCollect, recordEarned, recordInterval, ruleOf, sinkOf, type HarvestLedger } from './harvest.ts'
 import { emaTickOf, ETH_PRICE_POOL, observe, twapTick } from './observe.ts'
+import { priceAt } from './vault4626.ts'
 import type { Dataset, GasModel, Metrics, OpEntry, OpKind, PoolSample, RunResult, Sample, SessionUse, SimConfig } from './types.ts'
 import { accrue, apply, inRange, newWorld, valueIn, type World } from './world.ts'
 
@@ -254,6 +255,14 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   let gaps = 0
   // Lab (otto/mamoru#178): the harvest arm, when one is set. Absent, the run is the one of before, hash included.
   const lab: HarvestLedger | null = config.harvest ? newLedger(config.harvest) : null
+  // Lab (#413): a vault sink grows its savings with the vault's share price, which must cover the whole window.
+  const vaultPrice = (t: number) => {
+    const p = priceAt(config.vaultPrices ?? [], t)
+    if (p === null) throw new Error(`no vault share price at ${t}: a vault sink needs SimConfig.vaultPrices over the window`)
+    return p
+  }
+  if (lab && sinkOf(lab.arm)) vaultPrice(first.time)
+  const engineOrderUsed = lab !== null && lab.arm.kind !== 'live' && config.labHarvestOrder === 'engine'
   let minValue: bigint | null = null
 
   for (let i = from; i <= to; i++) {
@@ -266,6 +275,8 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
       const prev = ds.samples[prevIndex]!
       let stableFees = 0n
       let stableValue = 0n
+      // Lab (#413) switch arm: each pool's fees and position value over the interval, for its trailing APR.
+      const byPool = lab?.arm.kind === 'switch' ? new Map<RegistryName, { fees: bigint; value: bigint }>() : null
       for (const p of w.positions) {
         const k = ds.pools.indexOf(p.pool)
         const a = prev.pools[k]
@@ -282,9 +293,16 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
             stableFees += v
             stableValue += price(s, e.token0!, amt.amount0) + price(s, e.token1!, amt.amount1)
           }
+          if (byPool) {
+            const amt = amountsOf(b.sqrtPriceX96, p.tickLower, p.tickUpper, p.liquidity)
+            const cur = byPool.get(p.pool) ?? { fees: 0n, value: 0n }
+            byPool.set(p.pool, { fees: cur.fees + v, value: cur.value + price(s, e.token0!, amt.amount0) + price(s, e.token1!, amt.amount1) })
+          }
         }
       }
-      if (lab) accrueYield(lab, stableFees, stableValue)
+      if (byPool && lab) for (const [pool, x] of byPool) recordInterval(lab, pool, s.time, x.fees, x.value, s.time - prev.time)
+      if (lab && sinkOf(lab.arm)) accrueVault(lab, vaultPrice(prev.time), vaultPrice(s.time))
+      else if (lab) accrueYield(lab, stableFees, stableValue)
     }
     // A deposit due at a sample the run stepped over lands at the next one it replays.
     for (; nextTopUp < topUps.length && topUps[nextTopUp]!.at <= i; nextTopUp++) {
@@ -326,23 +344,32 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     // Lab (#178): a harvest arm's own harvest takes the review's one operation; `decide` then waits for the next.
     const obs = series.time.length % every === 0 ? observe(ds, i, w, policy, gas.priorityFeeWei) : null
     if (obs && lab) driftStep(lab, obs, policy)
-    const labOps = obs && lab ? labHarvest(lab, w, ds, s, savings, policy.execution.slippageBps, (kind) => gasCost(ds, s, kind, gas, savings)) : null
+    // Under a Lab arm the engine's own harvest is off: a position it would harvest is shown to it without its fees, so
+    // the review goes on to what it would propose next. Re-ranges and reduces still collect, as they do on chain.
+    const masked = (o: Observation) => {
+      let d = decide(o, policy)
+      while (lab && lab.arm.kind !== 'live' && d.proposal?.kind === 'harvest') {
+        const id = d.proposal.tokenId
+        o.positions = o.positions.map((p) => (p.tokenId === id ? { ...p, collectable0: 0n, collectable1: 0n } : p))
+        d = decide(o, policy)
+      }
+      return d
+    }
+    // #413 `engine` order: `decide` first; its re-range (or merge) keeps the place it has ahead of harvests in the
+    // engine, the arm's harvest takes the harvest slot, and a vault deposit of savings waits for a review with nothing else.
+    const engineOrder = engineOrderUsed
+    const pre = obs && engineOrder ? masked(obs) : null
+    const labOps = obs && lab && pre?.proposal?.kind !== 'rerange' ? labHarvest(lab, w, ds, s, savings, policy.execution.slippageBps, (kind) => gasCost(ds, s, kind, gas, savings), !engineOrder || pre?.proposal === null) : null
     if (labOps) {
       reasons.LAB_HARVEST = (reasons.LAB_HARVEST ?? 0) + 1
       for (const o of labOps) {
         ops.push({ i, block: s.block, time: s.time, kind: o.kind, pool: o.pool, grant: o.grant, code: o.kind === 'harvest' ? 'DECIDE_HARVEST' : o.kind === 'enter_swap' ? 'DECIDE_CONVERT' : 'DECIDE_ENTER', reason: 'DECIDE_HARVEST', trail: [], ok: true, gasCost: o.gasCost, feesValue: o.feesValue })
         gasSpent += o.gasCost
-        count[o.kind]++
+        // A vault deposit (#413) is not one of the pool kinds counted for `decide`'s runs.
+        count[o.kind] = (count[o.kind] ?? 0) + 1
       }
     } else if (obs) {
-      let d = decide(obs, policy)
-      // Under a Lab arm the engine's own harvest is off: a position it would harvest is shown to it without its fees,
-      // so the review goes on to what it would propose next. Re-ranges and reduces still collect, as they do on chain.
-      while (lab && lab.arm.kind !== 'live' && d.proposal?.kind === 'harvest') {
-        const id = d.proposal.tokenId
-        obs.positions = obs.positions.map((p) => (p.tokenId === id ? { ...p, collectable0: 0n, collectable1: 0n } : p))
-        d = decide(obs, policy)
-      }
+      const d = pre ?? masked(obs)
       reasons[d.reason] = (reasons[d.reason] ?? 0) + 1
       // otto/mamoru#127: how often a bucket waited for depth, and how much savings sat idle at each review.
       if (d.waiting?.some((w) => w.code === 'DECIDE_WAIT_DEPTH')) depthWaits++
@@ -382,7 +409,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
         const e = entry(p.pool, baseRegistry)
         // Lab (#178) compound arm: the compounded share of what a re-range or reduce takes out, booked if it goes through.
         const held = 'tokenId' in p ? w.positions.find((x) => x.tokenId === p.tokenId) : undefined
-        const share = lab?.arm.kind === 'compound' && held && (p.kind === 'rerange' || p.kind === 'reduce') ? compoundedShare(lab, held, p.kind === 'reduce' ? p.liquidity : held.liquidity, sqrtRatioAtTick(twapTick(ds, ds.pools.indexOf(p.pool), i, policy.execution.twapWindowSeconds)), savings) : null
+        const share = (lab?.arm.kind === 'compound' || lab?.arm.kind === 'switch') && held && (p.kind === 'rerange' || p.kind === 'reduce') ? compoundedShare(lab, held, p.kind === 'reduce' ? p.liquidity : held.liquidity, sqrtRatioAtTick(twapTick(ds, ds.pools.indexOf(p.pool), i, policy.execution.twapWindowSeconds)), savings) : null
         const done = apply(w, p, ps, s.time, policy.execution.slippageBps)
         const cost = done.ok ? gasCost(ds, s, p.kind, gas, savings) : 0n
         ops.push({
@@ -396,12 +423,12 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
           count[p.kind]++
           if (lab && (p.kind === 'harvest' || p.kind === 'rerange' || p.kind === 'reduce')) {
             // Savings arm: the fees a re-range or reduce collected go to the savings layer, not the account (#178).
-            if (lab.arm.kind === 'savings' && p.kind !== 'harvest') divertFees(lab, w, e, ps, done.fees0, done.fees1, savings)
+            // A switch arm (#413) follows the pool's current mode; a compounded share leaves with the position either way.
+            const rule = ruleOf(lab, p.pool).kind
+            if (rule === 'savings' && p.kind !== 'harvest') divertFees(lab, w, e, ps, done.fees0, done.fees1, savings)
             else recordCollect(lab, e, ps, done.fees0, done.fees1, savings)
-            if (lab.arm.kind === 'compound' && p.kind !== 'harvest') {
-              keepInKind(lab, e, done.fees0, done.fees1)
-              share?.commit()
-            }
+            if (rule === 'compound' && p.kind !== 'harvest') keepInKind(lab, e, done.fees0, done.fees1)
+            if (p.kind !== 'harvest') share?.commit()
             if (p.kind === 'harvest') {
               const pl = poolLedger(lab, p.pool)
               pl.harvests++
@@ -473,7 +500,7 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
   const sessions = sessionUses(policy, tally, capUsdc)
   const harvest = lab ? harvestReport(lab, w, ds, last, price, minValue!) : undefined
   const pHash = policyHash(policy)
-  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, renewal, refused, deposit: config.deposit, topUps, gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions, ...(config.capUsdc === undefined ? {} : { capUsdc }), ...(refresh ? { refresh, usageRefreshes } : {}), ...(harvest ? { harvestArm: config.harvest, harvest } : {}) }
+  const facts = { simVersion: SIM_VERSION, datasetId: ds.id, policyHash: pHash, from, to, every, gaps, enforce, renewal, refused, deposit: config.deposit, topUps, gas, end, hodlEnd, fees, gasSpent, ops: ops.map(({ trail: _t, ...o }) => o), reasons, sessions, ...(config.capUsdc === undefined ? {} : { capUsdc }), ...(refresh ? { refresh, usageRefreshes } : {}), ...(harvest ? { harvestArm: config.harvest, harvest } : {}), ...(lab && sinkOf(lab.arm) ? { vaultPrices: config.vaultPrices } : {}), ...(engineOrderUsed ? { labHarvestOrder: 'engine' } : {}) }
   return {
     simVersion: SIM_VERSION,
     datasetId: ds.id,

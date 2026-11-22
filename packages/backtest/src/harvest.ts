@@ -7,6 +7,12 @@
 //   target weights.
 // - `compound` (B): the fees go back into the same position (increaseLiquidity), when they reach k times the cost of a
 //   collect and an increase. Reference, as Beefy does.
+// otto/mamoru#413 adds two shapes, Lab only:
+// - `savings` with a `vault` sink: the savings layer is the Stable vault, outside the bucket weights. Harvested USDC
+//   waits as USDC until one deposit of at least max(1 USDC, sweepK x the deposit's gas) goes in (its own userOp), then
+//   earns the vault's share-price growth.
+// - `switch` (D): per pool, compound while the pool's trailing fee APR is high, savings (vault sink) once it falls under
+//   `exitBps`; back to compounding only above `enterBps` (hysteresis), so it does not flip on noise.
 // Absent from the run config, nothing here runs and every result hash is the one of before.
 import { ReasonError } from '@mamoru/domain'
 import { amountsForLiquidity, amountsOf, inSavings, volatileOf, type Observation } from '@mamoru/decide'
@@ -22,12 +28,43 @@ const Q128 = 1n << 128n
  * `live`: `decide` as it is; the run only measures. `savings`: A·k, `capSeconds` the time cap T. `compound`: B. `k` is a
  * multiple of the harvest's own cost, read to the hundredth.
  */
-export type HarvestArm = { kind: 'live' } | { kind: 'savings'; k: number; capSeconds?: number } | { kind: 'compound'; k: number }
+export type HarvestArm =
+  | { kind: 'live' }
+  | { kind: 'savings'; k: number; capSeconds?: number; sink?: VaultSink }
+  | { kind: 'compound'; k: number }
+  | SwitchArm
+
+/**
+ * #413: the savings layer is the Stable vault. Harvested USDC waits as USDC (`sweep`) until it reaches
+ * max(`VAULT_MIN_SWEEP`, sweepK x the gas of a vault deposit); one deposit userOp then puts it in, and from there it grows
+ * with the vault's share price (`SimConfig.vaultPrices`). Valued at its share price; no redeem is charged, as no arm
+ * pays the exit of its positions.
+ */
+export type VaultSink = { kind: 'vault'; sweepK: number }
+
+/**
+ * #413 mode D: per pool, compound (as `compound`) while the pool's fee APR over the last `aprSeconds` is high; once it
+ * falls under `exitBps`, savings into the vault (as `savings` with the sink); back to compounding only when it rises
+ * over `enterBps`. Every pool starts compounding and keeps that until it has `aprSeconds` of history.
+ */
+export type SwitchArm = { kind: 'switch'; k: number; capSeconds?: number; sink: VaultSink; aprSeconds: number; exitBps: number; enterBps: number }
+
+/** The engine's vault floor on v7/v8 (policy V7_ENGINE, otto/mamoru#390): 1 USDC. */
+export const VAULT_MIN_SWEEP = 1_000_000n
+
+const days = (sec: number) => (sec % 86_400 === 0 ? `${sec / 86_400}d` : `${sec}s`)
 
 export function armName(a: HarvestArm): string {
   if (a.kind === 'live') return 'live'
   if (a.kind === 'compound') return `B-k${a.k}`
-  return `A-k${a.k}${a.capSeconds ? `-T${a.capSeconds % 86_400 === 0 ? `${a.capSeconds / 86_400}d` : `${a.capSeconds}s`}` : ''}`
+  const cap = a.capSeconds ? `-T${days(a.capSeconds)}` : ''
+  if (a.kind === 'switch') return `D-k${a.k}${cap}-s${a.sink.sweepK}-apr${a.exitBps}-${a.enterBps}-${days(a.aprSeconds)}`
+  return `A-k${a.k}${cap}${a.sink ? `-vault-s${a.sink.sweepK}` : ''}`
+}
+
+/** The vault sink of an arm, if it has one. */
+export function sinkOf(a: HarvestArm): VaultSink | undefined {
+  return a.kind === 'switch' ? a.sink : a.kind === 'savings' ? a.sink : undefined
 }
 
 /** What one pool's fees went through over a run. Amounts are raw token units; values raw savings units. */
@@ -81,10 +118,89 @@ export type HarvestLedger = {
   compounded: Map<bigint, bigint>
   /** Principal drift from the target weights, from the first review with a position in every bucket. */
   drift: { entered: boolean; samples: number; sumBps: number; maxBps: number }
+  /** Vault sink (#413): savings USDC not deposited yet (part of `savings`), deposits made and their gas. */
+  sweep: bigint
+  sweeps: number
+  sweepGas: bigint
+  vaultRemE18: bigint
+  /** Switch arm (#413), per pool: fee intervals for the trailing APR, the pool's current mode, and how often it flipped. */
+  apr: Map<RegistryName, { first: number; xs: { time: number; fees: number; valueSeconds: number }[] }>
+  mode: Map<RegistryName, 'compound' | 'savings'>
+  switches: number
 }
 
 export function newLedger(arm: HarvestArm): HarvestLedger {
-  return { arm, savings: 0n, savingsRemX128: 0n, yieldEarned: 0n, pools: {}, since: new Map(), compounded: new Map(), drift: { entered: false, samples: 0, sumBps: 0, maxBps: 0 } }
+  return { arm, savings: 0n, savingsRemX128: 0n, yieldEarned: 0n, pools: {}, since: new Map(), compounded: new Map(), drift: { entered: false, samples: 0, sumBps: 0, maxBps: 0 }, sweep: 0n, sweeps: 0, sweepGas: 0n, vaultRemE18: 0n, apr: new Map(), mode: new Map(), switches: 0 }
+}
+
+/** USDC into the savings layer; with a vault sink it waits for the next deposit. */
+function toSavings(l: HarvestLedger, amount: bigint): void {
+  l.savings += amount
+  if (sinkOf(l.arm)) l.sweep += amount
+}
+
+/**
+ * The rule a pool's fees follow now: the arm itself, or for `switch` the savings or compound rule of the pool's mode.
+ * `savings` here never carries the sink; the sink is read from the ledger's arm.
+ */
+export function ruleOf(l: HarvestLedger, pool: RegistryName): Exclude<HarvestArm, SwitchArm> {
+  const a = l.arm
+  if (a.kind !== 'switch') return a
+  return (l.mode.get(pool) ?? 'compound') === 'compound' ? { kind: 'compound', k: a.k } : { kind: 'savings', k: a.k, ...(a.capSeconds ? { capSeconds: a.capSeconds } : {}) }
+}
+
+/** Switch arm: one interval of a pool's positions, its fees and value (raw savings units) over `dt` seconds. */
+export function recordInterval(l: HarvestLedger, pool: RegistryName, time: number, fees: bigint, value: bigint, dt: number): void {
+  if (l.arm.kind !== 'switch' || dt <= 0) return
+  const h = l.apr.get(pool) ?? { first: time - dt, xs: [] }
+  h.xs.push({ time, fees: Number(fees), valueSeconds: Number(value) * dt })
+  while (h.xs.length && h.xs[0]!.time <= time - l.arm.aprSeconds) h.xs.shift()
+  l.apr.set(pool, h)
+}
+
+/** Trailing fee APR of a pool in bps, or null before it has `aprSeconds` of history. */
+export function aprBps(l: HarvestLedger, pool: RegistryName, now: number): number | null {
+  if (l.arm.kind !== 'switch') return null
+  const h = l.apr.get(pool)
+  if (!h || now - h.first < l.arm.aprSeconds) return null
+  let fees = 0
+  let vs = 0
+  for (const x of h.xs) {
+    fees += x.fees
+    vs += x.valueSeconds
+  }
+  return vs > 0 ? (fees * 365 * 86_400 * 10_000) / vs : 0
+}
+
+/** Switch arm, at a review: each pool with history moves between compound and savings on its APR, with hysteresis. */
+export function stepModes(l: HarvestLedger, now: number): void {
+  const a = l.arm
+  if (a.kind !== 'switch') return
+  for (const pool of l.apr.keys()) {
+    const apr = aprBps(l, pool, now)
+    if (apr === null) continue
+    const m = l.mode.get(pool) ?? 'compound'
+    const next = m === 'compound' && apr < a.exitBps ? 'savings' : m === 'savings' && apr > a.enterBps ? 'compound' : m
+    if (next !== m) {
+      l.mode.set(pool, next)
+      l.switches++
+    }
+  }
+}
+
+/**
+ * Vault sink: the savings already deposited grow with the vault's share price from `fromPrice` to `toPrice`. What
+ * waits in `sweep` earns nothing.
+ */
+export function accrueVault(l: HarvestLedger, fromPrice: number, toPrice: number): void {
+  const invested = l.savings - l.sweep
+  if (invested <= 0n || toPrice === fromPrice) return
+  const g = BigInt(Math.round((toPrice / fromPrice - 1) * 1e18))
+  const t = l.vaultRemE18 + invested * g
+  const whole = t / 10n ** 18n
+  l.vaultRemE18 = t % 10n ** 18n
+  l.savings += whole
+  l.yieldEarned += whole
 }
 
 /** Fees a position earned over one interval (#178: the ledger balances to them, token by token). */
@@ -133,7 +249,7 @@ export function divertFees(l: HarvestLedger, w: World, e: RegistryEntry, ps: Poo
   }
   const vol = otherToken(e, savings)
   const [s, v] = e.token0 === savings ? [fees0, fees1] : [fees1, fees0]
-  l.savings += s
+  toSavings(l, s)
   pl.direct += s
   add(pl.pending, vol, v)
 }
@@ -202,12 +318,15 @@ export type LabOp = { kind: OpKind; pool: RegistryName; tokenId: bigint; grant: 
  * At a review: the first position (in the account's order) whose fees meet the arm's trigger is harvested. Savings: the
  * collect and the swap of the volatile part (two userOps: a convert in the same batch could sell principal, #140), the
  * proceeds to the savings layer. Compound: the collect and an increase of the same position with what fits its range;
- * what does not fit stays in the account, as live. Returns the operations, or null when no position triggers.
+ * what does not fit stays in the account, as live. With a vault sink and `sweep`, a review with no harvest deposits the
+ * waiting savings once they reach the floor. Returns the operations, or null when nothing triggers.
  */
-export function labHarvest(l: HarvestLedger, w: World, ds: { pools: RegistryName[] }, s: Sample, savings: RegistryName, slippageBps: number, gasOf: (k: OpKind) => bigint): LabOp[] | null {
-  const arm = l.arm
-  if (arm.kind === 'live') return null
+export function labHarvest(l: HarvestLedger, w: World, ds: { pools: RegistryName[] }, s: Sample, savings: RegistryName, slippageBps: number, gasOf: (k: OpKind) => bigint, sweep = true): LabOp[] | null {
+  if (l.arm.kind === 'live') return null
+  stepModes(l, s.time)
   for (const pos of w.positions) {
+    const arm = ruleOf(l, pos.pool)
+    if (arm.kind === 'live') return null
     const ps = s.pools[ds.pools.indexOf(pos.pool)]
     if (!ps) continue
     if (!l.since.has(pos.tokenId)) l.since.set(pos.tokenId, s.time)
@@ -228,7 +347,7 @@ export function labHarvest(l: HarvestLedger, w: World, ds: { pools: RegistryName
     const ops: LabOp[] = [{ kind: 'harvest', pool: pos.pool, tokenId: pos.tokenId, grant: 'lab:harvest', gasCost: collectGas, feesValue: est.feesValue }]
     if (arm.kind === 'savings') {
       const owedSav = e.token0 === savings ? fees0 : fees1
-      l.savings += owedSav
+      toSavings(l, owedSav)
       led.direct += owedSav
       if (est.volatileAmount > 0n) {
         sell(l, led, est)
@@ -264,8 +383,8 @@ export function labHarvest(l: HarvestLedger, w: World, ds: { pools: RegistryName
     return ops
   }
   // Savings: volatile fees a re-range or reduce left waiting in a pool that has no position any more get a swap of
-  // their own, on the same rule (no collect in the cost).
-  if (arm.kind === 'savings') for (const [pool, pl] of Object.entries(l.pools)) {
+  // their own, on the same rule (no collect in the cost). Pending exists only for a pool whose fees were diverted.
+  if (l.arm.kind === 'savings' || l.arm.kind === 'switch') for (const [pool, pl] of Object.entries(l.pools)) {
     if (w.positions.some((p) => p.pool === pool)) continue
     const ps = s.pools[ds.pools.indexOf(pool)]
     if (!ps) continue
@@ -277,11 +396,23 @@ export function labHarvest(l: HarvestLedger, w: World, ds: { pools: RegistryName
     const mid = valueIn(e, ps, vol, amount, savings)
     const loss = mid > out ? mid - out : 0n
     const est = { feesValue: mid, cost: gasOf('enter_swap') + loss, volatile: vol, volatileAmount: amount, out, loss }
-    if (!triggers({ kind: 'savings', k: arm.k }, est, s.time, s.time)) continue
+    if (!triggers({ kind: 'savings', k: l.arm.k }, est, s.time, s.time)) continue
     sell(l, pl, est)
     const swapGas = gasOf('enter_swap')
     pl.gas += swapGas
     return [{ kind: 'enter_swap', pool, tokenId: 0n, grant: 'lab:harvest-swap', gasCost: swapGas, feesValue: 0n }]
+  }
+  // Vault sink (#413): the waiting USDC goes into the vault in one deposit once it is worth the deposit's gas.
+  const sink = sinkOf(l.arm)
+  if (sweep && sink && l.sweep > 0n) {
+    const gas = gasOf('vault_deposit')
+    const floor = (gas * BigInt(Math.round(sink.sweepK * 100))) / 100n
+    if (l.sweep >= (floor > VAULT_MIN_SWEEP ? floor : VAULT_MIN_SWEEP)) {
+      l.sweep = 0n
+      l.sweeps++
+      l.sweepGas += gas
+      return [{ kind: 'vault_deposit', pool: 'vault:gtUSDCp', tokenId: 0n, grant: 'lab:savings-deposit', gasCost: gas, feesValue: 0n }]
+    }
   }
   return null
 }
@@ -293,7 +424,7 @@ function sell(l: HarvestLedger, led: PoolLedger, est: HarvestEstimate): void {
   led.swapOut += est.out
   led.swapLoss += est.loss
   led.pending[est.volatile] = 0n
-  l.savings += est.out
+  toSavings(l, est.out)
   led.swaps++
 }
 
@@ -400,6 +531,15 @@ export type HarvestReport = {
   driftMeanBps: number
   /** Lowest value of the account net of gas over the run (#150: gas must not take it below zero). */
   minValue: bigint
+  /**
+   * #413: realized yield, what the 10 % fee is charged on: every fee collected (harvests and the collect a re-range or
+   * reduce starts with, at the price of each collect) plus the savings layer's yield. Fees still owed are not in it.
+   */
+  realized: bigint
+  /** Vault sink (#413): deposits, their gas (also in `cost`), and the savings USDC still waiting for one. */
+  vault?: { sweeps: number; gas: bigint; waiting: bigint }
+  /** Switch arm (#413): mode flips over the run, and each pool's mode at the end. */
+  switches?: { count: number; endModes: Record<RegistryName, 'compound' | 'savings'> }
   pools: PoolHarvestReport[]
 }
 
@@ -431,9 +571,15 @@ export function harvestReport(l: HarvestLedger, w: World, ds: { pools: RegistryN
         const whole = price(last, e.token0!, a.amount0 + p.owed0) + price(last, e.token1!, a.amount1 + p.owed1)
         return n + (whole * added) / p.liquidity
       }, 0n)
-      const captured = l.arm.kind === 'savings' ? pl.direct + pl.swapOut - pl.gas : l.arm.kind === 'compound' ? lpShare + atEnd(pl.inKind) + pl.frozen - pl.gas : atEnd(pl.collected) - pl.gas
-      const unconverted = l.arm.kind === 'savings' ? atEnd(pl.pending) : 0n
-      const exposureRemoved = l.arm.kind === 'savings' ? pl.convertedValue - atEnd(pl.converted) : 0n
+      // A switch arm sums both rules' parts; under savings or compound alone the other rule's parts are zero.
+      const captured =
+        l.arm.kind === 'savings' ? pl.direct + pl.swapOut - pl.gas
+        : l.arm.kind === 'compound' ? lpShare + atEnd(pl.inKind) + pl.frozen - pl.gas
+        : l.arm.kind === 'switch' ? pl.direct + pl.swapOut + lpShare + atEnd(pl.inKind) + pl.frozen - pl.gas
+        : atEnd(pl.collected) - pl.gas
+      const diverts = l.arm.kind === 'savings' || l.arm.kind === 'switch'
+      const unconverted = diverts ? atEnd(pl.pending) : 0n
+      const exposureRemoved = diverts ? pl.convertedValue - atEnd(pl.converted) : 0n
       const uncollected = w.positions.filter((p) => p.pool === pool).reduce((n, p) => n + price(last, e.token0!, p.owed0) + price(last, e.token1!, p.owed1), 0n)
       return { pool, fees: pl.fees, harvests: pl.harvests, swaps: pl.swaps, increases: pl.increases, gas: pl.gas, swapLoss: pl.swapLoss, captured, unconverted, exposureRemoved, uncollected }
     })
@@ -443,10 +589,10 @@ export function harvestReport(l: HarvestLedger, w: World, ds: { pools: RegistryN
     arm: armName(l.arm),
     savings: l.savings,
     yieldEarned: l.yieldEarned,
-    captured: sum((p) => p.captured) + l.yieldEarned,
+    captured: sum((p) => p.captured) + l.yieldEarned - l.sweepGas,
     unconverted: sum((p) => p.unconverted),
     exposureRemoved: sum((p) => p.exposureRemoved),
-    cost: sum((p) => p.gas + p.swapLoss),
+    cost: sum((p) => p.gas + p.swapLoss) + l.sweepGas,
     fees: sum((p) => p.fees),
     harvests: count((p) => p.harvests),
     swaps: count((p) => p.swaps),
@@ -454,6 +600,9 @@ export function harvestReport(l: HarvestLedger, w: World, ds: { pools: RegistryN
     driftMaxBps: l.drift.maxBps,
     driftMeanBps: l.drift.samples === 0 ? 0 : Math.round(l.drift.sumBps / l.drift.samples),
     minValue,
+    realized: Object.values(l.pools).reduce((n, pl) => n + pl.collectedValue, 0n) + l.yieldEarned,
+    ...(sinkOf(l.arm) ? { vault: { sweeps: l.sweeps, gas: l.sweepGas, waiting: l.sweep } } : {}),
+    ...(l.arm.kind === 'switch' ? { switches: { count: l.switches, endModes: Object.fromEntries([...l.mode.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) } } : {}),
     pools,
   }
 }
