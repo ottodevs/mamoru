@@ -1,6 +1,6 @@
 import { keccak256, stringToHex } from 'viem'
 import type { Hex } from '@mamoru/domain'
-import { amountsOf, canonicalJson, decide, pegDeviationBps, pegStep, PEG_CLEAR, stageStep, type Observation, type Proposal } from '@mamoru/decide'
+import { amountsOf, canonicalJson, decide, depegExitOf, depeggedPool, pegDeviationBps, pegStep, PEG_CLEAR, stageStep, type Observation, type Proposal } from '@mamoru/decide'
 import { computeCaps, grantKey, policyHash, usageLimitFor, type Caps, type GrantTemplate, type PolicyVersion, type Price } from '@mamoru/policy'
 import { baseRegistry, entry, type RegistryEntry, type RegistryName } from '@mamoru/registry'
 import { sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
@@ -361,7 +361,11 @@ export function runBacktest(ds: Dataset, policy: PolicyVersion, config: SimConfi
     // has no re-range. A vault deposit of savings waits for a review where `decide` proposes nothing.
     const engineOrder = engineOrderUsed
     const pre = obs && engineOrder ? masked(obs) : null
-    const labOps = obs && lab && pre?.proposal?.kind !== 'rerange' ? labHarvest(lab, w, ds, s, savings, policy.execution.slippageBps, (kind) => gasCost(ds, s, kind, gas, savings), !engineOrder || pre?.proposal === null) : null
+    // Ahead of harvests in the engine: the depeg exit, then re-ranges and merges. The exit is `decide`'s own proposal
+    // whenever its depeg guard has tripped, so on such a review the arm waits too. (Releases and chain exits, also ahead,
+    // need intents or a remote bucket the backtest never has.)
+    const ahead = pre !== null && (pre.proposal?.kind === 'rerange' || (pre.proposal !== null && depeggedPool(obs!, policy) !== null && depegExitOf(obs!, policy, depeggedPool(obs!, policy)!) !== null))
+    const labOps = obs && lab && !ahead ? labHarvest(lab, w, ds, s, savings, policy.execution.slippageBps, (kind) => gasCost(ds, s, kind, gas, savings), !engineOrder || pre?.proposal === null) : null
     if (labOps) {
       reasons.LAB_HARVEST = (reasons.LAB_HARVEST ?? 0) + 1
       for (const o of labOps) {
