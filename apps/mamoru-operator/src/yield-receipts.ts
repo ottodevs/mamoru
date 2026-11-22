@@ -389,8 +389,9 @@ function dayGas(ops: readonly StoredOp[]): Map<string, Gas> {
     const own = op.opId.startsWith('eng-') ? op.userOpHash?.toLowerCase() : undefined
     if (own) {
       const seen = t.userOps.get(own) ?? zero
-      t.userOps.set(own, gas.wei > seen.wei ? gas : seen)
-    } else if (gas.wei > t.whole.wei) t.whole = gas
+      // Copies of one transaction have equal wei: a priced copy must not lose to an unpriced one that came first.
+      t.userOps.set(own, gas.wei > seen.wei || (gas.wei === seen.wei && seen.usdc === null) ? gas : seen)
+    } else if (gas.wei > t.whole.wei || (gas.wei === t.whole.wei && t.whole.usdc === null)) t.whole = gas
   }
   for (const t of txs.values()) {
     let sum: Gas = zero

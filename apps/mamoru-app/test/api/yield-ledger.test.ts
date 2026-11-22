@@ -277,6 +277,7 @@ describe('writeReceipts (otto/mamoru#129): the operator\'s per-day gas and colle
     db.raw.exec('ALTER TABLE yield_ledger_account_receipts DROP COLUMN gas_paid_usdc')
     await writeReceipts(db, withReceipts([{ day, gasWei: '200', gasUsdc: '400', positions: [] }]), now)
     expect(db.raw.query('SELECT gas_paid_wei FROM yield_ledger_account_receipts WHERE day = ?').get(day)).toEqual({ gas_paid_wei: '200' })
+    expect((db.raw.query('SELECT digest FROM yield_ledger_account_receipts WHERE day = ?').get(day) as { digest: string }).digest.startsWith('nogas:')).toBe(true) // rewritten once the column exists
   })
 
   test('a day not priced yet keeps the stored USD figure but still takes the gas and raw amounts', async () => {

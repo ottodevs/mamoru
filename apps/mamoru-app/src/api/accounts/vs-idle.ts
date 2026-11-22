@@ -37,7 +37,7 @@ type IncomeRow = { t_s: number; usd: number; source?: string; from_s?: number | 
 export function mamoruFeeUsdc(income: readonly IncomeRow[], until: number): bigint {
   let base = 0n
   // A vault's first-sample backfill is yield from before it was observed, not income realized from 5 Nov: never charged.
-  for (const r of income) if (r.t_s >= MAMORU_FEE_FROM && r.t_s < until && !r.event_id?.startsWith('vault-backfill:')) base += BigInt(r.usd)
+  for (const r of income) if (r.t_s >= MAMORU_FEE_FROM && r.t_s < until && !r.event_id?.startsWith('vault-backfill:')) base += BigInt(Math.round(r.usd))
   return (base * MAMORU_FEE_BPS) / 10_000n
 }
 
@@ -110,7 +110,7 @@ export async function loadVsIdle(db: Db, userId: string, now: Date, baselineComp
       if (snap || earned) earnedKnown = false
       continue
     }
-    realized += BigInt(earned.totalUsd) - BigInt(snap.fees_usdc)
+    realized += BigInt(Math.round(Number(earned.totalUsd))) - BigInt(Math.round(snap.fees_usdc))
     for (const n of earned.notCounted) if (n !== 'accrued-24h') notCounted.add(n) // that one belongs to the 24 h figure only
     income.push(...(await incomeRows(db, s.chain_id, s.account_key)))
     const gas = await gasRows(db, s.chain_id, s.account_key, last.day)

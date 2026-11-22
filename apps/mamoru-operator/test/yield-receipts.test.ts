@@ -70,6 +70,8 @@ describe('dayReceipts gas in USDC (otto/mamoru#380)', () => {
   const one = (id: string, tx: string, gasWei: string, gasUsdc?: string): StoredOp => ({ opId: id, kind: 'enter', state: 'confirmed', updatedAt: at, txHash: tx as `0x${string}`, userOpHash: `0x${id}` as `0x${string}`, facts: { txHash: tx, at, gasWei, ...(gasUsdc === undefined ? {} : { gasUsdc }), fees: [], v: FACTS_VERSION } }) as StoredOp
   test('the day sums the priced gas of each op; one unpriced op leaves the day unpriced, never 0', () => {
     expect(dayReceipts([one('eng-a', '0xa1', '100', '300'), one('eng-b', '0xb1', '50', '150')])[0]).toMatchObject({ gasWei: '150', gasUsdc: '450' })
+    // a priced copy of the same transaction wins over an unpriced one that came first
+    expect(dayReceipts([one('eng-a', '0xa1', '100'), { ...one('eng-a', '0xa1', '100', '300'), opId: 'eng-a' }])[0]).toMatchObject({ gasUsdc: '300' })
     const mixed = dayReceipts([one('eng-a', '0xa1', '100', '300'), one('eng-b', '0xb1', '50')])[0]!
     expect(mixed.gasWei).toBe('150')
     expect(mixed.gasUsdc).toBeUndefined()

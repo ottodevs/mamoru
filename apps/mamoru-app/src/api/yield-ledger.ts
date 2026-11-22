@@ -450,7 +450,8 @@ export async function writeReceipts(db: Db, snapshot: SnapshotWire, now: Date): 
                collected_usdc = COALESCE(excluded.collected_usdc, yield_ledger_account_receipts.collected_usdc),
                digest = excluded.digest, updated_at = excluded.updated_at`,
           )
-          .bind(...base, collected, digest, now.toISOString())
+          // A digest no wire day has: once the column exists the day is written again, with its gas in USDC.
+          .bind(...base, collected, `nogas:${digest}`, now.toISOString())
           .run()
       }
     }
