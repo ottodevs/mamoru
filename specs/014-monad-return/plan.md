@@ -38,8 +38,13 @@ not wait for step A to confirm before preparing step B.
   `MONAD_UNWIND_PENDING`, `NOTHING_TO_STOP`. Holds the Safe tx as a Stop.
 - **Change (RH-07):** when WMON above dust is held and the last decision's chain exit code is
   `REMOTE_DEPTH_BELOW_BUDGET`, build the depth-held variant instead of refusing. `ReturnHomeInput` gains
-  `sell?: { amountIn, minOut, fee, twapWindow }`; `buildReturnHome` adds the approve and `exactInputSingle` calls and
-  burns `usdc + minOut`. Still refused if a position is open.
+  `sell?: { amountInMax, amountOut, fee, twapWindow }`; `buildReturnHome` adds the approve and `exactOutputSingle`
+  calls and burns `usdc + amountOut` (no USDC left; WMON residual bounded by the allowance). Still refused if a position
+  is open.
+- **Change (RH-11):** refuse `BRIDGE_IN_FLIGHT` while the Safe's own bridge-in journal, or the Base peer's
+  `bridge-out` journal for this remote, has a burn not yet read as minted on the Safe. The Base operator, once a
+  `return-home` prepare for its remote exists (held, signed or confirmed), proposes no bridge to Monad for the account
+  (on top of the entry pause and the `base_v8` gate).
 - **Change (RH-02):** the removed set is Stop's set **union** every session id the Safe enabled on chain
   (`sessionCreatedIds` from the Safe's deploy block) that `isSessionEnabled` still reads true. The input lists them all.
 - Settle (built): the confirmed tx records the release `home-<tx>` (state `burned`, `owner.home`), marks the account
@@ -86,6 +91,7 @@ not wait for step A to confirm before preparing step B.
 | Depth-held Safe | prepare reads WMON > dust and the chain exit code | depth-held variant (RH-07) |
 | Circle attestation API down or slow | in flight > 2 h | alert; keep polling with backoff; anyone can mint once it is attested |
 | Mint reverts 3 times | ReturnHome counter | alert; message stays mintable to the same recipient |
-| USDC reaches the Monad Safe after step A (a late collect) | Monad exposure > dust with no session | Home keeps the card; step A again is a send-only tx (no sessions left to remove) |
+| Base → Monad bridge unminted at prepare | Monad bridge-in journal / Base bridge-out journal | `BRIDGE_IN_FLIGHT`: step A waits for the mint, then burns it with the rest (RH-11) |
+| USDC reaches the Monad Safe after step A anyway (fault case under RH-11) | Monad exposure > dust with no session | alert; Home offers step A again as a send-only tx (one more prompt) |
 | Session found after settle | read-back | alert + revoke-only step A |
 | Step B reverts (enable's depth check, #410, on a Base pool) | simulation at prepare | prepare refuses with the policy's reason; v8 caps re-sized (Base pools are far deeper than a 25 % share of 10,000 today, see SCN-RH-07) |

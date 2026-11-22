@@ -13,9 +13,10 @@ High stakes: owner funds and owner signatures. Each point names what a reviewer 
 | S5 | A session is left on the Monad Safe | removed set = Stop's set ∪ every on-chain enabled id; Worker checks each id is enabled and that the count matches the Safe's `SessionCreated` ids still enabled; read-back after settle | an omitted session must fail the Worker check, not only the read-back |
 | S6 | The Safe pays the relayer | no refund in the Safe tx (`gasPrice` 0, no refund receiver); a prepare that would need one is refused (`SPONSOR_UNAVAILABLE`) | built |
 | S7 | Delegatecall to an arbitrary target | only MultiSendCallOnly 1.4.1 (pinned address) is delegatecalled; every inner call is a CALL | builder uses `ownerSafeTx` |
-| S8 | Depth-held sale at a bad price | `minOut` from the pool TWAP (policy window) minus 80 bps; the Worker re-reads the TWAP on Monad (`MONAD_RPC_URLS`) and refuses a `minOut` below its own floor; the summary shows "at least Z USDC" | owner path skips the action policy: the Worker check is the only price guard besides the user reading Z |
+| S8 | Depth-held sale at a bad price | exact output `q` from the pool TWAP (policy window) minus 80 bps, `amountInMaximum` = the Safe's WMON; the Worker re-reads the TWAP on Monad (`MONAD_RPC_URLS`) and refuses a `q` below its own floor; the summary shows Y, Z and the residual bound R | owner path skips the action policy: the Worker check is the only price guard besides the user reading Z |
 | S9 | Replay on another chain or Safe | SafeTx hash binds chain id, Safe and nonce | none |
-| S10 | Allowance left to TokenMessenger | exact `approve(amount)`, consumed by the burn in the same tx | builder |
+| S10 | Allowance left to TokenMessenger or the router | exact `approve(amount)` consumed by the burn; the router's WMON allowance left after exact output is at most the unsold residual, on a pinned router that only spends it for a call from this Safe | builder; a test reads both allowances after the tx |
+| S10b | USDC stranded on Monad by a late bridge mint | step A refused while a Base → Monad bridge is unminted; the Base account bridges nothing to Monad once step A is prepared (RH-11) | test: unminted bridge → `BRIDGE_IN_FLIGHT` |
 
 ## Base side
 
