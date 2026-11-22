@@ -1,102 +1,190 @@
 # 014: Every account on the Base-only policy; Monad money home, placed in USDC/cbBTC
 
 Ticket: otto/mamoru#428 (milestone "Feedback Monad"). Related: #415 (entry pause, live), #427 (unwind to USDC on Monad,
-no signature), spec 002 (multichain), spec 010 (one authorization, the two-step "What's new" flow this reuses).
-Status: draft r1, 21 Nov 2026.
+no signature, done), #410 (depth check), #431 (v8 weights), spec 002 (multichain), spec 010 (one authorization, the
+"What's new" flow this reuses), #333 / #361 (one authorization north star), #356 / #322 (V4 blockers), #116 (one prompt
+for every chain).
+Status: draft r2, 22 Nov 2026. v8 weights approved by Ot (22 Nov); harvested yield goes to a savings layer in the
+Stable vault, outside the targets (#413). r1 (21 Nov) is kept below where it still holds. r2 adds: what is built since r1, why the
+approval is two passkey prompts and not one, Monad first, the depth-held Safes, the screen copy and the v8 summary for
+the owners' OK. Companion files: `plan.md` (operator sequence, idempotency), `tasks.md`, `scenarios.md`, `threats.md`.
 
 ## Decision (owner, 21 Nov 2026)
 
 - No new capital goes to Monad until further notice. `entryPause` for chain 143 is live in the engine settings, until
   4102444800.
 - Every Monad growth position is closed and its WMON sold to USDC, held on the Monad Safe (#427, existing V3 grants, no
-  signature).
+  signature). `chainExit` for chain 143 is in every account's engine settings since 21 Nov.
 - Each Monad user is then asked for one authorization that brings that USDC back to their Base Safe and puts it into
   USDC/cbBTC.
 - **Scope addition (owner, 21 Nov):** every account, new and old, ends on the newest policy version wherever possible.
   - The Base-only policy (`conservador-live-v8`, below) is the default for every new Start.
   - Every existing Base account (v2-v7) is offered the same one-signature upgrade to it.
-  - A Monad account also signs the Monad leg (CCTP back to Base and session revoke). That is a second passkey prompt,
-    not the same signature: one assertion cannot cover two chains on these Safes (next section).
+  - A Monad account also signs the Monad leg (CCTP back to Base and session revoke).
 
-## State on 21 Nov 2026 (read in code at 66f881d1)
+## Requirements
+
+| Id | Requirement |
+|---|---|
+| RH-01 | One authorization screen per Monad user lists every line both chains will sign before the first passkey prompt. For a depth-held Safe, step A's amount is shown as "your USDC after the sale (at least Z + current balance)" and its exact lines are shown again before its own prompt. |
+| RH-02 | The Monad leg is one owner Safe tx on the user's Monad Safe: revoke every Mamoru session there, and CCTP-burn the Safe's whole USDC with `mintRecipient` = the same user's Base Safe. Nothing else. |
+| RH-03 | The Worker rebuilds every owner Safe tx of this flow with the shared builder (`buildReturnHome`, `buildMonadSell`) and compares the SafeTx hash, before the owner signs (`BUILD_MISMATCH` otherwise). Step A: recipient, domain, amount, sessions. Step A0: Safe = the row's own, router = the registry's SwapRouter02, `tokenIn` WMON, `tokenOut` USDC, the growth pool's fee, `recipient` = this Safe, `amountIn` = the Safe's on-chain WMON balance, only MultiSendCallOnly delegatecalled, plus the price check. |
+| RH-04 | The Base leg moves the account to `conservador-live-v8` through the existing renewal: no remote bucket, no bridge-out grant, USDC/cbBTC taking money. |
+| RH-05 | After the burn, minting on Base and placing into v8 need no signature and no person. Every step is idempotent and resumable after an operator restart. |
+| RH-06 | Each leg stands alone: any prefix of the flow (none, one leg, both) leaves funds only in the user's own Safes, counted in the totals and the cap. |
+| RH-07 | A Safe whose unwind is held (#410, `REMOTE_DEPTH_BELOW_BUDGET`) still goes home: an owner sale first (step A0, price guarded), then step A on the exact resulting balance, with no residual and one more Monad prompt. If the sale is refused (`MONAD_DEPTH_TOO_LOW`), the USDC goes home and the WMON stays the owner's on Monad for a withdrawal. |
+| RH-11 | Before the Monad operator prepares step A, the Base operator sets a permanent fence on the account (under the account lock): from then it signs, re-signs and broadcasts no bridge to Monad for it. Step A is then refused while any Base → Monad bridge for the account is not terminal (`sending`, `burned`, `dropped`, or `minted` without the mint read on the Safe). |
+| RH-08 | No V4 contract, no new contract and no new session-key custody (ships without #356 / #322). |
+| RH-09 | Nothing visible changes in the app until Ot and Brais approve the screens and the copy below. |
+| RH-10 | v8 is the default for every new Start while the no-Monad rule holds (`base_v8` scope `*`), and offered to every Base account on v2-v7. |
+
+## State on 22 Nov 2026 (read in code at 41a0eb1c)
+
+Built and merged since r1 (not yet visible: `base_v8` is off and no app screen calls `return-home`):
+
+- **v8 policy** (`packages/policy/src/policies-v8.ts`, #431): Stable 50 / WETH-USDC 25 / USDC-cbBTC 25 on v6's
+  contracts, `V8_MIGRATES_FROM` v2-v7, offered through the renewal (`v4Target`) and Start (`activationPolicy`) only in
+  the `base_v8` scope. No bridge to Monad for an account in that scope (`operator.ts` remote bridge gate). Its renewal
+  summary is in "Copy" below.
+- **Monad leg builder** `buildReturnHome` (`packages/account/return-home`), the Monad operator's `return-home/prepare`
+  and `return-home` routes (held and settled as a Stop), and the Worker's `checkReturnHome` (rebuilds and compares the
+  hash, checks the Safe is the row's own and `home` is the owner's Base Safe in the same env).
+- **The home side**: the confirmed burn is recorded on the Monad account from the receipt as an owner-signed release
+  (`home-<tx>` id), reported in the exposure answer, and adopted by the Base `ReturnHome` only once Circle's attested
+  message matches (b67da3ac, aa8abaa4, 3a36ab9a). The Base relayer then calls `receiveMessage`.
+
+Not built: the `WhatsNew` view for this flow (`policy: 'base-v8'`), the Base operator's mirror of the Monad step, the
+depth-held sale step A0 (RH-07), the Base-side fence (RH-11), the Worker's balance and session checks (RH-03 items 4-5), the app screen.
+
+Facts the design rests on:
 
 - **Monad Safe authority.** A v6/v7 account's Safe on Monad carries one V3 session (`liveWmonUsdcMonadV6`,
-  `packages/policy/src/policies-monad.ts:75`, grant `manageAnyV3Only(V4_POOLS_MONAD.growth)`). The session can decrease,
-  collect, burn, mint and increase on the growth pool, and swap WMON for USDC. It cannot bridge or transfer. A return
-  to Base on V3 is logged as `noteReturnBlocked` (`apps/mamoru-operator/src/operator.ts:6536`). Only V4 can return,
-  and V4 is off.
-- **USDC/cbBTC on v6/v7 is exit only.** The bucket is at preference 0 and its grant is `exitOnlyV5Grant`, which has no
-  mint, no increase and no USDC approval (`policies-v6.ts:40`, `policies-v7.ts:41`). The allocation is part of the
-  signed policy, and its hash salts the session ids. So putting money into cbBTC again is a new approval.
-- **One passkey prompt covers one chain** (spec 010, "Limit"). The passkey signs a Safe tx hash, and that hash's
-  EIP-712 domain holds the chain id and the Safe. A signature valid on both chains would need a chain-agnostic
-  validator in the Safe's setup. That is possible only for new accounts (#116).
-- **A two-step owner flow already exists.** `migrate-v4`: step 0 on Base runs through the ordinary owner path. Step 1 on
-  Monad is prepared and submitted by the Monad operator through the peer (`RemotePeer.migrateV4`). The Base operator
-  mirrors it as an op. The app shows it as the `WhatsNew` steps (`packages/domain/src/app-api.ts`). The Worker rebuilds
-  each step's Safe tx before the owner signs (`checkBuilt`, `apps/mamoru-app/src/api/accounts/operator.ts`).
-- **The home side of the return leg already exists** (`apps/mamoru-operator/src/return-home.ts`). After the burn it
-  fetches Circle's attestation, checks it against the attesters enabled on Base, and sends `receiveMessage` from the
-  Base relayer. Today it accepts only burns whose CCTP sender is V4 on Monad.
+  `packages/policy/src/policies-monad.ts`, grant `manageAnyV3Only`). It can decrease, collect, burn, mint, increase on
+  the growth pool and swap WMON for USDC. It cannot bridge or transfer (operator `noteReturnBlocked`). So the Monad leg
+  needs the owner.
+- **USDC/cbBTC on v6/v7 is exit only** (preference 0, `exitOnlyV5Grant`). The allocation is part of the signed policy
+  and salts the session ids. So placing money into cbBTC on Base needs the owner too.
+- **The owner signer.** Every Safe has one owner, `SafeWebAuthnSharedSigner` (Safe passkey module), set at creation.
+  The Safe asks it `isValidSignature(hash, sig)` and it verifies a WebAuthn assertion whose `challenge` is exactly
+  `hash`. For `execTransaction`, `hash` is the SafeTx EIP-712 hash, whose domain holds the chain id and the Safe.
+- **Depth-held Safes.** MamoruActionPolicyV3 refuses every swap and mint on a pool whose instantaneous depth is under
+  the session's daily budget (#410). On Monad WMON/USDC that holds the chain exit's WMON sale for some accounts (the
+  chain exit returns `REMOTE_DEPTH_BELOW_BUDGET`), and `return-home/prepare` refuses them with
+  `MONAD_UNWIND_PENDING`. Decreases are not depth checked, so positions do close.
+
+## Why two passkey prompts, not one
+
+The ticket asks for one passkey approval. With the contracts every account has today, one WebAuthn assertion cannot
+authorize both chains. Options evaluated:
+
+| Option | Possible today? | Why |
+|---|---|---|
+| One assertion over a multi-chain payload (e.g. hash of both SafeTx hashes) | No | The shared signer checks `challenge == hash` for the one hash the Safe asks about. It has no Merkle or batch mode. |
+| One SafeTx hash valid on both chains | No | The SafeTx domain separator binds chain id and Safe address (Safe 1.4.1). |
+| Owner pre-approves hashes (`approveHash`) | No | The owner is a contract that cannot call. |
+| Base Safe tx sends a CCTP message that makes the Monad Safe act | No | Needs a receiver module on the Monad Safe. None is installed, installing one is itself a Monad owner tx. |
+| Existing Monad session does the return | No | Its grant has no bridge or transfer. |
+| V4 (`registerRemote`, home-driven return) | No | V4 is off: #356 (R7) and #322 (KEY-01) block any V4 grant. |
+| Chain-agnostic validator (#116) | Not for existing accounts | It is a new contract added as owner or validator on each chain: one more owner tx per chain, i.e. the same two prompts, plus an audit. |
+| **Two assertions, one screen** | **Yes** | One Safe tx per chain, each signed by its own prompt. |
+
+So the floor is two passkey prompts for a Monad user (one for an account with no Monad Safe). The design keeps it to
+**one screen, one decision, two taps**: the second tap is needed because Safari and iOS only allow a WebAuthn call
+inside a fresh user gesture. The owners are asked to accept this wording (Copy, item C5). One prompt for both chains
+stays the goal of #116 for new accounts.
+
+## Can it ship without V4, #356 and #322? Yes
+
+- Both legs use only what every account already has: the Safe, its passkey owner, SmartSession with
+  MamoruActionPolicyV3, CCTP V2 on Monad and Base, and v6's Base contracts for v8. No V4 module, no new deployment.
+- #356 (R7) is a V4 grant bug. Nothing here grants V4.
+- #322 (KEY-01) gates the first V4 grant. v8 grants are V3 sessions under the same key custody as the v6/v7
+  sessions they replace, and the leaked-key bound does not grow: same cap C, a USDC/cbBTC grant capped at a 25 % share,
+  WETH/USDC cut from 35 % to 25 %, and the bridge-out grant to Monad removed. The Monad session is removed outright.
+- The cost: each account later signs once more to reach V4 (#333), when V4 ships. That is the "What's new" migration
+  spec 010 already plans, not a new signature this flow adds.
 
 ## What the user authorizes
 
-**One authorization screen. One "Approve" tap per chain, so two passkey prompts, on Base then Monad.** A single prompt
-is not possible on these Safes (above). Each prompt signs one Safe transaction. The screen lists both steps and every
-line each step signs before the first prompt.
+**One authorization screen. Two taps, two passkey prompts: Monad first, then Base.** The screen shows both steps and
+every line each one signs before the first prompt (RH-01).
 
-### Step 0, Base: move the account to `conservador-live-v8`
+### Step A, Monad: send everything home and end Mamoru's access there
 
-This is the existing renewal with a new target policy. One owner Safe transaction:
+One owner Safe tx on the Monad Safe (`buildReturnHome`), sent through MultiSendCallOnly 1.4.1:
 
-- It revokes every v6/v7 grant, bridge-out to Monad included. From then on this account can never send money to Monad
-  again, whatever the engine settings say.
-- It enables v8's grants, sized for the account's cap.
-- It admits the open positions, which stay under management.
+1. `SmartSession.removeSession(id)` for every session still enabled on the Safe (Stop's set, re-read on chain).
+2. If the Safe holds USDC: `USDC.approve(TokenMessengerV2, amount)` then
+   `TokenMessengerV2.depositForBurn(amount, 6, mintRecipient = the user's Base Safe, USDC, destinationCaller = 0,
+   maxFee = 0, minFinalityThreshold = 2000)`. `amount` is the Safe's whole USDC balance at prepare. No hook.
+3. Depth-held Safes (RH-07): step A is preceded by **step A0, an owner sale** on the Monad Safe. See "Depth-held
+   Safes: sell first, then send" below. Step A itself never sells, so its amount is always the exact balance.
+4. The MON for gas stays. Mamoru pays the gas (no refund in the Safe tx).
 
-### Step 1, Monad: send everything home and end Mamoru's access there
+Then, with no signature: the Base operator records the burn, waits for Circle's attestation (Standard finality, about
+13-19 minutes), checks the message and mints it on Base. The mint is permissionless: if Mamoru is down, anyone can relay
+the attested message, and the recipient cannot change.
 
-One owner Safe transaction on the Monad Safe, built by the Monad operator:
+### Depth-held Safes: sell first, then send (RH-07)
 
-1. It removes and revokes every session on the Monad Safe. The set is the same as Stop's (`stopRevokes`).
-2. Nothing is priced at signing time. While a position is still open or WMON is held above dust (0.01 WMON), the
-   prepare is refused with `MONAD_UNWIND_PENDING`: #427 winds those down first, with no signature.
-3. If the Safe holds USDC: `approve(TokenMessengerV2, amount)` then `depositForBurn(amount, domain 6, mintRecipient = the account's Base Safe,
-   USDC, destinationCaller = 0, maxFee = 0, minFinalityThreshold = 2000)`.
-   - `amount` is the Safe's whole USDC balance when prepared. With no USDC the transaction only revokes.
-   - The gas MON stays.
+When the Safe still holds WMON above 0.01 and its chain exit is held by `REMOTE_DEPTH_BELOW_BUDGET` (the session's
+swaps revert, #410, possibly for good), the screen shows one more Monad step before step A:
 
-Then, with no signature:
+- **Step A0, one owner Safe tx:** `WMON.approve(SwapRouter02, w)` and `exactInputSingle(WMON → USDC, growth pool fee,
+  recipient = this Safe, amountIn = w, amountOutMinimum = m)`, `w` = the whole WMON balance. Nothing is revoked or
+  sent, and it is not a Stop: the account stays active and its engine keeps running. The owner path is not under the
+  action policy, so the depth check does not apply.
+- **Price guard:** `m` = the full sale's QuoterV2 quote at prepare less 30 bps (fees and impact included, so it does
+  not revert for them). The Worker re-quotes on Monad (`MONAD_RPC_URLS`) and refuses unless `m` is within 30 bps of its
+  quote and the quote is no more than 300 bps under the TWAP value of `w` (policy long window); otherwise
+  `MONAD_DEPTH_TOO_LOW` and step A0 waits (the USDC already on the Safe can still go home with step A; that step A
+  then revokes, and the WMON leaves with an ordinary withdrawal). A revert is atomic and the step is prepared again.
+- **Then step A** is prepared once A0 is confirmed, on the exact USDC balance, so nothing is left behind. Between A0
+  and A the engine spends nothing: the entry pause for chain 143 refuses every entry, and the chain exit only sells
+  WMON (none left). Step A re-reads the balance at prepare in any case.
+- **Who decides the refusal:** the Monad operator runs the same quote and TWAP check at A0 prepare and records
+  `MONAD_DEPTH_TOO_LOW` on the account (state, with the quote and block) when it fails; only then does
+  `planReturnHome` build step A on the USDC alone. The Worker's check is a second, independent one: a Worker refusal
+  of a prepare the operator passed is `BUILD_MISMATCH`, nothing signed, and does not unlock the USDC-only step A.
+- Cost: three prompts for these accounts (A0, A, B) instead of two. On 21 Nov two prod accounts were depth-held.
 
-4. The Base operator records the burn and mints it on Base once Circle attests (Standard finality, about 13 to 19
-   minutes). The mint is permissionless: if Mamoru is down, anyone can mint the message, and its recipient is fixed.
-5. The v8 engine places the USDC that arrives into its targets. Monad's share goes into USDC/cbBTC.
+### Step B, Base: move the account to `conservador-live-v8`
 
-### Order
+The existing renewal with v8 as its target. One owner Safe tx:
 
-- Step 0 goes first. It is the one that closes the door to Monad for this account.
-- Step 1 can be prepared as soon as step 0 is submitted. It does not need to wait for confirmation, because it moves
-  the money only to the user's own Base Safe.
-- If step 1 lands before step 0, the USDC waits on the v7 account as savings (the Monad bucket is paused) until step 0
-  lands.
+- It revokes every v6/v7 grant, bridge-out to Monad included. From then on the account can never send money to Monad.
+- It enables v8's grants, sized for the account's cap, and admits the open positions.
 
-### Clicks and signatures (AGENTS rule)
+Then the engine places what is idle on the Base Safe (the return included) into v8's targets; the Monad share goes to
+USDC/cbBTC (`plan.md`).
+
+### Order: Monad first (r2 change)
+
+r1 put Base first. r2 puts Monad first:
+
+- Step A ends Mamoru's exposure on Monad and starts the 15-20 minute transfer. It is the one tied to the 24 Nov unlock.
+- Step A does not depend on v8. If the owners have not yet approved v8's weights, the screen offers step A alone, and
+  the USDC waits on the Base Safe as idle savings (the v7 Monad bucket is entry-paused, so it is never bridged back).
+- Either step alone is safe (RH-06, failure table). Base first gave no extra safety: the entry pause and the `base_v8`
+  bridge gate already stop new money going to Monad.
+- An account with no Monad Safe (v2) sees step B only.
+
+### Clicks and signatures
 
 | # | The user | Sees |
 |---|---|---|
-| 1 | Taps the Home card "Bring your Monad funds to Base" | The authorization screen: the two steps, each with its full summary |
-| 2 | Taps "Approve on Base", passkey prompt 1 | "Step 1 of 2 approved", then "Confirmed on Base" a few seconds later |
-| 3 | Taps "Approve on Monad", passkey prompt 2 | "On its way to Base: about 15-20 minutes" |
-| — | Nothing | Home shows the amount in transit on the Monad row, then in USDC/cbBTC on Base once minted and placed |
+| 1 | Taps the Home card | The authorization screen: two steps, each with its full summary |
+| 2 | Taps "Approve on Monad", passkey prompt 1 | "Step 1 of 2 done. Your USDC is on its way to Base" |
+| 3 | Taps "Approve on Base", passkey prompt 2 | "Done. Mamoru will put it to work when it arrives" |
+| — | Nothing | Home: the amount in transit on the Monad row, then on Base, then in USDC/cbBTC |
 
-Two taps and two passkey prompts. The second tap exists because browsers (Safari) need a fresh user gesture for each
-WebAuthn call. Withdrawals stay as they are, one signature each.
+A depth-held Safe sees step A0 ("Approve sale on Monad") first: three taps and three prompts.
 
-### Target policy `conservador-live-v8`
+Withdrawals stay as they are, one signature each.
 
-`conservador-live-v7` without the Monad bucket. Weights of 22 Nov (#431): Stable 50 %, WETH/USDC 25 %, USDC/cbBTC 25 %, both
-pools on Base. An account coming from v7 holds 35 % in WETH/USDC: 10 points over its new target, past the 5-point drift band
-(`DRIFT_BPS`), so the usual reduce brings it toward 25 %, one operation per review, and USDC/cbBTC takes that money.
+## Target policy `conservador-live-v8`
+
+`conservador-live-v7` without the Monad bucket. Weights of 22 Nov (#431), **approved by Ot on 22 Nov**:
 
 | Bucket | Share | Pools / vaults | Grant |
 |---|---|---|---|
@@ -106,114 +194,112 @@ pools on Base. An account coming from v7 holds 35 % in WETH/USDC: 10 points over
 | stables-lp | 0 | USDC/USDT 0.01 % | exit only, opt-in (as v7) |
 
 - No remote bucket, no bridge-out grant, no Monad Safe for new accounts.
-- Every grant is on MamoruActionPolicyV3 alone, so the approval stays one owner transaction (v6/v7's rule).
-- Why these weights: they move only Monad's share. The Stable and Balance positions an account holds are not
-  touched, so there are no swaps beyond placing what comes home.
-- The pre-Monad v5 weights (50 % USDC/USDT, 40 % cbBTC, 10 % WETH) would also be possible. They mean selling about 25 %
-  of each account out of WETH/USDC. They are not chosen; the owner can ask for them, and it is one constant.
-- `V8_MIGRATES_FROM`: every earlier Base conservador version, v2 to v7 (and their lab twins). It is offered ahead of
-  every other move, so an account in scope is never offered v6 or v7, which open a Monad leg.
-- The move waits for any bridge to Monad still in flight (`BRIDGE_IN_FLIGHT`), so that money is counted until it lands.
-  The mint on Monad runs from the bridge journal whatever the policy is.
+- Every grant is on MamoruActionPolicyV3 alone, so the approval stays one owner tx.
+- An account from v7 holds 35 % in WETH/USDC: 10 points over target, past the 5-point drift band (`DRIFT_BPS`), so the
+  usual reduce brings it toward 25 %, one op per review, and USDC/cbBTC takes that money.
+- Alternative not chosen (Ot chose 50 / 25 / 25): v5's 50 % USDC/USDT, 40 % cbBTC, 10 % WETH (one constant; sells about 25 % of each account
+  out of WETH/USDC).
+- The move waits for any bridge to Monad still in flight (`BRIDGE_IN_FLIGHT`).
 
 ## Prod accounts and the path each takes (read 21 Nov 2026 13:00Z)
 
-Source: the operator's own signed metrics as the Worker stored them (`operator_metrics_latest`, generated 13:00:15Z),
-joined with D1 `accounts` and `account_snapshot_latest`. This is a read only. D1's `policy_version` column is `1.0.0`
-on every row, so the policy comes from the metrics.
+Source: the operator's signed metrics as the Worker stored them, joined with `accounts` and
+`account_snapshot_latest`. Read only.
 
 | Account | Env | Policy now | Signed cap | Base USD | Monad USD | Path |
 |---|---|---|---|---|---|---|
-| 3e4d1d49 | prod | v7 | 10,000 | 2,438.71 | 449.55 | step 0 + step 1 (2 prompts) |
-| 63b06f5b | prod | v7 | 10,000 | 1,251.11 | 224.16 | step 0 + step 1 |
-| c9d4179b | prod | v7 | 10,000 | 790.48 | 133.89 | step 0 + step 1 (canary settings v16) |
-| b22428c7 | prod | v7 | 1,000 | 766.30 | 127.47 | step 0 + step 1 |
-| 909fa964 | prod | v7 | 1,000 | 166.49 | 29.84 | step 0 + step 1 |
-| 4e2cf182 | prod | v7 | 10,000 | 149.82 | 28.86 | step 0 + step 1 |
-| 88264d2f | prod | v7 | 10,000 | 120.35 | 21.72 | step 0 + step 1 |
-| c23e94e1 | prod | v7 | 10,000 | 76.35 | 13.68 | step 0 + step 1 |
-| 8b0b4d7f | prod | v7 | 10,000 | 2.28 | 0.38 | step 0 + step 1 |
-| 307146b5 | prod | v7 | 1,000 | 0.72 | 0.15 | step 0 + step 1 |
-| b913a2b0 | prod | v7 | 10,000 | 0.69 | 0.14 | step 0 + step 1 |
-| 189692ff | prod | v2 | 100 | 0.87 | — | step 0 only (1 prompt) |
-| b54dda3a | beta | v7 | 10,000 | 806.52 | 144.18 | step 0 + step 1 |
-| 00a7a1df | beta | v7 | 10,000 | 3.84 | 0.61 | step 0 + step 1 |
+| 3e4d1d49 | prod | v7 | 10,000 | 2,438.71 | 449.55 | A + B (2 prompts); depth-held on 21 Nov (#410) |
+| 63b06f5b | prod | v7 | 10,000 | 1,251.11 | 224.16 | A + B |
+| c9d4179b | prod | v7 | 10,000 | 790.48 | 133.89 | A + B (canary settings v16) |
+| b22428c7 | prod | v7 | 1,000 | 766.30 | 127.47 | A + B |
+| 909fa964 | prod | v7 | 1,000 | 166.49 | 29.84 | A + B |
+| 4e2cf182 | prod | v7 | 10,000 | 149.82 | 28.86 | A + B; depth-held on 21 Nov (#410) |
+| 88264d2f | prod | v7 | 10,000 | 120.35 | 21.72 | A + B |
+| c23e94e1 | prod | v7 | 10,000 | 76.35 | 13.68 | A + B |
+| 8b0b4d7f | prod | v7 | 10,000 | 2.28 | 0.38 | A + B |
+| 307146b5 | prod | v7 | 1,000 | 0.72 | 0.15 | A + B |
+| b913a2b0 | prod | v7 | 10,000 | 0.69 | 0.14 | A + B |
+| 189692ff | prod | v2 | 100 | 0.87 | — | B only (1 prompt) |
+| b54dda3a | beta | v7 | 10,000 | 806.52 | 144.18 | A + B |
+| 00a7a1df | beta | v7 | 10,000 | 3.84 | 0.61 | A + B |
 
-- **39 more accounts** (v2) are not active and hold nothing. There is nothing to migrate: their next Start activates v8.
-- **No account on v4, v5 or v6** today. **None on V4** (`one_auth_v4` is off).
-- **Cannot migrate:** none is blocked by its policy.
-  - An owner who lost their passkey cannot sign. That is not visible from here.
-  - Three Monad Safes hold under 0.40 USD. Step 1 still revokes their sessions, and it burns whatever USDC they hold
-    (Mamoru pays the gas).
-  - A step 1 with no USDC at all is a revoke only. The builder takes that case (no burn).
-- The monad column is the latest snapshot. After #427 runs it is all USDC.
-
-### New accounts
-
-While the no-Monad rule holds, `activationPolicy` gives v8 to every Start in the scope of the new ops flag `base_v8`,
-ahead of v7. The flag is scoped like `vaults_v7` (`*` = everyone).
+- 39 more v2 accounts are inactive and hold nothing: their next Start activates v8.
+- None on v4, v5, v6 or V4.
+- Which Safes are depth-held is re-read at prepare time, not taken from this table.
+- A step A with no USDC is a revoke only. Three Monad Safes hold under 0.40 USD: step A still revokes their sessions.
+- An owner who lost their passkey cannot sign either step; their Monad Safe keeps its USDC and one growth-only session
+  under the entry pause.
 
 ## Failure states
 
 | What | Result |
 |---|---|
-| Step 0 refused or failed | Nothing changed, the step reopens. The account stays v7, its Monad money stays in USDC on Monad (paused, #415) |
-| Step 0 confirmed, step 1 never signed | Base on v8, no bridge-out grant. The Monad Safe keeps its USDC and its V3 session, which can only manage the growth pool; the entry pause keeps it out. The Monad operator keeps running that Safe's own engine under its own policy, whatever the Base policy is. The Monad row keeps offering step 1 and Withdraw. The account cap still counts the Monad value (peer exposure reads `acc.remote` whatever the policy), so Base never places more than the cap across both chains |
-| Step 1 reverts on chain | The Safe tx is atomic: nothing moved, nothing revoked. The step reopens |
-| Burn landed, attestation slow | Counted as in flight on Base (ReturnHome `burned`), so the totals do not dip. The app shows it as in transit |
-| Mint reverts | Retried with backoff, then alerts after 3 reverts. The money is safe in the message: anyone can mint it to the same recipient |
-| Monad operator down at step 1 prepare | `REMOTE_UNAVAILABLE`, retryable, nothing signed |
+| Step A refused at prepare (`MONAD_UNWIND_PENDING`, `BRIDGE_IN_FLIGHT`, `REMOTE_UNAVAILABLE`, `BUILD_MISMATCH`) | Nothing signed. The step stays offered. |
+| A Base → Monad bridge is not terminal when the owner opens the screen | Step A waits (`BRIDGE_IN_FLIGHT`, RH-11) until the Monad operator reads the mint on the Safe, so that USDC goes home in the same burn. Step B can be signed meanwhile. |
+| USDC reaches the Monad Safe after step A anyway (a mint relayed late by a third party despite RH-11) | Home shows it on the Monad row and offers step A again, a send-only tx (no session left). One more prompt; RH-11 makes this a fault case, not a path. |
+| Step A reverts on chain | Atomic: nothing moved, nothing revoked. The step reopens. |
+| Step A confirmed, step B never signed | Monad: no session left, gas MON stays. Base: v7, the return lands as idle USDC (Monad bucket entry-paused, never bridged back). Home keeps offering step B. |
+| Step B confirmed, step A never signed | Base on v8, no bridge-out grant. The Monad Safe keeps its USDC and its growth-only session under the entry pause; its own engine keeps running there. Home keeps offering step A and Withdraw. The cap still counts the Monad value. |
+| Burn landed, attestation slow | Counted in flight (`burned`), totals do not dip. The app shows it in transit. |
+| Attestation never matches (wrong recipient, amount, domain or sender) | Not adopted, not minted by Mamoru; alert. Cannot happen with a burn the Worker checked (RH-03). |
+| Mint reverts | Retried with backoff, alert after 3. The message stays mintable by anyone to the same recipient. |
+| Operator restarts between burn and mint | The release is in state; the home re-reads it from the Monad exposure answer and resumes (`plan.md`). |
 
-## Security
+## Copy (needs Ot and Brais's OK)
 
-- **Recipient pinned.** The Worker rebuilds step 1 with the same builder (`buildReturnHome`, `packages/account`) before
-  the owner signs, and refuses (`BUILD_MISMATCH`) unless all of these hold:
-  - the Safe is the row's own Monad Safe, re-derived from its keys;
-  - `mintRecipient` is this account's Base Safe and the destination domain is 6;
-  - `destinationCaller` is 0, `maxFee` is 0 and there is no hook;
-  - the hash is equal.
-- **No replay across chains.** Each Safe tx hash binds the chain id, the Safe and its nonce.
-- **No standing authority left on Monad.** Step 1 revokes the sessions in the same transaction that moves the money.
-- **Caps.** The account cap is cross-chain and counts in-flight returns (#355), so it does not change. v8's WETH and cbBTC caps
-  are sized at their 25 % shares.
-- **The Base mint.** The home accepts a burn only if Circle's attested message is a burn of Monad USDC to the account's
-  own Base Safe, of the reported amount, Monad to Base, with the remote Safe as message sender. A burn whose sender is
-  V4 (spec 010) is still accepted as before.
-- **The yield fee (#391).** The Monad fee owed is charged on the next Base withdrawal through `remoteFeeBase`. That
-  reads the peer's `feeCollectedUsdc` of `acc.remote`, which v8 keeps, so it is not lost.
+Nothing below ships until both say yes (RH-09). Text is what the user reads; it is in English like the rest of the app.
 
-## Scope of the code
+**C1. Home card** (Monad users with a Monad Safe that still has a session or USDC)
 
-- **PR 1:** this spec.
-- **PR 2:** `conservador-live-v8` (+ lab twin) in `packages/policy`, `resolveV8Policy` at boot (v7's contracts),
-  `v4Target` and `activationPolicy` prefer v8 under `base_v8`, the renew summary lines, the `base_v8` ops flag, tests.
-- **PR 3:** the `return-home` route (held and settled as a Stop, so the engine stops and the grants are revoked as in
-  any Stop). The app calls it on the Monad row with `{ home }`; the Worker checks `home` and rebuilds the tx. The
-  confirmed burn is kept on the Monad account as an owner-signed release (`owner.home`), reported in the Safe's
-  exposure answer; the Base ReturnHome takes a reported owner release to one of the account's homes as burned
-  (sender: that Safe) and mints it after checking Circle's attested message.
-  - Monad operator: plan, hold, submit and status routes, and the shared builder `buildReturnHome`.
-  - Base operator: prepare and submit forwarded to the peer, the step mirrored as an op, and the confirmed burn
-    recorded in ReturnHome with the remote Safe as sender.
-  - Worker: `checkBuilt` covers `return-home/prepare`.
-  - The `WhatsNew`-shaped view (`policy: 'base-v8'`) so the existing two-step screen can show it.
-- **PR 4 (needs Ot and Brais):** the Home card and the screen copy below. Nothing visible changes until they say yes.
+- Title: "Bring your Monad funds to Base"
+- Body: "Mamoru has moved your Monad position to USDC. Approve to bring it to your Safe on Base and put it to work in
+  USDC/cbBTC."
+- Button: "Review"
 
-## Copy proposed (needs Ot and Brais's OK)
+**C2. Authorization screen**
 
-- Home card title: "Bring your Monad funds to Base"
-- Home card body: "Monad has a large token unlock on 24 Nov. Mamoru has moved your Monad position to USDC. Approve
-  twice to bring it home and put it to work in USDC/cbBTC on Base."
-- Screen points:
-  1. "Your USDC on Monad comes back to your Safe on Base"
-  2. "Mamoru puts it into USDC/cbBTC; your other positions stay as they are"
-  3. "Mamoru stops working on Monad: no more money goes there"
-  4. "Two approvals with your passkey, one per network"
-- Step buttons: "Approve on Base", then "Approve on Monad".
-- In transit: "On its way to Base, about 15-20 minutes".
+- Title: "Leave Monad"
+- Points:
+  1. "Your USDC on Monad comes back to your Safe on Base, through Circle (about 15-20 minutes, no fee)"
+  2. "Mamoru stops working on Monad: no more money goes there"
+  3. "On Base, Mamoru aims for 50 % Stable, 25 % WETH/USDC and 25 % USDC/cbBTC"
+  4. "Two confirmations with your passkey, one per network"
+- Step A card: "On Monad" + the operator's summary lines (C4) + button "Approve on Monad"
+- Step B card: "On Base" + the renewal summary lines (C4) + button "Approve on Base"
 
-## Open questions
+**C3. Progress and done**
 
-1. Weights: v7 minus Monad (proposed) or back to v5's 50/40/10?
-2. Should accounts that never sign step 1 be reminded? (No push channel today; the Home card only.)
-3. After the no-Monad rule ends: is v8 kept as the default, or is a new Monad policy offered as an opt-in?
+- After step A: "Step 1 of 2 done. Your USDC is on its way to Base"
+- After step B: "Done. Mamoru will put it to work when it arrives"
+- Home, Monad row in transit: "On its way to Base, about 15-20 minutes"
+- Step A refused while unwinding: "Mamoru is still moving your Monad position to USDC. Try again in a few minutes"
+
+**C4. Summary lines already in code** (shown inside the step cards; the owners review them as copy)
+
+- Base renewal to v8 (`operator.ts`, #431):
+  - "Mamoru stops sending money to Monad: on Base it aims for 50% in Stable, 25% in WETH/USDC, 25% in USDC/cbBTC"
+  - "Your Safe on Monad <address> keeps what it holds until you approve sending it to this Safe, the next step"
+    (r2: with Monad first this line changes to "Your USDC on Monad comes here with the other step" when step A is
+    already done or offered on the same screen; needs OK)
+- Monad step (`planReturnHome`):
+  - "Revoke the engine's N session grant(s) on your Safe on Monad: Mamoru stops working there"
+  - "Send X USDC from your Safe on Monad to your Safe on Base <address>, through Circle's CCTP (about 15-20 minutes, no
+    fee)"
+  - "On Base, Mamoru puts it to work in your positions there"
+  - "The MON left for gas stays in this Safe"
+  - Step A0 (depth-held Safes): "Sell Y WMON in your Safe on Monad for at least Z USDC, so all of it can come home"
+    and button "Approve sale on Monad"
+
+**C5. The word "one".** The ticket says one approval. The screen says "Two confirmations with your passkey, one per
+network" because two OS prompts appear (section "Why two passkey prompts"). Owners decide between this and "One
+approval, confirmed twice with your passkey".
+
+**C6. Weights.** Decided: 50 / 25 / 25 (Ot, 22 Nov). The percentages in C2 and C4 follow them; the wording still needs both owners' OK.
+
+## Open questions (for the owners)
+
+1. ~~Weights~~ decided (C6).
+2. Wording of the two prompts (C5).
+3. Accounts that never sign step A: the Home card only (no push channel today), or also an email if the account has one?
+4. After the no-Monad rule ends: v8 stays the default, and a Monad policy comes back as an opt-in?
+5. Depth-held Safes: accept the extra prompt (step A0), or skip the sale and leave the WMON on Monad for a later withdrawal?
