@@ -18,9 +18,11 @@
 //
 // A third layer serves `latest` state reads (calls, code, balances, storage) again for LATEST_KEEP_MS, a few blocks:
 // an answer that old is what a provider's node a few blocks behind gives anyway, and the proxy already serves `latest`
-// heads MAMORU_HEAD_LAG blocks behind the tip. Anything that changes state the operator reads drops it at once: a
-// transaction sent through the proxy, or a receipt found for one. Nonces, gas prices, estimates, simulations and
-// `pending` reads are never kept.
+// heads MAMORU_HEAD_LAG blocks behind the tip. A transaction sent through the proxy drops every kept answer when it
+// goes out and when it is answered, and turns the layer off for LATEST_QUIET_MS after that: until it is mined and
+// settled (by Safe nonce, an eth_call), every latest read reaches a provider, so no decision or settlement read can
+// see state from before it, and a nonce that a reorg undoes is read again as before. A receipt found drops them too.
+// Nonces, gas prices, estimates, simulations and `pending` reads are never kept.
 
 /** Methods whose answer depends only on their params (no sends, no filters, no logs). */
 const READS = new Set([
@@ -57,6 +59,8 @@ export const FINAL_MARGIN = 64n
 export const FINAL_KEEP_MS = 10 * 60_000
 /** How long a `latest` state read is served again: 5 Base blocks, 3 Monad blocks. */
 export const LATEST_KEEP_MS = 1_000
+/** After a send, how long latest reads are neither shared nor kept: inclusion, settlement's 24 s, and room for a retry. */
+export const LATEST_QUIET_MS = 120_000
 /** `latest` reads whose answer is the chain's state at the tip and nothing else. */
 const LATEST_READS = new Set(['eth_call', 'eth_getCode', 'eth_getBalance', 'eth_getStorageAt'])
 
@@ -134,11 +138,18 @@ export class ReadCache {
     private readonly latestMs = LATEST_KEEP_MS,
   ) {}
 
-  /** State the operator reads may have changed (a send, a receipt found): no `latest` answer from before is served. */
-  changed(): void {
+  /** No latest read is shared or kept before this time (a send went out). */
+  private quietUntil = Number.NEGATIVE_INFINITY
+
+  /**
+   * State the operator reads may have changed: no `latest` answer from before is served. `quietMs`: a send, whose
+   * execution is unresolved for a while; every latest read reaches a provider until then.
+   */
+  changed(quietMs = 0): void {
     this.epoch++
     this.latest.clear()
     this.latestInflight.clear()
+    if (quietMs > 0) this.quietUntil = Math.max(this.quietUntil, Date.now() + quietMs)
   }
 
   /** The provider's tip as the proxy last read it. */
@@ -160,6 +171,7 @@ export class ReadCache {
   /** A kept answer for this request, or undefined. */
   hit(msg: Req): unknown {
     if (latestRead(msg)) {
+      if (Date.now() < this.quietUntil) return undefined
       const k = keyOf(msg)
       const v = this.latest.get(k)
       if (v === undefined) return undefined
@@ -214,6 +226,7 @@ export class ReadCache {
   }
 
   private async runLatest(msg: Req, ask: () => Promise<any>): Promise<any> {
+    if (Date.now() < this.quietUntil) return ask()
     const k = keyOf(msg)
     const pending = this.latestInflight.get(k)
     if (pending) {
@@ -233,7 +246,7 @@ export class ReadCache {
     this.latestInflight.set(k, p)
     const r = await p
     // Kept from when it was sent, and only if nothing changed meanwhile.
-    if (epoch === this.epoch && r && !r.error && !emptyLooking(r.result)) {
+    if (epoch === this.epoch && Date.now() >= this.quietUntil && r && !r.error && !emptyLooking(r.result)) {
       this.latest.delete(k)
       this.latest.set(k, { r, at })
       while (this.latest.size > this.max) this.latest.delete(this.latest.keys().next().value as string)

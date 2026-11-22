@@ -47,6 +47,23 @@ describe('latest reads (otto/mamoru#419)', () => {
     expect(c.hit(a)).toBeUndefined()
   })
 
+  test('after a send, latest reads are neither shared nor kept for the quiet time', async () => {
+    const c = new ReadCache(async () => null)
+    const nonce = { method: 'eth_call', params: [{ to: '0x1', data: '0xaffed0e0' }, 'latest'] }
+    await c.run(nonce, ok('0x07'))
+    c.changed(60_000)
+    let asked = 0
+    const ask = async () => (asked++, { jsonrpc: '2.0', id: 1, result: '0x08' })
+    await Promise.all([c.run(nonce, ask), c.run(nonce, ask)])
+    expect(c.hit(nonce)).toBeUndefined()
+    expect(asked).toBe(2)
+    const short = new ReadCache(async () => null)
+    short.changed(5)
+    await Bun.sleep(10)
+    await short.run(nonce, ok('0x09'))
+    expect(short.hit(nonce)).toBeDefined()
+  })
+
   test('errors and empty-looking latest answers are never kept', async () => {
     const c = new ReadCache(async () => null)
     const code = { method: 'eth_getCode', params: ['0x1', 'latest'] }
@@ -59,7 +76,7 @@ describe('latest reads (otto/mamoru#419)', () => {
 })
 
 describe('the proxy shares one head and drops latest answers on a send (otto/mamoru#419)', () => {
-  test('heads within HEAD_TTL share one tip read; a send makes the next latest call reach the provider', async () => {
+  test('heads within HEAD_TTL share one tip read; after a send every latest call reaches the provider', async () => {
     const asked: string[] = []
     const fetch = async (_url: string, init: RequestInit) => {
       const m = JSON.parse(String(init.body)) as { id: number; method: string }
@@ -77,8 +94,10 @@ describe('the proxy shares one head and drops latest answers on a send (otto/mam
       await send('eth_call', call)
       await send('eth_sendRawTransaction', ['0x02'])
       await send('eth_call', call)
+      await send('eth_call', call)
       expect(asked.filter((m) => m === 'eth_blockNumber').length).toBe(1)
-      expect(asked.filter((m) => m === 'eth_call').length).toBe(2)
+      // One before the send; after it, each reaches the provider (quiet until settled).
+      expect(asked.filter((m) => m === 'eth_call').length).toBe(3)
       expect(proxy.cacheStats()?.headShared).toBe(2)
     } finally {
       proxy.stop()

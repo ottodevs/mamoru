@@ -1,6 +1,6 @@
 import type { Server } from 'bun'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { ReadCache, blockParam as pinnedBlockParam, isRead, pinnedBlock, type ReadCacheStats } from './read-cache.ts'
+import { LATEST_QUIET_MS, ReadCache, blockParam as pinnedBlockParam, isRead, pinnedBlock, type ReadCacheStats } from './read-cache.ts'
 
 const TRACE_TAGS = new Set(['latest', 'pending', 'safe', 'finalized', 'earliest'])
 import { classifyRpcError, componentOf, redactSecrets, safeMetrics, type Component, type LogRangeOutcome, type RpcMetrics } from './metrics.ts'
@@ -886,12 +886,15 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     trace(msg)
     // otto/mamoru#419: every provider this proxy uses proved `chainId` before its first request (see onChain): the
     // answer is known, and asking for it again (observe() does on every review) proves nothing more.
+    // A send drops every kept latest answer before it goes out and quiets the layer until it is settled (read-cache.ts).
+    if (cache && msg.method === 'eth_sendRawTransaction') cache.changed(LATEST_QUIET_MS)
     if (msg.method === 'eth_chainId' && opts.chainId !== undefined && cache) return { jsonrpc: '2.0', id: msg.id, result: `0x${opts.chainId.toString(16)}` }
     const kept = cache?.hit(msg)
     if (kept !== undefined) return { ...(kept as object), id: msg.id }
     const r = cache ? { ...((await cache.run(msg, () => handleInner(msg, seen))) as object), id: msg.id } : await handleInner(msg, seen)
-    // A send, or a transaction found mined, changes state the operator reads: no `latest` answer from before it is served.
-    if (cache && (msg.method === 'eth_sendRawTransaction' || (msg.method === 'eth_getTransactionReceipt' && (r as any)?.result))) cache.changed()
+    // Answered: dropped again, quiet from now. A transaction found mined changes state too: nothing from before is served.
+    if (cache && msg.method === 'eth_sendRawTransaction') cache.changed(LATEST_QUIET_MS)
+    else if (cache && msg.method === 'eth_getTransactionReceipt' && (r as any)?.result) cache.changed()
     // Name the call behind an invalid-params refusal: the engine only sees the message.
     const e = (r as any)?.error
     if (e && msg.method === 'eth_sendRawTransaction') {
