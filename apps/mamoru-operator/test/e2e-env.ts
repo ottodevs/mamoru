@@ -5,12 +5,12 @@
 // through the production keyed provider: on 22 Nov two runs spent most of the month's last credits. Worse, the operator
 // an e2e boots read MAMORU_RPC_TRUSTED from that env, proved those providers on chain 8453 (the fork's id too) and spread
 // its reads between the fork and Base mainnet. An e2e now never reads either file: the fork's upstream is E2E_RPC_URL
-// (Base) or E2E_L1_RPC_URL (Ethereum) when set, a public node otherwise, and every production-only variable is cleared
+// (Base), E2E_L1_RPC_URL (Ethereum) or E2E_MONAD_RPC_URL when set, a public node otherwise, and every production-only variable is cleared
 // before the operator boots.
 
 /** Public upstreams: slow and rate limited (FORK_CUPS throttles the fork), never anyone's quota. */
-export const PUBLIC_UPSTREAM = { base: 'https://mainnet.base.org', l1: 'https://ethereum-rpc.publicnode.com' } as const
-const UPSTREAM_VAR = { base: 'E2E_RPC_URL', l1: 'E2E_L1_RPC_URL' } as const
+export const PUBLIC_UPSTREAM = { base: 'https://mainnet.base.org', l1: 'https://ethereum-rpc.publicnode.com', monad: 'https://rpc.monad.xyz' } as const
+const UPSTREAM_VAR = { base: 'E2E_RPC_URL', l1: 'E2E_L1_RPC_URL', monad: 'E2E_MONAD_RPC_URL' } as const
 
 /** The live Base operator's policy contracts (public addresses), which the Base e2e runs used to inherit from its env. */
 export const LIVE_BASE_POLICY = {
@@ -25,6 +25,7 @@ export const PRODUCTION_ONLY = [
   'RPC_URL',
   'BASE_RPC_URL',
   'L1_RPC_URL',
+  'MONAD_RPC_URL',
   'OPERATOR_SECRET',
   'MAMORU_RPC_TRUSTED',
   'MAMORU_RPC_FALLBACKS',
@@ -61,5 +62,13 @@ export function e2eBaseEnv(opts: { livePolicy?: boolean } = {}): string {
   clearProductionEnv()
   process.env.RPC_URL = upstream
   if (opts.livePolicy) for (const [k, v] of Object.entries(LIVE_BASE_POLICY)) process.env[k] ??= v
+  return upstream
+}
+
+/** A Monad e2e's environment: production variables cleared, `MONAD_RPC_URL` (the fork's upstream) set to the e2e one. */
+export function e2eMonadEnv(): string {
+  const upstream = e2eUpstream('monad')
+  clearProductionEnv()
+  process.env.MONAD_RPC_URL = upstream
   return upstream
 }

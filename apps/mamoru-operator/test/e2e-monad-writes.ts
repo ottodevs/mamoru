@@ -6,7 +6,7 @@
 // executes the activation; the engine enters the WMON/USDC pool (enter_swap, enter_mint) through the operator's
 // loopback bundler. Then the gas each transaction declared is set against what it used: Monad charges the limit.
 //   PATH=$HOME/.foundry/bin:$PATH bun apps/mamoru-operator/test/e2e-monad-writes.ts
-// MONAD_RPC_URL overrides the public Monad RPC (the fork's upstream; never in argv).
+// E2E_MONAD_RPC_URL overrides the public Monad RPC (the fork's upstream; never in argv; e2e-env.ts).
 import { randomBytes } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -24,6 +24,7 @@ import { PASSKEY_SCALARS, SoftwarePasskey } from '../../../packages/scenarios/we
 import { buyUsdc } from '../../../packages/scenarios/monad/harness.ts'
 import { bootOperator } from '../src/boot.ts'
 import { signedCall } from './e2e-client.ts'
+import { e2eMonadEnv } from './e2e-env.ts'
 
 const DEPOSIT = 50_000_000n // 50 USDC, under the 100 USDC default cap
 const POOL = 'pool:WMON/USDC/3000'
@@ -36,7 +37,7 @@ function check(ok: boolean, what: string): void {
   log(`ok  ${what}`)
 }
 
-if (!process.env.MONAD_RPC_URL) process.env.MONAD_RPC_URL = 'https://rpc.monad.xyz'
+e2eMonadEnv()
 const proxy = startForkProxy('MONAD_RPC_URL')
 const anvilBin = Bun.which('anvil') ?? join(homedir(), '.foundry/bin/anvil')
 const probe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') })

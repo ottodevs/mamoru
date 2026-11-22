@@ -14,7 +14,7 @@ describe('e2e environment (otto/mamoru#450)', () => {
   })
 
   test('production providers, peers, settings and keys are cleared; anything else is kept', () => {
-    const env: Record<string, string | undefined> = { RPC_URL: 'k', BASE_RPC_URL: 'k', MAMORU_RPC_TRUSTED: 'k', MAMORU_PEER_OPERATORS: 'p', MAMORU_SETTINGS_URL: 's', ALCHEMY_KEY_2: 'k', QUICKNODE_BASE_MAINNET_HTTP: 'k', E2E_RPC_URL: 'e', FORK_CUPS: '5', PATH: '/bin' }
+    const env: Record<string, string | undefined> = { RPC_URL: 'k', BASE_RPC_URL: 'k', MONAD_RPC_URL: 'k', MAMORU_RPC_TRUSTED: 'k', MAMORU_PEER_OPERATORS: 'p', MAMORU_SETTINGS_URL: 's', ALCHEMY_KEY_2: 'k', QUICKNODE_BASE_MAINNET_HTTP: 'k', E2E_RPC_URL: 'e', FORK_CUPS: '5', PATH: '/bin' }
     clearProductionEnv(env)
     expect(env).toEqual({ E2E_RPC_URL: 'e', FORK_CUPS: '5', PATH: '/bin' })
   })

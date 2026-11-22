@@ -4,7 +4,7 @@
 // registry (MAMORU_SOURCE_CHAIN_ID=143 on a lab chain id). Off Base it signs and sends nothing (CHAIN_READ_ONLY).
 //   bun apps/mamoru-operator/test/e2e-monad-fork.ts [prestate.json.gz]
 // With a prestate it runs offline on a plain anvil (bun run scenarios:monad replay's state); without, it forks Monad
-// at the block pinned in scenarios/monad/manifest.json through the public RPC (MONAD_RPC_URL overrides it).
+// at the block pinned in scenarios/monad/manifest.json through the public RPC (E2E_MONAD_RPC_URL overrides it; e2e-env.ts).
 import { randomBytes } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -18,6 +18,10 @@ import { loadMonadManifest, startFromState, startMonadFork, upstreamHost } from 
 import { buildPosition, fmt } from '../../../packages/scenarios/monad/scenario.ts'
 import { bootOperator } from '../src/boot.ts'
 import { signedCall } from './e2e-client.ts'
+import { e2eMonadEnv } from './e2e-env.ts'
+
+// otto/mamoru#450: never the live operator's Monad provider.
+e2eMonadEnv()
 
 const t0 = Date.now()
 const log = (m: string) => console.log(`[e2e-monad +${((Date.now() - t0) / 1000).toFixed(0)}s] ${m}`)

@@ -22,7 +22,7 @@
 //   nix shell nixpkgs#foundry --command bash -c 'export PATH=$HOME/.foundry/bin:$PATH;
 //     cd contracts/action-policy && ./install.sh && forge build --silent && cd ../.. &&
 //     bun apps/mamoru-operator/test/e2e-two-chain.ts'
-// Upstreams: E2E_RPC_URL (default https://mainnet.base.org, e2e-env.ts), MONAD_RPC_URL (default https://rpc.monad.xyz), public,
+// Upstreams: E2E_RPC_URL (default https://mainnet.base.org, e2e-env.ts), E2E_MONAD_RPC_URL (default https://rpc.monad.xyz), public,
 // through loopback proxies. Nothing is broadcast anywhere but the two local anvils.
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdtempSync } from 'node:fs'
@@ -84,7 +84,7 @@ function check(ok: boolean, step: string, detail = ''): void {
 const baseUpstream = e2eUpstream('base')
 clearProductionEnv()
 process.env.BASE_FORK_RPC_URL = baseUpstream
-if (!process.env.MONAD_RPC_URL) process.env.MONAD_RPC_URL = 'https://rpc.monad.xyz'
+process.env.MONAD_RPC_URL = e2eUpstream('monad')
 const anvilBin = Bun.which('anvil') ?? join(homedir(), '.foundry/bin/anvil')
 const dir = mkdtempSync(join(tmpdir(), 'mamoru-e2e-two-chain-'))
 type Fork = { lab: Lab; proxy: ForkProxy; anvil: ReturnType<typeof Bun.spawn>; port: EnginePort; url: string }
