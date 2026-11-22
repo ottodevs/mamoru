@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters, encodeEventTopics, parseAbi, type Address, type Hex, type Log } from 'viem'
 import { address, baseRegistry } from '@mamoru/registry'
-import { clampSavings, savingsObs, savingsOf, savingsOutOf, savingsView, type VaultRead } from '../src/savings.ts'
+import { clampSavings, clipBooks, savingsObs, savingsOf, savingsOutOf, savingsView, type VaultRead } from '../src/savings.ts'
 import type { StoredOp } from '../src/state.ts'
 import { factsFromLogs } from '../src/yield-receipts.ts'
 
@@ -19,7 +19,7 @@ const at = (s: number) => new Date(s * 1000).toISOString()
 const eng = (n: number, extra: Partial<StoredOp>): StoredOp => ({ opId: `eng-${n}`, kind: 'reduce', state: 'confirmed', updatedAt: at(n), block: n, pool: POOL, ...extra }) as StoredOp
 const harvest = (n: number, usdcFee: bigint, flagged = true) =>
   eng(n, { step: 'harvest', ...(flagged ? { savingsIn: true as const } : {}), facts: { at: at(n), gasWei: '1', fees: [{ tokenId: '1', pool: POOL, fee0: usdcSide === 'fee0' ? usdcFee.toString() : '7', fee1: usdcSide === 'fee1' ? usdcFee.toString() : '7' }] } })
-const sale = (n: number, usdcIn: bigint) => eng(n, { kind: 'enter', step: 'enter_swap', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: '7', savingsIn: true, facts: { at: at(n), gasWei: '1', fees: [], usdcNet: usdcIn.toString() } })
+const sale = (n: number, usdcIn: bigint) => eng(n, { kind: 'enter', step: 'enter_swap', tokenIn: 'WETH', tokenOut: 'USDC', amountIn: '7', savingsIn: true, userOpHash: `0x${'cd'.repeat(32)}`, facts: { at: at(n), gasWei: '1', fees: [], usdcNet: usdcIn.toString() } })
 const deposit = (n: number, assets: bigint, read = true, rate = 1_250_000n) =>
   eng(n, {
     kind: 'enter',
@@ -95,6 +95,28 @@ describe('savingsOf: what enters and leaves the books', () => {
     expect(savingsOf(ops, baseRegistry, { atBlock: 2 })).toMatchObject({ pending: 2n * USDC, vaults: {} })
   })
 
+  test('review of #395: in one block, the harvest that funds a deposit counts first whatever the stored order', () => {
+    const b = savingsOf([deposit(5, 2n * USDC), harvest(5, 2n * USDC)], baseRegistry)
+    expect(b.pending).toBe(0n)
+    expect(b.vaults[VAULT]!.basis).toBe(2n * USDC)
+  })
+
+  test('review of #395: a deposit read without its Deposit flow still moves pending (estimated, partial)', () => {
+    const noFlow = { ...deposit(2, 2n * USDC), facts: { at: at(2), gasWei: '1', fees: [] } } as StoredOp
+    const b = savingsOf([harvest(1, 2n * USDC), noFlow], baseRegistry, { rates: read(sharesFor(100n * USDC)) })
+    expect(b.pending).toBe(0n)
+    expect(b.vaults[VAULT]!.shares).toBe(sharesFor(2n * USDC))
+    expect(b.partial).toBe(true)
+    expect(b.estimated).toEqual([VAULT])
+  })
+
+  test('review of #395: a sale whose facts are not scoped to its userOp adds nothing (partial)', () => {
+    const { userOpHash: _h, ...unscoped } = sale(2, 2n * USDC)
+    const b = savingsOf([unscoped as StoredOp], baseRegistry)
+    expect(b.pending).toBe(0n)
+    expect(b.partial).toBe(true)
+  })
+
   test('unconfirmed ops do not count', () => {
     expect(savingsOf([{ ...harvest(1, USDC), state: 'submitted' } as StoredOp], baseRegistry).pending).toBe(0n)
   })
@@ -105,7 +127,7 @@ describe('clampSavings: never above what the Safe holds, and kept down', () => {
     const ops = [harvest(1, 5n * USDC)]
     const first = clampSavings(ops, baseRegistry, { block: 10, usdc: 2n * USDC, vaults: [] })
     expect(first.books.pending).toBe(2n * USDC)
-    expect(first.cuts).toEqual({ epoch: '', cuts: [{ block: 10, pending: (3n * USDC).toString() }] })
+    expect(first.cuts).toEqual({ epoch: '', cuts: [{ block: 10, seen: 1, pending: (3n * USDC).toString() }] })
     // An owner deposit of 100 later: the books stay at 2, the deposit is bucket money.
     const later = clampSavings(ops, baseRegistry, { block: 20, usdc: 102n * USDC, vaults: [] }, first.cuts)
     expect(later.books.pending).toBe(2n * USDC)
@@ -123,16 +145,26 @@ describe('clampSavings: never above what the Safe holds, and kept down', () => {
     expect(unread.cuts.cuts).toEqual([])
   })
 
-  test('no cut while an op is on its way: a withdrawal already in the balance is not counted twice once it confirms', () => {
+  test('an op settled after the cut that saw its effect drops that cut: a withdrawal is never counted twice', () => {
     const ops = [harvest(1, 5n * USDC)]
     const sent = { ...withdrawal(9, { pending: 3n * USDC }), state: 'submitted', txHash: '0xab' } as StoredOp
-    // The withdrawal's 3 already left the Safe: 2 USDC held, books still 5.
+    // The withdrawal's 3 already left the Safe at block 9: 2 USDC held, books still 5. The read cuts 3.
     const during = clampSavings([...ops, sent], baseRegistry, { block: 10, usdc: 2n * USDC, vaults: [] })
-    expect(during.cuts.cuts).toEqual([])
-    expect(during.books.pending).toBe(5n * USDC)
+    expect(during.books.pending).toBe(2n * USDC)
+    expect(during.cuts.cuts).toEqual([{ block: 10, seen: 1, pending: (3n * USDC).toString() }])
+    // It confirms at block 9 (or lands late after being given up on): the cut's history changed, the cut goes.
     const after = clampSavings([...ops, { ...sent, state: 'confirmed' } as StoredOp], baseRegistry, { block: 11, usdc: 2n * USDC, vaults: [] }, during.cuts)
     expect(after.books.pending).toBe(2n * USDC)
-    expect(after.cuts.cuts).toEqual([])
+    expect(savingsOf([...ops, { ...sent, state: 'confirmed' } as StoredOp], baseRegistry, { cuts: during.cuts }).pending).toBe(2n * USDC)
+  })
+
+  test('review of #395: a balance the read did not return cuts nothing; an estimated deposit is never cut', () => {
+    const ops = [harvest(1, 5n * USDC)]
+    expect(clampSavings(ops, baseRegistry, { block: 10, usdc: undefined, vaults: [] }).cuts.cuts).toEqual([])
+    // An unread deposit counted at a rate a little off: its estimate may sit above the shares held.
+    const unread = [harvest(1, 10n * USDC), deposit(2, 10n * USDC, false)]
+    const r = clampSavings(unread, baseRegistry, { block: 10, usdc: 0n, vaults: read(sharesFor(10n * USDC) - 5n) })
+    expect(r.cuts.cuts).toEqual([])
   })
 
   test('a Stop starts a new epoch: the older cuts are dropped and do not touch the new books', () => {
@@ -164,6 +196,15 @@ describe('clampSavings: never above what the Safe holds, and kept down', () => {
 })
 
 describe('the figures the engine, the app and the fee read', () => {
+  test('clipBooks: within what a read holds, nothing stored; a missing balance or vault clips nothing', () => {
+    const b = { epoch: '', pending: 5n * USDC, vaults: { [VAULT]: { shares: sharesFor(10n * USDC), basis: 10n * USDC } }, partial: false }
+    const c = clipBooks(b, 2n * USDC, read(sharesFor(4n * USDC)))
+    expect(c.pending).toBe(2n * USDC)
+    expect(c.vaults[VAULT]).toEqual({ shares: sharesFor(4n * USDC), basis: 4n * USDC })
+    expect(b.pending).toBe(5n * USDC)
+    expect(clipBooks(b, undefined, [])).toEqual(b)
+  })
+
   test('savingsObs: empty books are absent, so the observation hashes as before', () => {
     expect(savingsObs({ epoch: '', pending: 0n, vaults: {}, partial: false })).toBeUndefined()
     expect(savingsObs({ epoch: '', pending: 5n, vaults: { [VAULT]: { shares: 9n, basis: 1n } }, partial: false })).toEqual({ pending: 5n, shares: { [VAULT]: 9n } })

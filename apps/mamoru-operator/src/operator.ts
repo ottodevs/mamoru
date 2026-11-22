@@ -71,7 +71,7 @@ import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-us
 import { bridgeLeftOf } from './bridge-left.ts'
 import { SpendHold, SPEND_HOLD_PROBE_MS, isSpend, spendDenialOf } from './window-hold.ts'
 import { clampHarvested, harvestedOf } from './harvested.ts'
-import { clampSavings, savingsObs } from './savings.ts'
+import { clampSavings, SAVINGS_ASSET, savingsObs } from './savings.ts'
 import { DEFAULT_SPONSOR, RESERVE_REFILLS_PER_DAY, SPONSOR_WINDOW_MS, activationRefusal, refillRefusal, monadSponsor, boundedSponsor, recentSponsored, sponsorRefusal, type SponsoredKind, type SponsorEntry, type SponsorPolicy } from './sponsorship.ts'
 import type { AccountState, ArmedActivation, RemoteSafeRecord, StateStore, StoredGrant, StoredOp } from './state.ts'
 import { poolDepthFor, type PoolDepthCache } from './pool-depth.ts'
@@ -2159,13 +2159,14 @@ export class Operator {
   /** The policy the account was activated with; accounts activated before policy ids were stored run conservador-live-v1. */
   /** otto/mamoru#413: the account keeps savings books: its policy has a vault bucket (Base v7/v8; never Monad). */
   private savingsBooked(acc: AccountState): boolean {
-    return this.policyOf(acc).buckets.some((b) => (b.vaults?.length ?? 0) > 0)
+    const policy = this.policyOf(acc)
+    return policy.savingsAsset === SAVINGS_ASSET && policy.buckets.some((b) => (b.vaults?.length ?? 0) > 0)
   }
 
   /** otto/mamoru#413: the savings books for a review (Observation.savings), storing any cut a balance below them takes. */
   private savingsForReview(acc: AccountState, balances: Observation['balances'], vaults: Observation['vaults'], block: bigint): Observation['savings'] | undefined {
     if (!this.savingsBooked(acc)) return undefined
-    const read = { block: Number(block), usdc: balances[this.policyOf(acc).savingsAsset] ?? 0n, vaults: (vaults ?? []).map((v) => ({ name: v.name, shares: v.shares, assets: v.assets })) }
+    const read = { block: Number(block), usdc: balances[SAVINGS_ASSET], vaults: (vaults ?? []).map((v) => ({ name: v.name, shares: v.shares, assets: v.assets })) }
     const r = clampSavings(acc.ops, this.cfg.registry, read, acc.savingsCuts)
     if (JSON.stringify(r.cuts) !== JSON.stringify(acc.savingsCuts ?? { epoch: r.cuts.epoch, cuts: [] })) {
       acc.savingsCuts = r.cuts
