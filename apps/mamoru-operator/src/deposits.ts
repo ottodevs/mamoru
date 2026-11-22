@@ -25,12 +25,14 @@ export type DepositRow = { txHash: Hex; logIndex: number; block: string; amountU
 export const DEPOSIT_MIN_USDC = 10_000n
 
 /**
- * Blocks under the head a deposit's block must be to be final (about 10 minutes of Base blocks): above it a block may
+ * Blocks under the head a deposit's block must be to be final (10 minutes at 2 s blocks; the operator uses DEPOSIT_CONFIRM_SECONDS): above it a block may
  * still reorg, or a node behind may not have served its logs yet, so the cursor never passes head minus this, and a
  * deposit above it is read again on every look and shown as arriving. A fixed depth, not the 'safe' tag: one call
  * fewer per look, and the same rule on every chain whatever tags its nodes answer.
  */
 export const DEPOSIT_CONFIRM_BLOCKS = 300n
+/** otto/mamoru#445: the same depth as chain time (10 min: 300 blocks at 2 s, 3,000 at Base's 200 ms), turned into blocks by the operator. */
+export const DEPOSIT_CONFIRM_SECONDS = 600
 
 /** Blocks per eth_getLogs page (the provider's 2,000-block range, as OWNER_LOG_PAGE_BLOCKS). */
 export const DEPOSIT_PAGE_BLOCKS = 2_000n

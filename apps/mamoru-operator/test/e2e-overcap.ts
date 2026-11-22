@@ -95,7 +95,7 @@ try {
   process.env.MAMORU_LIVE = '1'
   process.env.MAMORU_HEAD_LAG = '0' // anvil is one node
   const secret = randomBytes(32).toString('hex')
-  const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: POLICY })
+  const op = await bootOperator({ blockTimeMs: 1_000, rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: POLICY })
   stopOperator = () => op.stop()
   check(op.operator.cfg.live, 'operator is live on chain 8453 with MAMORU_LIVE=1')
   await lab.setBalance(op.operator.relayer.address, 10n ** 18n)

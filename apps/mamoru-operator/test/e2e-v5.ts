@@ -125,7 +125,7 @@ try {
   process.env.MAMORU_GAS_POLICY_ADDRESS = dep.gasPolicy
   process.env.MAMORU_ACTION_POLICY_V2_ADDRESS = dep.v2
   const secret = randomBytes(32).toString('hex')
-  const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v2' })
+  const op = await bootOperator({ blockTimeMs: 1_000, rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v2' })
   stopOperator = op.stop
   check(op.operator.cfg.v4Policy?.policyId === 'conservador-live-v4', 'operator configured with conservador-live-v4 bound to both deployed policies')
   check(op.operator.cfg.v5Policy?.policyId === 'conservador-live-v5' && op.operator.cfg.v5Policy.actionPolicy?.address.toLowerCase() === dep.v2.toLowerCase() && op.operator.cfg.v5Policy.actionPolicy?.contractVersion === 2, 'operator configured with conservador-live-v5 on MamoruActionPolicyV2')

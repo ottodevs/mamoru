@@ -98,7 +98,7 @@ try {
   // anvil is one node: no head lag to absorb (live default 3 blocks, see rpc-proxy.ts)
   process.env.MAMORU_HEAD_LAG = '0'
   const secret = randomBytes(32).toString('hex')
-  const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v2' })
+  const op = await bootOperator({ blockTimeMs: 1_000, rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v2' })
   stopOperator = op.stop
   check(op.operator.cfg.live, 'operator is live on chain 8453 with MAMORU_LIVE=1')
   await lab.setBalance(op.operator.relayer.address, 10n ** 18n)

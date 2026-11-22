@@ -344,6 +344,8 @@ export type BootOptions = {
   reviewMs?: number
   waitBlockMs?: number
   maxWaitBlocks?: number
+  /** MAMORU_BLOCK_TIME_MS (otto/mamoru#445): a lab fork's block time (anvil --block-time); absent: the chain's reference. */
+  blockTimeMs?: number
   /** MAMORU_CAP_USDC, whole USDC (otto/mamoru#127); absent: LIVE_CAP_USDC. */
   capUsdc?: string
   /** MAMORU_DEPTH = `impactBps,shareBps[,stablesImpactBps]` (otto/mamoru#127); absent: depth sizing off. */
@@ -779,6 +781,7 @@ export async function bootOperator(o: BootOptions) {
       reviewMs: o.reviewMs ?? 20_000,
       waitBlockMs: o.waitBlockMs ?? 2_100,
       maxWaitBlocks: o.maxWaitBlocks ?? 150,
+      ...(o.blockTimeMs !== undefined ? { blockTimeMs: o.blockTimeMs } : {}),
       rpcBudget: rpcBudget(rpcMetrics),
       watchClient,
       ...knobs,

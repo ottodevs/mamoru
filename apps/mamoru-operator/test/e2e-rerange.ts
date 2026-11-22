@@ -103,7 +103,7 @@ try {
   process.env.MAMORU_LIVE = '1'
   process.env.MAMORU_HEAD_LAG = '0'
   const secret = randomBytes(32).toString('hex')
-  const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: process.env.E2E_POLICY })
+  const op = await bootOperator({ blockTimeMs: 1_000, rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: process.env.E2E_POLICY })
   stopOperator = op.stop
   // anvil quotes a gas price ~100x Base's: the extension renewal below (~11M gas) is over the default 0.01 ETH daily
   // sponsorship there (SPONSOR_DAILY_BUDGET), on Base it costs ~1e-4 ETH. Raised to the top of SPONSOR_BOUNDS, as e2e-v4 does.

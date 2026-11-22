@@ -91,7 +91,7 @@ try {
   process.env.MAMORU_LIVE = '1'
   process.env.MAMORU_HEAD_LAG = '0' // anvil is one node
   const secret = randomBytes(32).toString('hex')
-  let op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v1' })
+  let op = await bootOperator({ blockTimeMs: 1_000, rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v1' })
   stopOperator = () => op.stop()
   check(op.operator.cfg.live, 'operator is live on chain 8453 with MAMORU_LIVE=1')
   await lab.setBalance(op.operator.relayer.address, 10n ** 18n)
@@ -166,7 +166,7 @@ try {
 
   // --- the operator restarts: the armed activation survives ---------------------------
   op.stop()
-  op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v1' })
+  op = await bootOperator({ blockTimeMs: 1_000, rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v1' })
   check((await ops()).find((o) => o.opId === armed.json.opId)?.code === 'ARMED', 'operator restarted, armed op reloaded')
 
   // --- the deposit lands; no further owner action --------------------------------------

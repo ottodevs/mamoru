@@ -18,6 +18,7 @@ const ALLOWED: Record<string, string> = {
   DEPOSIT_PAGE_BLOCKS: 'RPC page size',
   MONAD_HISTORY_STEP_BLOCKS: 'RPC page size (Monad only)',
   // How far back a search reads: RPC budget per look, sized per chain where it matters (#419 cuts RPC volume).
+  OWNER_LOG_SEARCH_BLOCKS: 'search budget in blocks; later ops settle by Safe nonce',
   LOG_WINDOW_BLOCKS: 'search budget in blocks',
   DEPOSIT_BACKFILL_BLOCKS: 'the default for a caller without a chain; the operator passes a day of its own blocks',
   INVENTORY_SLACK_BLOCKS: 'search budget in blocks',
@@ -25,7 +26,7 @@ const ALLOWED: Record<string, string> = {
   MONAD_CATCH_UP_BLOCKS: 'search budget in blocks (Monad only)',
   BASE_CATCH_UP_BLOCKS: 'search budget in blocks (Base only)',
   // Reorg depth: a fixed depth on every chain, the same rule whatever tags a node serves (deposits.ts).
-  DEPOSIT_CONFIRM_BLOCKS: 'reorg depth by design',
+  DEPOSIT_CONFIRM_BLOCKS: 'the default for a caller without a chain; the operator uses DEPOSIT_CONFIRM_SECONDS',
   // Ethereum sibling scan: chain 1, not an engine chain.
   SIBLING_SCAN_LAG: 'Ethereum only',
   // Stats sync on the engine: block windows of the pool history, labelled per chain.
@@ -52,5 +53,15 @@ describe('waits and windows are written in seconds (#417)', () => {
       }
     }
     expect(unlisted).toEqual([])
+  })
+})
+
+describe('a block-time override (#445)', () => {
+  test('a zero, negative or fractional OperatorConfig.blockTimeMs stops the operator at construction', async () => {
+    const { Operator } = await import('../src/operator.ts')
+    for (const blockTimeMs of [0, -200, 0.5, Number.NaN]) {
+      expect(() => new Operator({ blockTimeMs } as never, {} as never, {} as never, { state: { accounts: {} }, save: () => {} } as never)).toThrow('not a positive integer')
+    }
+    expect(() => new Operator({ blockTimeMs: 1_000 } as never, {} as never, {} as never, { state: { accounts: {} }, save: () => {} } as never)).not.toThrow()
   })
 })

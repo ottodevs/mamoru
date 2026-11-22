@@ -31,6 +31,7 @@ const op = await bootOperator({
   policyId: process.env.MAMORU_POLICY,
   reviewMs: num(process.env.MAMORU_REVIEW_MS),
   waitBlockMs: num(process.env.MAMORU_WAIT_BLOCK_MS),
+  blockTimeMs: num(process.env.MAMORU_BLOCK_TIME_MS),
   capUsdc: process.env.MAMORU_CAP_USDC,
   depth: process.env.MAMORU_DEPTH,
   ...(process.env.MAMORU_SETTINGS_URL ? { settingsUrl: process.env.MAMORU_SETTINGS_URL } : {}),

@@ -87,7 +87,7 @@ try {
   process.env.MAMORU_HEAD_LAG = '0'
   delete process.env.MAMORU_SOURCE_CHAIN_ID
   const secret = randomBytes(32).toString('hex')
-  const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'live-wmon-usdc-monad-v6' })
+  const op = await bootOperator({ blockTimeMs: 1_000, rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'live-wmon-usdc-monad-v6' })
   stopOperator = op.stop
   check(op.operator.cfg.live && op.operator.cfg.chainId === 143 && op.operator.cfg.registry.chainId === 143, 'operator is live on chain 143 with MAMORU_CHAIN_WRITES=143')
   check(op.operator.cfg.bundlerUrl !== '', 'the loopback bundler runs')

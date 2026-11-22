@@ -57,7 +57,7 @@ import { isTerminal } from '@mamoru/journal'
 import type { RpcBudget } from './budget.ts'
 import { MAX_INVENTORY, POSITION_DUST_USDC, amountsForLiquidity, idleTokens, inUsdc, livePool, nativePricePool, positionUsdc, positionView, priceOf, readSafe, usdcPools, writeRefusal, type PoolPosition, type SafeRead } from './chain.ts'
 import { FundingCache, fundingCacheKey, isAccountKey } from './funding-cache.ts'
-import { balanceMoves, DEPOSIT_BACKFILL_SECONDS, DEPOSIT_CONFIRM_BLOCKS, DEPOSIT_PAGE_BLOCKS, depositId, depositOpView, depositRange, depositsOf, mergeDeposits, readTransfersIn, type DepositRow } from './deposits.ts'
+import { balanceMoves, DEPOSIT_BACKFILL_SECONDS, DEPOSIT_CONFIRM_SECONDS, DEPOSIT_PAGE_BLOCKS, depositId, depositOpView, depositRange, depositsOf, mergeDeposits, readTransfersIn, type DepositRow } from './deposits.ts'
 import { exposureOf, joinReads, totalOf, type ChainExposure, type Covered, type ExposureWire, type PeerExposure, type PeerRead } from './exposure.ts'
 import { closeCalls, planReduce, planVaultExit, routeOf, swapBackCalls, vaultExitCalls, type SwapBack, type VaultExit } from './unwind.ts'
 import { accepts, divergenceLeg, divergenceWarning, judgeSwap, staleAcceptance, type AcceptedSwap } from './divergence.ts'
@@ -162,7 +162,7 @@ const DEPOSIT_HEAD_CACHE_MS = 10_000
 const DEPOSIT_PAGES_PER_PASS = 5
 /**
  * otto/mamoru#340: one account's deposit looks. `cursor`: the last block read for final rows (never past head minus
- * DEPOSIT_CONFIRM_BLOCKS), `saved` what the state file holds of it; `arriving`: deposits above it at the last look;
+ * DEPOSIT_CONFIRM_SECONDS), `saved` what the state file holds of it; `arriving`: deposits above it at the last look;
  * `moved`: the transfers that already moved the account (fundingMoved once per transfer, not once per look).
  */
 type DepositLook = { at: number; safe?: string; cursor?: bigint; saved?: bigint; okAt?: number; pending?: Promise<void>; arriving: DepositRow[]; moved: Set<string> }
@@ -190,8 +190,12 @@ const SETTLE_SECONDS = 24
 type LocalTotal = { total: bigint; safe: Address; block: bigint }
 type SpentBy = { safeTxHash: Hex; tx: Hex; block: bigint; ours: boolean; success: boolean }
 const EXECUTION_SUCCESS_EVENT = parseAbiItem('event ExecutionSuccess(bytes32 indexed txHash, uint256 payment)')
-/** How far past an owner op's send its ExecutionSuccess is searched for (a day: otto/mamoru#445, in seconds), and the blocks per request. */
-const OWNER_LOG_SEARCH_SECONDS = 86_400
+/**
+ * How far past an owner op's send its ExecutionSuccess is searched for, and the blocks per request: an RPC budget in
+ * blocks (22 pages), 2.4 h of Base at 200 ms (otto/mamoru#445). An op that lands later is settled by its Safe nonce
+ * (settleByNonce, spentBy: checkpointed range search and the spending block's own logs), not by this search.
+ */
+const OWNER_LOG_SEARCH_BLOCKS = 43_200n
 const OWNER_LOG_PAGE_BLOCKS = 2_000n
 /** First and longest wait between reconciliation passes of an account with owner ops still unresolved (doubling). */
 const RECONCILE_RETRY_MS = 30_000
@@ -1086,7 +1090,10 @@ export class Operator {
    * mine at their own pace), else the chain's reference (Base 200 ms since 5 Nov 2026, Monad 300 ms).
    */
   private get blockMs(): bigint {
-    return BigInt(this.cfg.blockTimeMs ?? chainOf(this.cfg.registry?.chainId ?? BASE_CHAIN_ID).blockTimeMs)
+    const ms = this.cfg.blockTimeMs ?? chainOf(this.cfg.registry?.chainId ?? BASE_CHAIN_ID).blockTimeMs
+    // A zero, negative or fractional block time would turn every wait into a division error or a negative range.
+    if (!Number.isInteger(ms) || ms <= 0) throw new Error(`block time ${ms} ms is not a positive integer`)
+    return BigInt(ms)
   }
   /** `seconds` of chain time in blocks, rounded up. */
   private toBlocks(seconds: number): bigint {
@@ -1159,6 +1166,8 @@ export class Operator {
     readonly relayer: Relayer,
     private readonly store: StateStore,
   ) {
+    // otto/mamoru#445: a block-time override that is not a positive integer stops the boot, not the first settlement.
+    if (cfg.blockTimeMs !== undefined) void this.blockMs
     this.v3 = uniswapV3(cfg.registry)
     const saved = cfg.guardReadsState
     const restored = saved?.load()
@@ -2613,9 +2622,10 @@ export class Operator {
       w.moved.clear()
     }
     const head = await this.client.getBlockNumber({ cacheTime: DEPOSIT_HEAD_CACHE_MS })
-    // Final rows only up to `line`; the cursor never passes it (see DEPOSIT_CONFIRM_BLOCKS). Above it, up to the head,
+    // Final rows only up to `line`; the cursor never passes it (see DEPOSIT_CONFIRM_SECONDS). Above it, up to the head,
     // deposits are read again on every look, in the same eth_getLogs once the cursor is caught up, shown as arriving.
-    const line = head > DEPOSIT_CONFIRM_BLOCKS ? head - DEPOSIT_CONFIRM_BLOCKS : 0n
+    const confirm = this.toBlocks(DEPOSIT_CONFIRM_SECONDS)
+    const line = head > confirm ? head - confirm : 0n
     const usdc = address(this.policyOf(acc).savingsAsset, this.cfg.registry)
     const ownTx = new Set(acc.ops.flatMap((o) => (o.txHash ? [o.txHash.toLowerCase()] : [])))
     const foundAt = now()
@@ -2767,7 +2777,7 @@ export class Operator {
       return b ? { ...o, bridge: b } : o
     })
     // otto/mamoru#340: and every deposit found (watchDeposits), after the ops (the history orders by block and time):
-    // the final ones, then those less than DEPOSIT_CONFIRM_BLOCKS deep, as arriving.
+    // the final ones, then those less than DEPOSIT_CONFIRM_SECONDS deep, as arriving.
     // Only to a client that asks (`deposits=1`): an app from before them would count an arriving one as an op in flight
     // and poll at its 4 s pace until it is final. A transfer in a transaction of one of the account's ops (a vault
     // redeem the look saw before the op's hash was stored) is never a deposit.
@@ -6376,7 +6386,7 @@ export class Operator {
    * Without a receipt: the Safe's ExecutionSuccess log of the op's own Safe tx hash. Only an owner execTransaction
    * emits it (engine userOps run through the module), so the log proves the tx executed. otto/mamoru#140: searched
    * from the block it was first handed to a provider around (broadcastAt; else sentAt, else its time) up to the head,
-   * at most OWNER_LOG_SEARCH_SECONDS (a day) past the latest handover (lastBroadcastAt), in pages of OWNER_LOG_PAGE_BLOCKS sent one after another and filtered by that Safe tx hash, so
+   * at most OWNER_LOG_SEARCH_BLOCKS (a block budget) past the latest handover (lastBroadcastAt), in pages of OWNER_LOG_PAGE_BLOCKS sent one after another and filtered by that Safe tx hash, so
    * a transaction that landed late (sent, its hash lost in a timeout) is still found. The Safe tx hash alone is the
    * match, in any transaction (otto/mamoru#163: the owner's signature can be relayed by anyone). `anyTx`: searched to
    * the head (the Safe nonce is past the op's). Without a Safe tx hash (an op stored before it was kept): only the old
@@ -6408,8 +6418,7 @@ export class Operator {
     // `anyTx` (otto/mamoru#163): the Safe nonce is past this op's, so its Safe tx ran by now or never will: searched to
     // the head, in whatever transaction carried it.
     // `toBlock`: exactly to that block (a pinned view, executionAt), whatever this head says.
-    const day = this.toBlocks(OWNER_LOG_SEARCH_SECONDS)
-    const last = opts.toBlock ?? (!opts.anyTx && lastAt + day < head.number ? lastAt + day : head.number)
+    const last = opts.toBlock ?? (!opts.anyTx && lastAt + OWNER_LOG_SEARCH_BLOCKS < head.number ? lastAt + OWNER_LOG_SEARCH_BLOCKS : head.number)
     const logs: Awaited<ReturnType<PublicClient['getLogs']>> = []
     for (let from = fromBlock; from <= last; from += OWNER_LOG_PAGE_BLOCKS) {
       const to = from + OWNER_LOG_PAGE_BLOCKS - 1n < last ? from + OWNER_LOG_PAGE_BLOCKS - 1n : last
