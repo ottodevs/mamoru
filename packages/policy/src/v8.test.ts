@@ -15,17 +15,17 @@ function ctx(): GrantContext {
 }
 
 describe('conservador-live-v8 (otto/mamoru#428): v7 without Monad', () => {
-  test('50 Stable in vaults, 35 Balance WETH/USDC as v7; Monad\'s 15 % on USDC/cbBTC; USDC/USDT exit only; no remote bucket', () => {
+  test('50 Stable in vaults as v7, 25 Balance WETH/USDC, 25 USDC/cbBTC (#431); USDC/USDT exit only; no remote bucket', () => {
     expect(conservadorLiveV8.buckets).toEqual([
       { id: 'stables', preference: 5000, pools: [], vaults: ['vault:gtUSDCp', 'vault:waBasUSDC'] },
-      { id: 'risk', preference: 3500, pools: ['pool:WETH/USDC/3000'] },
-      { id: 'btc-usdc', preference: 1500, pools: ['pool:USDC/cbBTC/500'] },
+      { id: 'risk', preference: 2500, pools: ['pool:WETH/USDC/3000'] },
+      { id: 'btc-usdc', preference: 2500, pools: ['pool:USDC/cbBTC/500'] },
       { id: 'stables-lp', preference: 0, pools: ['pool:USDC/USDT/100'], exitOptIn: true },
     ])
     expect('remoteBuckets' in conservadorLiveV8).toBe(false)
     expect(preferenceTotal(conservadorLiveV8)).toBe(10_000)
-    // The buckets an account already holds keep their share: only Monad's moves.
-    for (const id of ['stables', 'risk']) expect(conservadorLiveV8.buckets.find((b) => b.id === id)).toEqual(conservadorLiveV7.buckets.find((b) => b.id === id)!)
+    // Stable keeps v7's share and vaults.
+    for (const id of ['stables']) expect(conservadorLiveV8.buckets.find((b) => b.id === id)).toEqual(conservadorLiveV7.buckets.find((b) => b.id === id)!)
   })
 
   test('a new id and hash, Base only, not in POLICIES', () => {
@@ -50,12 +50,15 @@ describe('conservador-live-v8 (otto/mamoru#428): v7 without Monad', () => {
     expect(g.actions.some((a) => a.target === 'USDC' && a.signature.startsWith('approve'))).toBe(true)
   })
 
-  test('USDC/cbBTC caps at its 15 % share (v4/v5 sized it for 40 %)', () => {
-    expect(V8_POOLS.btc.capShareBps).toBe(1500)
+  test('WETH/USDC and USDC/cbBTC caps at their 25 % shares (v7 sized WETH for 35 %, v4/v5 cbBTC for 40 %)', () => {
+    expect(V8_POOLS.balance.capShareBps).toBe(2500)
+    expect(V8_POOLS.btc.capShareBps).toBe(2500)
     const caps = computeCaps(conservadorLiveV8, CAP, PRICES)
-    // per-call stable swap cap: 15 % of the cap
-    const perCall = Object.entries(caps).find(([k]) => k.startsWith('btc') && /swap/i.test(k) && /percall/i.test(k))
-    expect(perCall?.[1]).toBe((CAP * 1500n) / 10_000n)
+    // per-call stable swap cap: 25 % of the cap, for each pool
+    for (const prefix of ['btc', 'risk']) {
+      const perCall = Object.entries(caps).find(([k]) => k.startsWith(prefix) && /swap/i.test(k) && /percall/i.test(k))
+      expect(perCall?.[1], prefix).toBe((CAP * 2500n) / 10_000n)
+    }
   })
 
   test('every earlier Base version moves to it, never itself or a Monad sleeve; its engine keeps v7\'s vault floor', () => {

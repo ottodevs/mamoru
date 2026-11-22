@@ -186,7 +186,7 @@ describe('owner transaction of the move to v8', () => {
     expect(sessions.some((s) => s.action.has(GATE) || s.action.has(UNI))).toBe(false)
     expect(held.revokes!.length).toBe(a.grants.length)
     const text = t.summary.join('\n')
-    expect(text).toContain('Mamoru stops sending money to Monad: 15% goes into USDC/cbBTC on Base instead')
+    expect(text).toContain('Mamoru stops sending money to Monad: on Base it keeps 50% in Stable, 25% in WETH/USDC, 25% in USDC/cbBTC')
     expect(text).toContain(`Your Safe on Monad 0x${'cd'.repeat(20)} keeps what it holds`)
   })
 })

@@ -94,13 +94,15 @@ WebAuthn call. Withdrawals stay as they are, one signature each.
 
 ### Target policy `conservador-live-v8`
 
-`conservador-live-v7` without the Monad bucket, with Monad's 15 % moved to USDC/cbBTC:
+`conservador-live-v7` without the Monad bucket. Weights of 22 Nov (#431): Stable 50 %, WETH/USDC 25 %, USDC/cbBTC 25 %, both
+pools on Base. An account coming from v7 holds 35 % in WETH/USDC: 10 points over its new target, past the 5-point drift band
+(`DRIFT_BPS`), so the usual reduce brings it toward 25 %, one operation per review, and USDC/cbBTC takes that money.
 
 | Bucket | Share | Pools / vaults | Grant |
 |---|---|---|---|
 | stables | 50 % | gtUSDCp, then waBasUSDC | vault supply (as v7) |
-| risk (Balance) | 35 % | WETH/USDC 0.30 % | `manageAnyV3Only` (as v7) |
-| btc-usdc | 15 % | USDC/cbBTC 0.05 % | `manageAnyV3Only`, caps at a 15 % share |
+| risk (Balance) | 25 % | WETH/USDC 0.30 % | `manageAnyV3Only` (as v7), caps at a 25 % share |
+| btc-usdc | 25 % | USDC/cbBTC 0.05 % | `manageAnyV3Only`, caps at a 25 % share |
 | stables-lp | 0 | USDC/USDT 0.01 % | exit only, opt-in (as v7) |
 
 - No remote bucket, no bridge-out grant, no Monad Safe for new accounts.
@@ -172,8 +174,8 @@ ahead of v7. The flag is scoped like `vaults_v7` (`*` = everyone).
   - the hash is equal.
 - **No replay across chains.** Each Safe tx hash binds the chain id, the Safe and its nonce.
 - **No standing authority left on Monad.** Step 1 revokes the sessions in the same transaction that moves the money.
-- **Caps.** The account cap is cross-chain and counts in-flight returns (#355), so it does not change. v8's cbBTC caps
-  are sized at its 15 % share.
+- **Caps.** The account cap is cross-chain and counts in-flight returns (#355), so it does not change. v8's WETH and cbBTC caps
+  are sized at their 25 % shares.
 - **The Base mint.** The home accepts a burn only if Circle's attested message is a burn of Monad USDC to the account's
   own Base Safe, of the reported amount, Monad to Base, with the remote Safe as message sender. A burn whose sender is
   V4 (spec 010) is still accepted as before.
