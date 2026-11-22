@@ -290,12 +290,42 @@ describe('positions without valueUsdc', () => {
     expect(currentRate(rows, apy)).toMatchObject({ pct: null, gap: 'no-value', covered: 0, of: 1 })
     expect(monthlyRate(rows, apy)).toMatchObject({ pct: null, gap: 'no-value' })
   })
-  test('the compact rates line carries labels for screen readers, not aria-hidden', () => {
+  test('the compact line carries labels for screen readers, not aria-hidden', () => {
     const { html } = render(<Working f={placed} s={split(placed, null)} apy={apy} onStop={null} />)
     const compact = html.match(/<span class="wc-rates-m"[^>]*>.*?<\/span><\/span><\/span>/)?.[0] ?? ''
     expect(html).not.toMatch(/class="wc-rates-m"[^>]*aria-hidden/)
-    expect(compact).toContain('<span class="sr-only">Current rate </span>')
-    expect(compact).toContain('<span class="sr-only">, Monthly rate </span>')
+    expect(compact).toContain('<span class="sr-only">APR 30d </span>')
+    expect(compact).toContain('<span class="sr-only">, Earned </span>')
+  })
+})
+
+// otto/mamoru#380: Working capital columns Position, Amount, Share, APR 30d, Earned; no Current rate.
+describe('working capital: APR 30d and Earned', () => {
+  const view = (pools: { pool: string; earnedUsd: number; aprPct: number | null }[]) => pools
+  test('the columns, with no Current rate or Monthly rate', () => {
+    const { text } = render(<Working f={placed} s={split(placed, null)} apy={apy} onStop={null} pools={view([])} />)
+    expect(text).toContain('Position Amount Share APR 30d Earned')
+    expect(text).not.toContain('Current rate')
+    expect(text).not.toContain('Monthly rate')
+  })
+  test('a pool with earnings shows its APR and earned; none measured says n/a and why; not loaded shows n/a only', () => {
+    const got = render(<Working f={placed} s={split(placed, null)} apy={apy} onStop={null} pools={view([{ pool: 'pool:USDC/USDT/100', earnedUsd: 1.23, aprPct: 4.5 }])} />)
+    expect(got.html).toMatch(/data-testid="position-apr"[^>]*><span class="sr-only">APR 30d <\/span>4\.5%/)
+    expect(got.html).toContain('1.23')
+    const none = render(<Working f={placed} s={split(placed, null)} apy={apy} onStop={null} pools={view([])} />)
+    expect(none.text).toContain('Not measured yet on this network.')
+    expect(none.text).toContain('n/a')
+    const loading = render(<Working f={placed} s={split(placed, null)} apy={apy} onStop={null} />)
+    expect(loading.text).not.toContain('Not measured yet on this network.')
+  })
+  test('savings sit next to the Stable vault amount, small and green, and never in a share', () => {
+    const vaultPos = { ...pos('9', 'pool:USDC/USDT/100', '50000000'), vault: { name: 'vault:gtUSDCp', label: 'Gauntlet USDC Prime', shares: '1' } } as unknown as FundingView['positions'][number]
+    const f = { ...placed, positions: [vaultPos] } as FundingView
+    const { html } = render(<Working f={f} s={split(f, null)} apy={apy} onStop={null} pools={[]} savingsUsd={2.5} />)
+    expect(html).toContain('data-testid="position-savings"')
+    expect(html).toContain('+2.50')
+    const none = render(<Working f={f} s={split(f, null)} apy={apy} onStop={null} pools={[]} savingsUsd={0} />)
+    expect(none.html).not.toContain('position-savings')
   })
 })
 
@@ -399,6 +429,7 @@ const vsIdle = (over: Partial<VsIdleView> = {}): VsIdleView => ({
   breakdown: { feesUsd: 6.62, priceMoveUsd: 5.1, costsUsd: -0.62, mamoruFeeUsd: -0.55, netUsd: 10.55 },
   pendingUsd: 0,
   savingsUsd: 0,
+  pools: [],
   apr: { pct: 33.9, reason: null },
   status: 'complete',
   notCounted: [],

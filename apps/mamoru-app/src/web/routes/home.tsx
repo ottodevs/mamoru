@@ -97,6 +97,9 @@ export const homeCopy = {
   colPosition: 'Position',
   colAmount: 'Amount',
   colShare: 'Share',
+  colApr: 'APR 30d',
+  colEarned: 'Earned',
+  notMeasured: 'Not measured yet on this network.',
   target: (pct: number) => (pct === 0 ? 'target 0%, closing' : `target ${pct}%`),
   // otto/mamoru#210: a row of USDC supplied to a lending vault.
   lending: 'USDC lending',
@@ -373,7 +376,7 @@ function bySize(rows: PositionRate[]): number[] {
     })
 }
 
-function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView['positions'][number] & { chainId?: number }; r: PositionRate; i: number; readFromChain?: boolean; hold?: string }) {
+function PositionRow({ p, r, i, readFromChain = false, hold, earn, loaded = false, savingsUsd = 0 }: { p: FundingView['positions'][number] & { chainId?: number }; r: PositionRate; i: number; readFromChain?: boolean; hold?: string; /** The pool's earnings; null: none measured; undefined: not shown on this row. */ earn?: VsIdleView['pools'][number] | null; loaded?: boolean; savingsUsd?: number }) {
   const legs = positionAmounts(p).filter((l) => l.amount !== '0')
   // otto/mamoru#210: USDC supplied to a lending vault: one token, the vault as venue, always earning.
   const addr = p.vault ? vaultAddress(p.vault.name) : poolAddress(p.pool, p.chainId)
@@ -422,6 +425,7 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
           ) : (
             <>
               <TweenUsd raw={r.valueUsdc} /> <span className="wc-unit">USDC</span>
+              {savingsUsd > 0 ? <span className="wc-savings" data-testid="position-savings"> +{savingsUsd.toFixed(2)}</span> : null}
             </>
           )}
         </span>
@@ -448,24 +452,31 @@ function PositionRow({ p, r, i, readFromChain = false, hold }: { p: FundingView[
         ) : null}
       </span>
       {/* Desktop cells and the compact mobile line are never shown together (CSS), so each carries its own
-          visually hidden labels and screen readers get the rates at every width. */}
-      <span className={`wc-rate wc-num${r.currentPct === 0 || r.currentPct === null ? ' text-stone' : ''}`} data-testid="position-current">
-        <span className="sr-only">{homeCopy.current} </span>
-        {r.currentPct === 0 ? '0%' : pct(r.currentPct)}
+          visually hidden labels and screen readers get the figures at every width. otto/mamoru#380: APR 30d and Earned are the
+          owner's own, net of the fee; no measure says n/a and why. */}
+      <span className={`wc-rate wc-num${earn?.aprPct == null ? ' text-stone' : ''}`} data-testid="position-apr">
+        <span className="sr-only">{homeCopy.colApr} </span>
+        {earn === undefined && loaded ? '' : pct(earn?.aprPct ?? null)}
       </span>
-      <span className={`wc-rate wc-num${r.monthlyPct === null ? ' text-stone' : ''}`} data-testid="position-monthly">
-        <span className="sr-only">{homeCopy.monthly} </span>
-        {pct(r.monthlyPct)}
+      <span className={`wc-rate wc-num${earn ? '' : ' text-stone'}`} data-testid="position-earned">
+        <span className="sr-only">{homeCopy.colEarned} </span>
+        {earn === undefined && loaded ? '' : earn ? `${earn.earnedUsd.toFixed(2)}` : homeCopy.na}
       </span>
       <span className="wc-rates-m" data-testid="position-rates-compact">
-        <span className="sr-only">{homeCopy.current} </span>
-        <span className={r.currentPct ? undefined : 'text-stone'}>{r.currentPct === 0 ? '0%' : pct(r.currentPct)}</span>
-        <span className="sr-only">, {homeCopy.monthly} </span>
         <span className="text-stone">
-          <span aria-hidden="true"> · 30d </span>
-          {pct(r.monthlyPct)}
+          <span aria-hidden="true">APR 30d </span>
+          <span className="sr-only">{homeCopy.colApr} </span>
+          {earn === undefined && loaded ? homeCopy.na : pct(earn?.aprPct ?? null)}
+          <span aria-hidden="true"> · {homeCopy.colEarned} </span>
+          <span className="sr-only">, {homeCopy.colEarned} </span>
+          {earn ? earn.earnedUsd.toFixed(2) : homeCopy.na}
         </span>
       </span>
+      {loaded && earn === null ? (
+        <span className="wc-why" data-testid="position-not-measured">
+          {homeCopy.notMeasured}
+        </span>
+      ) : null}
       {r.unpriced.length ? (
         <span className="wc-why" data-testid="position-unpriced">
           {homeCopy.unpriced(r.unpriced.join(', '))}
@@ -486,7 +497,7 @@ function holdsApply(p: { chainId?: number }, homeChain: number): boolean {
   return p.chainId === undefined || p.chainId === homeChain
 }
 
-export function Working({ f, s, apy, price = null, onStop, onStart = null, otherChainsUsdc = 0n }: { f: FundingView; s: Split; apy?: ApyView; price?: bigint | null; onStop: (() => void) | null; onStart?: (() => void) | null; otherChainsUsdc?: bigint | null }) {
+export function Working({ f, s, apy, price = null, onStop, onStart = null, otherChainsUsdc = 0n, pools = null, savingsUsd = 0 }: { f: FundingView; s: Split; apy?: ApyView; price?: bigint | null; /** otto/mamoru#380: what each pool or vault earned the owner, from GET .../vs-idle; null while it loads. */ pools?: VsIdleView['pools'] | null; /** otto/mamoru#413 seam: the savings layer inside the Stable vault, shown next to the Stable amount; never in a share. */ savingsUsd?: number; onStop: (() => void) | null; onStart?: (() => void) | null; otherChainsUsdc?: bigint | null }) {
   const n = f.positions.length
   const homeChain = useChain().chainId
   // otto/mamoru#216: targets are shares of the whole account, sleeves on other chains included; while their value is
@@ -498,7 +509,6 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
   // An operation in flight says what it is; between operations the engine says whether more is coming and when it looks next.
   const line = progressLine(f.progress) ?? engineLine(f)
   const bridge = f.progress?.bridge
-  const noRate = apy !== undefined && rows.some((r) => r.monthlyPct === null || (r.inRange && r.currentPct === null))
   return (
     <Fold
       defaultOpen
@@ -539,17 +549,20 @@ export function Working({ f, s, apy, price = null, onStop, onStart = null, other
             <span className="wc-name">{homeCopy.colPosition}</span>
             <span className="wc-amount">{homeCopy.colAmount}</span>
             <span className="wc-share">{homeCopy.colShare}</span>
-            <span className="wc-rate">{homeCopy.current}</span>
-            <span className="wc-rate">{homeCopy.monthly}</span>
+            <span className="wc-rate">{homeCopy.colApr}</span>
+            <span className="wc-rate">{homeCopy.colEarned}</span>
           </div>
           <ul className="m-0 list-none p-0">
             {/* Ot, 5 Nov: one list, largest first; each row names its own chain, no header per chain. */}
             {bySize(rows).map((k, i) => {
               const p = f.positions[k]! as FundingView['positions'][number] & { chainId?: number }
-              return <PositionRow key={`${p.chainId ?? ''}:${p.tokenId}`} p={p} r={rows[k]!} i={i} readFromChain={f.source === 'chain'} hold={holdsApply(p, homeChain) ? f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code : undefined} />
+              const key = p.vault ? p.vault.name : p.pool
+              // One figure per pool or vault: a second position of the same one (a re-range in flight) shows none.
+              const first = bySize(rows).findIndex((j) => (f.positions[j]!.vault ? f.positions[j]!.vault!.name : f.positions[j]!.pool) === key) === i
+              const savings = rows[k]!.bucket === 'Stable' && p.vault && savingsUsd > 0 ? savingsUsd : 0
+              return <PositionRow key={`${p.chainId ?? ''}:${p.tokenId}`} p={p} r={rows[k]!} i={i} earn={pools === null ? undefined : first ? (pools.find((x) => x.pool === key) ?? null) : undefined} loaded={pools !== null} savingsUsd={savings} readFromChain={f.source === 'chain'} hold={holdsApply(p, homeChain) ? f.engine?.rangeHolds?.find((h) => h.tokenId === p.tokenId)?.code : undefined} />
             })}
           </ul>
-          {noRate ? <p className="m-0 pt-2 font-mono text-[0.72rem] text-stone">{homeCopy.noRate}</p> : null}
         </>
       )}
       {onStop || onStart ? (
@@ -1574,7 +1587,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
               on screen for its Ethereum part, and says when it is done. */}
           {!canStart && (oneOpen || one.finished) ? <OneApprovalStart flow={one} title={homeCopy.notRunning} startLabel={homeCopy.start} /> : null}
           {/* otto/mamoru#263: the move to the mix with Monad, step by step, while it runs and for a day after. */}
-          {noPositions ? null : <Working f={whole!.f} s={whole!.s} apy={apy.data} price={price} otherChainsUsdc={otherChainsUsdc} onStop={!fromChain && (f.active || whole!.f.positions.length > 0) ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />}
+          {noPositions ? null : <Working f={whole!.f} s={whole!.s} apy={apy.data} pools={vsIdle.isError ? null : (vsIdle.data?.pools ?? null)} savingsUsd={vsIdle.isError ? 0 : (vsIdle.data?.savingsUsd ?? 0)} price={price} otherChainsUsdc={otherChainsUsdc} onStop={!fromChain && (f.active || whole!.f.positions.length > 0) ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />}
           <Idle f={whole!.f} s={whole!.s} home={s as Split} />
           <History ops={opList} onRetry={retry} loaded={ops.isSuccess} />
         </>
