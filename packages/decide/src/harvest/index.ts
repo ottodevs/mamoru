@@ -129,7 +129,8 @@ export function harvestSaleOf(obs: Observation, policy: PolicyVersion, still?: R
     }
     const value = inSavings(hit.pool, token, amount, savings)
     const aged = obs.block.timestamp - BigInt(obs.harvested[token]!.since) >= HARVEST_SALE_AGE_SECONDS
-    const factor = aged ? 10_000n : BigInt(policy.harvest.costFactorBps)
+    // otto/mamoru#413: the sale's own factor when the policy sets one (v7/v8 engine: 50x), else the harvest's.
+    const factor = aged ? 10_000n : BigInt(policy.harvestSaleFactorBps ?? policy.harvest.costFactorBps)
     if (value * 10_000n <= cost * factor) {
       waits.push({ bucket: hit.b.id, code: 'DECIDE_WAIT_HARVEST_SALE' })
       continue

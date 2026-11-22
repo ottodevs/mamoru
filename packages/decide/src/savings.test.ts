@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { conservadorLiveV8, grantKey, v7EnginePolicy } from '@mamoru/policy'
 import { address, baseRegistry, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
-import { allocate, bucketObs, decide, positionValue, reinvestRoomOf, savingsSweepOf, type Observation, type PoolObs, type PositionObs, type VaultObs } from './index.ts'
+import { allocate, bucketObs, decide, harvestSaleOf, positionValue, reinvestRoomOf, savingsSweepOf, sweepFloorOf, type Observation, type PoolObs, type PositionObs, type VaultObs } from './index.ts'
 
 // otto/mamoru#413 (spec 012 savings-layer.md): harvested USDC is savings in the Stable vault, outside the bucket weights.
 // conservador-live-v8 as the engine runs it (Stable 50 in vaults / WETH-USDC 25 / USDC-cbBTC 25, vault floor 1 USDC).
@@ -253,5 +253,30 @@ describe('no savings, no change', () => {
     const e = decide({ ...o, savings: { pending: 0n, shares: {} } }, V8)
     expect(e.decisionId).toBe(d.decisionId)
     expect(e.proposal).toEqual(d.proposal)
+  })
+})
+
+describe('Lab harvest modes (22 Nov): sweep floor by size and the 50x sale trigger', () => {
+  test('the sweep floor grows with the account: 5 bps of its value, never under the 1 USDC vault floor', () => {
+    expect(sweepFloorOf(account(500n * USDC), V8)).toBe(1n * USDC)
+    // A 100k account (50k Stable, 25k per pool): 50 USDC.
+    const big = (pending: bigint) => obs({ balances: { USDC: pending, USDT: 0n, cbBTC: 0n, WETH: 0n }, positions: [position(WETH, 1n, 25_000n * USDC), position(BTC, 2n, 25_000n * USDC)], vaults: [vault('vault:gtUSDCp', 50_000n * USDC), vault('vault:waBasUSDC', 0n)], savings: { pending, shares: {} } })
+    const floor = sweepFloorOf(big(0n), V8)
+    expect(floor >= 50n * USDC - 2n && floor <= 50n * USDC + 2n).toBe(true)
+    expect(savingsSweepOf(big(30n * USDC), V8)).toEqual({ proposal: null, wait: null })
+    expect(savingsSweepOf(big(60n * USDC), V8).proposal).toMatchObject({ savings: true, assets: 60n * USDC })
+  })
+
+  test('v7/v8 engine: harvested volatile is sold at 50x its op cost, not 3x; the signed policy keeps 3x', () => {
+    expect(V8.harvestSaleFactorBps).toBe(500_000)
+    expect(conservadorLiveV8.harvestSaleFactorBps).toBeUndefined()
+    const at = (weth: bigint) => account(500n * USDC, 0n, 0n, { balances: { USDC: 0n, USDT: 0n, cbBTC: 0n, WETH: weth }, harvested: { WETH: { amount: weth, since: 900 } } })
+    // ~0.8 USDC of WETH, ~20x the op cost: sold under 3x, waits under 50x.
+    expect(harvestSaleOf(at(2n * 10n ** 14n), conservadorLiveV8).proposal).toMatchObject({ harvestSale: true })
+    expect(harvestSaleOf(at(2n * 10n ** 14n), V8)).toMatchObject({ proposal: null, waits: [{ code: 'DECIDE_WAIT_HARVEST_SALE' }] })
+    // ~4 USDC, ~100x: sold. After 7 days the bar is 1x whatever the factor.
+    expect(harvestSaleOf(at(10n ** 15n), V8).proposal).toMatchObject({ harvestSale: true })
+    const aged = at(2n * 10n ** 14n)
+    expect(harvestSaleOf({ ...aged, harvested: { WETH: { amount: 2n * 10n ** 14n, since: 1_000 - 7 * 86_400 } } }, V8).proposal).toMatchObject({ harvestSale: true })
   })
 })

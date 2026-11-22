@@ -4,6 +4,7 @@ import { vaultFloorOf } from '../allocate/index.ts'
 import { reinvestRoomOf } from '../harvest/index.ts'
 import type { Observation, VaultDepositProposal } from '../types.ts'
 import { bucketVaults } from '../value.ts'
+import { bucketValues } from '../rerange/index.ts'
 
 // otto/mamoru#413 (spec 012 savings-layer.md): harvested USDC is savings, kept in the Stable bucket's vault as shares
 // tagged savings, outside the bucket weights. The operator keeps the books (`Observation.savings`); here they are only
@@ -40,11 +41,26 @@ export function bucketObs(obs: Observation, policy: PolicyVersion): Observation 
   return { ...rest, balances, ...(vaults ? { vaults } : {}) }
 }
 
+/**
+ * otto/mamoru#413 (Lab harvest modes, 22 Nov): the smallest savings deposit also grows with the account, this share (bps)
+ * of its value, so a large account sweeps a few times a day, not every harvest (about 20 a day at 100k with the 1 USDC
+ * floor alone). 5 bps: 50 USDC at 100k, 0.50 at 1k (the vault floor, 1 USDC on v7/v8, binds there).
+ */
+export const SWEEP_FLOOR_BPS = 5n
+
+/** The smallest savings deposit: the vault floor, or SWEEP_FLOOR_BPS of the account's value when larger. Stateless. */
+export function sweepFloorOf(obs: Observation, policy: PolicyVersion): bigint {
+  const vault = vaultFloorOf(obs, policy)
+  const { total } = bucketValues(obs, policy, new Set(policy.buckets.flatMap((b) => b.pools)))
+  const bySize = (total * SWEEP_FLOOR_BPS) / 10_000n
+  return bySize > vault ? bySize : vault
+}
+
 export type SavingsSweep = { proposal: VaultDepositProposal | null; wait: { bucket: string; code: ReasonCode } | null }
 
 /**
- * SAV-R2: pending savings go into the Stable bucket's vault, tagged savings, once they reach the vault floor (the
- * same `max(vaultMinDeposit, entry floor)` an allocation deposit needs). Less waits and adds up with the next harvests,
+ * SAV-R2: pending savings go into the Stable bucket's vault, tagged savings, once they reach the sweep floor (the vault
+ * floor an allocation deposit needs, or 5 bps of the account when larger: `sweepFloorOf`). Less waits and adds up with the next harvests,
  * silently (nothing to report until it can go). Within what the vault takes now, the V4 vault ratio (`vaultRoom`) and
  * the V4 room reserve (HRV-R7). Never with an unsafe deposit, an unread vault the policy names, or the bucket frozen
  * (`still`: a fall or a depeg holds the stables bucket still). Absent `obs.savings`: nothing.
@@ -57,7 +73,7 @@ export function savingsSweepOf(obs: Observation, policy: PolicyVersion, still?: 
   const named = new Set(b.vaults ?? [])
   if (obs.vaultsUnread?.some((v) => named.has(v))) return none
   const pending = savingsPending(obs, policy)
-  const floor = vaultFloorOf(obs, policy)
+  const floor = sweepFloorOf(obs, policy)
   if (pending < floor) return none
   const live = (grant: string) => obs.sessions.some((s) => s.grant === grant && s.active && BigInt(s.validUntil) > obs.block.timestamp && (s.usesLeft ?? 1) > 0)
   const open = bucketVaults(obs, b).filter((v) => v.maxDeposit >= floor)

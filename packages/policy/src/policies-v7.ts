@@ -66,7 +66,9 @@ export const conservadorLabV7: PolicyVersion = { ...conservadorLiveV7, policyId:
  * three). Not a field of the policy: its hash salts the session ids (saltOf), so a change there moves every v7 grant.
  * The operator's engine applies it (`enginePolicyOf`), as SLEEVE_ENGINE.
  */
-const V7_ENGINE = { vaultMinDeposit: 1_000_000n } as const satisfies Partial<PolicyVersion>
+// otto/mamoru#413 (Lab harvest modes, 22 Nov, TRAIN): harvested volatile is sold once worth 50x the sale's op cost (1x
+// after 7 days): half the ops and about half the gas of 10x or 20x, same savings captured.
+const V7_ENGINE = { vaultMinDeposit: 1_000_000n, harvestSaleFactorBps: 500_000 } as const satisfies Partial<PolicyVersion>
 const v7Engines = new WeakMap<PolicyVersion, PolicyVersion>()
 /** otto/mamoru#428: v8 keeps v7's Stable vaults, so its engine runs with the same floor. */
 const V7_ENGINE_IDS: ReadonlySet<string> = new Set([conservadorLiveV7.policyId, conservadorLabV7.policyId, 'conservador-live-v8', 'conservador-lab-v8'])

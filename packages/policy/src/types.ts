@@ -146,6 +146,12 @@ export type PolicyVersion = {
   savingsAsset: RegistryName
   gasReserveWei: bigint
   harvest: { costFactorBps: number }
+  /**
+   * otto/mamoru#413 (Lab harvest modes, 22 Nov): the factor (bps of the op cost) harvested volatile must beat before its
+   * sale (spec 012 HRV-R2), before the 7-day cap drops it to 1x. Absent: `harvest.costFactorBps`, as before. Engine-side
+   * (v7/v8: 50x, `v7EnginePolicy`), never in a signed policy: its hash salts the session ids.
+   */
+  harvestSaleFactorBps?: number
   range: {
     widthTicks: number
     adjust: 'off' | 'on_out_of_range'
