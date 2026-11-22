@@ -3,7 +3,7 @@
 // value-series.ts (net deposited).
 import type { Db } from './env.ts'
 
-export type FlowWire = { id: string; t: number; kind: 'in' | 'out' | 'gap'; usdc: string }
+export type FlowWire = { id: string; t: number; kind: 'in' | 'out' | 'gap' | 'cover'; usdc: string }
 type Resolve = (chainId: number, address: string) => Promise<{ accountKey: string } | null>
 
 const INSERT = 'INSERT INTO account_flows (chain_id, account_key, flow_id, kind, t_s, usd, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING'
@@ -17,7 +17,7 @@ export async function writeFlows(db: Db, snapshot: { chainId: number; receipts?:
     const account = await resolve(snapshot.chainId, r.safe.toLowerCase())
     if (!account) continue
     const stmts = r.flows
-      .filter((f) => Number.isFinite(f.t) && /^\d+$/.test(f.usdc) && (f.kind === 'gap' ? BigInt(f.usdc) === 0n : (f.kind === 'in' || f.kind === 'out') && BigInt(f.usdc) > 0n))
+      .filter((f) => Number.isFinite(f.t) && /^\d+$/.test(f.usdc) && (f.kind === 'gap' || f.kind === 'cover' ? BigInt(f.usdc) === 0n : (f.kind === 'in' || f.kind === 'out') && BigInt(f.usdc) > 0n))
       .map((f) => db.prepare(INSERT).bind(snapshot.chainId, account.accountKey, f.id, f.kind, Math.floor(f.t), Number(f.usdc), at))
     offered += stmts.length
     if (stmts.length) await db.batch(stmts)

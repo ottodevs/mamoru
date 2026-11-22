@@ -16,9 +16,10 @@ import { gaveUp, needsFacts } from './yield-receipts.ts'
 /**
  * `id` is stable across snapshots (the Worker keeps one row per id); `t` is unix seconds; `usdc` raw USDC (6 decimals).
  * `gap` is not money: the operator says it cannot vouch for the flows (usdc '0'), so the Worker marks the net deposited
- * partial instead of showing a baseline that may be short.
+ * partial instead of showing a baseline that may be short. `cover` (usdc '0') would be the operator vouching that its
+ * flows are gap-free from `t` on; it is never emitted yet (otto/mamoru#438), so the net deposited stays partial.
  */
-export type FlowWire = { id: string; t: number; kind: 'in' | 'out' | 'gap'; usdc: string }
+export type FlowWire = { id: string; t: number; kind: 'in' | 'out' | 'gap' | 'cover'; usdc: string }
 
 const seconds = (iso: string): number | null => {
   const ms = Date.parse(iso)

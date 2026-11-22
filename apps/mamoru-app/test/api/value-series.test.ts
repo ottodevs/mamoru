@@ -73,6 +73,9 @@ function flow(db: ReturnType<typeof seed>, chain: number, key: string, id: strin
   db.raw.exec(`INSERT INTO account_flows (chain_id, account_key, flow_id, kind, t_s, usd, updated_at) VALUES (${chain}, '${key}', '${id}', '${kind}', ${Date.parse(at) / 1000}, ${usdc * USDC}, '${at}')`)
 }
 
+const cover = (db: ReturnType<typeof seed>, key = 'base-u1') =>
+  db.raw.exec(`INSERT INTO account_flows (chain_id, account_key, flow_id, kind, t_s, usd, updated_at) VALUES (8453, '${key}', 'cover:0', 'cover', 1, 0, 'x')`)
+
 describe('net deposited (otto/mamoru#380)', () => {
   test('each day carries the cumulative in minus out up to its end; the total is the net now', async () => {
     const db = seed()
@@ -84,6 +87,7 @@ describe('net deposited (otto/mamoru#380)', () => {
     flow(db, 8453, 'base-u1', 'in:0xb:1', 'in', '2026-11-05T23:59:59.000Z', 400)
     flow(db, 8453, 'base-u1', 'out:0xc', 'out', '2026-11-06T08:00:00.000Z', 300)
     flow(db, 8453, 'base-u2', 'in:0xd:0', 'in', '2026-11-04T09:00:00.000Z', 9999) // another owner
+    cover(db)
     const v = await loadValueSeries(db, 'u1', NOW)
     expect(v.points.map((p) => p.deposited)).toEqual([1000, 1400, 1100])
     expect(v.netDeposited).toEqual({ usd: 1100, status: 'complete', since: '2026-11-04' })
@@ -115,11 +119,21 @@ describe('net deposited (otto/mamoru#380)', () => {
     latest(ok, 8453, 'base-u1', '2026-11-06T17:50:00.000Z')
     flow(ok, 8453, 'base-u1', 'in:0xa:0', 'in', '2026-11-05T09:00:00.000Z', 100)
     flow(ok, 8453, 'base-u1', 'out:0xb', 'out', '2026-11-06T09:00:00.000Z', 110)
+    cover(ok)
     const v = await loadValueSeries(ok, 'u1', NOW)
     expect(v.points.map((p) => p.deposited)).toEqual([100, -10])
     expect(v.netDeposited).toEqual({ usd: -10, status: 'complete', since: '2026-11-05' })
     ok.raw.exec(`INSERT INTO account_flows (chain_id, account_key, flow_id, kind, t_s, usd, updated_at) VALUES (8453, 'base-u1', 'gap:deposits-cap', 'gap', 1, 0, 'x')`)
     expect((await loadValueSeries(ok, 'u1', NOW)).netDeposited.status).toBe('partial')
+  })
+
+  test('without the operator\'s cover row the net deposited is never complete', async () => {
+    const db = seed()
+    daily(db, '2026-11-05', 8453, 'base-u1', 100 * USDC)
+    flow(db, 8453, 'base-u1', 'in:0xa:0', 'in', '2026-11-05T01:00:00.000Z', 100)
+    expect((await loadValueSeries(db, 'u1', NOW)).netDeposited.status).toBe('partial')
+    cover(db)
+    expect((await loadValueSeries(db, 'u1', NOW)).netDeposited.status).toBe('complete')
   })
 
   test('Base and Monad flows of one owner are summed', async () => {
@@ -128,6 +142,7 @@ describe('net deposited (otto/mamoru#380)', () => {
     daily(db, '2026-11-05', 143, 'monad-u1', 50 * USDC)
     flow(db, 8453, 'base-u1', 'in:0xa:0', 'in', '2026-11-05T01:00:00.000Z', 100)
     flow(db, 143, 'monad-u1', 'in:0xb:0', 'in', '2026-11-05T02:00:00.000Z', 50)
+    cover(db)
     expect((await loadValueSeries(db, 'u1', NOW)).netDeposited).toEqual({ usd: 150, status: 'complete', since: '2026-11-05' })
   })
 })
