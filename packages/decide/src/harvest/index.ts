@@ -1,6 +1,7 @@
 import type { ReasonCode } from '@mamoru/domain'
 import { hasManageAny, type PolicyVersion } from '@mamoru/policy'
 import type { RegistryName } from '@mamoru/registry'
+import { depthOf } from '../depth/index.ts'
 import { convertKey, positionValue } from '../rerange/index.ts'
 import type { EnterSwapProposal, HarvestProposal, Observation, PoolObs, PositionObs } from '../types.ts'
 import { inSavings, opCostInSavings } from '../value.ts'
@@ -128,7 +129,17 @@ export function harvestSaleOf(obs: Observation, policy: PolicyVersion, still?: R
       continue
     }
     const pool = hit.pool
-    return { proposal: { kind: 'enter_swap', grant, pool: pool.name, tokenIn: token, tokenOut: savings, fee: pool.fee, amountIn: amount, harvestSale: true }, waits }
+    // otto/mamoru#416: no more than the pool takes at the policy's impact (depth sellRoom, as an idle sale and the chain
+    // exit): a thin pool gets the harvest in slices, one per review, instead of a sale the engine's quote check refuses
+    // (EHG_SWAP_IMPACT_OVER_LIMIT) review after review. Each slice is read again at the TWAP, so the next one waits for
+    // the pool to recover from the last. A slice not worth its op waits for depth.
+    const room = depthOf(obs, policy, pool, policy.range.widthTicksByPool?.[pool.name] ?? policy.range.widthTicks)?.sellRoom
+    const amountIn = room !== undefined && room < amount ? room : amount
+    if (amountIn < amount && inSavings(pool, token, amountIn, savings) * 10_000n <= cost * factor) {
+      waits.push({ bucket: hit.b.id, code: 'DECIDE_WAIT_DEPTH' })
+      continue
+    }
+    return { proposal: { kind: 'enter_swap', grant, pool: pool.name, tokenIn: token, tokenOut: savings, fee: pool.fee, amountIn, harvestSale: true }, waits }
   }
   return { proposal: null, waits }
 }

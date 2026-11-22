@@ -4,6 +4,7 @@ import { address, baseRegistry, entry } from '@mamoru/registry'
 import { sqrtRatioAtTick } from '@mamoru/uniswap-v3/quote'
 import { canonicalJson, decide, HARVEST_SALE_AGE_SECONDS, harvestSaleOf, inSavings, type Observation, type PoolObs, type PositionObs } from './index.ts'
 import { opCostInSavings } from './value.ts'
+import { depthOf } from './depth/index.ts'
 
 // otto/mamoru#107, spec 012 HRV-R1, R2, R7: the sale of harvested volatile, on the live v7 policy.
 const V7 = conservadorLiveV7
@@ -158,3 +159,33 @@ describe('spending room on V4 (spec 012 HRV-R7)', () => {
     expect(d.proposal).toMatchObject({ kind: 'enter_swap', harvestSale: true })
   })
 })
+
+// otto/mamoru#416: a thin pool (Monad's WMON/USDC near the price) takes the harvest in slices at the depth impact, instead
+// of one sale the engine's quote check refuses (EHG_SWAP_IMPACT_OVER_LIMIT) review after review.
+describe('harvest sale at the pool depth (#416)', () => {
+  const DEPTH = { ...V7, depth: { maxImpactBps: 30, maxShareBps: 500 } }
+  const withDepth = (liquidity: bigint | null) => POOLS.map((p) => (p.name === BTC_POOL ? { ...p, liquidity: liquidity ?? p.liquidity, twapLiquidity: liquidity } : p))
+  const harvested = btcWorth(COST * 1_000n)
+  const at = (liquidity: bigint | null) => obs({ pools: withDepth(liquidity), balances: { USDC: 0n, cbBTC: harvested }, harvested: { cbBTC: { amount: harvested, since: Number(NOW) - 60 } } })
+
+  test('a deep pool takes the whole harvest in one sale', () => {
+    expect(harvestSaleOf(at(10n ** 24n), DEPTH).proposal).toMatchObject({ amountIn: harvested, harvestSale: true })
+  })
+
+  test('a thin pool takes a slice: the sell room at the policy impact, the rest in later reviews', () => {
+    const o = at(10n ** 8n)
+    const room = depthOf(o, DEPTH, o.pools.find((p) => p.name === BTC_POOL)!, V7.range.widthTicksByPool?.[BTC_POOL] ?? V7.range.widthTicks)!.sellRoom
+    expect(room > 0n && room < harvested).toBe(true)
+    expect(inSavings(BTC, 'cbBTC', room, 'USDC') * 10_000n > COST * BigInt(V7.harvest.costFactorBps)).toBe(true)
+    expect(harvestSaleOf(o, DEPTH).proposal).toMatchObject({ amountIn: room, harvestSale: true })
+  })
+
+  test('a slice not worth its op, or no TWAP liquidity read, waits for depth and never takes the review', () => {
+    for (const o of [at(10n ** 5n), at(null)]) {
+      const sale = harvestSaleOf(o, DEPTH)
+      expect(sale.proposal).toBeNull()
+      expect(sale.waits).toContainEqual({ bucket: 'btc-usdc', code: 'DECIDE_WAIT_DEPTH' })
+    }
+  })
+})
+
