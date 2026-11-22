@@ -1,7 +1,7 @@
 // app.mamoru.lol/stats (spec 013 amendment A1, design approved by Ot and Brais on 6 Nov): every Mamoru account added
 // up, public, no session. Where the money is, what it earns, whether the return holds, then the accounts. A block whose
 // figures the API did not send (incomplete, stale or backed by fewer than 3 accounts) is not drawn.
-import type { StatsAprPoint, StatsSlice, StatsView } from '@mamoru/domain'
+import type { StatsView } from '@mamoru/domain'
 import { Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSession, useStats } from '../api/queries.ts'
@@ -60,8 +60,6 @@ export const statsCopy = {
   perDayTip: 'Fees and vault yield earned each UTC day, in US dollars.',
   byAsset: 'By asset',
   byAssetTip: 'Exposure to each token: every pool position split into its two tokens at today’s amounts; vaults hold USDC.',
-  byChain: 'By chain',
-  byChainTip: 'Value held on each chain.',
   apr: 'APR over time',
   aprTip: 'Each dot is one day: what a dollar working earned that day, as a yearly rate. The line is the 7-day average, which shows whether a rate holds.',
   accounts: 'Total accounts',
@@ -86,24 +84,9 @@ function Lab({ children, tip }: { children: ReactNode; tip: string }) {
   )
 }
 
-const PLACES = ['Stable vaults', 'Liquidity pools', 'Idle'] as const
-const PLACE_COLOUR: Record<(typeof PLACES)[number], string> = { 'Stable vaults': '#2f5d50', 'Liquidity pools': '#7a9a8c', Idle: '#bdb39f' }
-
-/** The API's places (stable vaults, stable and volatile pairs, idle) in the three the approved design shows. */
-export function placesOf(slices: StatsSlice[]): { name: (typeof PLACES)[number]; usd: number; pct: number }[] {
-  const sum = new Map<(typeof PLACES)[number], number>()
-  for (const s of slices) {
-    const k = s.key === 'Stable vaults' || s.key === 'Idle' ? s.key : 'Liquidity pools'
-    sum.set(k, (sum.get(k) ?? 0) + s.usd)
-  }
-  const total = [...sum.values()].reduce((a, v) => a + v, 0) || 1
-  return PLACES.filter((k) => sum.has(k)).map((k) => ({ name: k, usd: sum.get(k)!, pct: (sum.get(k)! / total) * 100 }))
-}
-
 function Hero({ v }: { v: StatsView }) {
   const dep = v.snapshots.totalDeposits
   const work = v.snapshots.moneyWorking
-  const places = v.distributions.byPlace ? placesOf(v.distributions.byPlace) : null
   if (!dep) return null
   return (
     <section className="sx-hero" aria-labelledby="sx-dep">
@@ -125,27 +108,6 @@ function Hero({ v }: { v: StatsView }) {
           </div>
         ) : null}
       </div>
-      {places ? (
-        <>
-          <div className="sx-alloc" role="img" aria-label={places.map((p) => `${p.name} ${usd(p.usd)}, ${pct(p.pct, 0)}`).join('; ')}>
-            {places.map((p, i) => (
-              <span key={p.name} style={{ flex: p.usd, background: PLACE_COLOUR[p.name], animationDelay: `${i * 60}ms` }} title={`${p.name}: ${usd(p.usd)}`} />
-            ))}
-          </div>
-          <ul className="sx-alloc-keys">
-            {places.map((p) => (
-              <li key={p.name}>
-                <span className="sw" style={{ background: PLACE_COLOUR[p.name] }} />
-                <span className="n">{p.name}</span>
-                <span className="v">
-                  {usd(p.usd)}
-                  <small>{pct(p.pct, 0)}</small>
-                </span>
-              </li>
-            ))}
-          </ul>
-        </>
-      ) : null}
     </section>
   )
 }
@@ -194,16 +156,9 @@ function Seg<T extends string | number>({ label, value, options, onChange }: { l
   )
 }
 
-type Chain = 'all' | 'base' | 'monad'
-
 function AprBlock({ apr, asOf }: { apr: NonNullable<StatsView['series']['apr']>; asOf: string | null }) {
-  const [chain, setChain] = useState<Chain>('all')
   const [range, setRange] = useState<number>(0)
-  const chains: { v: Chain; label: string }[] = [{ v: 'all', label: 'All' }]
-  if (apr.base?.length) chains.push({ v: 'base', label: 'Base' })
-  if (apr.monad?.length) chains.push({ v: 'monad', label: 'Monad' })
-  const all = (chain === 'all' ? apr.all : (apr[chain] ?? apr.all)) as StatsAprPoint[]
-  const rows = range ? all.slice(-range) : all
+  const rows = range ? apr.all.slice(-range) : apr.all
   if (!apr.all.length) return null
   const today = asOf?.slice(0, 10)
   return (
@@ -214,7 +169,6 @@ function AprBlock({ apr, asOf }: { apr: NonNullable<StatsView['series']['apr']>;
         tip={statsCopy.aprTip}
         side={
           <div className="sx-ctl">
-            {chains.length > 1 ? <Seg label="Chain" value={chain} options={chains} onChange={setChain} /> : null}
             <Seg
               label="Range"
               value={range}
@@ -264,7 +218,6 @@ export function StatsBody({ v }: { v: StatsView }) {
   const s = v.snapshots
   const d = v.distributions
   const series = v.series
-  const chainCount = d.byChain?.length ?? 0
   const tvl = series.totalDeposits
   const perDay = series.earnedPerDay
   return (
@@ -304,7 +257,7 @@ export function StatsBody({ v }: { v: StatsView }) {
           ) : null}
         </section>
       ) : null}
-      {d.byToken?.length || d.byChain?.length ? (
+      {d.byToken?.length ? (
         <section className="sx-two sx-holds">
           {d.byToken?.length ? (
             <Block id="sx-tok" title={statsCopy.byAsset} tip={statsCopy.byAssetTip}>
@@ -313,11 +266,6 @@ export function StatsBody({ v }: { v: StatsView }) {
                 centre={s.inStablecoins ? { value: pct(s.inStablecoins.value, 0), label: 'in stablecoins' } : { value: String(d.byToken.length), label: 'assets' }}
                 fmtUsd={usd}
               />
-            </Block>
-          ) : null}
-          {d.byChain?.length ? (
-            <Block id="sx-ch" title={statsCopy.byChain} tip={statsCopy.byChainTip}>
-              <Donut rows={d.byChain.map((x) => ({ name: x.key, usd: x.usd, pct: x.pct }))} centre={{ value: s.totalDeposits ? usd(s.totalDeposits.value) : String(chainCount), label: `on ${chainCount} chain${chainCount === 1 ? '' : 's'}` }} fmtUsd={usd} />
             </Block>
           ) : null}
         </section>
@@ -356,7 +304,6 @@ function StatsSkeleton() {
             <span className="sk sk-wv" />
           </div>
         </div>
-        <span className="sk sk-bar" />
       </section>
       <section className="sx-figs">
         {[0, 1, 2].map((i) => (
