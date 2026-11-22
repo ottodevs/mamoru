@@ -5,9 +5,8 @@
 // nothing (the account did not exist). The last point is also `partial` when a chain's latest read is older than
 // VALUE_STALE_MS. Each point also carries `deposited`, the owner's net deposited USDC at the end of that UTC day
 // (otto/mamoru#380: the flows of `account_flows`, in minus out, on every chain, as the baseline of "vs idle USDC"). It is
-// the difference `usd - deposited` the Portfolio charts. The flows are only as old as the operator kept them
-// (deposits.ts: one day of first backfill): `netDeposited.status` says `partial` when value exists before the first
-// known flow, `none` when no flow is known at all, so a reader shows "n/a" instead of a baseline that is wrong.
+// the difference `usd - deposited` the Portfolio charts. The flows are the RECORDED ones only (the operator keeps one
+// day of first backfill): `netDeposited.status` is always `partial` (or `none` with no flow); see applyFlows.
 // Intraday points from `account_worked_samples` are left out on purpose: those samples omit idle money
 // whenever positions exist, so a sum of them would understate the value. Pure D1 reads.
 import type { Db } from '../env.ts'
@@ -17,7 +16,7 @@ export const VALUE_STALE_MS = 30 * 60 * 1000
 
 export type ValuePoint = { day: string; usd: number; partial?: true; /** Net deposited USDC at the end of this UTC day; absent when no flow is known. */ deposited?: number }
 /** otto/mamoru#380: `usd` is the net deposited now (USDC sent minus withdrawn). `since`: the day of the first flow known. */
-export type NetDeposited = { usd: number; status: 'complete' | 'partial' | 'none'; since?: string }
+export type NetDeposited = { usd: number; status: 'partial' | 'none'; since?: string }
 export type ValueSeriesView = {
   /** Oldest latest read among the chains that have one (ISO), null before the first read. */
   asOf: string | null
@@ -66,7 +65,7 @@ export async function loadValueSeries(db: Db, userId: string, now: Date): Promis
     return { day, usd: usd(total), ...(partial ? { partial: true as const } : {}) }
   })
 
-  const netDeposited = applyFlows(points, await flowsOf(db, sleeves), firstDay)
+  const netDeposited = applyFlows(points, await flowsOf(db, sleeves))
 
   const reads = perChain.map((c) => c.readAt)
   const known = reads.filter((r): r is string => r !== null).sort()
@@ -75,7 +74,7 @@ export async function loadValueSeries(db: Db, userId: string, now: Date): Promis
   return { asOf: known[0] ?? null, points, chains: perChain.map((c) => c.chainId), netDeposited }
 }
 
-type Flow = { kind: 'in' | 'out' | 'gap' | 'cover'; t_s: number; usd: number; chain_id: number }
+type Flow = { kind: 'in' | 'out' | 'gap'; t_s: number; usd: number; chain_id: number }
 
 async function flowsOf(db: Db, sleeves: { chain_id: number; account_key: string }[]): Promise<Flow[]> {
   const out: Flow[] = []
@@ -96,14 +95,13 @@ const signedOf = (f: Flow) => (f.kind === 'in' ? f.usd : f.kind === 'out' ? -f.u
 
 /**
  * Sets `deposited` on every point (cumulative in - out up to the end of its UTC day, signed: more out than in is a
- * negative baseline, the gains taken out) and says how far the flows can be trusted. `complete` needs evidence, not
- * only a first flow: the operator's `cover` row for every chain with value, no operator `gap` row, no value before the first flow, and the first day's value explained by what
- * was deposited by then (a deposit the operator never kept would leave the first day's value far above it).
+ * negative baseline, the gains taken out). The net deposited is the RECORDED flows only and is always `partial`: the
+ * operator keeps deposits for one day on a first look and 200 rows, so older money may be missing. What would make it
+ * complete (per-chain coverage, gaps, a first-day check) is otto/mamoru#438; until then a reader labels it as recorded.
  */
-function applyFlows(points: ValuePoint[], flows: Flow[], firstDayOf: Map<number, string>): NetDeposited {
+function applyFlows(points: ValuePoint[], flows: Flow[]): NetDeposited {
   const money = flows.filter((f) => f.kind === 'in' || f.kind === 'out')
   if (!money.length) return { usd: 0, status: 'none' }
-  const sinceDay = new Date(money[0]!.t_s * 1000).toISOString().slice(0, 10)
   let net = 0
   let i = 0
   for (const p of points) {
@@ -112,13 +110,5 @@ function applyFlows(points: ValuePoint[], flows: Flow[], firstDayOf: Map<number,
     p.deposited = usd(net)
   }
   for (; i < money.length; i++) net += signedOf(money[i]!)
-  const first = points[0]
-  // Value before the first known flow, or a gap the operator named: the money came in where the operator did not see it.
-  const unexplained = first !== undefined && first.day < sinceDay
-  // `complete` also needs the operator's word that its flows are gap-free from before the first value (a `cover` row,
-  // otto/mamoru#438; not sent yet, so today every account is partial and a reader shows n/a).
-  // Every chain that has value needs its own cover row from before that chain's first value.
-  const covered = firstDayOf.size > 0 && [...firstDayOf].every(([chain, day]) => flows.some((f) => f.kind === 'cover' && f.chain_id === chain && f.t_s <= Date.parse(`${day}T23:59:59.000Z`) / 1000))
-  const partial = unexplained || !covered || flows.some((f) => f.kind === 'gap')
-  return { usd: usd(net), status: partial ? 'partial' : 'complete', since: sinceDay }
+  return { usd: usd(net), status: 'partial', since: new Date(money[0]!.t_s * 1000).toISOString().slice(0, 10) }
 }

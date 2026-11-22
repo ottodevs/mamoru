@@ -9,15 +9,15 @@
 -- the reader subtracts the whole fee owed from the net once.
 -- usd is raw USDC (6 decimals), positive; kind says the direction. kind 'gap' (usd 0) is not money: the operator says it
 -- cannot vouch for the flows (a deposit list at its cap, a withdrawal whose receipt was given up on), so the reader
--- marks the net deposited partial. kind 'cover' (usd 0) is the operator vouching that its flows are gap-free from t_s on:
--- without one the net deposited is never 'complete' (otto/mamoru#438: the operator side, not sent yet).
+-- says so. The reader treats the net deposited as the recorded flows only (always partial); what makes it complete is
+-- otto/mamoru#438.
 CREATE TABLE account_flows (
   chain_id INTEGER NOT NULL,
   account_key TEXT NOT NULL,
   flow_id TEXT NOT NULL,          -- 'in:<tx>:<logIndex>', 'out:<tx>' or 'gap:<why>'
-  kind TEXT NOT NULL CHECK (kind IN ('in', 'out', 'gap', 'cover')),
+  kind TEXT NOT NULL CHECK (kind IN ('in', 'out', 'gap')),
   t_s INTEGER NOT NULL,
-  usd INTEGER NOT NULL CHECK (usd > 0 OR (kind IN ('gap', 'cover') AND usd = 0)),
+  usd INTEGER NOT NULL CHECK (usd > 0 OR (kind = 'gap' AND usd = 0)),
   updated_at TEXT NOT NULL,
   PRIMARY KEY (chain_id, account_key, flow_id)
 ) WITHOUT ROWID;
