@@ -732,22 +732,23 @@ export function movedTo(calls: readonly { data: Hex }[]): Address | undefined {
 
 /** otto/mamoru#293: what a migrate-v4 prepare answers besides the summary: the step, the destination, and the whole Safe tx. */
 function migrateFields(tx: SafeTx, step: 0 | 1, moveTo: Address | undefined): Partial<OwnerTxToSign> {
+  return { step, ...(moveTo ? { moveTo } : {}), safeTx: wireSafeTx(tx) }
+}
+
+/** The Safe tx as the Worker reads it (bigints as decimal strings): a migration's and, otto/mamoru#430, a Stop's. */
+function wireSafeTx(tx: SafeTx): NonNullable<OwnerTxToSign['safeTx']> {
   const zero = '0x0000000000000000000000000000000000000000' as const
   return {
-    step,
-    ...(moveTo ? { moveTo } : {}),
-    safeTx: {
-      to: tx.to,
-      value: tx.value.toString(),
-      data: tx.data,
-      operation: tx.operation,
-      safeTxGas: (tx.refund?.safeTxGas ?? 0n).toString(),
-      baseGas: (tx.refund?.baseGas ?? 0n).toString(),
-      gasPrice: (tx.refund?.gasPrice ?? 0n).toString(),
-      gasToken: zero,
-      refundReceiver: tx.refund?.refundReceiver ?? zero,
-      nonce: tx.nonce.toString(),
-    },
+    to: tx.to,
+    value: tx.value.toString(),
+    data: tx.data,
+    operation: tx.operation,
+    safeTxGas: (tx.refund?.safeTxGas ?? 0n).toString(),
+    baseGas: (tx.refund?.baseGas ?? 0n).toString(),
+    gasPrice: (tx.refund?.gasPrice ?? 0n).toString(),
+    gasToken: zero,
+    refundReceiver: tx.refund?.refundReceiver ?? zero,
+    nonce: tx.nonce.toString(),
   }
 }
 
@@ -2855,7 +2856,7 @@ export class Operator {
     // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
     const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}), ...(kind === 'activate' && extra.built ? { input: extra.built.input } : {}), ...(extra.returnHome ? { returnHome: extra.returnHome.input } : {}) }
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}), ...(kind === 'activate' && extra.built ? { input: extra.built.input } : {}), ...(extra.returnHome ? { returnHome: extra.returnHome.input } : {}), ...(kind === 'stop' ? { safeTx: wireSafeTx(tx) } : {}) }
   }
 
   /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */

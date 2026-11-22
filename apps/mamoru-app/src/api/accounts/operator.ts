@@ -1,7 +1,8 @@
 import { Hono, type Context } from 'hono'
-import type { AccountContext, MigrateV4Input, RemoteSpec, ReturnHomeInput } from '@mamoru/domain'
+import type { AccountContext, Address, MigrateV4Input, RemoteSpec, ReturnHomeInput } from '@mamoru/domain'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
 import { buildReturnHome } from '@mamoru/account/return-home'
+import { whyNotStop } from '@mamoru/account/stop-check'
 import { registryFor, type Registry } from '@mamoru/registry'
 import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
@@ -141,6 +142,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
    */
   const checkBuilt = async (c: Context<AppEnv>, row: AccountRow, path: string, text: string, registryOf: (chainId: number) => Registry = registryFor): Promise<Response | null> => {
     if (path.endsWith('/return-home/prepare')) return checkReturnHome(c, row, text, registryOf)
+    if (path.endsWith('/stop/prepare')) return checkStop(c, row, text, registryOf)
     const sibling = path.endsWith('/ethereum-sibling/prepare')
     const migrate = path.endsWith('/migrate-v4/prepare')
     if (!sibling && !migrate && !path.endsWith('/activate/prepare')) return null
@@ -220,6 +222,27 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
       return refusedBuild(c, row, `build: ${e instanceof Error ? e.message : String(e)}`)
     }
     return hash.toLowerCase() === (body.safeTxHash ?? '').toLowerCase() ? null : refusedBuild(c, row, 'hash')
+  }
+  /**
+   * otto/mamoru#430: a Stop is planned from what the operator reads at that block, so it cannot be rebuilt from inputs. It
+   * is passed on only when its Safe tx (`safeTx`) is this row's own Safe on its own chain, hashes to what the owner is asked
+   * to sign, and makes only the calls a Stop makes, every one paying the Safe itself (whyNotStop). A Stop without `safeTx`
+   * (an operator older than this check) is refused too: 502 BUILD_MISMATCH, nothing signed.
+   */
+  const checkStop = async (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Promise<Response | null> => {
+    let body: Parameters<typeof whyNotStop>[2]
+    try {
+      body = JSON.parse(text)
+    } catch {
+      return refusedBuild(c, row, 'not JSON')
+    }
+    let why: string | null
+    try {
+      why = whyNotStop(row.address as Address, row.chain_id, body, registryOf(row.chain_id))
+    } catch (e) {
+      why = `stop: ${e instanceof Error ? e.message : String(e)}`
+    }
+    return why ? refusedBuild(c, row, `stop ${why}`) : null
   }
   const refusedBuild = (c: Context<AppEnv>, row: AccountRow, why: string) => {
     console.error(`one-authorization prepare refused for ${row.account_key}: ${why}`)

@@ -382,7 +382,7 @@ export type OwnerTxToSign = {
   // when the prepared calls move funds, the Safe they send them to (read from the built calls). Submit refuses another step.
   step?: 0 | 1
   moveTo?: Hex0x
-  // otto/mamoru#295 (migrate-v4): the Safe transaction itself, so the Worker can recompute `safeTxHash` from it, check the Safe
+  // otto/mamoru#295 (migrate-v4) and #430 (stop): the Safe transaction itself, so the Worker can recompute `safeTxHash` from it, check the Safe
   // and the destination, and read the calldata before the owner is asked to sign. Bigints as decimal strings.
   safeTx?: { to: Hex0x; value: string; data: Hex0x; operation: 0 | 1; safeTxGas: string; baseGas: string; gasPrice: string; gasToken: Hex0x; refundReceiver: Hex0x; nonce: string }
   // otto/mamoru#293 (migrate-v4): the exact input `buildMigrateV4` built `safeTx` from.
