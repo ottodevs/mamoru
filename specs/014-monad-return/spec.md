@@ -4,7 +4,8 @@ Ticket: otto/mamoru#428 (milestone "Feedback Monad"). Related: #415 (entry pause
 no signature, done), #410 (depth check), #431 (v8 weights), spec 002 (multichain), spec 010 (one authorization, the
 "What's new" flow this reuses), #333 / #361 (one authorization north star), #356 / #322 (V4 blockers), #116 (one prompt
 for every chain).
-Status: draft r2, 22 Nov 2026. r1 (21 Nov) is kept below where it still holds. r2 adds: what is built since r1, why the
+Status: draft r2, 22 Nov 2026. v8 weights approved by Ot (22 Nov); harvested yield goes to a savings layer in the
+Stable vault, outside the targets (#413). r1 (21 Nov) is kept below where it still holds. r2 adds: what is built since r1, why the
 approval is two passkey prompts and not one, Monad first, the depth-held Safes, the screen copy and the v8 summary for
 the owners' OK. Companion files: `plan.md` (operator sequence, idempotency), `tasks.md`, `scenarios.md`, `threats.md`.
 
@@ -169,8 +170,7 @@ Withdrawals stay as they are, one signature each.
 
 ## Target policy `conservador-live-v8`
 
-`conservador-live-v7` without the Monad bucket. Weights of 22 Nov (#431), **needs the owners' OK** before `base_v8` is
-turned on:
+`conservador-live-v7` without the Monad bucket. Weights of 22 Nov (#431), **approved by Ot on 22 Nov**:
 
 | Bucket | Share | Pools / vaults | Grant |
 |---|---|---|---|
@@ -183,7 +183,7 @@ turned on:
 - Every grant is on MamoruActionPolicyV3 alone, so the approval stays one owner tx.
 - An account from v7 holds 35 % in WETH/USDC: 10 points over target, past the 5-point drift band (`DRIFT_BPS`), so the
   usual reduce brings it toward 25 %, one op per review, and USDC/cbBTC takes that money.
-- Alternative not chosen: v5's 50 % USDC/USDT, 40 % cbBTC, 10 % WETH (one constant; sells about 25 % of each account
+- Alternative not chosen (Ot chose 50 / 25 / 25): v5's 50 % USDC/USDT, 40 % cbBTC, 10 % WETH (one constant; sells about 25 % of each account
   out of WETH/USDC).
 - The move waits for any bridge to Monad still in flight (`BRIDGE_IN_FLIGHT`).
 
@@ -279,11 +279,11 @@ Nothing below ships until both say yes (RH-09). Text is what the user reads; it 
 network" because two OS prompts appear (section "Why two passkey prompts"). Owners decide between this and "One
 approval, confirmed twice with your passkey".
 
-**C6. Weights.** 50 / 25 / 25 (above) or v5's 50 / 40 / 10.
+**C6. Weights.** Decided: 50 / 25 / 25 (Ot, 22 Nov). The percentages in C2 and C4 follow them; the wording still needs both owners' OK.
 
 ## Open questions (for the owners)
 
-1. Weights (C6).
+1. ~~Weights~~ decided (C6).
 2. Wording of the two prompts (C5).
 3. Accounts that never sign step A: the Home card only (no push channel today), or also an email if the account has one?
 4. After the no-Monad rule ends: v8 stays the default, and a Monad policy comes back as an opt-in?

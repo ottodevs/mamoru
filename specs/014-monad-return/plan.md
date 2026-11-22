@@ -70,6 +70,9 @@ not wait for step A to confirm before preparing step B.
   USDC/cbBTC is entered as today's V3 entries: swap half to cbBTC within the band, mint in range. A v7 account that
   returned before step B keeps the USDC idle until v8 is signed (the v7 Monad bucket is entry-paused; v7's cbBTC bucket
   is exit only).
+- **Harvests (#413):** harvested yield goes to a savings layer in the Stable vault, outside the bucket targets. The
+  placement above counts only principal (the returned USDC and what the account already holds); it never assumes a
+  harvest re-enters a pool, and the savings layer is not part of any bucket's gap or share cap.
 - **WETH/USDC drift:** from v7's 35 % to v8's 25 % by the usual reduce, one op per review, past `DRIFT_BPS`.
 
 ## Idempotency and resumption
