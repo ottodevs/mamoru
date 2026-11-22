@@ -5,7 +5,7 @@ import { address, baseRegistry, erc20Abi, erc4626Abi, monadRegistry, multiSendCa
 import { uniswapV3 } from '@mamoru/uniswap-v3'
 import { ownerSafeTx, stopBatch } from '../live/index.ts'
 import { safeTxTypedData, type MultiSendCall, type SafeTx } from '../safe/index.ts'
-import { readStop, STOP_MAX_BASE_GAS, STOP_MIN_OUT_BPS, whyNotStop, whyNotStopBounds, type StopNeeds } from './index.ts'
+import { readStop, STOP_MAX_BASE_GAS, STOP_SAFE_TX_GAS, STOP_MIN_OUT_BPS, whyNotStop, whyNotStopBounds, type StopNeeds } from './index.ts'
 
 // otto/mamoru#430: the Worker reads a Stop's Safe tx and passes it only when every call is one a Stop makes, paying the Safe.
 
@@ -63,7 +63,7 @@ describe('whyNotStop (otto/mamoru#430)', () => {
   })
 
   test('a Stop the Safe pays for itself, within the base gas the operator charges: admitted', () => {
-    const tx = { ...ownerSafeTx(stopCalls(baseRegistry), 4n, baseRegistry), refund: { safeTxGas: 900_000n, baseGas: STOP_MAX_BASE_GAS, gasPrice: 20_000_000n, refundReceiver: RELAYER } }
+    const tx = { ...ownerSafeTx(stopCalls(baseRegistry), 4n, baseRegistry), refund: { safeTxGas: STOP_SAFE_TX_GAS, baseGas: STOP_MAX_BASE_GAS, gasPrice: 20_000_000n, refundReceiver: RELAYER } }
     expect(whyNotStop(SAFE, 8453, offer(tx), baseRegistry)).toBeNull()
   })
 
@@ -110,7 +110,7 @@ describe('whyNotStop (otto/mamoru#430)', () => {
   })
 
   test('a refund over the base gas the operator charges: refused', () => {
-    const tx = { ...ownerSafeTx(stopCalls(baseRegistry), 4n, baseRegistry), refund: { safeTxGas: 900_000n, baseGas: STOP_MAX_BASE_GAS + 1n, gasPrice: 20_000_000n, refundReceiver: RELAYER } }
+    const tx = { ...ownerSafeTx(stopCalls(baseRegistry), 4n, baseRegistry), refund: { safeTxGas: STOP_SAFE_TX_GAS, baseGas: STOP_MAX_BASE_GAS + 1n, gasPrice: 20_000_000n, refundReceiver: RELAYER } }
     expect(whyNotStop(SAFE, 8453, offer(tx), baseRegistry)).toBe('refund')
   })
 
@@ -132,13 +132,13 @@ describe('whyNotStop (otto/mamoru#430)', () => {
     expect(whyNotStop(SAFE, 8453, batch([...stopCalls(baseRegistry), swap]), baseRegistry)).toContain('swap pool')
   })
 
-  test('a refund that forwards no gas to the calls (they fail, the refund is paid): refused', () => {
-    const tx = { ...ownerSafeTx(stopCalls(baseRegistry), 4n, baseRegistry), refund: { safeTxGas: 0n, baseGas: 100_000n, gasPrice: 20_000_000n, refundReceiver: RELAYER } }
+  test.each([0n, 1n, STOP_SAFE_TX_GAS - 1n])('a refund that forwards %p gas to the calls (they run out, the refund is paid): refused', (safeTxGas) => {
+    const tx = { ...ownerSafeTx(stopCalls(baseRegistry), 4n, baseRegistry), refund: { safeTxGas, baseGas: 100_000n, gasPrice: 20_000_000n, refundReceiver: RELAYER } }
     expect(whyNotStop(SAFE, 8453, offer(tx), baseRegistry)).toBe('refund')
   })
 
   test('readStop names what the Worker must read: every swap and a refund gas price', () => {
-    const tx = { ...ownerSafeTx(stopCalls(baseRegistry), 4n, baseRegistry), refund: { safeTxGas: 900_000n, baseGas: 100_000n, gasPrice: 20_000_000n, refundReceiver: RELAYER } }
+    const tx = { ...ownerSafeTx(stopCalls(baseRegistry), 4n, baseRegistry), refund: { safeTxGas: STOP_SAFE_TX_GAS, baseGas: 100_000n, gasPrice: 20_000_000n, refundReceiver: RELAYER } }
     const r = readStop(SAFE, 8453, offer(tx), baseRegistry) as StopNeeds
     expect(r.swaps).toEqual([{ tokenIn: address('cbBTC', baseRegistry), tokenOut: usdc, fee: 500, amountIn: 50_000n, amountOutMinimum: 1n }])
     expect(r.refundGasPrice).toBe(20_000_000n)

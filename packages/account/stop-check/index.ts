@@ -26,8 +26,11 @@ import type { WireSafeTx } from '../one-auth/index.ts'
  * base gas plus a deploy, 120k + 500k). A larger baseGas would pay the relayer for gas it never spent.
  */
 export const STOP_MAX_BASE_GAS = 620_000n
-/** The gas a Safe-paid Stop may forward to its calls: the operator's OWNER_TX_GAS. */
-export const STOP_MAX_SAFE_TX_GAS = 4_000_000n
+/**
+ * The gas a Safe-paid Stop forwards to its calls: exactly the operator's OWNER_TX_GAS. Safe 1.4.1 pays the refund even
+ * when the calls fail, so any smaller budget would let them run out of gas, the nonce spent and nothing revoked.
+ */
+export const STOP_SAFE_TX_GAS = 4_000_000n
 /** A Safe-paid Stop's gas price, at most this many times the chain's when the Worker checks it (the operator asks twice). */
 export const STOP_MAX_GAS_PRICE_TIMES = 3n
 /**
@@ -159,8 +162,8 @@ export function readStop(safe: Address, chainId: number, body: { safe?: string; 
     const baseGas = dec(w.baseGas, 'baseGas')
     const gasPrice = dec(w.gasPrice, 'gasPrice')
     const refunds = gasPrice !== 0n
-    // A refund forwards exactly safeTxGas to the calls: 0 there would let them fail and the refund still be paid.
-    const refundOk = safeTxGas > 0n && safeTxGas <= STOP_MAX_SAFE_TX_GAS && baseGas <= STOP_MAX_BASE_GAS && !isAddressEqual(w.refundReceiver, ZERO)
+    // A refund forwards exactly safeTxGas to the calls (STOP_SAFE_TX_GAS: never a budget they could run out of).
+    const refundOk = safeTxGas === STOP_SAFE_TX_GAS && baseGas <= STOP_MAX_BASE_GAS && !isAddressEqual(w.refundReceiver, ZERO)
     if (refunds ? !refundOk : safeTxGas !== 0n || baseGas !== 0n || !isAddressEqual(w.refundReceiver, ZERO)) return { why: 'refund' }
     tx = { to: getAddress(w.to), value, data: w.data, operation: w.operation, nonce: dec(w.nonce, 'nonce'), ...(refunds ? { refund: { safeTxGas, baseGas, gasPrice, refundReceiver: getAddress(w.refundReceiver) } } : {}) }
     if (w.operation === 1) {

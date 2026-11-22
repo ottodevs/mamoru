@@ -32,6 +32,7 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
+import { STOP_SAFE_TX_GAS } from '@mamoru/account/stop-check'
 import { buildReturnHome, RETURN_HOME_DOMAIN, RETURN_HOME_FINALITY, returnReleaseId, TOKEN_MESSENGER_V2 as RETURN_TOKEN_MESSENGER } from '@mamoru/account/return-home'
 import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
@@ -2895,7 +2896,8 @@ export class Operator {
   }
 
   private gasOf(kind: OwnerKind | SponsoredKind): bigint {
-    return kind === 'renew' ? RENEW_TX_GAS : OWNER_TX_GAS
+    // otto/mamoru#430: a Safe-paid Stop forwards exactly the budget the Worker's check admits.
+    return kind === 'renew' ? RENEW_TX_GAS : kind === 'stop' ? STOP_SAFE_TX_GAS : OWNER_TX_GAS
   }
 
   /**
