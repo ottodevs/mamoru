@@ -84,8 +84,11 @@ export class BudgetBook {
     return Object.fromEntries(this.periods)
   }
 
-  /** One request to the provider labelled `label`. True when it crossed an alert line (the caller saves at once). */
-  record(label: string, method: string, now: number = Date.now()): boolean {
+  /**
+   * One request to the provider labelled `label`. When it crosses an alert line, the mark is set and `save` runs before
+   * the [alert] line is written: a restart after the page reloads the mark and never pages again for that line.
+   */
+  record(label: string, method: string, now: number = Date.now(), save: () => void = () => {}): boolean {
     const domain = domainOfLabel(label)
     const p = this.period(domain, now)
     if (!p) return false
@@ -95,6 +98,7 @@ export class BudgetBook {
     const crossed = BUDGET_ALERTS.filter((f) => p.units >= f * budget && p.alerted < f).at(-1)
     if (crossed === undefined) return false
     p.alerted = crossed
+    save()
     const forecast = this.forecast(domain, p, budget, now)
     const reset = nextReset(domain, now, this.resetDays)
     // One journal line, under the redactor's length cap: the forecast and the reset must not be cut off.

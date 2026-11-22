@@ -414,9 +414,8 @@ export class RpcMetrics {
       c.requests++
       c.cuEstimate += cu
     }
-    // An alert line crossed is saved at once: a restart must not page again for it.
-    if (this.budget.record(provider, method, now)) this.persist(now)
-    else this.maybePersist(now)
+    // An alert line crossed is saved before it is written: a restart must not page again for it.
+    if (!this.budget.record(provider, method, now, () => this.persist(now))) this.maybePersist(now)
   }
 
   recordError(provider: string, method: string, cls: ErrorClass, now: number = Date.now()): void {

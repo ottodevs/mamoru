@@ -84,6 +84,11 @@ describe('weighted read spread (otto/mamoru#420)', () => {
       w.calls.length = 0
       await rpc(proxy.url, 'eth_call', [{ to: ADDR, data: '0x' }, '0x64'])
       expect(w.calls.map((c) => c.who)).toEqual(['B'])
+      // Its guard simulation, pinned to the same head, goes to B as well: one provider's view for the whole decision.
+      w.calls.length = 0
+      expect((await rpc(proxy.url, 'eth_simulateV1', [{ blockStateCalls: [] }, '0x64'])).result).toBe('0xbb')
+      expect((await rpc(proxy.url, 'eth_estimateGas', [{ to: ADDR }, '0x64'])).result).toBe('0xbb')
+      expect(w.calls.map((c) => c.who)).toEqual(['B', 'B'])
       down.add(B)
       w.calls.length = 0
       expect((await rpc(proxy.url, 'eth_call', [{ to: ADDR, data: '0x' }, '0x64'])).result).toBe('0xaa')
@@ -154,10 +159,12 @@ describe('weighted read spread (otto/mamoru#420)', () => {
     }
   })
 
-  test('reads not pinned to a block keep the configured order; sends keep theirs too', async () => {
+  test('reads not pinned to a block keep the configured order, even with the upstream in a backoff; sends keep theirs too', async () => {
     const w = world({ [A]: 100, [B]: 100 })
-    const proxy = startRpcProxy(A, { fetch: w.fetch, trusted: [B], fallbacks: [PUBLIC], logRanges: {}, headLag: 0n, quota: new QuotaBook(), random: draws([0.99]) })
+    const quota = new QuotaBook()
+    const proxy = startRpcProxy(A, { fetch: w.fetch, trusted: [B], fallbacks: [PUBLIC], logRanges: {}, headLag: 0n, quota, random: draws([0.99]) })
     try {
+      quota.backoff(A, 'quiknode.pro', 'failing')
       await rpc(proxy.url, 'eth_getTransactionCount', [ADDR, 'pending'])
       await rpc(proxy.url, 'eth_getTransactionReceipt', [`0x${'22'.repeat(32)}`])
       await rpc(proxy.url, 'eth_sendRawTransaction', ['0x02'])
@@ -223,6 +230,42 @@ describe('weighted read spread (otto/mamoru#420)', () => {
       w.calls.length = 0
       // B cooling: every draw starts at A now.
       for (let i = 0; i < 2; i++) await rpc(proxy.url, 'eth_call', [{ to: ADDR, data: '0x' }, '0x60'])
+      expect(w.calls.map((c) => c.who)).toEqual(['A', 'A'])
+    } finally {
+      proxy.stop()
+    }
+  })
+
+  test('a spent public fallback due for its recheck never jumps ahead of the upstream for a send', async () => {
+    const quota = new QuotaBook(undefined, 0)
+    const w = world({ [A]: 100, [B]: 100 })
+    const proxy = startRpcProxy(A, { fetch: w.fetch, trusted: [B], fallbacks: [PUBLIC], logRanges: {}, headLag: 0n, quota })
+    try {
+      quota.mark(PUBLIC, 'publicnode.com', 'quota exceeded', Date.now() + 86_400_000)
+      await Bun.sleep(2)
+      await rpc(proxy.url, 'eth_sendRawTransaction', ['0x02'])
+      expect(w.calls.map((c) => c.who)).toEqual(['A'])
+    } finally {
+      proxy.stop()
+    }
+  })
+
+  test('a provider that answers it does not have a block it showed is put back under it (a reorg, a lagging node)', async () => {
+    const tipOf: Record<string, number> = { [A]: 100, [B]: 100 }
+    const w = world(tipOf)
+    const proxy = startRpcProxy(A, { fetch: w.fetch, trusted: [B], fallbacks: [], logRanges: {}, headLag: 0n, quota: new QuotaBook(), random: draws([0.9, 0.1]) })
+    try {
+      // Head 100 from B first, then from A.
+      await rpc(proxy.url, 'eth_blockNumber')
+      await rpc(proxy.url, 'eth_blockNumber')
+      // B rolls back to 98: its read at 100 says header not found.
+      tipOf[B] = 98
+      w.calls.length = 0
+      expect((await rpc(proxy.url, 'eth_call', [{ to: ADDR, data: '0x' }, '0x64'])).error?.message).toBe('header not found')
+      expect(w.calls.map((c) => c.who)).toEqual(['B'])
+      // From now on reads at 100 start at A, the one provider that still has the block.
+      w.calls.length = 0
+      for (let i = 0; i < 2; i++) expect((await rpc(proxy.url, 'eth_call', [{ to: ADDR, data: '0x' }, '0x64'])).result).toBe('0xaa')
       expect(w.calls.map((c) => c.who)).toEqual(['A', 'A'])
     } finally {
       proxy.stop()

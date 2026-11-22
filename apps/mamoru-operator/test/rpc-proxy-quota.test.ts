@@ -260,3 +260,56 @@ describe('quota answers and resets (otto/mamoru#418)', () => {
     }
   })
 })
+
+describe('eth_getLogs with every provider spent (otto/mamoru#418, review)', () => {
+  test('the minute probe asks one provider once; the next request in the minute asks none', async () => {
+    const quota = new QuotaBook()
+    const calls: string[] = []
+    const fetch = async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { id: number; method: string }
+      calls.push(`${new URL(url).hostname} ${body.method}`)
+      if (body.method === 'eth_blockNumber') return Response.json({ jsonrpc: '2.0', id: body.id, result: '0x100' })
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, error: SPENT }), { status: 429 })
+    }
+    const PUB = 'https://base-rpc.publicnode.com'
+    const proxy = startRpcProxy(ALCHEMY, { fetch, trusted: [QUICKNODE], fallbacks: [PUB], logRanges: {}, chunkLogs: false, trustedLogsOnly: true, quota, headLag: 0n })
+    const logs = () => fetch2(proxy.url, { jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ fromBlock: '0x10', toBlock: '0x15' }] })
+    try {
+      quota.mark(ALCHEMY, 'alchemy.com', 'Monthly capacity limit exceeded', Date.now() + 86_400_000)
+      quota.mark(QUICKNODE, 'quiknode.pro', 'Monthly capacity limit exceeded', Date.now() + 86_400_000)
+      calls.length = 0
+      const first = await logs()
+      expect(first.error).toBeDefined()
+      // One provider, one request: no second pass, and no rate retry of a spent plan.
+      expect(calls).toEqual(['base-mainnet.g.alchemy.com eth_getLogs'])
+      calls.length = 0
+      const second = await logs()
+      expect(second.error?.message).toMatch(/^every provider for this call is out of quota until /)
+      expect(calls).toEqual([])
+    } finally {
+      proxy.stop()
+    }
+  })
+})
+
+async function fetch2(url: string, body: unknown): Promise<any> {
+  return (await fetch(url, { method: 'POST', body: JSON.stringify(body) })).json()
+}
+
+describe('alert marks are saved before the page (review)', () => {
+  test('quota: the file holds the mark when the [alert] line is written', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'quota-order-'))
+    const real = console.error
+    let onDisk: string | null = null
+    console.error = (...a: unknown[]) => {
+      if (String(a[0]).startsWith('[alert]')) onDisk = readFileSync(join(dir, 'rpc-quota.json'), 'utf8')
+    }
+    try {
+      new QuotaBook(dir).mark(ALCHEMY, 'alchemy.com', 'Monthly capacity limit exceeded', Date.now() + 86_400_000)
+    } finally {
+      console.error = real
+    }
+    expect(onDisk).not.toBeNull()
+    expect(Object.keys(JSON.parse(onDisk!))).toHaveLength(1)
+  })
+})

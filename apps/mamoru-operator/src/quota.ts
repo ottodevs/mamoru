@@ -180,8 +180,9 @@ export class QuotaBook {
     const until = Math.max(resetAt, now + QUOTA_PROBE_MS)
     this.entries.set(k, { label, since: was?.since ?? now, markedAt: now, until, probeAt: Math.min(until, now + this.recheckMs) })
     this.cool.delete(k)
-    if (!was) logErr('[alert]', `RPC provider ${label} out of quota until ${new Date(until).toISOString()} (its reset), asked again once a day: ${words}`)
+    // Saved before the page: a restart reloads the mark and does not page again.
     this.save()
+    if (!was) logErr('[alert]', `RPC provider ${label} out of quota until ${new Date(until).toISOString()} (its reset), asked again once a day: ${words}`)
   }
 
   /** A burst limit or a failure (#420): out of the read spread for a few seconds. A spent quota is not touched. */

@@ -476,6 +476,14 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const v = BigInt(n)
     if ((tips.get(url) ?? -1n) < v) tips.set(url, v)
   }
+  /**
+   * A provider that answers a read pinned to block `at` as one that does not have it ("header not found", a null block):
+   * after a reorg or behind a load balancer, its tip is put back under `at`, so the next reads pinned there start elsewhere.
+   */
+  const unseen = (url: string, at: bigint, method: string, json: any) => {
+    const missing = /header not found|block not found|unknown block|missing trie node|block .*not (found|available)/i.test(String(json?.error?.message ?? '')) || (method === 'eth_getBlockByNumber' && json && 'result' in json && json.result === null)
+    if (missing && (tips.get(url) ?? -1n) >= at) tips.set(url, at - 1n)
+  }
   const logRanges = opts.logRanges ?? logRangesFromEnv()
   // The upstream keeps its setting (Alchemy or MAMORU_LOG_RANGE: chunks of maxLogRange); every other provider has its own range.
   const logProviders = providers.map((url, i) => ({ url, logRange: i === 0 && chunkLogs ? maxLogRange : logRangeOf(url, logRanges) }))
@@ -511,7 +519,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const w = base.map((u) => (quota.cooling(u) || (at !== null && (tips.get(u) ?? -1n) < at) ? 0 : weightOf(u)))
     const sticky = at === null ? undefined : headSource.get(String(at))
     const s = sticky === undefined ? -1 : base.indexOf(sticky)
-    if (s >= 0 && !quota.cooling(sticky!)) return [sticky!, ...base.filter((_, j) => j !== s && w[j]! > 0), ...base.filter((_, j) => j !== s && w[j]! <= 0)]
+    // Still has the block (not put back under it by a "header not found" since) and not cooling.
+    if (s >= 0 && !quota.cooling(sticky!) && (tips.get(sticky!) ?? -1n) >= at!) return [sticky!, ...base.filter((_, j) => j !== s && w[j]! > 0), ...base.filter((_, j) => j !== s && w[j]! <= 0)]
     const total = w.reduce((a, b) => a + b, 0)
     if (!(total > 0)) return demote(base)
     let r = random() * total
@@ -552,19 +561,14 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const pool = isSend ? providers : trusted
     const base = live(pool, (u) => u)
     if (!base.length) return allSpent(pool, body?.id)
-    // `start` rotates the list: a retry asks the next provider first. A send keeps the configured order (#420: its
-    // fan-out is unchanged); a read pinned to a block, and the head itself, start at a provider drawn by weight.
+    // `start` rotates the list: a retry asks the next provider first. Sends and reads by tag or hash (nonces, receipts)
+    // keep the exact configured order (#420); only a read pinned to a block, and the head itself, are spread.
     const at = pinnedAt(body ?? {})
-    let list =
-      start > 0
-        ? [...base.slice(start % base.length), ...base.slice(0, start % base.length)]
-        : isSend
-          ? base
-          : (at !== null && isRead(body.method)) || body?.method === 'eth_blockNumber'
-            ? spread(base, at)
-            : demote(base)
-    // A spent provider let through to be asked again (its daily recheck, its reset) goes first, or it may never be asked.
-    if (list.some((u) => quota.down(u))) list = [...list.filter((u) => quota.down(u)), ...list.filter((u) => !quota.down(u))]
+    const spreads = start === 0 && !isSend && ((at !== null && isRead(body.method)) || body?.method === 'eth_blockNumber')
+    let list = spreads ? spread(base, at) : [...base.slice(start % base.length), ...base.slice(0, start % base.length)]
+    // In the spread, a spent provider let through to be asked again (its daily recheck, its reset) goes first, or it may
+    // never be drawn. Elsewhere it waits its turn in the configured order.
+    if (spreads && list.some((u) => quota.down(u))) list = [...list.filter((u) => quota.down(u)), ...list.filter((u) => !quota.down(u))]
     // The one request of a minute that asks a spent provider again (see `live`) is one request, not two passes.
     const all = base.length === 1 && pool.every((u) => quota.down(u)) ? list : [...list, ...list]
     for (const [pi, url] of all.entries()) {
@@ -579,6 +583,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
           const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
           if (errObj && metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(r.status, errObj)))
           noteQuota(url, sentAt, r.status, errObj, r.retryAfter)
+          if (at !== null) unseen(url, at, body.method, r.json)
           if (wellFormed(r.json) && !retriable(r.status, r.json)) {
             if (body.method === 'eth_getBlockByNumber') remember(url, r.json.result)
             if (body.method === 'eth_blockNumber') noteTip(url, r.json.result)
@@ -679,7 +684,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       } catch (e) {
         // Review of #398: only within the request's retry window (the caller times out at 60 s), only in the first pass over
         // the providers, and never for an answer about the range itself (too many results, too wide).
-        const overRate = classifyRpcError((e as any).status, (e as any).rpc) === 'rateCapacity' && !RANGE_REFUSAL.test(String((e as any).rpc?.message ?? ''))
+        // A spent plan (#418) is no rate: asking again in a second gets the same refusal.
+        const overRate = classifyRpcError((e as any).status, (e as any).rpc) === 'rateCapacity' && !RANGE_REFUSAL.test(String((e as any).rpc?.message ?? '')) && !quotaExhausted((e as any).status, (e as any).rpc)
         if (retryUntil === null || p.url !== upstream || k >= RATE_RETRY_MS.length || Date.now() + RATE_RETRY_MS[k]! >= retryUntil || !overRate) throw e
         await Bun.sleep(RATE_RETRY_MS[k]!)
       }
@@ -782,7 +788,9 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     let last: any = order.length ? null : allSpent(allowed.map((x) => x.p.url), null).error
     // What the caller is told when nothing is accepted: a range that was read but not witnessed says more than a provider being down.
     let unwitnessed: any = null
-    for (const [k, { p }] of [...order, ...order].entries()) {
+    // The one request of a minute that asks a spent provider again (see `live`) is one pass, as in raw().
+    const probing = order.length === 1 && allowed.every((x) => quota.down(x.p.url))
+    for (const [k, { p }] of (probing ? order : [...order, ...order]).entries()) {
       if (k === order.length && Date.now() + 250 < deadline) await Bun.sleep(250)
       const label = labelOf(p.url)
       try {

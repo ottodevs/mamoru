@@ -107,3 +107,16 @@ describe('RpcMetrics budget', () => {
     expect(raw).not.toMatch(/https?:/)
   })
 })
+
+describe('budget alert order (review)', () => {
+  test('rpc-usage.json holds the alert mark when the [alert] line is written', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'budget-order-'))
+    const m = new RpcMetrics(dir, new BudgetBook({ 'drpc.org': 10 }, {}))
+    let seen = null as number | null
+    console.error = (...a: unknown[]) => {
+      if (String(a[0]).startsWith('[alert]')) seen = JSON.parse(readFileSync(join(dir, 'rpc-usage.json'), 'utf8')).budget['drpc.org'].alerted
+    }
+    for (let i = 0; i < 7; i++) m.recordRequest('drpc.org', 'eth_call', false)
+    expect(seen).toBe(0.7)
+  })
+})
