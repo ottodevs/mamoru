@@ -1587,7 +1587,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
               on screen for its Ethereum part, and says when it is done. */}
           {!canStart && (oneOpen || one.finished) ? <OneApprovalStart flow={one} title={homeCopy.notRunning} startLabel={homeCopy.start} /> : null}
           {/* otto/mamoru#263: the move to the mix with Monad, step by step, while it runs and for a day after. */}
-          {noPositions ? null : <Working f={whole!.f} s={whole!.s} apy={apy.data} pools={vsIdle.data?.pools ?? null} savingsUsd={vsIdle.data?.savingsUsd ?? 0} price={price} otherChainsUsdc={otherChainsUsdc} onStop={!fromChain && (f.active || whole!.f.positions.length > 0) ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />}
+          {noPositions ? null : <Working f={whole!.f} s={whole!.s} apy={apy.data} pools={vsIdle.isError ? null : (vsIdle.data?.pools ?? null)} savingsUsd={vsIdle.isError ? 0 : (vsIdle.data?.savingsUsd ?? 0)} price={price} otherChainsUsdc={otherChainsUsdc} onStop={!fromChain && (f.active || whole!.f.positions.length > 0) ? () => setDialog('stop') : null} onStart={canRestart ? start : null} />}
           <Idle f={whole!.f} s={whole!.s} home={s as Split} />
           <History ops={opList} onRetry={retry} loaded={ops.isSuccess} />
         </>
