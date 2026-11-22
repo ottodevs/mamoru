@@ -31,6 +31,21 @@ import type {
   YieldLedgerView,
 } from '@mamoru/domain'
 
+/** `GET /api/accounts/:key/vs-idle` (src/api/accounts/vs-idle.ts, otto/mamoru#380). */
+export type VsIdleView = {
+  asOf: string | null
+  totalUsd: number | null
+  netDeposited: { usd: number; status: 'complete' | 'partial' | 'none'; since?: string }
+  since: string | null
+  breakdown: { feesUsd: number; priceMoveUsd: number; costsUsd: number | null; mamoruFeeUsd: number; netUsd: number } | null
+  pendingUsd: number
+  /** APR · 30-day avg, the owner's real net APR; null for the first 30 days (show the Mamoru average) or while nothing worked. */
+  apr: { pct: number | null; reason: 'first-30-days' | 'not-measured' | null }
+  status: 'complete' | 'partial'
+  notCounted: ('flows' | 'fees' | 'vault-yield' | 'history' | 'costs')[]
+  series: { day: string; netUsd: number }[]
+}
+
 /** `GET /api/accounts/:key/value-series` (src/api/accounts/value-series.ts). */
 export type ValueSeriesView = {
   asOf: string | null
@@ -67,6 +82,7 @@ export type ApiClient = {
   stats(): Promise<StatsView>
   /** Spec 013 STATS-R14: the owner's total value by UTC day, every chain. */
   valueSeries(accountKey: string): Promise<ValueSeriesView>
+  vsIdle(accountKey: string): Promise<VsIdleView>
   ops(accountKey: string): Promise<{ ops: OpView[] }>
   activatePrepare(accountKey: string): Promise<OwnerTxToSign>
   activate(accountKey: string, sig: OwnerSignature): Promise<OpView>
@@ -160,6 +176,7 @@ export const httpClient: ApiClient = {
   yieldLedger: (k) => request<YieldLedgerView>(acct(k, 'yield')),
   stats: () => request<StatsView>('/api/stats'),
   valueSeries: (k) => request<ValueSeriesView>(acct(k, 'value-series')),
+  vsIdle: (k) => request<VsIdleView>(acct(k, 'vs-idle')),
   // otto/mamoru#340: with the deposit rows (the operator leaves them out for apps that do not ask).
   ops: (k) => request<{ ops: OpView[] }>(acct(k, 'ops?deposits=1')),
   activatePrepare: (k) => post<OwnerTxToSign>(acct(k, 'activate/prepare')),

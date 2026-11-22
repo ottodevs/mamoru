@@ -399,6 +399,25 @@ export const fixtureClient: ApiClient = {
     })
     return delay({ asOf: new Date().toISOString(), points, chains: [8453], netDeposited: { usd: 2500, status: 'partial' as const, since: points[0]!.day } })
   },
+  // otto/mamoru#380: the shape of the vs-idle read, with the figures of the agreed mock (net 10.55 on 974.76 deposited).
+  vsIdle: () => {
+    const start = Date.UTC(2026, 9, 21)
+    const shape = [0, 0.5, 0.7, 1.4, 1.8, 2, 2.9, 4.6, 6.3, 7.7, 8.2, 8.7, 9, 9.1, 9.2, 9.7, 11, 12.4, 13.8, 15.2, 15.5, 15.9, 16.7, 17.7, 18.4, 19.1, 19.8, 21.8, 23, 23.5, 24.8, 25.8, 26.9]
+    const k = 10.55 / shape[shape.length - 1]!
+    const series = shape.map((n, i) => ({ day: new Date(start + i * 864e5).toISOString().slice(0, 10), netUsd: Math.round(n * k * 100) / 100 }))
+    return delay({
+      asOf: new Date().toISOString(),
+      totalUsd: 985.31,
+      netDeposited: { usd: 974.76, status: 'complete' as const, since: series[0]!.day },
+      since: series[0]!.day,
+      breakdown: { feesUsd: 6.62, priceMoveUsd: 5.1, costsUsd: -0.62, mamoruFeeUsd: -0.55, netUsd: 10.55 },
+      pendingUsd: 0.4,
+      apr: { pct: 33.9, reason: null },
+      status: 'complete' as const,
+      notCounted: [],
+      series,
+    })
+  },
   yieldLedger: () =>
     delay({
       asOf: new Date().toISOString(),
