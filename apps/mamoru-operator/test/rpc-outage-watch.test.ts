@@ -99,5 +99,25 @@ describe('the proxy pages when every provider fails (#444)', () => {
     expect(alerts[0]).toStartWith('[alert] rpc proxy:')
     expect(lines.join('\n')).not.toContain('test-key')
   })
+
+  test('a provider whose own JSON-RPC error happens to read "upstream HTTP 503" is still an answer: no page', async () => {
+    const fetcher = async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { id: number }
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, error: { code: -32000, message: 'upstream HTTP 503' } }), { status: 200 })
+    }
+    const lines: string[] = []
+    const orig = console.error
+    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '))
+    const proxy = startRpcProxy(A, { fetch: fetcher as never, trusted: [Q], fallbacks: [], logRanges: {}, quota: new QuotaBook(), allDownAlertMs: 50 })
+    try {
+      await call(proxy.url)
+      await Bun.sleep(80)
+      await call(proxy.url)
+    } finally {
+      proxy.stop()
+      console.error = orig
+    }
+    expect(lines.filter((l) => l.startsWith('[alert] rpc '))).toEqual([])
+  })
 })
 

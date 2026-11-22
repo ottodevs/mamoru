@@ -483,7 +483,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     } else if (!methodUnserved(err) && !RANGE_REFUSAL.test(String(err?.message ?? '')) && (status === undefined || retriable(status, { error: err }))) {
       quota.backoff(url, label, classifyRpcError(status, err) === 'rateCapacity' ? 'burst_limited' : 'failing')
       outage.failed()
-    } else if (status === 200 && typeof err?.code === 'number' && !/^upstream HTTP /.test(String(err?.message ?? ''))) outage.ok() // a JSON-RPC error answer (a revert, an unserved method, a range refusal): the provider is up
+    } else if (status === 200 && typeof err?.code === 'number' && err?.synthetic !== true) outage.ok() // a JSON-RPC error answer (a revert, an unserved method, a range refusal): the provider is up
     else outage.failed() // 401/403 (a key revoked), any other status, a body that is not JSON-RPC: no answer
   }
   /**
@@ -642,7 +642,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
           const sentAt = Date.now()
           const r = await post(url, body)
           if (metrics) safeMetrics(() => metrics.recordRequest(label, body.method, isChunk, Date.now(), caller.getStore()))
-          const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
+          const errObj = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}`, synthetic: true })
           if (errObj && metrics) safeMetrics(() => metrics.recordError(label, body.method, classifyRpcError(r.status, errObj)))
           noteQuota(url, sentAt, r.status, errObj, r.retryAfter)
           if (at !== null) unseen(url, at, body.method, r.json)
@@ -694,7 +694,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       throw Object.assign(new Error(String(rpc.message)), { rpc })
     }
     if (metrics) safeMetrics(() => metrics.recordRequest(label, method, isChunk, Date.now(), caller.getStore()))
-    const rpc = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}` })
+    const rpc = r.json?.error ?? (wellFormed(r.json) ? undefined : { code: -32603, message: `upstream HTTP ${r.status}`, synthetic: true })
     noteQuota(url, sentAt, r.status, rpc, r.retryAfter)
     if (!rpc) {
       if (method === 'eth_getBlockByNumber') noteTip(url, r.json.result?.number)
