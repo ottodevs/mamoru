@@ -114,7 +114,8 @@ describe('operator proxy', () => {
     const { cookie, owner } = await onboard(h)
     const k = owner.accountKey
     for (const p of ['activate/prepare', 'activate', 'transfer/prepare', 'transfer', 'stop/prepare', 'stop', 'bridge-out/prepare', 'bridge-out']) {
-      expect((await h.post(`/api/accounts/${k}/${p}`, {}, { cookie })).status).toBe(200)
+      // otto/mamoru#430: a Stop prepare without the builder's input is forwarded, then refused (stop-build.test.ts).
+      expect((await h.post(`/api/accounts/${k}/${p}`, {}, { cookie })).status).toBe(p === 'stop/prepare' ? 502 : 200)
     }
     expect((await h.request(`/api/accounts/${k}/funding`, { cookie })).status).toBe(200)
     expect((await h.request(`/api/accounts/${k}/withdraw-assets`, { cookie })).status).toBe(200)

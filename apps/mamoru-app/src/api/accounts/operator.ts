@@ -1,7 +1,8 @@
 import { Hono, type Context } from 'hono'
-import type { AccountContext, MigrateV4Input, RemoteSpec, ReturnHomeInput } from '@mamoru/domain'
+import type { AccountContext, MigrateV4Input, RemoteSpec, ReturnHomeInput, StopInput } from '@mamoru/domain'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
 import { buildReturnHome } from '@mamoru/account/return-home'
+import { buildStop } from '@mamoru/account/stop'
 import { registryFor, type Registry } from '@mamoru/registry'
 import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
@@ -141,6 +142,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
    */
   const checkBuilt = async (c: Context<AppEnv>, row: AccountRow, path: string, text: string, registryOf: (chainId: number) => Registry = registryFor): Promise<Response | null> => {
     if (path.endsWith('/return-home/prepare')) return checkReturnHome(c, row, text, registryOf)
+    if (path.endsWith('/stop/prepare')) return checkStop(c, row, text, registryOf)
     const sibling = path.endsWith('/ethereum-sibling/prepare')
     const migrate = path.endsWith('/migrate-v4/prepare')
     if (!sibling && !migrate && !path.endsWith('/activate/prepare')) return null
@@ -220,6 +222,32 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
       return refusedBuild(c, row, `build: ${e instanceof Error ? e.message : String(e)}`)
     }
     return hash.toLowerCase() === (body.safeTxHash ?? '').toLowerCase() ? null : refusedBuild(c, row, 'hash')
+  }
+  /**
+   * otto/mamoru#430: a Stop is passed on only when the Worker, with the same builder (buildStop, every target from the
+   * chain's pinned registry), gets the same Safe tx from the operator's `stop` input on this row's own Safe and chain. That
+   * builder only revokes sessions, closes positions, takes vault shares out and swaps back to USDC, all paid to the Safe
+   * itself; any other call, target, Safe, chain or value gives another hash. Anything else: 502 BUILD_MISMATCH, nothing signed.
+   */
+  const checkStop = (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Response | null => {
+    let body: { safe?: unknown; chainId?: unknown; safeTxHash?: unknown; stop?: StopInput } | null
+    try {
+      body = JSON.parse(text)
+    } catch {
+      return refusedBuild(c, row, 'not JSON')
+    }
+    const input = body && typeof body === 'object' ? body.stop : undefined
+    if (!body || !input || typeof input !== 'object') return refusedBuild(c, row, 'no input')
+    if (input.chainId !== row.chain_id || body.chainId !== row.chain_id) return refusedBuild(c, row, 'chain')
+    const me = row.address.toLowerCase()
+    if (typeof input.safe !== 'string' || input.safe.toLowerCase() !== me || typeof body.safe !== 'string' || body.safe.toLowerCase() !== me) return refusedBuild(c, row, 'safe')
+    let hash: string
+    try {
+      hash = buildStop(input, registryOf(row.chain_id)).safeTxHash
+    } catch (e) {
+      return refusedBuild(c, row, `build: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    return typeof body.safeTxHash === 'string' && hash.toLowerCase() === body.safeTxHash.toLowerCase() ? null : refusedBuild(c, row, 'hash')
   }
   const refusedBuild = (c: Context<AppEnv>, row: AccountRow, why: string) => {
     console.error(`one-authorization prepare refused for ${row.account_key}: ${why}`)

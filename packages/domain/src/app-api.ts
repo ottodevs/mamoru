@@ -390,6 +390,22 @@ export type OwnerTxToSign = {
   // otto/mamoru#428 (spec 014, step 1 of leaving Monad): the exact input `buildReturnHome` built `safeTx` from. The
   // Worker rebuilds it, and checks the Safe is the row's own and `home` the owner's Base Safe, before the owner signs.
   returnHome?: ReturnHomeInput
+  // otto/mamoru#430: a Stop's exact input to `buildStop` (packages/account/stop). The Worker rebuilds the Stop from it on the
+  // row's own Safe and chain, and passes the prepare on only when the hash is the one the owner is asked to sign.
+  stop?: StopInput
+}
+// otto/mamoru#430: every input of a Stop Safe tx, JSON-safe (integers as decimal strings). Pools, tokens and vaults by their
+// registry names. `refund`: a Safe-paid Stop (the Safe refunds the relayer); absent, Mamoru pays.
+export type StopInput = {
+  chainId: number
+  safe: Hex0x
+  safeNonce: string
+  revokes: Hex0x[]
+  positions: { tokenId: string; liquidity: string; amount0Min: string; amount1Min: string }[]
+  deadline: string
+  vaultExits: { vault: string; mode: 'redeem' | 'withdraw'; assets: string; shares: string }[]
+  swaps: { token: string; pool: string; amountIn: string; amountOutMinimum: string }[]
+  refund?: { safeTxGas: string; baseGas: string; gasPrice: string; refundReceiver: Hex0x }
 }
 // otto/mamoru#428: every input of a return-home Safe tx on a design-C Safe (packages/account/return-home), JSON-safe.
 // `amountUsdc` "0" is a revoke only. `removeIds`: the sessions removed (the same set as Stop).

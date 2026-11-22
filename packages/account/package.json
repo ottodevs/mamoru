@@ -13,7 +13,8 @@
     "./userop": "./userop/index.ts",
     "./remote": "./remote/index.ts",
     "./one-auth": "./one-auth/index.ts",
-    "./return-home": "./return-home/index.ts"
+    "./return-home": "./return-home/index.ts",
+    "./stop": "./stop/index.ts"
   },
   "dependencies": {
     "@mamoru/domain": "workspace:*",

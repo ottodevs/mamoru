@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, pad, parseAbi, parseAbiItem, parseEventLogs, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type ReturnHomeInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type Address, type RemoteSpec, type ReturnHomeInput, type StopInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, baseRegistry, tokenMessengerV2Abi, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
@@ -20,7 +20,6 @@ import {
   ownerSignatureShape,
   readSafeNonce,
   safeTxHashOf,
-  stopBatch,
   transferBatch,
   verifyOwnerSignature,
   type LiveAccount,
@@ -32,6 +31,7 @@ import {
 } from '@mamoru/account/live'
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
+import { buildStop, stopCalls } from '@mamoru/account/stop'
 import { buildReturnHome, RETURN_HOME_DOMAIN, RETURN_HOME_FINALITY, returnReleaseId, TOKEN_MESSENGER_V2 as RETURN_TOKEN_MESSENGER } from '@mamoru/account/return-home'
 import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
@@ -924,7 +924,12 @@ type Prepared = {
   built?: { input: MigrateV4Input; safeTxHash: Hex }
   /** otto/mamoru#428: a Stop that sends the Safe's USDC home (return-home): what buildReturnHome built from, and its hash. */
   returnHome?: { input: ReturnHomeInput; safeTxHash: Hex }
+  /** otto/mamoru#430: what a Stop's calls were built from (buildStop's input without the nonce and the fee); hold completes it and returns it as `stop`. */
+  stopPlan?: StopPlan
 }
+
+/** otto/mamoru#430: the part of a Stop's builder input its plan chooses. */
+type StopPlan = Pick<StopInput, 'revokes' | 'positions' | 'deadline' | 'vaultExits' | 'swaps'>
 
 type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** otto/mamoru#223: out-of-range positions the last decision does not re-range, with the re-range code. */ rangeHolds?: { tokenId: string; code: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
@@ -2873,6 +2878,19 @@ export class Operator {
     if (extra.returnHome && (fee.refund || extra.returnHome.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.returnHome.input.safeNonce !== nonce.toString())) {
       throw new HttpError(fee.refund ? 503 : 409, fee.refund ? 'SPONSOR_UNAVAILABLE' : 'RETURN_HOME_STALE', fee.refund ? 'Mamoru cannot pay for this right now: nothing was changed, try again later' : 'your Safe on Monad changed while this was prepared: prepare it again')
     }
+    // otto/mamoru#430: a Stop is exactly what buildStop gives for its input, the fee included (the Worker rebuilds it).
+    let stopInput: StopInput | undefined
+    if (extra.stopPlan) {
+      const r = fee.refund
+      stopInput = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: nonce.toString(), ...extra.stopPlan, ...(r ? { refund: { safeTxGas: r.safeTxGas.toString(), baseGas: r.baseGas.toString(), gasPrice: r.gasPrice.toString(), refundReceiver: r.refundReceiver } } : {}) }
+      let rebuilt: Hex | null = null
+      try {
+        rebuilt = buildStop(stopInput, this.cfg.registry).safeTxHash
+      } catch (e) {
+        logErr(`[owner] ${acc.accountKey} stop: the builder refuses its own input:`, e)
+      }
+      if (rebuilt?.toLowerCase() !== safeTxHash.toLowerCase()) throw safeHttpError(500, 'OPERATOR_ERROR')
+    }
     if (kind === 'activate' && extra.built && fee.refund) throw new HttpError(503, 'SPONSOR_UNAVAILABLE', 'Mamoru cannot pay for this Start right now: nothing was changed, try again later')
     if (kind === 'activate' && extra.built && (extra.built.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.built.input.safeNonce !== nonce.toString())) {
       throw new HttpError(409, 'ONE_AUTH_STALE', 'your Safe changed while the Start was prepared: prepare it again')
@@ -2890,7 +2908,7 @@ export class Operator {
     // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
     const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}), ...(kind === 'activate' && extra.built ? { input: extra.built.input } : {}), ...(extra.returnHome ? { returnHome: extra.returnHome.input } : {}) }
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}), ...(kind === 'activate' && extra.built ? { input: extra.built.input } : {}), ...(extra.returnHome ? { returnHome: extra.returnHome.input } : {}), ...(stopInput ? { stop: stopInput } : {}) }
   }
 
   /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */
@@ -4869,12 +4887,14 @@ export class Operator {
     const { deployed } = await readSafeNonce(this.client, live.safe)
     if (!deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
     if (!revokes.length) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant to revoke')
-    const calls = stopBatch({ account: live.safe, permissionIds: revokes, positions: [], deadline: 0n, registry: this.cfg.registry })
+    // otto/mamoru#430: built by the Stop builder the Worker rebuilds it with.
+    const plan: StopPlan = { revokes, positions: [], deadline: '0', vaultExits: [], swaps: [] }
+    const calls = stopCalls({ chainId: this.cfg.chainId, safe: live.safe, safeNonce: '0', ...plan }, this.cfg.registry)
     const summary = [
       `Revoke the engine's ${revokes.length} session grant(s)`,
       fallback ? 'Your positions could not be read just now: they stay in your Safe as they are, and Stop again closes them' : 'Your positions and tokens stay in your Safe as they are; Stop again closes them',
     ]
-    return this.hold(acc, live, 'stop', calls, summary, { revokes, revokeOnly: true })
+    return this.hold(acc, live, 'stop', calls, summary, { revokes, revokeOnly: true, stopPlan: plan })
   }
 
   private async planFullStop(acc: AccountState, live: LiveAccount, revokes: Hex[]): Promise<OwnerTxToSign> {
@@ -4901,11 +4921,15 @@ export class Operator {
     const vault = planVaultExit(r.vaults ?? [], null, this.bucketVaults(acc))
     if (!revokes.length && !positions.length && !swaps.length && !vault.exits.length) throw new HttpError(409, 'NOTHING_TO_STOP', 'no grant, no position and nothing to swap back')
     const deadline = (await this.client.getBlock()).timestamp + 1800n
-    const calls = [
-      ...(revokes.length || positions.length ? stopBatch({ account: live.safe, permissionIds: revokes, positions, deadline, registry: this.cfg.registry }) : []),
-      ...vaultExitCalls(live.safe, vault.exits, this.cfg.registry),
-      ...swapBackCalls(live.safe, swaps, this.cfg.registry),
-    ]
+    // otto/mamoru#430: built by the Stop builder the Worker rebuilds it with, from these explicit inputs.
+    const plan: StopPlan = {
+      revokes,
+      positions: positions.map((p) => ({ tokenId: p.tokenId.toString(), liquidity: p.liquidity.toString(), amount0Min: p.amount0Min.toString(), amount1Min: p.amount1Min.toString() })),
+      deadline: deadline.toString(),
+      vaultExits: vault.exits.map((x) => ({ vault: x.vault, mode: x.mode, assets: x.assets.toString(), shares: x.shares.toString() })),
+      swaps: swaps.filter((sw) => sw.amountIn > 0n).map((sw) => ({ token: sw.token, pool: sw.pool, amountIn: sw.amountIn.toString(), amountOutMinimum: sw.amountOutMinimum.toString() })),
+    }
+    const calls = stopCalls({ chainId: this.cfg.chainId, safe: live.safe, safeNonce: '0', ...plan }, this.cfg.registry)
     await this.checkFromSafe(live.safe, calls, r.block, undefined)
     const summary = [
       ...(revokes.length ? [`Revoke the engine's ${revokes.length} session grant(s)`] : []),
@@ -4916,7 +4940,7 @@ export class Operator {
       'Everything stays in your Safe as USDC',
       ...(left > 0 ? [`${left} more position(s) stay in your Safe: Stop again to close them`] : []),
     ]
-    return this.hold(acc, live, 'stop', calls, summary, { revokes })
+    return this.hold(acc, live, 'stop', calls, summary, { revokes, stopPlan: plan })
   }
 
   // ---- owner side: submit --------------------------------------------------

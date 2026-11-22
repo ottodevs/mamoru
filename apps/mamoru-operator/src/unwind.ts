@@ -1,13 +1,14 @@
 import type { Address } from '@mamoru/domain'
 import type { MultiSendCall } from '@mamoru/account/safe'
 import type { LivePosition } from '@mamoru/account/live'
-import { address, entry, erc4626Abi, type Registry } from '@mamoru/registry'
-import { encodeFunctionData } from 'viem'
+import { entry, type Registry } from '@mamoru/registry'
 import { uniswapV3 } from '@mamoru/uniswap-v3'
 import { positionUsdc, type PoolPosition, type PoolPrice, type VaultHolding } from './chain.ts'
 
-/** A swap of `token` back to USDC on `pool`. */
-export type SwapBack = { token: string; pool: string; amountIn: bigint; amountOutMinimum: bigint }
+// otto/mamoru#430: the swap-back and vault-exit calls are the Stop builder's (packages/account/stop), which the Worker
+// rebuilds a Stop with; re-exported here for the operator's other exits.
+import { vaultExitCalls as vaultCalls } from '@mamoru/account/stop'
+export { swapBackCalls, type SwapBack } from '@mamoru/account/stop'
 
 const strip = (c: { to: Address; value: bigint; data: `0x${string}` }): MultiSendCall => ({ to: c.to, value: c.value, data: c.data })
 
@@ -57,20 +58,6 @@ export function closeCalls(account: Address, ps: LivePosition[], deadline: bigin
       ...(burnIt ? [burn(p.tokenId)] : []),
     ].map(strip),
   )
-}
-
-/** Each swap: exact approve to SwapRouter02, exactInputSingle to the Safe, approve back to 0. */
-export function swapBackCalls(account: Address, swaps: SwapBack[], registry: Registry): MultiSendCall[] {
-  const { approve, exactInputSingle } = uniswapV3(registry)
-  return swaps
-    .filter((s) => s.amountIn > 0n)
-    .flatMap((s) =>
-      [
-        approve(s.token, 'SwapRouter02', s.amountIn),
-        exactInputSingle({ account, tokenIn: s.token, tokenOut: 'USDC', fee: entry(s.pool, registry).fee!, amountIn: s.amountIn, amountOutMinimum: s.amountOutMinimum }),
-        approve(s.token, 'SwapRouter02', 0n),
-      ].map(strip),
-    )
 }
 
 /** The pool a token is swapped back to USDC on: the policy's pool for it, else the first registry USDC pool that has it. */
@@ -131,13 +118,7 @@ export function planVaultExit(vaults: readonly VaultHolding[], need: bigint | nu
   return { exits, short: remaining !== null && remaining > short ? remaining : short }
 }
 
+/** Each exit: the vault's redeem(shares) or withdraw(assets), with the Safe as receiver and owner (the Stop builder's). */
 export function vaultExitCalls(account: Address, exits: readonly VaultExit[], registry: Registry): MultiSendCall[] {
-  return exits.map((x) => ({
-    to: address(x.vault, registry),
-    value: 0n,
-    data:
-      x.mode === 'redeem'
-        ? encodeFunctionData({ abi: erc4626Abi, functionName: 'redeem', args: [x.shares, account, account] })
-        : encodeFunctionData({ abi: erc4626Abi, functionName: 'withdraw', args: [x.assets, account, account] }),
-  }))
+  return vaultCalls(account, exits, registry)
 }
