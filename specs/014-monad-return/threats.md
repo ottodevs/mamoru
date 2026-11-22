@@ -10,13 +10,13 @@ High stakes: owner funds and owner signatures. Each point names what a reviewer 
 | S2 | A hook or a caller restriction diverts or blocks the mint | `depositForBurn` (not `WithHook`), `destinationCaller` 0, `maxFee` 0 | builder has no hook path; test decodes the calldata |
 | S3 | Operator builds a different tx than it shows | Worker rebuilds with the same builder and compares the SafeTx hash (`BUILD_MISMATCH`) | hash compare covers `to`, `data`, `operation`, nonce, gas fields, refund receiver |
 | S4 | Amount under the balance leaves funds behind, or over it reverts | Worker reads the Safe's USDC `balanceOf` on Monad and requires equality with `amountUsdc` (plus `minOut` in the depth-held variant) | new check; equality at the block read, stale → re-prepare |
-| S5 | A session is left on the Monad Safe | removed set = Stop's set ∪ every on-chain enabled id; Worker checks each id is enabled and that the count matches the Safe's `SessionCreated` ids still enabled; read-back after settle | an omitted session must fail the Worker check, not only the read-back |
+| S5 | A session is left on the Monad Safe | removed set = Stop's set ∪ every on-chain enabled id; Worker checks each id is enabled and that the count matches the Safe's `SessionCreated` ids still enabled; read-back after settle | an omitted session must fail the Worker check, not only the read-back; the depth-held plain path (RH-07) is the only build with sessions kept, and the Worker accepts it only with `MONAD_DEPTH_TOO_LOW` re-derived from its own quote |
 | S6 | The Safe pays the relayer | no refund in the Safe tx (`gasPrice` 0, no refund receiver); a prepare that would need one is refused (`SPONSOR_UNAVAILABLE`) | built |
 | S7 | Delegatecall to an arbitrary target | only MultiSendCallOnly 1.4.1 (pinned address) is delegatecalled; every inner call is a CALL | builder uses `ownerSafeTx` |
-| S8 | Depth-held sale at a bad price | exact output `q` from the pool TWAP (policy window) minus 80 bps, `amountInMaximum` = the Safe's WMON; the Worker re-reads the TWAP on Monad (`MONAD_RPC_URLS`) and refuses a `q` below its own floor; the summary shows Y, Z and the residual bound R | owner path skips the action policy: the Worker check is the only price guard besides the user reading Z |
+| S8 | Depth-held sale at a bad price | `minOut` = QuoterV2 quote less 30 bps; the Worker re-quotes on Monad and refuses `minOut` more than 30 bps under its quote, or a quote more than 300 bps under the TWAP value (`MONAD_DEPTH_TOO_LOW`); the summary shows Y and Z | owner path skips the action policy: the Worker check is the only price guard besides the user reading Z |
 | S9 | Replay on another chain or Safe | SafeTx hash binds chain id, Safe and nonce | none |
-| S10 | Allowance left to TokenMessenger or the router | exact `approve(amount)` consumed by the burn; the router's WMON allowance left after exact output is at most the unsold residual, on a pinned router that only spends it for a call from this Safe | builder; a test reads both allowances after the tx |
-| S10b | USDC stranded on Monad by a late bridge mint | step A refused while a Base → Monad bridge is unminted; the Base account bridges nothing to Monad once step A is prepared (RH-11) | test: unminted bridge → `BRIDGE_IN_FLIGHT` |
+| S10 | Allowance left to TokenMessenger or the router | exact `approve(amount)` consumed by the burn; exact `approve(w)` consumed by `exactInputSingle(amountIn = w)` | builder; a test reads both allowances after the tx |
+| S10b | USDC stranded on Monad by a late bridge mint | step A refused while a Base → Monad bridge is `sending`, `burned`, `dropped` or minted-unread; no bridge to Monad signed, re-signed or broadcast after the first step A prepare (RH-11) | tests: each non-terminal state → `BRIDGE_IN_FLIGHT`; a dropped bridge is not re-signed after a step A prepare |
 
 ## Base side
 
@@ -39,6 +39,9 @@ High stakes: owner funds and owner signatures. Each point names what a reviewer 
   `installModule`.
 
 ## Accepted risks
+
+- Depth-held sale: USDC above the sale's minimum stays on the owner's Monad Safe (no upper bound when the price moves in
+  the Safe's favor); it is the owner's and leaves with an ordinary withdrawal.
 
 - Circle CCTP: the return relies on Circle's attesters and Monad/Base CCTP contracts, as every bridge since spec 002.
 - An owner who never signs keeps USDC on Monad with one growth-only session under the entry pause.

@@ -27,13 +27,13 @@ the owners' OK. Companion files: `plan.md` (operator sequence, idempotency), `ta
 | Id | Requirement |
 |---|---|
 | RH-01 | One authorization screen per Monad user lists every line both chains will sign before the first passkey prompt. |
-| RH-02 | The Monad leg is one owner Safe tx on the user's Monad Safe: revoke every Mamoru session there, and CCTP-burn the Safe's whole USDC with `mintRecipient` = the same user's Base Safe. Nothing else. |
+| RH-02 | The Monad leg is one owner Safe tx on the user's Monad Safe: revoke every Mamoru session there (only exception: the depth-held plain path of RH-07 keeps the growth-only session until the WMON is sold), and CCTP-burn the Safe's whole USDC with `mintRecipient` = the same user's Base Safe. Nothing else. |
 | RH-03 | The Worker rebuilds the Monad Safe tx with the shared builder, and checks recipient, domain, amount, sessions and hash, before the owner signs (`BUILD_MISMATCH` otherwise). |
 | RH-04 | The Base leg moves the account to `conservador-live-v8` through the existing renewal: no remote bucket, no bridge-out grant, USDC/cbBTC taking money. |
 | RH-05 | After the burn, minting on Base and placing into v8 need no signature and no person. Every step is idempotent and resumable after an operator restart. |
 | RH-06 | Each leg stands alone: any prefix of the flow (none, one leg, both) leaves funds only in the user's own Safes, counted in the totals and the cap. |
-| RH-07 | A Safe whose unwind is held (#410, `REMOTE_DEPTH_BELOW_BUDGET`) can still go home in the same single Monad tx, leaving no USDC and at most a stated, bounded WMON residual. |
-| RH-11 | Step A is never prepared while a Base → Monad bridge to that Safe is unminted, and once step A is prepared or signed the Base account sends nothing more to Monad. |
+| RH-07 | A Safe whose unwind is held (#410, `REMOTE_DEPTH_BELOW_BUDGET`) can still go home in the same single Monad tx, with a price guard on the sale, and a stated residual (any sale output above its minimum) or, when the sale is refused, the USDC home now and the WMON later. |
+| RH-11 | Step A is never prepared while any Base → Monad bridge for the account is not terminal (`sending`, `burned`, `dropped`, or `minted` without the mint read on the Safe), and from the first step A prepare the Base operator signs, re-signs and broadcasts no bridge to Monad for the account. |
 | RH-08 | No V4 contract, no new contract and no new session-key custody (ships without #356 / #322). |
 | RH-09 | Nothing visible changes in the app until Ot and Brais approve the screens and the copy below. |
 | RH-10 | v8 is the default for every new Start while the no-Monad rule holds (`base_v8` scope `*`), and offered to every Base account on v2-v7. |
@@ -118,17 +118,28 @@ One owner Safe tx on the Monad Safe (`buildReturnHome`), sent through MultiSendC
    `TokenMessengerV2.depositForBurn(amount, 6, mintRecipient = the user's Base Safe, USDC, destinationCaller = 0,
    maxFee = 0, minFinalityThreshold = 2000)`. `amount` is the Safe's whole USDC balance at prepare. No hook.
 3. Depth-held variant (RH-07, only when the Safe still holds WMON above 0.01 and the chain exit is held by
-   `REMOTE_DEPTH_BELOW_BUDGET`): before step 2, `WMON.approve(SwapRouter02, w)` and one `exactOutputSingle(WMON → USDC,
-   pool fee of the growth pool, recipient = this Safe, amountOut = q, amountInMaximum = w)`, then the burn amount is
-   the USDC balance plus `q`, so **no USDC is left behind**. The owner path is not under the action policy, so the depth
-   check does not apply. `q` is what `w` buys at the pool's TWAP price (the policy's long window) less the chain exit's
-   impact allowance (`CHAIN_EXIT_IMPACT_BPS`, 30 bps) and 50 bps of drift.
-   - **Residual, stated:** a Safe tx carries fixed amounts, so it cannot burn "whatever the swap returned". With exact
-     output the only thing that can stay is unsold WMON, worth at most the 80 bps allowance of the sale (about 3.60 USD
-     on a 450 USD sale), plus the gas MON. It stays the owner's, in the owner's Safe; the summary shows the bound before
-     the prompt. No residual at all needs either waiting for the chain exit (no signature, but a depth-held Safe may wait
-     indefinitely) or a new contract that burns the post-swap balance (out of scope, RH-08). Owners decide (open
-     question 5).
+   `REMOTE_DEPTH_BELOW_BUDGET`): before step 2, `WMON.approve(SwapRouter02, w)` and one `exactInputSingle(WMON → USDC,
+   pool fee of the growth pool, recipient = this Safe, amountIn = w, amountOutMinimum = m)`; the burn amount is the
+   USDC balance plus `m`. The owner path is not under the action policy, so the depth check does not apply.
+   - **`m` from a quote, not from the TWAP.** The operator quotes the whole sale with QuoterV2 on Monad at prepare
+     (pool fee and price impact included) and sets `m` = quote less 30 bps. So the swap does not revert for fees or
+     impact; it reverts only if the price moves against the Safe by more than 30 bps before inclusion, and a revert is
+     atomic (nothing moved, nothing revoked): the step is prepared again with a fresh quote.
+   - **Price guard.** The Worker re-quotes on Monad (`MONAD_RPC_URLS`) and refuses unless `m` is within 30 bps of its
+     own quote, and unless the quote is no more than 300 bps under the pool's TWAP value of `w` (policy long window). A
+     spot pushed away from the TWAP, or a pool too shallow for the whole sale within 300 bps, is refused with
+     `MONAD_DEPTH_TOO_LOW`: the Safe then keeps the plain path (USDC home now, revoke deferred, below) or waits for
+     the chain exit.
+   - **What can stay behind, stated without a bound.** A Safe tx carries fixed amounts, so it cannot burn "whatever the
+     swap returned". Any USDC the sale returns above `m` stays on the Monad Safe: expected about 30 bps of the sale, but
+     more if the price moves in the Safe's favor before inclusion. It is the owner's, in the owner's Safe, shown on the
+     Monad row, and leaves with an ordinary withdrawal (one signature, as every withdrawal). Bringing it home without a
+     signature would need a session left on the Monad Safe or a contract that burns the post-swap balance; both are
+     out of scope (RH-08). Owners decide (open question 5).
+   - **When the Worker refuses the sale** (`MONAD_DEPTH_TOO_LOW`): step A is offered as the plain path, which burns the
+     Safe's USDC and **keeps** the growth-only session, so the chain exit can still sell the WMON when depth allows; a
+     later step A (send-only plus revoke) takes the proceeds home. Two Monad prompts for these Safes, stated in the
+     screen. Their USDC never waits on Monad for the WMON.
    - A still-open position (should not happen: decreases are not depth checked) keeps the prepare refused.
 4. The MON for gas stays. Mamoru pays the gas (no refund in the Safe tx).
 
@@ -221,7 +232,7 @@ Source: the operator's signed metrics as the Worker stored them, joined with `ac
 | What | Result |
 |---|---|
 | Step A refused at prepare (`MONAD_UNWIND_PENDING`, `BRIDGE_IN_FLIGHT`, `REMOTE_UNAVAILABLE`, `BUILD_MISMATCH`) | Nothing signed. The step stays offered. |
-| A Base → Monad bridge is unminted when the owner opens the screen | Step A waits (`BRIDGE_IN_FLIGHT`, RH-11) until the Monad operator reads the mint on the Safe, so that USDC goes home in the same burn. Step B can be signed meanwhile. |
+| A Base → Monad bridge is not terminal when the owner opens the screen | Step A waits (`BRIDGE_IN_FLIGHT`, RH-11) until the Monad operator reads the mint on the Safe, so that USDC goes home in the same burn. Step B can be signed meanwhile. |
 | USDC reaches the Monad Safe after step A anyway (a mint relayed late by a third party despite RH-11) | Home shows it on the Monad row and offers step A again, a send-only tx (no session left). One more prompt; RH-11 makes this a fault case, not a path. |
 | Step A reverts on chain | Atomic: nothing moved, nothing revoked. The step reopens. |
 | Step A confirmed, step B never signed | Monad: no session left, gas MON stays. Base: v7, the return lands as idle USDC (Monad bucket entry-paused, never bridged back). Home keeps offering step B. |
@@ -273,7 +284,7 @@ Nothing below ships until both say yes (RH-09). Text is what the user reads; it 
     fee)"
   - "On Base, Mamoru puts it to work in your positions there"
   - "The MON left for gas stays in this Safe"
-  - Depth-held variant adds: "Sell up to Y WMON for Z USDC first, and send that too. Up to R USDC worth of WMON may stay in this Safe"
+  - Depth-held variant adds: "Sell Y WMON for at least Z USDC first, and send Z too. Any USDC above Z stays in this Safe; you can withdraw it"
 
 **C5. The word "one".** The ticket says one approval. The screen says "Two confirmations with your passkey, one per
 network" because two OS prompts appear (section "Why two passkey prompts"). Owners decide between this and "One
@@ -287,4 +298,4 @@ approval, confirmed twice with your passkey".
 2. Wording of the two prompts (C5).
 3. Accounts that never sign step A: the Home card only (no push channel today), or also an email if the account has one?
 4. After the no-Monad rule ends: v8 stays the default, and a Monad policy comes back as an opt-in?
-5. Depth-held Safes: accept the bounded WMON residual (one signature now), or wait for the chain exit?
+5. Depth-held Safes: sell in step A and leave any output above the minimum on Monad (withdrawable), or always use the plain path (USDC home now, WMON sold by the chain exit, a second Monad prompt later)?
