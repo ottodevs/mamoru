@@ -581,6 +581,12 @@ export const fixtureClient: ApiClient = {
         liveState.funding.approval = { validUntil: Math.floor(Date.now() / 1000) + 365 * 86_400, renewDue: false, expired: false }
       }),
     ),
+  // otto/mamoru#428: the operator's own lines for a return home and for the owner sale before it (spec 014, copy C4).
+  returnHomePrepare: (_k, home) =>
+    delay(fixtureTx(["Revoke the engine's 1 session grant(s) on your Safe on Monad: Mamoru stops working there", `Send 449.55 USDC from your Safe on Monad to your Safe on Base ${home}, through Circle's CCTP (about 15-20 minutes, no fee)`, 'On Base, Mamoru puts it to work in your positions there', 'The MON left for gas stays in this Safe'])),
+  returnHome: () => delay(fixtureOp('exit', () => {})),
+  monadSellPrepare: () => delay(fixtureTx(['Sell 120 WMON in your Safe on Monad for at least 3.58 USDC, so all of it can come home'])),
+  monadSell: () => delay(fixtureOp('reduce', () => {})),
   feedback: () => delay({ id: `fixture_fb_${liveState.n++}`, received: true as const }),
 
 }

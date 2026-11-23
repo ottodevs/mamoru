@@ -35,6 +35,8 @@ import { HowItWorks, howCopy } from '../components/how-it-works.tsx'
 import { Chevron, Fold, LiveSync, PullToRefresh, TweenPct, TweenUsd } from '../components/motion.tsx'
 import { useThrottledRefresh } from '../lib/refresh-throttle.ts'
 import { isMultichainTarget, monadCopy, MonadConsentDialog, splitRows } from '../components/monad-consent.tsx'
+import { LeaveMonadCard } from '../components/leave-monad.tsx'
+import { leaveSteps } from '../lib/leave-monad.ts'
 import { isVaultTarget } from '../lib/policies.ts'
 import { ApprovalBody, ApprovalDialog } from '../components/approval-dialog.tsx'
 import { moneyCopy, StuckNote, totalScopeNote, unreadChains } from '../components/money-map.tsx'
@@ -1426,6 +1428,12 @@ export function HomeView({ accountKey }: { accountKey: string }) {
   const keepOpen = dialog !== null || renewAsked
   const f = liveDown && !keepOpen ? undefined : cached
   const multichain = isMultichainTarget(f?.approval?.policyId)
+  // otto/mamoru#428 (spec 014): the operator offers to leave Monad (a Safe there with a session or USDC left): one card
+  // and one screen for both chains. While its Base step is still to sign, that screen is where the move to the Base-only
+  // mix is approved, so the plain renewal row and its dialog stay out of the way.
+  const leave = monadSleeve && f?.active && f.approval?.whatsNew && leaveSteps(f.approval.whatsNew) ? f.approval.whatsNew : null
+  const leaveRenews = !!leave && leave.steps.some((x) => x.kind === 'renew' && !x.done)
+  const baseAddress = (sessionData?.sleeves ?? []).find((x) => x.accountKey === accountKey)?.address
   // Unknown until the session has said whether a Monad sleeve exists and, if so, its balance has loaded (#142 review).
   const otherChainsUsdc = funding.data?.money ? null : !multichain ? 0n : !sessionData ? null : !monadSleeve ? 0n : monadFunding.data ? split(monadFunding.data, null).total : null
   // The session ended while Home was open: ask again, and the first screen offers the sign-in.
@@ -1625,9 +1633,10 @@ export function HomeView({ accountKey }: { accountKey: string }) {
             </>
           ) : canStart ? (
             <StartRow accountKey={accountKey} funded={hasMoney(f)} one={one} />
-          ) : f.active && f.approval && approvalOpen && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) && !renewing ? (
+          ) : f.active && f.approval && approvalOpen && (f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) && !renewing && !leaveRenews ? (
             <ApprovalRow key={approvalRowKey(f.approval)} approval={f.approval} onOpen={openApproval} />
           ) : null}
+          {monadSleeve && baseAddress ? <LeaveMonadCard baseKey={accountKey} monadKey={monadSleeve.accountKey} home={baseAddress} view={leave} /> : null}
           {/* otto/mamoru#311: Base is approved and the account is starting, so Start's row is gone; the one approval stays
               on screen for its Ethereum part, and says when it is done. */}
           {!canStart && (oneOpen || one.finished) ? <OneApprovalStart flow={one} title={homeCopy.notRunning} startLabel={homeCopy.start} /> : null}
@@ -1679,7 +1688,7 @@ export function HomeView({ accountKey }: { accountKey: string }) {
           <WithdrawDialog key={withdrawSeed} accountKey={accountKey} s={s} open={dialog === 'withdraw'} onClose={() => setDialog(null)} initialAmount={withdrawSeed} deployed={f.deployed} />
           <StopDialog accountKey={accountKey} s={s} open={dialog === 'stop'} onClose={() => setDialog(null)} />
           <StartDialog accountKey={accountKey} s={s} open={dialog === 'start'} onClose={() => setDialog(null)} />
-          {f.approval && f.active && !renewing && approvalOpen && (renewAsk || f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) ? (
+          {f.approval && f.active && !renewing && !leaveRenews && approvalOpen && (renewAsk || f.approval.renewDue || (f.approval.missing ?? 0) > 0 || f.approval.usage || f.approval.upgrade || f.approval.capRaise) ? (
             // otto/mamoru#142 review: a renewal that moves to the mix with Monad always goes through its consent and the
             // Monad step, due, expired or paused alike: never a one-tap renewal to it, never one the Worker must refuse.
             f.approval.upgrade && isMultichainTarget(f.approval.upgradePolicy) && !isVaultMove(f.approval) ? (

@@ -71,6 +71,15 @@ export type ApiClient = {
   stop(accountKey: string, sig: OwnerSignature): Promise<OpView>
   renewPrepare(accountKey: string): Promise<OwnerTxToSign>
   renew(accountKey: string, sig: OwnerSignature): Promise<OpView>
+  /**
+   * otto/mamoru#428 (spec 014), on the account's Safe on Monad (`accountKey` is that Safe's): the return home (revoke
+   * Mamoru's sessions there and send its USDC to `home`, the owner's Safe on Base) and, where the engine cannot sell
+   * the WMON left, the owner sale that comes first.
+   */
+  returnHomePrepare(accountKey: string, home: string): Promise<OwnerTxToSign>
+  returnHome(accountKey: string, sig: OwnerSignature): Promise<OpView>
+  monadSellPrepare(accountKey: string): Promise<OwnerTxToSign>
+  monadSell(accountKey: string, sig: OwnerSignature): Promise<OpView>
   /** #133: move the USDC found on Ethereum to this account on Base. */
   bridgeOutPrepare(accountKey: string): Promise<BridgeOutToSign>
   bridgeOut(accountKey: string, sig: OwnerSignature): Promise<BridgeOutView>
@@ -165,6 +174,10 @@ export const httpClient: ApiClient = {
   stop: (k, sig) => post<OpView>(acct(k, 'stop'), sig),
   renewPrepare: (k) => post<OwnerTxToSign>(acct(k, 'renew/prepare')),
   renew: (k, sig) => post<OpView>(acct(k, 'renew'), sig),
+  returnHomePrepare: (k, home) => post<OwnerTxToSign>(acct(k, 'return-home/prepare'), { home }),
+  returnHome: (k, sig) => post<OpView>(acct(k, 'return-home'), sig),
+  monadSellPrepare: (k) => post<OwnerTxToSign>(acct(k, 'monad-sell/prepare')),
+  monadSell: (k, sig) => post<OpView>(acct(k, 'monad-sell'), sig),
   bridgeOutPrepare: (k) => post<BridgeOutToSign>(acct(k, 'bridge-out/prepare')),
   bridgeOut: (k, sig) => post<BridgeOutView>(acct(k, 'bridge-out'), sig),
   bridgeOutStatus: (k) => request<BridgeOutView>(acct(k, 'bridge-out')),
