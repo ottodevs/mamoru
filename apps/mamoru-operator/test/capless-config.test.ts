@@ -122,6 +122,42 @@ test('spec 006 (Sol review): a raised pulled cap is refused for an account whose
   expect(op.settingsStatus()?.capRefused).toEqual(['legacy-a'])
 })
 
+test('otto/mamoru#453: the refused cap is paged only while the chain takes entries for the account; listed either way', async () => {
+  const base = { chainId: 143, registry: baseRegistry, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
+  const store = { state: { accounts: {} }, save: () => {} }
+  const v1 = Object.values(POLICIES).find((p) => p.allocation !== 'target-weights')!
+  const acc = { accountKey: 'monad-acct', policyId: v1.policyId, active: true, grants: [] } as never
+  const future = Math.floor(Date.now() / 1000) + 3600
+  let extra: Record<string, unknown> = { chainExit: [{ chainId: 143 }] }
+  const settings = { forAccount: () => ({ settings: { depth: { impactBps: 30, shareBps: 500 }, capUsdc: 1000, guard: { enabled: false, btc: { fallBps: 700, volBps: 8000 }, eth: { fallBps: 900, volBps: 10000 } }, ...extra }, versionId: 2, source: 'd1', override: [] }), status: () => ({}) }
+  const op = new Operator({ ...base, settings } as never, {} as never, {} as never, store as never)
+  const pages = async () => {
+    const logged: string[] = []
+    const log = console.log
+    console.log = (...args: unknown[]) => void logged.push(args.map(String).join(' '))
+    try {
+      op.capFor(acc)
+    } finally {
+      console.log = log
+    }
+    return logged.filter((l) => l.includes('refused for monad-ac')).length
+  }
+  // Exiting the chain, or an entry pause still running on it: refused and listed, not paged.
+  expect(await pages()).toBe(0)
+  expect(op.settingsStatus()?.capRefused).toEqual(['monad-ac'])
+  extra = { entryPause: [{ chainId: 143, until: future }] }
+  expect(await pages()).toBe(0)
+  // A pause of another chain, or one that has ended, leaves entries open: paged once.
+  extra = { entryPause: [{ chainId: 8453, until: future }] }
+  expect(await pages()).toBe(1)
+  expect(await pages()).toBe(0)
+  // Closed again, then reopened: it pages again.
+  extra = { chainExit: [{ chainId: 143 }] }
+  expect(await pages()).toBe(0)
+  extra = { entryPause: [{ chainId: 143, until: Math.floor(Date.now() / 1000) - 1 }] }
+  expect(await pages()).toBe(1)
+})
+
 describe('Operator: per-account cap overrides (otto/mamoru#26)', () => {
   const base = { chainId: 8453, live: true, rpcUrl: '', bundlerUrl: '', policy: POLICIES['conservador-live-v2']!, reviewMs: 1, waitBlockMs: 1, maxWaitBlocks: 1 }
   const store = { state: { accounts: {} }, save: () => {} }

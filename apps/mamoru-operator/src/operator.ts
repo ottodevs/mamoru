@@ -1623,11 +1623,18 @@ export class Operator {
     // default needs depth sizing actually applied to this account, which happens under a target-weights policy only.
     // Otherwise the account keeps the default cap and the status names it.
     if (cap > LIVE_CAP_USDC && (!s.settings.depth || this.policyOf(acc).allocation !== 'target-weights')) {
-      if (!this.capRefused.has(acc.accountKey)) console.log(`[alert] engine settings: ${own !== null ? 'account cap' : 'cap'} ${fmtUsdc(cap)} refused for ${acc.accountKey.slice(0, 8)} (${s.settings.depth ? `policy ${this.policyOf(acc).policyId} cannot size entries to depth` : 'depth sizing is off'}); default cap kept`)
+      // otto/mamoru#453: the cap only sizes entries; while this chain takes none for the account, the refusal is listed
+      // (settingsStatus) but not paged, and it pages again once entries reopen.
+      if (this.entriesClosed(acc)) this.capPaged.delete(acc.accountKey)
+      else if (!this.capPaged.has(acc.accountKey)) {
+        this.capPaged.add(acc.accountKey)
+        console.log(`[alert] engine settings: ${own !== null ? 'account cap' : 'cap'} ${fmtUsdc(cap)} refused for ${acc.accountKey.slice(0, 8)} (${s.settings.depth ? `policy ${this.policyOf(acc).policyId} cannot size entries to depth` : 'depth sizing is off'}); default cap kept`)
+      }
       this.capRefused.add(acc.accountKey)
       return { cap: LIVE_CAP_USDC, source: 'default' }
     }
     this.capRefused.delete(acc.accountKey)
+    this.capPaged.delete(acc.accountKey)
     const source: CapSource =
       own !== null ? 'override' : s.source === 'local' || s.override.includes('capUsdc') ? 'emergency' : s.settings.capUsdc === null ? 'default' : s.canary ? 'canary' : 'env'
     return { cap, source }
@@ -1635,6 +1642,22 @@ export class Operator {
 
   /** Accounts whose pulled cap was refused by capFor; reported in /metrics. */
   private readonly capRefused = new Set<string>()
+  /** otto/mamoru#453: the accounts whose cap refusal was paged (once each, while entries are open). */
+  private readonly capPaged = new Set<string>()
+
+  /**
+   * otto/mamoru#453: whether this account's engine settings close new entries into this operator's chain: a `chainExit`
+   * of it, or an `entryPause` of it that has not ended. Depth and cap pages are noise then (no new money goes there);
+   * they come back by themselves when the settings reopen the chain.
+   */
+  private entriesClosed(acc: AccountState): boolean {
+    const s = this.cfg.settings?.forAccount(acc.accountKey)?.settings
+    if (!s) return false
+    const chain = this.cfg.chainId
+    if ((s.chainExit ?? []).some((e) => e.chainId === chain)) return true
+    const now = Math.floor(Date.now() / 1000)
+    return (s.entryPause ?? []).some((e) => e.chainId === chain && e.until > now)
+  }
 
   /**
    * The cap an activation runs under: the current one, never above the cap its signed summary named. An approval
@@ -6682,6 +6705,12 @@ export class Operator {
   private noteDepthShort(acc: AccountState, short: NonNullable<Observation['depthShort']>): void {
     const s = short[0]
     const had = this.depthHeld.get(acc.accountKey)
+    // otto/mamoru#453: while the account's entries into this chain are closed, a short pool holds nothing back: not paged
+    // nor listed, so the first one after the chain reopens pages again.
+    if (s && this.entriesClosed(acc)) {
+      this.depthHeld.delete(acc.accountKey)
+      return
+    }
     if (!s) {
       if (had) console.log(`[remote] ${acc.accountKey}: ${had.pool} is deep enough again for this Safe's daily budget; entries resume`)
       this.depthHeld.delete(acc.accountKey)

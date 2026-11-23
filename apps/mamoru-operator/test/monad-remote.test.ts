@@ -337,6 +337,25 @@ describe('provision (Monad side)', () => {
     expect(m.op.remoteDepthHeld()).toEqual([])
   })
 
+  test('otto/mamoru#453: while the account exits or pauses this chain, a short pool is neither paged nor listed; reopened, it pages', async () => {
+    let extra: Record<string, unknown> = { chainExit: [{ chainId: 143 }] }
+    const m = keyed()
+    await m.op.provision(m.rctx)
+    const acc = m.state.accounts[m.rctx.accountKey]!
+    ;(m.op as unknown as { cfg: { settings: unknown } }).cfg.settings = { forAccount: () => ({ settings: { ...extra }, versionId: 1, source: 'd1', override: [] }), status: () => ({}) }
+    const p = m.op as unknown as { noteDepthShort(a: AccountState, s: { pool: string; depth: bigint; perWindow: bigint }[]): void }
+    const short = [{ pool: 'pool:WMON/USDC/3000', depth: 7_400_000_000n, perWindow: 15_000_000_000n }]
+    const pages = async () => (await quiet(async () => p.noteDepthShort(acc, short))).logged.filter((l) => l.includes('REMOTE_DEPTH_BELOW_BUDGET')).length
+    expect(await pages()).toBe(0)
+    expect(m.op.remoteDepthHeld()).toEqual([])
+    extra = { entryPause: [{ chainId: 143, until: Math.floor(Date.now() / 1000) + 3600 }] }
+    expect(await pages()).toBe(0)
+    extra = {}
+    expect(await pages()).toBe(1)
+    expect(m.op.remoteDepthHeld()).toHaveLength(1)
+    expect(await pages()).toBe(0)
+  })
+
   test('idempotent: already active answers active again, sends nothing and starts nothing more', async () => {
     const m = keyed()
     await m.op.provision(m.rctx)
