@@ -293,6 +293,8 @@ export const HYPERSYNC_LABEL = 'hypersync'
 
 /** otto/mamoru#459: how long one read of the chain's finalized block serves the log ranges of a proxy. */
 const FINALIZED_TTL_MS = 30_000
+/** otto/mamoru#459: what a range waits for the finalized block before the providers read it all: most of the deadline is theirs. */
+const FINALIZED_WAIT_MS = 5_000
 
 /** `p`, or a throw when `deadline` (ms since the epoch) comes first. */
 function withDeadline<T>(p: Promise<T>, deadline: number): Promise<T> {
@@ -381,6 +383,8 @@ export type RpcProxyOptions = {
    * as every range is); default MAMORU_HYPERSYNC_SPOT_BLOCKS or 10. 0: no comparison when HyperSync covers the range.
    */
   hypersyncSpotBlocks?: number
+  /** otto/mamoru#459: tests only; how long a range waits for the finalized block (default FINALIZED_WAIT_MS). */
+  finalizedWaitMs?: number
   /** Tests: the upstream transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
@@ -914,8 +918,9 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       })
       finalizedRead = mine
     }
-    // Within the request's deadline: a slow provider leaves time for the providers' read of the range.
-    return withDeadline(finalizedRead.p, deadline).catch(() => null)
+    // A short wait, never the request's deadline: a slow answer leaves the providers the time to read the whole range.
+    const wait = Date.now() + (opts.finalizedWaitMs ?? FINALIZED_WAIT_MS)
+    return withDeadline(finalizedRead.p, wait < deadline ? wait : deadline).catch(() => null)
   }
   /**
    * otto/mamoru#459: HyperSync reads only finalized history, [from, min(finalized, its archive, to)]: no reorg reaches

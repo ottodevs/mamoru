@@ -168,7 +168,7 @@ describe('HyperSync client', () => {
 // ---- Through the RPC proxy ---------------------------------------------------------------------
 
 /** Two RPC providers (upstream and a witness) over `logs`, `finalized` their finalized block (null: refused); HyperSync over `hsLogs`. */
-function proxyWorld(logs: Chain[], o: { hsLogs?: Chain[]; archive?: number; override?: HsAnswer; finalized?: number | null } = {}) {
+function proxyWorld(logs: Chain[], o: { hsLogs?: Chain[]; archive?: number; override?: HsAnswer; finalized?: number | null; finalizedStalls?: boolean } = {}) {
   const hs = hyperWorld(o.hsLogs ?? logs, o)
   const rpcCalls: { url: string; from: number; to: number }[] = []
   let finalizedReads = 0
@@ -180,6 +180,7 @@ function proxyWorld(logs: Chain[], o: { hsLogs?: Chain[]; archive?: number; over
     if (body.method === 'eth_blockNumber') return answer(hex(10_000))
     if (body.method === 'eth_getBlockByNumber' && body.params[0] === 'finalized') {
       finalizedReads++
+      if (o.finalizedStalls) await new Promise((r) => setTimeout(r, 1_500))
       const f = o.finalized === undefined ? 9_000 : o.finalized
       return f === null ? Response.json({ jsonrpc: '2.0', id: body.id, error: { code: -32000, message: 'finalized not supported' } }) : answer({ number: hex(f), hash: blockHash(f) })
     }
@@ -201,9 +202,9 @@ const newMetrics = () => {
   return new RpcMetrics(d)
 }
 
-async function scan(w: ReturnType<typeof proxyWorld>, from: number, to: number, o: { hypersync?: HyperSyncConfig | null; metrics?: RpcMetrics } = {}) {
+async function scan(w: ReturnType<typeof proxyWorld>, from: number, to: number, o: { hypersync?: HyperSyncConfig | null; metrics?: RpcMetrics; logsRequestMs?: number } = {}) {
   const hypersync = o.hypersync === undefined ? cfg(w.fetch) : o.hypersync
-  const proxy = startRpcProxy(UPSTREAM, { fetch: w.fetch, fallbacks: [WITNESS], logRanges: {}, chunkLogs: false, hypersync, hypersyncMinBlocks: 100, hypersyncSpotBlocks: 10, metrics: o.metrics })
+  const proxy = startRpcProxy(UPSTREAM, { fetch: w.fetch, fallbacks: [WITNESS], logRanges: {}, chunkLogs: false, hypersync, hypersyncMinBlocks: 100, hypersyncSpotBlocks: 10, finalizedWaitMs: 100, logsRequestMs: o.logsRequestMs, metrics: o.metrics })
   try {
     const res = await fetch(`${proxy.url}c/deposits`, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ address: ADDR, topics: [TOPIC], fromBlock: hex(from), toBlock: hex(to) }] }) })
     return (await res.json()) as { result?: unknown[]; error?: unknown }
@@ -285,6 +286,13 @@ describe('eth_getLogs through the proxy with HyperSync', () => {
     expect(r.result).toEqual(expected(1_000, 4_999))
     expect(w.hs.bodies.length).toBe(0)
     expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 1_000, to: 4_999 }])
+  })
+
+  test('a stalled finalized read waits only its short budget: the providers still read the range within the deadline', async () => {
+    const w = proxyWorld(LOGS, { finalizedStalls: true })
+    const r = await scan(w, 1_000, 4_999, { logsRequestMs: 1_000 })
+    expect(r.result).toEqual(expected(1_000, 4_999))
+    expect(w.hs.bodies.length).toBe(0)
   })
 
   test('a range entirely above the finalized block is the providers\' only', async () => {
