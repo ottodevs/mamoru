@@ -1172,9 +1172,9 @@ export class Operator {
   private relayerShortLoggedAt = 0
   /** otto/mamoru#135: one readSafe shared by every open tab and poll of the same account; dropped whenever the account moves (fundingMoved). */
   private readonly fundingCache = new FundingCache<SafeRead>(Date.now, FUNDING_STALE_MS)
-  /** otto/mamoru#456: per account and Safe, when funding's read last found it without code; per account, when it last moved. */
+  /** otto/mamoru#456: per account and Safe, when funding's read last found it without code; per account, how many times it moved. */
   private readonly noCodeAt = new Map<string, number>()
-  private readonly movedAt = new Map<string, number>()
+  private readonly moveGen = new Map<string, number>()
   /** otto/mamoru#340: per account, the last look for a deposit (watchDeposits): when, how far, and the one in flight. */
   private readonly depositLooks = new Map<string, DepositLook>()
   /** otto/mamoru#376: accounts whose spends the chain refused for a spending limit (window-hold.ts). In memory: a restart probes once. */
@@ -2837,12 +2837,14 @@ export class Operator {
     }
     const codeKey = `${acc.accountKey}:${safe.toLowerCase()}`
     const startedAt = Date.now()
+    const gen = this.moveGen.get(acc.accountKey) ?? 0
     const noCode = this.noCodeAt.get(codeKey)
     const undeployed = display && noCode !== undefined && startedAt >= noCode && startedAt - noCode < NO_CODE_KEEP_MS
     const r = await readSafe(this.client, safe, this.cfg.registry, { ...(asked ? { admitted: asked.map((id) => BigInt(id)) } : {}), ...(undeployed ? { undeployed: true } : {}) })
-    // Kept only from a read that asked the chain and started after the account last moved (an owner op, a deposit).
+    // Kept only from a read that asked the chain with no move of the account (an owner op, a deposit) while it ran: a
+    // generation, not a time, so a clock set back cannot let a read from before a move through.
     if (r.deployed) this.noCodeAt.delete(codeKey)
-    else if (!undeployed && startedAt > (this.movedAt.get(acc.accountKey) ?? 0)) this.noCodeAt.set(codeKey, startedAt)
+    else if (!undeployed && (this.moveGen.get(acc.accountKey) ?? 0) === gen) this.noCodeAt.set(codeKey, startedAt)
     this.homeReadAt.set(r, Date.now())
     // Sol review #6: the record holds what the Safe still owns, so it stays bounded. Pruned from a read that saw every
     // NFT (enumerated) or checked the admitted ids one by one (ownerOf), never from a capped enumeration.
@@ -2870,7 +2872,7 @@ export class Operator {
    */
   private fundingMoved(acc: AccountState): void {
     // otto/mamoru#456: and a Safe read without code is asked about its code again (an owner op may have deployed it).
-    this.movedAt.set(acc.accountKey, Date.now())
+    this.moveGen.set(acc.accountKey, (this.moveGen.get(acc.accountKey) ?? 0) + 1)
     for (const k of [...this.noCodeAt.keys()]) if (k.startsWith(`${acc.accountKey}:`)) this.noCodeAt.delete(k)
     // Every Safe this account was read for, not only acc.ctx's: a request's context is what funding keys by.
     this.fundingCache.invalidateWhere((k) => isAccountKey(k, acc.accountKey))

@@ -52,4 +52,22 @@ describe('otto/mamoru#456: an undeployed Safe is not asked for its code on every
     expect((await p.readOf(acc, SAFE, true)).deployed).toBe(true)
     expect(p.noCodeAt.size).toBe(0)
   })
+
+  test('a read in flight when the account moves keeps nothing, whatever the clock does', async () => {
+    const { w, p } = setup()
+    await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    const acc = w.state.accounts.k!
+    p.noCodeAt.clear()
+    const real = Date.now
+    try {
+      const read = p.readOf(acc, SAFE, true)
+      // The move lands while the read runs, stamped by a clock set back an hour.
+      Date.now = () => real() - 3_600_000
+      p.fundingMoved(acc)
+      await read
+    } finally {
+      Date.now = real
+    }
+    expect(p.noCodeAt.size).toBe(0)
+  })
 })
