@@ -308,8 +308,11 @@ function componentView(b: Buckets): ComponentSnapshot {
   return out
 }
 
-/** Who made a request: the loops of the operator, as the loopback proxy is told by the path it was called on. A closed set. */
-export const COMPONENTS = ['engine', 'watcher', 'operator', 'relayer', 'snapshot'] as const
+/**
+ * Who made a request: the loops of the operator, as the loopback proxy is told by the path it was called on. A closed set.
+ * `operator` is the operator's client outside any named loop (rpc-scope.ts); `watcher` is the armed watcher's balance batch.
+ */
+export const COMPONENTS = ['engine', 'watcher', 'operator', 'relayer', 'snapshot', 'armed', 'returns', 'oneauth', 'releases', 'usage', 'deposits', 'bridge', 'http', 'review', 'reconcile', 'relayers', 'remotes', 'held'] as const
 export type Component = (typeof COMPONENTS)[number] | 'unlabelled'
 
 export function componentOf(pathname: string): Component {

@@ -411,3 +411,51 @@ describe('review r1 of #253 (P1-2): a lane-1 op is on disk before it is sent; th
     expect(await g.lane1.sendV4SessionOpAt(g.acc, intents)).toEqual({ wait: 'gas over the ceiling' })
   })
 })
+
+describe('otto/mamoru#456: tickOneAuth reads a settled V4 home every five minutes, one on its way every minute', () => {
+  function home(ready: boolean) {
+    const peer = { key: async () => privateKeyToAccount(KEY).address, provision: async () => ({ state: 'pending' as const, code: 'X' }) }
+    const w = world(0n, { ...scoped, remoteRegistry: () => pinned(monadRegistry), remotePeers: { 143: peer } })
+    const acc = onV4(w)
+    const target = (w.op as unknown as { v4RemoteTarget(a: AccountState, k: Address, c: bigint): { address: Address } }).v4RemoteTarget(acc, privateKeyToAccount(KEY).address, v4CapUsdOf(100_000_000n))
+    const reads: string[] = []
+    const c = priv(w.op).client
+    const real = c.readContract.bind(c)
+    c.readContract = async (a) => {
+      reads.push(a.functionName)
+      return a.functionName === 'configOf' ? { set: true, capUsd: v4CapUsdOf(100_000_000n) } : a.functionName === 'remoteOf' ? { remote: target.address, capUsd: v4CapUsdOf(100_000_000n), ownersHash: `0x${'00'.repeat(32)}`, sessionKey: privateKeyToAccount(KEY).address } : a.functionName === 'isReady' ? ready : real(a)
+    }
+    acc.oneAuth = { capUsd: v4CapUsdOf(100_000_000n).toString() }
+    const at = (w.op as unknown as { oneAuthAt: Map<string, number> }).oneAuthAt
+    return { w, acc, reads: () => reads.filter((n) => n === 'configOf').length, ago: (ms: number) => at.set('k', Date.now() - ms) }
+  }
+
+  test('settled (registered and ready): once, then not again until five minutes have passed', async () => {
+    const h = home(true)
+    await priv(h.w.op).tickOneAuth()
+    expect(h.acc.oneAuth?.remote?.ready).toBe(true)
+    expect(h.reads()).toBe(1)
+    await priv(h.w.op).tickOneAuth()
+    h.ago(240_000)
+    await priv(h.w.op).tickOneAuth()
+    expect(h.reads()).toBe(1)
+    h.ago(301_000)
+    await priv(h.w.op).tickOneAuth()
+    expect(h.reads()).toBe(2)
+    // A clock set back reads it at once.
+    h.ago(-60_000)
+    await priv(h.w.op).tickOneAuth()
+    expect(h.reads()).toBe(3)
+  })
+
+  test('on its way (registered, not ready yet), or a migration in flight: every tick', async () => {
+    const h = home(false)
+    for (let i = 0; i < 3; i++) await priv(h.w.op).tickOneAuth()
+    expect(h.reads()).toBe(3)
+    const s = home(true)
+    await priv(s.w.op).tickOneAuth()
+    s.acc.ops.push({ opId: 'own-2-migrate-v4', kind: 'migrate-v4', state: 'submitted', updatedAt: '', migrateStep: 0 } as never)
+    await priv(s.w.op).tickOneAuth()
+    expect(s.reads()).toBe(2)
+  })
+})

@@ -68,6 +68,7 @@ import type { Relayer } from './relayer.ts'
 import { yieldFee, YIELD_FEE_BPS, YIELD_FEE_FROM } from './yield-fee.ts'
 import { revertData } from './bundler.ts'
 import { readChainUsage, readPolicyBudgets, type ChainUsage } from './session-usage.ts'
+import { scoped } from './rpc-scope.ts'
 import { bridgeLeftOf } from './bridge-left.ts'
 import { SpendHold, SPEND_HOLD_PROBE_MS, isSpend, spendDenialOf } from './window-hold.ts'
 import { clampHarvested, harvestedOf } from './harvested.ts'
@@ -138,8 +139,12 @@ const remoteCodeOf = (c: string | undefined): string => (c && /^[A-Z][A-Z0-9_]{0
  * the app shows: every owner action's prepare and submit reads the chain itself and decides on that.
  */
 const FUNDING_FRESH_MS = 15_000
-/** #149: how long the on-chain usage counters of an account are taken as current (about 30 reads per account). */
-const CHAIN_USAGE_TTL_MS = 10 * 60_000
+/**
+ * #149: how long the on-chain usage counters of an account are taken as current (about 30 reads per account).
+ * otto/mamoru#456: an hour. They feed the renew row and the bridge-out total only, never an owner operation or a Stop
+ * (each reads the chain itself); the burns journal covers the bridge's own sends, and a failed one forces a re-read.
+ */
+const CHAIN_USAGE_TTL_MS = 60 * 60_000
 /** otto/mamoru#376: the oldest chain read a V3 bridge-out's remaining total is judged on (one missed refresh, then unknown). */
 const BRIDGE_READ_MAX_AGE_MS = CHAIN_USAGE_TTL_MS + 5 * 60_000
 const FUNDING_STALE_MS = 60_000
@@ -263,10 +268,15 @@ const POST_WAIT_MS = 15_000
 const ARM_WATCH_MS = 15_000
 /** While the owner is around (armed, seen in the app or paid in within the last hour) the Safe is read every pass. */
 const ARM_FRESH_MS = 3_600_000
-/** After that: once a minute for a day, then every five minutes. A deposit nobody is waiting for can take that long to start. */
+/**
+ * After that: once a minute for a day, then every half hour (otto/mamoru#456: a Safe nobody opened in a day). A deposit
+ * nobody is waiting for can take that long to start; the owner opening the app reads it at once (funding).
+ */
 const ARM_IDLE_MS = 60_000
 const ARM_DAY_MS = 86_400_000
-const ARM_STALE_MS = 300_000
+const ARM_STALE_MS = 1_800_000
+/** otto/mamoru#456: a V4 home whose remote is registered, ready and settled is read by tickOneAuth this often (else every minute). */
+const ONE_AUTH_SETTLED_MS = 300_000
 /** Over the RPC budget an account with nothing in flight is still reviewed at least this often. */
 const BUDGET_REVIEW_MS = 900_000
 /** Over the RPC budget an operation left `included` is picked up at the normal pace for this long, then at the braked pace. */
@@ -2425,7 +2435,11 @@ export class Operator {
    * #149: the usage counters of the account's grants as the chain has them, at most CHAIN_USAGE_TTL_MS old. A use the
    * operator did not make (the key used elsewhere) is logged; either way the larger count is what the row follows.
    */
-  private async refreshChainUsage(acc: AccountState): Promise<void> {
+  private refreshChainUsage(acc: AccountState): Promise<void> {
+    return scoped('usage', () => this.refreshChainUsageNow(acc))
+  }
+
+  private async refreshChainUsageNow(acc: AccountState): Promise<void> {
     if (!acc.active || !acc.grants.length) return
     // otto/mamoru#293: a V4 session has no usage limit or expiry to count: no usage refresh (its pause is read by refreshOneAuth).
     if (this.onV4(acc)) return
@@ -2726,7 +2740,7 @@ export class Operator {
     if (now - w.at < (this.rpcOverBudget(now) ? Math.max(every, DEPOSIT_SCAN_BRAKED_MS) : every)) return Promise.resolve()
     w.at = now
     const look = w
-    const p: Promise<void> = this.lookForDeposits(acc, safe, look)
+    const p: Promise<void> = scoped('deposits', () => this.lookForDeposits(acc, safe, look))
       .catch((e) => logErr(`[deposits] ${acc.accountKey}:`, e))
       .finally(() => {
         if (look.pending === p) look.pending = undefined
@@ -5692,7 +5706,7 @@ export class Operator {
   /** Every ARM_WATCH_MS: one pass over the armed accounts. */
   private async watchArmed(): Promise<void> {
     if (this.armStopped) return
-    await this.checkArmed()
+    await scoped('armed', () => this.checkArmed())
     if (!this.armStopped) this.armTimer = setTimeout(() => this.watchArmed(), ARM_WATCH_MS)
   }
 
@@ -6409,7 +6423,7 @@ export class Operator {
     if (Date.now() - last < RECONCILE_EVERY_MS) return this.reconcileLater(acc)
     this.reconciled.set(acc.accountKey, Date.now())
     this.lock(acc.accountKey)
-      .run(() => this.reconcileOwner(acc))
+      .run(() => scoped('reconcile', () => this.reconcileOwner(acc)))
       .catch((e) => logErr(`[reconcile] ${acc.accountKey}`, e))
       .finally(() => this.reconcileLater(acc))
   }
@@ -7040,11 +7054,11 @@ export class Operator {
     const r = this.cfg.returnHome
     const peer = this.cfg.remotePeers?.[BRIDGE_MONAD_CHAIN_ID]
     if (!r || !peer?.release || !peer.releaseStatus) return
-    await r.tick((key) => {
+    await scoped('returns', () => r.tick((key) => {
       const acc = this.store.state.accounts[key]
       const remote = acc ? this.v4RemoteContext(acc) : null
       return remote ? { remote, peer: peer as Required<Pick<RemotePeer, 'release' | 'releaseStatus'>> } : null
-    })
+    }))
   }
 
   /** The V4 stack, the flag scope and the account's policy allow offering the move (no reads: approvalView is sync). */
@@ -7648,14 +7662,33 @@ export class Operator {
    */
   async tickOneAuth(): Promise<void> {
     await this.tickReturns().catch((e) => logErr('[return] tick:', e))
+    const at = Date.now()
     for (const acc of Object.values(this.store.state.accounts)) {
       if (!acc.active || !this.onV4(acc) || acc.policyId === ONE_AUTH_V4_REMOTE) continue
+      if (!this.oneAuthDue(acc, at)) continue
+      this.oneAuthAt.set(acc.accountKey, at)
       const job = await this.lock(acc.accountKey)
         .run(() => this.oneAuthRemote(acc))
         .catch((e) => logErr(`[v4] ${acc.accountKey} remote:`, e))
       // #348: the remote's readiness step, outside the account lock (review r1 of #253, P2: iris and the peer are network calls).
       if (job) await this.stepRemoteReady(acc, job.ctx, job.peer).catch((e) => logErr(`[v4] ${acc.accountKey} remote readiness:`, e))
     }
+  }
+
+  /** otto/mamoru#456: when tickOneAuth last read each V4 home. */
+  private readonly oneAuthAt = new Map<string, number>()
+
+  /**
+   * otto/mamoru#456: a V4 home is read every minute while something of its remote is on its way (not registered or not
+   * ready yet, its readiness flow running, a migration prepared or unsettled, design-C's step 1 open); settled, every
+   * ONE_AUTH_SETTLED_MS. A clock set back reads it at once.
+   */
+  private oneAuthDue(acc: AccountState, at: number): boolean {
+    const last = this.oneAuthAt.get(acc.accountKey)
+    if (last === undefined || last > at || at - last >= ONE_AUTH_SETTLED_MS) return true
+    const done = this.v4StepsDone(acc)
+    const moving = !acc.oneAuth?.remote?.ready || !!acc.oneAuth.remoteReady || this.readyBusy.has(acc.accountKey) || this.migrationHold(acc) || (!!this.designC(acc) && done.has(0) && !done.has(1))
+    return moving
   }
 
   /** When the remote was last (re-)registered by this operator, per account: at most once per REREGISTER_MS. */
@@ -8787,12 +8820,12 @@ export class Operator {
           const next = nextReview(g.more, runner.followUps ?? 0, this.rpcOverBudget(Date.now()), this.cfg.reviewMs)
           this.setFollowUps(acc, runner, next.followUps)
           runner.nextAt = Date.now() + next.ms
-          runner.timer = setTimeout(tick, next.ms)
+          runner.timer = setTimeout(() => scoped('review', tick), next.ms)
         }
       }
     }
     runner.nextAt = Date.now() + firstMs
-    runner.timer = setTimeout(tick, firstMs)
+    runner.timer = setTimeout(() => scoped('review', tick), firstMs)
     console.log(`[engine ${acc.accountKey}] loop started for ${acc.ctx.address} every ${this.cfg.reviewMs}ms${firstMs ? ` (first review in ${Math.round(firstMs / 1000)} s)` : ''}`)
   }
 

@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { componentOf, cuFor, RpcMetrics } from '../src/metrics.ts'
 import { labelProviders, providerWords, startRpcProxy } from '../src/rpc-proxy.ts'
+import { scoped, scopedHttp } from '../src/rpc-scope.ts'
+import { createPublicClient } from 'viem'
 
 /** 40 lowercase-hex chars, the shape of a QuickNode endpoint token (and most other provider API keys). */
 const QUICKNODE_TOKEN = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2'
@@ -366,6 +368,30 @@ describe('requests by component', () => {
   test('componentOf: the closed set, anything else is unlabelled', () => {
     expect(['/c/engine', '/c/watcher', '/c/operator', '/c/relayer', '/c/snapshot', '/c/engine/'].map(componentOf)).toEqual(['engine', 'watcher', 'operator', 'relayer', 'snapshot', 'engine'])
     expect(['/', '', '/c/', '/c/attacker', '/c/engine/extra', '/c/ENGINE', '/x/engine'].map(componentOf)).toEqual(Array(7).fill('unlabelled'))
+  })
+
+  test('otto/mamoru#456: the scoped client counts each request as the loop it was made in, batched or not', async () => {
+    const upstream = fakeUpstream((body) => ({ json: { jsonrpc: '2.0', id: body.id, result: '0x1' } }))
+    const metrics = new RpcMetrics(tmpDir())
+    const proxy = startRpcProxy(upstream.url, { metrics })
+    const client = createPublicClient({ transport: scopedHttp((c) => `${proxy.url}c/${c}`, 'operator', { batch: true, timeout: 5_000 }) })
+    const code = (n: number) => client.getCode({ address: `0x${String(n).padStart(40, '0')}` })
+    try {
+      // Concurrent loops on one client: the batch of each one goes to its own path, an inner scope wins, and a timer
+      // started inside a scope keeps it.
+      await Promise.all([
+        scoped('usage', () => Promise.all([code(1), code(2)])),
+        scoped('http', () => Promise.all([code(3), scoped('deposits', () => code(4))])),
+        code(5),
+        scoped('armed', () => new Promise((done) => setTimeout(() => void code(6).then(done), 5))),
+      ])
+    } finally {
+      proxy.stop()
+      upstream.stop()
+    }
+    const by = metrics.snapshot().byComponent.cumulative
+    expect(Object.fromEntries(Object.entries(by).map(([c, m]) => [c, m.eth_getCode!.requests]))).toEqual({ usage: 2, http: 1, deposits: 1, operator: 1, armed: 1 })
+    expect(['/c/armed', '/c/returns', '/c/oneauth', '/c/usage', '/c/deposits', '/c/bridge', '/c/http', '/c/review'].map(componentOf)).toEqual(['armed', 'returns', 'oneauth', 'usage', 'deposits', 'bridge', 'http', 'review'])
   })
 
   test('the path decides the component; the provider counters are the same as before', async () => {

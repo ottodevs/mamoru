@@ -865,7 +865,7 @@ describe('the armed watcher reads every armed Safe in one request', () => {
     expect(out).toEqual([{ key: 'k2', usdc: 9_000_000n }])
   })
 
-  test('an activation armed days ago with no owner around is read every five minutes, and at once when the app opens', async () => {
+  test('an activation armed days ago with no owner around is read every half hour, and at once when the app opens', async () => {
     const w = world(0n)
     const tx = await w.op.prepareActivate(ctx)
     const armed = await w.op.submit(ctx, 'activate', sign(tx))
@@ -875,11 +875,11 @@ describe('the armed watcher reads every armed Safe in one request', () => {
     await pass(w.op)
     await pass(w.op)
     expect(seen.multicall).toBe(1)
-    // Four minutes after the last read: not yet. Five: read again.
-    priv(w.op).armRead.set('k', Date.now() - 240_000)
+    // Five minutes after the last read: not yet (otto/mamoru#456). Thirty: read again.
+    priv(w.op).armRead.set('k', Date.now() - 301_000)
     await pass(w.op)
     expect(seen.multicall).toBe(1)
-    priv(w.op).armRead.set('k', Date.now() - 301_000)
+    priv(w.op).armRead.set('k', Date.now() - 1_801_000)
     await pass(w.op)
     expect(seen.multicall).toBe(2)
     // The owner opens the app: funding marks the account, every pass reads it again.
@@ -1970,6 +1970,23 @@ describe('renewing the approval of a running account', () => {
       const ids = acc.grants.map((g) => g.permissionId.toLowerCase()).join(',')
       ;(w.op as unknown as Usage).chainUsage.set(acc.accountKey, { at: Date.now(), grants: ids, byGrant: new Map([[swap.permissionId.toLowerCase(), { used: 3, spentBps: 8_500 }]]) })
       expect((await w.op.funding(ctx)).approval?.usage).toEqual({ action: 'enter', pool: 'pool:USDC/cbBTC/500', usedBps: 8_500, spent: false })
+    })
+
+    test('otto/mamoru#456: the chain usage counters are read again after an hour, not before', async () => {
+      const { w, acc } = await capped()
+      type U = { chainUsage: Map<string, { at: number }>; refreshChainUsage(a: unknown): Promise<void>; client: { getBlockNumber: (a?: unknown) => Promise<bigint> } }
+      const u = w.op as unknown as U
+      let reads = 0
+      const real = u.client.getBlockNumber.bind(u.client)
+      u.client.getBlockNumber = async (a) => (reads++, real(a))
+      await u.refreshChainUsage(acc)
+      expect(reads).toBe(1)
+      u.chainUsage.get('k')!.at = Date.now() - 59 * 60_000
+      await u.refreshChainUsage(acc)
+      expect(reads).toBe(1)
+      u.chainUsage.get('k')!.at = Date.now() - 61 * 60_000
+      await u.refreshChainUsage(acc)
+      expect(reads).toBe(2)
     })
 
     test('a renewal that is due goes first, with what fits; the missing grants are added after it', async () => {

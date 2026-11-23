@@ -11,7 +11,8 @@ import { monadV6Deployed } from '@mamoru/account/remote'
 import { RemotePeer } from './remote-peer.ts'
 import { rpcBudget } from './budget.ts'
 import { startLiveBundler } from './bundler.ts'
-import { RpcMetrics, logErr } from './metrics.ts'
+import { RpcMetrics, logErr, type Component } from './metrics.ts'
+import { scoped, scopedHttp } from './rpc-scope.ts'
 import { livePool, writeRefusal } from './chain.ts'
 import { writeRegistry } from './chain-writes.ts'
 import { Operator, type OperatorConfig } from './operator.ts'
@@ -620,7 +621,9 @@ export async function bootOperator(o: BootOptions) {
   // One path per component, for the counters only: the proxy serves them all the same way.
   const via = (component: string) => `${proxy.url}c/${component}`
   o = { ...o, rpcUrl: via('engine') }
-  const client = createPublicClient({ transport: http(via('operator'), { batch: true, timeout: 60_000 }) })
+  // otto/mamoru#456: the operator's client is shared by its loops; each request goes to the path of the loop it was made in
+  // (rpc-scope.ts `scoped`), `operator` outside any, so /metrics names the loop that spends.
+  const client = createPublicClient({ transport: scopedHttp((c: Component) => via(c), 'operator', { batch: true, timeout: 60_000 }) })
   const watchClient = createPublicClient({ transport: http(via('watcher'), { batch: true, timeout: 60_000 }) })
   const chainId = await client.getChainId()
   const readRegistry = operatorRegistry(chainId, process.env)
@@ -722,8 +725,9 @@ export async function bootOperator(o: BootOptions) {
       return readPoolDepth(monad as never, { name: pool, address: e.address, token0: registryAddress(e.token0!, monadRegistry), token1: registryAddress(e.token1!, monadRegistry) }, band, in1)
     }
     const bm = bridgeMonad
-    setInterval(() => void bm.tick(), 60_000)
-    void bm.tick()
+    const bmTick = () => scoped('bridge', () => bm.tick())
+    setInterval(() => void bmTick(), 60_000)
+    void bmTick()
     console.log(`[operator] bridge leg to Monad on (v6 accounts): ${bm.pendingCount()} burn(s) in flight, ${monadRelayer ? `mints from relayer ${monadRelayer.address} on Monad` : `no mints (${mintRefusal})`}`)
   }
   const bundler = refusal === null ? startLiveBundler(client, relayer, chainId, writes.on ? { registry, gasModel: chainOf(registry.chainId).gasModel } : {}) : null
@@ -815,20 +819,20 @@ export async function bootOperator(o: BootOptions) {
   )
   // otto/mamoru#251: an account's own Safe on a remote chain is provisioned when its approval lands, and again every
   // minute until its operator reports it running (a deploy that failed, a peer that was down).
-  if (Object.keys(remotePeers).length) setInterval(() => void operator.tickRemotes(), 60_000).unref?.()
+  if (Object.keys(remotePeers).length) setInterval(() => void scoped('remotes', () => operator.tickRemotes()), 60_000).unref?.()
   // otto/mamoru#277: each relayer's native balance is read on this minute tick, at most every 10 min (metrics.ts RELAYER_READ_MS).
-  setInterval(() => void operator.tickRelayers(), 60_000).unref?.()
+  setInterval(() => void scoped('relayers', () => operator.tickRelayers()), 60_000).unref?.()
   // otto/mamoru#367: held-position history read between reviews (only engines with a history step: Monad).
   let heldTick = false
   setInterval(() => {
     if (heldTick) return
     heldTick = true
-    void operator.tickHeldHistory().finally(() => (heldTick = false))
+    void scoped('held', () => operator.tickHeldHistory()).finally(() => (heldTick = false))
   }, 60_000).unref?.()
   // otto/mamoru#293: V4 homes register, provision and follow the readiness of their remote every minute.
-  if (oneAuth && chainId === BASE_CHAIN_ID) setInterval(() => void operator.tickOneAuth(), 60_000).unref?.()
+  if (oneAuth && chainId === BASE_CHAIN_ID) setInterval(() => void scoped('oneauth', () => operator.tickOneAuth()), 60_000).unref?.()
   // otto/mamoru#278: a V4 remote Safe's burn home is settled against the chain every minute.
-  if (oneAuth && chainId !== BASE_CHAIN_ID) setInterval(() => void operator.tickReleases(), 60_000).unref?.()
+  if (oneAuth && chainId !== BASE_CHAIN_ID) setInterval(() => void scoped('releases', () => operator.tickReleases()), 60_000).unref?.()
   // otto/mamoru#136 phase 1 + otto/mamoru#129: one read of every served Safe and its pools, with the yield-ledger
   // hold-value baseline always folded in, served on GET /snapshot. Always built when the chain supports it;
   // started and stopped by the `yield_ledger` ops flag (D1, set from /ops), not MAMORU_SNAPSHOT / MAMORU_YIELD_LEDGER
@@ -996,8 +1000,9 @@ export async function bootOperator(o: BootOptions) {
     operator.siblingHoldingsUsdc = (ctx) => bo.siblingHoldingsUsdc(ctx)
     // otto/mamoru#348 (A1): the home's announceReady to its sibling goes from its own session on Base (lane 1), and is read back there.
     if (chainId === BASE_CHAIN_ID && oneAuth) bo.home = { announce: (accountKey, onSigned) => operator.announceSiblingHome(accountKey, onSigned), outcome: (op) => operator.lane1Outcome(op) }
-    setInterval(() => void bo.tick(), 60_000)
-    void bo.tick()
+    const boTick = () => scoped('bridge', () => bo.tick())
+    setInterval(() => void boTick(), 60_000)
+    void boTick()
     if (aa) console.log(`[operator] bridge-out uses userOps on Ethereum: gas paid in USDC through the ${paymaster!.name} paymaster, bundled by the operator`)
     if (bo.pendingCctp() > 0) console.log(`[operator] bridge-out: ${bo.pendingCctp()} CCTP move(s) to finish on Base`)
     console.log(`[operator] bridge-out from Ethereum available (on per account from /ops), relayer ${relayer.address} (${wei ?? 'unknown'} wei on Ethereum)`)

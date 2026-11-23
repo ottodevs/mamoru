@@ -5,6 +5,7 @@ import type { Server } from 'bun'
 import type { AccountContext } from '@mamoru/domain'
 import { verifyMetricsSignature } from '@mamoru/operator-auth'
 import { logErr } from './metrics.ts'
+import { scoped } from './rpc-scope.ts'
 import type { SnapshotLoop } from './snapshot.ts'
 import type { BridgeOut } from './bridge-out.ts'
 import { Admission, authFraming, boundedText, DEFAULT_ADMISSION, type AdmissionLimits, type Bucket } from './admission.ts'
@@ -152,76 +153,79 @@ export function startServer(op: Operator, opts: { secret: string; hostname: stri
     idleTimeout: opts.idleTimeoutSec ?? 120,
     // otto/mamoru#140 (part2 #7): Bun's own ceiling, under the 128 MB default; account routes are held to a far smaller one below.
     maxRequestBodySize: 256 * 1024,
-    async fetch(req) {
-      const url = new URL(req.url)
-      const path = url.pathname + url.search
-      if (url.pathname === '/health') {
-        return json(200, { ok: true, chainId: op.cfg.chainId, live: op.cfg.live, policy: op.cfg.policy.policyId, relayer: op.relayer.address })
-      }
-      if (url.pathname === '/metrics') {
-        if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
-        const sig = req.headers.get('x-mamoru-sig')
-        if (!(await verifyMetricsSignature(opts.secret, 'GET', '/metrics', sig))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
-        return json(200, await buildMetricsPayload(op, opts.rpcMetrics, opts.gitSha, opts.bootedAt, opts.quota, opts.rpcCache, opts.bridgeOut))
-      }
-      if (url.pathname === '/pool-stats') {
-        // otto/mamoru#248: the hourly pool stats (TVL, daily volumes) the app turns into the plan APY. Signed like
-        // /metrics; served from the cache as it is (each field null until read, with asOf). 404 where there is none.
-        if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
-        if (!(await verifyMetricsSignature(opts.secret, 'GET', '/pool-stats', req.headers.get('x-mamoru-sig')))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
-        const stats = op.poolStatsView()
-        if (!stats) return json(404, { error: 'no pool stats on this chain' })
-        return json(200, { chainId: op.cfg.chainId, pools: stats })
-      }
-      if (url.pathname === '/snapshot') {
-        // otto/mamoru#136: the latest snapshot, signed like /metrics. 404 while the loop is off: either this
-        // operator never constructs one (not Base, or no MULTICALL3), or it does but the `yield_ledger` ops flag
-        // (otto/mamoru#129) is off right now — `isRunning`, not `current`, decides that, so a loop stopped after
-        // the flag flipped off never hands out the snapshot it read while it was still on.
-        if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
-        const sig = req.headers.get('x-mamoru-sig')
-        if (!(await verifyMetricsSignature(opts.secret, 'GET', '/snapshot', sig))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
-        if (!opts.snapshot?.isRunning) return json(404, { error: 'snapshot off' })
-        const snap = opts.snapshot.current
-        if (!snap) return json(503, { error: 'no snapshot yet', lastError: opts.snapshot.lastError })
-        return json(200, { ...snap, safes: snap.safes.map((x) => ({ ...x, accountKey: x.accountKey.slice(0, 8) })), lastError: opts.snapshot.lastError })
-      }
-      if (url.pathname.startsWith(EXPOSURE_PATH)) {
-        // otto/mamoru#212: a peer operator reads what this chain holds for one Safe, to hold the account's cap across
-        // chains. Read only, signed like /metrics (same OPERATOR_SECRET on every operator).
-        if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
-        if (!(await verifyMetricsSignature(opts.secret, 'GET', url.pathname, req.headers.get('x-mamoru-sig')))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
-        // otto/mamoru#332: `<address>` or `<address>/<chainId>/<safe>/<block>` (the caller's own read in the same total).
-        const asked = parseExposurePath(url.pathname)
-        if (!asked) return json(400, { error: 'not an address', code: 'BAD_REQUEST' })
-        if (!admission.enter('other')) return json(503, { error: 'the operator is busy, try again in a moment', code: 'OPERATOR_BUSY' })
-        try {
-          return json(200, await op.exposureFor(asked.safe as `0x${string}`, asked.covered))
-        } catch (e) {
-          logErr('[http] exposure:', e)
-          return json(503, { error: 'the account could not be read right now', code: 'EXPOSURE_UNAVAILABLE' })
-        } finally {
-          admission.leave('other')
-        }
-      }
-      const m = ROUTE.exec(url.pathname)
-      if (!m) return json(404, { error: 'not found' })
-      // otto/mamoru#140 (part2 #7): headers that cannot carry a valid signature are refused before the body is read,
-      // and no more than maxInFlight account requests are open at once.
-      if (!authFraming(admission.limits, req.headers.get('x-mamoru-account'), req.headers.get('x-mamoru-sig'), req.headers.get('x-mamoru-ts'))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
-      // Stop (prepare and submit) has its own bucket in every limit: other traffic never keeps an owner from revoking.
-      // Its slots are taken only once the signature is verified (Sol review #5): unauthenticated slow bodies cannot fill
-      // them. Its body is read first, without a slot, under a tighter size and deadline.
-      const bucket: Bucket = m[2]!.startsWith('stop') ? 'stop' : 'other'
-      if (bucket === 'stop') return account(req, url, path, m, bucket)
-      if (!admission.enter(bucket)) return json(503, { error: 'the operator is busy, try again in a moment', code: 'OPERATOR_BUSY' })
-      try {
-        return await account(req, url, path, m, bucket)
-      } finally {
-        admission.leave(bucket)
-      }
-    },
+    // otto/mamoru#456: every RPC request a route makes is counted as `http`'s (a loop it starts under its own name keeps that name).
+    fetch: (req) => scoped('http', () => serve(req)),
   })
+
+  async function serve(req: Request): Promise<Response> {
+    const url = new URL(req.url)
+    const path = url.pathname + url.search
+    if (url.pathname === '/health') {
+      return json(200, { ok: true, chainId: op.cfg.chainId, live: op.cfg.live, policy: op.cfg.policy.policyId, relayer: op.relayer.address })
+    }
+    if (url.pathname === '/metrics') {
+      if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
+      const sig = req.headers.get('x-mamoru-sig')
+      if (!(await verifyMetricsSignature(opts.secret, 'GET', '/metrics', sig))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+      return json(200, await buildMetricsPayload(op, opts.rpcMetrics, opts.gitSha, opts.bootedAt, opts.quota, opts.rpcCache, opts.bridgeOut))
+    }
+    if (url.pathname === '/pool-stats') {
+      // otto/mamoru#248: the hourly pool stats (TVL, daily volumes) the app turns into the plan APY. Signed like
+      // /metrics; served from the cache as it is (each field null until read, with asOf). 404 where there is none.
+      if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
+      if (!(await verifyMetricsSignature(opts.secret, 'GET', '/pool-stats', req.headers.get('x-mamoru-sig')))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+      const stats = op.poolStatsView()
+      if (!stats) return json(404, { error: 'no pool stats on this chain' })
+      return json(200, { chainId: op.cfg.chainId, pools: stats })
+    }
+    if (url.pathname === '/snapshot') {
+      // otto/mamoru#136: the latest snapshot, signed like /metrics. 404 while the loop is off: either this
+      // operator never constructs one (not Base, or no MULTICALL3), or it does but the `yield_ledger` ops flag
+      // (otto/mamoru#129) is off right now — `isRunning`, not `current`, decides that, so a loop stopped after
+      // the flag flipped off never hands out the snapshot it read while it was still on.
+      if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
+      const sig = req.headers.get('x-mamoru-sig')
+      if (!(await verifyMetricsSignature(opts.secret, 'GET', '/snapshot', sig))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+      if (!opts.snapshot?.isRunning) return json(404, { error: 'snapshot off' })
+      const snap = opts.snapshot.current
+      if (!snap) return json(503, { error: 'no snapshot yet', lastError: opts.snapshot.lastError })
+      return json(200, { ...snap, safes: snap.safes.map((x) => ({ ...x, accountKey: x.accountKey.slice(0, 8) })), lastError: opts.snapshot.lastError })
+    }
+    if (url.pathname.startsWith(EXPOSURE_PATH)) {
+      // otto/mamoru#212: a peer operator reads what this chain holds for one Safe, to hold the account's cap across
+      // chains. Read only, signed like /metrics (same OPERATOR_SECRET on every operator).
+      if (req.method !== 'GET') return json(405, { error: 'method not allowed' })
+      if (!(await verifyMetricsSignature(opts.secret, 'GET', url.pathname, req.headers.get('x-mamoru-sig')))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+      // otto/mamoru#332: `<address>` or `<address>/<chainId>/<safe>/<block>` (the caller's own read in the same total).
+      const asked = parseExposurePath(url.pathname)
+      if (!asked) return json(400, { error: 'not an address', code: 'BAD_REQUEST' })
+      if (!admission.enter('other')) return json(503, { error: 'the operator is busy, try again in a moment', code: 'OPERATOR_BUSY' })
+      try {
+        return json(200, await op.exposureFor(asked.safe as `0x${string}`, asked.covered))
+      } catch (e) {
+        logErr('[http] exposure:', e)
+        return json(503, { error: 'the account could not be read right now', code: 'EXPOSURE_UNAVAILABLE' })
+      } finally {
+        admission.leave('other')
+      }
+    }
+    const m = ROUTE.exec(url.pathname)
+    if (!m) return json(404, { error: 'not found' })
+    // otto/mamoru#140 (part2 #7): headers that cannot carry a valid signature are refused before the body is read,
+    // and no more than maxInFlight account requests are open at once.
+    if (!authFraming(admission.limits, req.headers.get('x-mamoru-account'), req.headers.get('x-mamoru-sig'), req.headers.get('x-mamoru-ts'))) return json(401, { error: 'unauthorized', code: 'OPERATOR_AUTH' })
+    // Stop (prepare and submit) has its own bucket in every limit: other traffic never keeps an owner from revoking.
+    // Its slots are taken only once the signature is verified (Sol review #5): unauthenticated slow bodies cannot fill
+    // them. Its body is read first, without a slot, under a tighter size and deadline.
+    const bucket: Bucket = m[2]!.startsWith('stop') ? 'stop' : 'other'
+    if (bucket === 'stop') return account(req, url, path, m, bucket)
+    if (!admission.enter(bucket)) return json(503, { error: 'the operator is busy, try again in a moment', code: 'OPERATOR_BUSY' })
+    try {
+      return await account(req, url, path, m, bucket)
+    } finally {
+      admission.leave(bucket)
+    }
+  }
 
   async function account(req: Request, url: URL, path: string, m: RegExpExecArray, bucket: Bucket): Promise<Response> {
     const stop = bucket === 'stop'
