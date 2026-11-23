@@ -193,7 +193,11 @@ export function positionUsdc(p: PoolPosition, sqrtPriceX96: bigint, registry: Re
  * call instead of a separate eth_blockNumber, and eth_getCode is asked only until the Safe's deployment is
  * confirmed (see `isDeployed`).
  */
-export async function readSafe(client: PublicClient, safe: Address, registry: Registry, opts: { admitted?: readonly bigint[] } = {}): Promise<SafeRead> {
+/**
+ * `undeployed`: the caller read this Safe without code moments ago and nothing of it moved since (otto/mamoru#456, the
+ * funding display only): it is reported undeployed without asking eth_getCode again.
+ */
+export async function readSafe(client: PublicClient, safe: Address, registry: Registry, opts: { admitted?: readonly bigint[]; undeployed?: boolean } = {}): Promise<SafeRead> {
   const pools = usdcPools(registry)
   const live = livePool(registry)
   const npm = address('NonfungiblePositionManager', registry)
@@ -237,7 +241,7 @@ export async function readSafe(client: PublicClient, safe: Address, registry: Re
   const lag = secondsToBlocks(registry.chainId, SAFE_SIGHTING_SECONDS)
   const safeNumber = blockNumber > lag ? blockNumber - lag : 0n
   const [deployed, eth, nfts, balances, slots] = await Promise.all([
-    isSafeDeployed(client, safe, blockNumber, safeNumber),
+    opts.undeployed ? false : isSafeDeployed(client, safe, blockNumber, safeNumber),
     needAt(ethRead, () => client.getBalance({ address: safe, blockNumber })),
     needAt(nftRead, () => client.readContract({ address: npm, abi: nonfungiblePositionManagerAbi, functionName: 'balanceOf', args: [safe], blockNumber })),
     Promise.all(balanceReads.map((r, i) => needAt(r, () => client.readContract({ address: address(tokenNames[i]!, registry), abi: erc20Abi, functionName: 'balanceOf', args: [safe], blockNumber })))),
