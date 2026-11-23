@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { PublicClient } from 'viem'
 import { address, monadRegistry } from '@mamoru/registry'
-import { SIM_CALL_GAS, simulateFromEntryPoint } from './index.ts'
+import { SIM_CALL_GAS, simulateCalls, simulateFromEntryPoint } from './index.ts'
 
 // otto/mamoru#260 (Brais's Monad Safe, 1 Nov): Monad's eth_simulateV1 refuses `"validation": false` and a sender with
 // code, and reports the whole gas limit as gasUsed. The simulation from the EntryPoint must work there.
@@ -58,5 +58,26 @@ describe('simulateFromEntryPoint on a gas_limit chain (Monad)', () => {
     const sim = await simulateFromEntryPoint(client, SAFE, '0x', 1n, monadRegistry)
     expect(sim.gasUsed).toBe(85_165n)
     expect(seen.estimate).toBeUndefined()
+  })
+})
+
+// otto/mamoru#452: anvil 1.10's eth_simulateV1 (probed on a Base fork, 23 Nov) answers a revert with returnData 0x and
+// the revert bytes in error.data: {"returnData":"0x","status":"0x0","error":{"code":3,"message":"execution reverted: …","data":"0x…01"}}.
+describe('simulateCalls: a revert carries its bytes in returnData, whichever field the node put them in', () => {
+  const WORD = `0x${'00'.repeat(31)}01` as const
+  const node = (call: Record<string, unknown>) => ({ request: async () => [{ calls: [{ gasUsed: '0x521a', logs: [], ...call }] }] }) as unknown as PublicClient
+  test('anvil: returnData 0x, error.data the bytes', async () => {
+    const [r] = await simulateCalls(node({ status: '0x0', returnData: '0x', error: { code: 3, message: 'execution reverted', data: WORD } }), [{ to: SAFE, data: '0x' }], 1n)
+    expect(r).toMatchObject({ status: 'reverted', returnData: WORD, error: 'execution reverted' })
+  })
+  test('geth: the bytes already in returnData are kept; a success never takes error.data', async () => {
+    const [g] = await simulateCalls(node({ status: '0x0', returnData: WORD, error: { message: 'execution reverted', data: '0xdead' } }), [{ to: SAFE, data: '0x' }], 1n)
+    expect(g!.returnData).toBe(WORD)
+    const [ok] = await simulateCalls(node({ status: '0x1', returnData: '0x', error: { message: 'x', data: WORD } }), [{ to: SAFE, data: '0x' }], 1n)
+    expect(ok!.returnData).toBe('0x')
+  })
+  test('error.data that is not hex bytes is ignored', async () => {
+    const [r] = await simulateCalls(node({ status: '0x0', returnData: '0x', error: { message: 'execution reverted', data: { reason: 'x' } } }), [{ to: SAFE, data: '0x' }], 1n)
+    expect(r!.returnData).toBe('0x')
   })
 })

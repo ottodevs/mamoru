@@ -861,7 +861,7 @@ export const SIM_CALL_GAS = 30_000_000n
  * is the spec default) because Monad's RPC refuses an explicit `"validation": false` ("not supported yet").
  */
 export async function simulateCalls(client: PublicClient, calls: SimCall[], blockNumber: bigint, stateOverrides?: Record<Address, { code: Hex }>): Promise<SimCallResult[]> {
-  let out: { calls: { status: Hex; returnData: Hex; gasUsed: Hex; logs: Log[]; error?: { message: string } }[] }[]
+  let out: { calls: { status: Hex; returnData: Hex; gasUsed: Hex; logs: Log[]; error?: { message: string; data?: unknown } }[] }[]
   try {
     out = (await client.request({
       method: 'eth_simulateV1' as never,
@@ -876,7 +876,9 @@ export async function simulateCalls(client: PublicClient, calls: SimCall[], bloc
   }
   return out[0]!.calls.map((c) => ({
     status: c.status === '0x1' ? 'success' : 'reverted',
-    returnData: c.returnData,
+    // otto/mamoru#452: anvil (1.10) answers a revert with returnData 0x and the revert bytes in error.data; geth puts them
+    // in returnData. Either way returnData carries them, so simulateAndRevert's (success, ...) answer reads the same.
+    returnData: c.status !== '0x1' && (!c.returnData || c.returnData === '0x') && typeof c.error?.data === 'string' && /^0x([0-9a-f]{2})*$/i.test(c.error.data) ? (c.error.data as Hex) : c.returnData,
     gasUsed: BigInt(c.gasUsed),
     logs: c.logs,
     error: c.error?.message,
