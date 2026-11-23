@@ -6523,7 +6523,7 @@ export class Operator {
       .finally(() => {
         // A pass that threw concluded nothing either.
         this.noteReconciled(acc, before)
-        this.reconcileLater(acc)
+        this.reconcileLater(acc, true)
       })
   }
 
@@ -6560,9 +6560,10 @@ export class Operator {
   /**
    * otto/mamoru#140: while an account has unresolved owner ops, reconciliation runs again on its own, not only when
    * a request comes in: after reconcileRetryMs, doubling up to reconcileRetryMaxMs (an RPC outage is waited out without
-   * hammering it). Nothing left unresolved: the timer and its backoff are dropped.
+   * hammering it). Nothing left unresolved: the timer and its backoff are dropped. Only a pass that ran (afterPass)
+   * doubles the wait: a call that found it throttled or held keeps the current step (otto/mamoru#456).
    */
-  private reconcileLater(acc: AccountState): void {
+  private reconcileLater(acc: AccountState, afterPass = false): void {
     const key = acc.accountKey
     const t = this.reconcileTimers.get(key)
     if (!this.unresolved(acc) || this.shutDown) {
@@ -6571,10 +6572,12 @@ export class Operator {
       return
     }
     if (t?.timer) return
-    const delay = t ? Math.min(t.delay * 2, this.reconcileRetryMaxMs) : this.reconcileRetryMs
-    // otto/mamoru#456: never before a hold ends (the timer would only find it held).
+    const delay = !t ? this.reconcileRetryMs : afterPass ? Math.min(t.delay * 2, this.reconcileRetryMaxMs) : t.delay
+    // otto/mamoru#456: never before a hold ends (the timer would only find it held). A timer that fired just short of
+    // it (Date.now rounding) waits out only the rest.
     const q = this.reconcileHeld(acc) ? this.reconcileQuiet.get(key)! : undefined
-    const wait = q ? Math.max(delay, q.until - Date.now()) : delay
+    const left = q ? q.until - Date.now() : 0
+    const wait = q ? (afterPass ? Math.max(delay, left) : left) : delay
     const timer = setTimeout(() => {
       const e = this.reconcileTimers.get(key)
       if (e) e.timer = null

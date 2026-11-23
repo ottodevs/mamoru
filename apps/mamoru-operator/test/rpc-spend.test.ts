@@ -73,7 +73,7 @@ describe('otto/mamoru#456: an undeployed Safe is not asked for its code on every
 })
 
 describe('otto/mamoru#456: background reconciliation that concludes nothing backs off', () => {
-  type R = { reconcileSoon(a: AccountState): void; reconcileOwner(a: AccountState): Promise<void>; reconciled: Map<string, number>; reconcileQuiet: Map<string, { until: number; delay: number }>; reconcileTimers: Map<string, { timer: unknown }>; patchOp(a: AccountState, id: string, p: object): void }
+  type R = { reconcileSoon(a: AccountState): void; reconcileOwner(a: AccountState): Promise<void>; reconciled: Map<string, number>; reconcileQuiet: Map<string, { until: number; delay: number }>; reconcileTimers: Map<string, { timer: unknown; delay: number }>; patchOp(a: AccountState, id: string, p: object): void }
   async function setup(conclude = () => false, fail = false) {
     const w = world(0n)
     await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
@@ -135,6 +135,28 @@ describe('otto/mamoru#456: background reconciliation that concludes nothing back
       s.r.patchOp(s.acc, own.opId, { state: own.state })
       await s.pass()
       expect(s.passes()).toBe(2)
+    } finally {
+      s.stop()
+    }
+  })
+
+  test('a timer that fires just short of the hold keeps the backoff step and waits out only the rest', async () => {
+    const s = await setup()
+    try {
+      await s.pass()
+      const t = s.r.reconcileTimers.get('k')!
+      expect(t.delay).toBe(30_000)
+      // The retry timer fires while the hold still has 3 ms to go (Date.now rounding): no pass, no doubling.
+      clearTimeout(t.timer as never)
+      t.timer = null
+      s.r.reconcileQuiet.get('k')!.until = Date.now() + 3
+      await s.pass()
+      expect(s.passes()).toBe(1)
+      expect(s.r.reconcileTimers.get('k')!.delay).toBe(30_000)
+      // The rescheduled timer runs the pass as the hold ends, and only that pass doubles the wait.
+      for (let i = 0; i < 50 && s.passes() < 2; i++) await Bun.sleep(5)
+      expect(s.passes()).toBe(2)
+      expect(s.r.reconcileTimers.get('k')!.delay).toBe(60_000)
     } finally {
       s.stop()
     }
