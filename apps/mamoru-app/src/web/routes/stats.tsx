@@ -1,11 +1,11 @@
 // app.mamoru.lol/stats (spec 013 amendment A1, design approved by Ot and Brais on 6 Nov): every Mamoru account added
 // up, public, no session. Where the money is, what it earns, whether the return holds, then the accounts. A block whose
 // figures the API did not send (incomplete, stale or backed by fewer than 3 accounts) is not drawn.
-import type { StatsView } from '@mamoru/domain'
+import type { StatsSlice, StatsView } from '@mamoru/domain'
 import { Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSession, useStats } from '../api/queries.ts'
-import { AreaChart, dayLabel, DayChart, Donut } from '../components/charts.tsx'
+import { AreaChart, CATS, dayLabel, DayChart } from '../components/charts.tsx'
 import { MainTabs, TabBar } from '../components/nav.tsx'
 import { Brand, InfoPopover } from '../components/ui.tsx'
 import '../stats.css'
@@ -60,6 +60,8 @@ export const statsCopy = {
   perDayTip: 'Fees and vault yield earned each UTC day, in US dollars.',
   byAsset: 'By asset',
   byAssetTip: 'Exposure to each token: every pool position split into its two tokens at today’s amounts; vaults hold USDC.',
+  byChain: 'By chain',
+  byChainTip: 'Value held on each chain.',
   apr: 'APR over time',
   aprTip: 'Each dot is one day: what a dollar working earned that day, as a yearly rate. The line is the 7-day average, which shows whether a rate holds.',
   accounts: 'Total accounts',
@@ -84,9 +86,47 @@ function Lab({ children, tip }: { children: ReactNode; tip: string }) {
   )
 }
 
+type Split = 'asset' | 'chain'
+
+/** The hero bar (Brais, 23 Nov, #455): the split by asset by default, or by chain, in one horizontal bar. */
+function Alloc({ byToken, byChain }: { byToken?: StatsSlice[]; byChain?: StatsSlice[] }) {
+  const [split, setSplit] = useState<Split>(byToken?.length ? 'asset' : 'chain')
+  const options: { v: Split; label: string }[] = []
+  if (byToken?.length) options.push({ v: 'asset', label: statsCopy.byAsset })
+  if (byChain?.length) options.push({ v: 'chain', label: statsCopy.byChain })
+  const rows = (split === 'asset' ? byToken : byChain) ?? []
+  if (!rows.length) return null
+  return (
+    <div className="sx-alloc-wrap">
+      <div className="sx-alloc-head">
+        {options.length > 1 ? <Seg label="Split" value={split} options={options} onChange={setSplit} /> : <span className="sx-lab">{split === 'asset' ? statsCopy.byAsset : statsCopy.byChain}</span>}
+        <InfoPopover label={`About "${split === 'asset' ? statsCopy.byAsset : statsCopy.byChain}"`}>{split === 'asset' ? statsCopy.byAssetTip : statsCopy.byChainTip}</InfoPopover>
+      </div>
+      <div className="sx-alloc" role="img" aria-label={rows.map((p) => `${p.key} ${usd(p.usd)}, ${pct(p.pct, 0)}`).join('; ')}>
+        {rows.map((p, i) => (
+          <span key={p.key} style={{ flex: p.usd, background: CATS[i % CATS.length], animationDelay: `${i * 60}ms` }} title={`${p.key}: ${usd(p.usd)}`} />
+        ))}
+      </div>
+      <ul className="sx-alloc-keys" data-testid="stats-alloc">
+        {rows.map((p, i) => (
+          <li key={p.key}>
+            <span className="sw" style={{ background: CATS[i % CATS.length] }} />
+            <span className="n">{p.key}</span>
+            <span className="v">
+              {usd(p.usd)}
+              <small>{pct(p.pct, 0)}</small>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 function Hero({ v }: { v: StatsView }) {
   const dep = v.snapshots.totalDeposits
   const work = v.snapshots.moneyWorking
+  const d = v.distributions
   if (!dep) return null
   return (
     <section className="sx-hero" aria-labelledby="sx-dep">
@@ -108,6 +148,7 @@ function Hero({ v }: { v: StatsView }) {
           </div>
         ) : null}
       </div>
+      <Alloc byToken={d.byToken} byChain={d.byChain} />
     </section>
   )
 }
@@ -216,7 +257,6 @@ function AprBlock({ apr, asOf }: { apr: NonNullable<StatsView['series']['apr']>;
 
 export function StatsBody({ v }: { v: StatsView }) {
   const s = v.snapshots
-  const d = v.distributions
   const series = v.series
   const tvl = series.totalDeposits
   const perDay = series.earnedPerDay
@@ -257,19 +297,6 @@ export function StatsBody({ v }: { v: StatsView }) {
           ) : null}
         </section>
       ) : null}
-      {d.byToken?.length ? (
-        <section className="sx-two sx-holds">
-          {d.byToken?.length ? (
-            <Block id="sx-tok" title={statsCopy.byAsset} tip={statsCopy.byAssetTip}>
-              <Donut
-                rows={d.byToken.map((x) => ({ name: x.key, usd: x.usd, pct: x.pct }))}
-                centre={s.inStablecoins ? { value: pct(s.inStablecoins.value, 0), label: 'in stablecoins' } : { value: String(d.byToken.length), label: 'assets' }}
-                fmtUsd={usd}
-              />
-            </Block>
-          ) : null}
-        </section>
-      ) : null}
       {series.apr ? <AprBlock apr={series.apr} asOf={v.dataAsOf} /> : null}
       <Figures
         label="Accounts"
@@ -304,6 +331,7 @@ function StatsSkeleton() {
             <span className="sk sk-wv" />
           </div>
         </div>
+        <span className="sk sk-bar" />
       </section>
       <section className="sx-figs">
         {[0, 1, 2].map((i) => (
