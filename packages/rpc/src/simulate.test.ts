@@ -81,3 +81,19 @@ describe('simulateCalls: a revert carries its bytes in returnData, whichever fie
     expect(r!.returnData).toBe('0x')
   })
 })
+
+test('simulateFromEntryPoint: a balance read that reverts counts as 0, whatever bytes its revert carries (#452)', async () => {
+  const BIG = `0x${'ff'.repeat(32)}`
+  const client = {
+    request: async ({ params }: { params: unknown }) => {
+      const calls = (params as [{ blockStateCalls: [{ calls: { data: string }[] }] }])[0].blockStateCalls[0].calls
+      // The reads before the execution revert (revert bytes in error.data, as anvil answers); the reads after it read 0.
+      const exec = calls.findIndex((c) => c.data === '0xabcd')
+      const ok = { status: '0x1', returnData: `0x${'00'.repeat(32)}`, gasUsed: '0x5208', logs: [] }
+      return [{ calls: calls.map((_c, i) => (i < exec ? { status: '0x0', returnData: '0x', gasUsed: '0x5208', logs: [], error: { message: 'execution reverted', data: BIG } } : ok)) }]
+    },
+  } as unknown as PublicClient
+  const sim = await simulateFromEntryPoint(client, SAFE, '0xabcd', 1n, monadRegistry)
+  expect(sim.ok).toBe(true)
+  expect(Object.values(sim.deltas).every((d) => d === 0n)).toBe(true)
+})

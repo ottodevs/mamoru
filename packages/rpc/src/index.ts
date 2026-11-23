@@ -950,7 +950,8 @@ export async function simulateFromEntryPoint(client: PublicClient, account: Addr
   }
   const n = reads.length
   const exec = res[n]!
-  const word = (r: SimCallResult) => BigInt(r.returnData === '0x' ? 0 : r.returnData)
+  // A reverted balance read counts as 0: its returnData holds revert bytes (#452), never a balance.
+  const word = (r: SimCallResult) => BigInt(r.status !== 'success' || r.returnData === '0x' ? 0 : r.returnData)
   const deltas: Record<RegistryName, bigint> = {}
   TOKENS.forEach((t, i) => {
     deltas[t] = word(res[n + 1 + i]!) - word(res[i]!)
