@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import type { Hex } from 'viem'
+import { encodeAbiParameters, encodeFunctionData, hashTypedData, pad, toFunctionSelector, type Hex } from 'viem'
 import type { ReturnHomeInput } from '@mamoru/domain'
-import { buildReturnHome } from '@mamoru/account/return-home'
-import { monadRegistry } from '@mamoru/registry'
+import { ownerSafeTx } from '@mamoru/account/live'
+import { buildReturnHome, returnHomeCalls, TOKEN_MESSENGER_V2 } from '@mamoru/account/return-home'
+import { safeTxTypedData } from '@mamoru/account/safe'
+import { monadRegistry, tokenMessengerV2Abi } from '@mamoru/registry'
 import { resetOperatorHealth } from '../../src/api/sleeves.ts'
 import { harness, ORIGIN, PASSKEY_A, register, sessionCookie } from './helpers.ts'
 
@@ -13,7 +15,18 @@ const OPERATOR_SECRET = 'operator-secret-for-tests-only-0123456789'
 const MONAD_OPERATOR = 'https://operator-monad.test'
 const SLEEVE = `0x${'77'.repeat(20)}` as Hex
 
-function world(prepare: (home: Hex) => unknown) {
+const SESSION = `0x${'01'.repeat(32)}` as Hex
+const BALANCE = 28_850_000n
+const GET_PERMISSION_IDS = toFunctionSelector('getPermissionIDs(address)')
+/** A Monad provider: SmartSession.getPermissionIDs answers `enabled`, any other eth_call (USDC.balanceOf) `usdc`; down when `usdc` is null. */
+const node = (usdc: bigint | null, enabled: Hex[]) => async (_url: string, init: RequestInit) => {
+  if (usdc === null) throw new TypeError('connect ECONNREFUSED')
+  const { params } = JSON.parse(String(init.body)) as { params: [{ data: Hex }] }
+  const result = params[0].data.startsWith(GET_PERMISSION_IDS) ? encodeAbiParameters([{ type: 'bytes32[]' }], [enabled]) : encodeAbiParameters([{ type: 'uint256' }], [usdc])
+  return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), { headers: { 'content-type': 'application/json' } })
+}
+
+function world(prepare: (home: Hex) => unknown, chainState: { usdc: bigint | null; enabled: Hex[] } = { usdc: BALANCE, enabled: [SESSION] }) {
   resetOperatorHealth()
   let home: Hex = '0x0000000000000000000000000000000000000000'
   const operatorFetch = async (url: string) => {
@@ -22,7 +35,7 @@ function world(prepare: (home: Hex) => unknown) {
     if (url.endsWith('/return-home/prepare')) return json(prepare(home))
     return json({ ok: true })
   }
-  const h = harness(undefined, { env: { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET, OPERATOR_URL_143: `${MONAD_OPERATOR}/` }, operatorFetch })
+  const h = harness(undefined, { env: { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET, OPERATOR_URL_143: `${MONAD_OPERATOR}/`, MONAD_RPC_URLS: 'https://monad-rpc.test' }, operatorFetch, chainFetch: node(chainState.usdc, chainState.enabled) })
   h.db.raw.query(`INSERT INTO ops_flag_changes (flag, enabled, author, reason, created_at) VALUES ('monad_sleeves', 1, 'ot', 'test', '2026-10-23T00:00:00Z')`).run()
   return {
     h,
@@ -42,7 +55,7 @@ function world(prepare: (home: Hex) => unknown) {
   }
 }
 
-const input = (home: Hex, o: Partial<ReturnHomeInput> = {}): ReturnHomeInput => ({ chainId: 143, safe: SLEEVE, safeNonce: '2', home, amountUsdc: '28850000', removeIds: [`0x${'01'.repeat(32)}`], ...o })
+const input = (home: Hex, o: Partial<ReturnHomeInput> = {}): ReturnHomeInput => ({ chainId: 143, safe: SLEEVE, safeNonce: '2', home, amountUsdc: BALANCE.toString(), removeIds: [SESSION], ...o })
 const offer = (i: ReturnHomeInput, hash?: string) => ({ safe: i.safe, chainId: i.chainId, safeTxHash: hash ?? buildReturnHome(i, monadRegistry).safeTxHash, summary: [], expiresAt: 'x', prepareId: 'p1', returnHome: i })
 
 describe('return-home/prepare is rebuilt by the Worker (#428)', () => {
@@ -66,5 +79,77 @@ describe('return-home/prepare is rebuilt by the Worker (#428)', () => {
     const res = await call('/return-home/prepare')
     expect(res.status).toBe(502)
     expect(((await res.json()) as { code: string }).code).toBe('BUILD_MISMATCH')
+  })
+
+  // SCN-RH-01 (RH-03, threats S2): the same recipient and amount with a caller restriction, or through depositForBurnWithHook,
+  // is another Safe tx: the hash the operator would have to offer is not the builder's.
+  test.each([
+    ['a destinationCaller', (i: ReturnHomeInput) => tampered(i, (args) => encodeFunctionData({ abi: tokenMessengerV2Abi, functionName: 'depositForBurn', args: [args.amount, 6, pad(i.home as Hex, { size: 32 }), args.usdc, pad('0x99', { size: 32 }), 0n, 2000] }))],
+    ['a hook', (i: ReturnHomeInput) => tampered(i, (args) => encodeFunctionData({ abi: HOOK_ABI, functionName: 'depositForBurnWithHook', args: [args.amount, 6, pad(i.home as Hex, { size: 32 }), args.usdc, `0x${'00'.repeat(32)}`, 0n, 2000, '0x1234'] }))],
+  ])('%s: refused (BUILD_MISMATCH)', async (_why, hashOf) => {
+    const w = world((home) => offer(input(home), hashOf(input(home))))
+    const { call } = await w.owner()
+    const res = await call('/return-home/prepare')
+    expect(res.status).toBe(502)
+    expect(((await res.json()) as { code: string }).code).toBe('BUILD_MISMATCH')
+  })
+})
+
+const HOOK_ABI = [{ type: 'function', name: 'depositForBurnWithHook', stateMutability: 'nonpayable', inputs: [{ type: 'uint256' }, { type: 'uint32' }, { type: 'bytes32' }, { type: 'address' }, { type: 'bytes32' }, { type: 'uint256' }, { type: 'uint32' }, { type: 'bytes' }], outputs: [] }] as const
+/** The SafeTx hash of `i` with its burn call replaced by `burn`: what an operator would offer for a tx the builder does not make. */
+function tampered(i: ReturnHomeInput, burn: (a: { amount: bigint; usdc: Hex }) => Hex): Hex {
+  const calls = returnHomeCalls(i, monadRegistry)
+  const last = calls[calls.length - 1]!
+  expect(last.to).toBe(TOKEN_MESSENGER_V2)
+  const swapped = [...calls.slice(0, -1), { ...last, data: burn({ amount: BigInt(i.amountUsdc), usdc: calls[calls.length - 2]!.to as Hex }) }]
+  return hashTypedData(safeTxTypedData(i.safe as Hex, i.chainId, ownerSafeTx(swapped, BigInt(i.safeNonce), monadRegistry)))
+}
+
+describe('return-home/prepare is checked against the chain by the Worker (#428, RH-03)', () => {
+  const S2 = `0x${'02'.repeat(32)}` as Hex
+  test.each([
+    ['less than the Safe holds (funds left behind)', { usdc: BALANCE + 1n, enabled: [SESSION] }, {}],
+    ['more than the Safe holds (reverts)', { usdc: BALANCE - 1n, enabled: [SESSION] }, {}],
+    ['an enabled session missing from removeIds', { usdc: BALANCE, enabled: [SESSION, S2] }, {}],
+    ['a session the Safe does not have enabled', { usdc: BALANCE, enabled: [SESSION] }, { removeIds: [SESSION, S2] }],
+    ['no session removed while one is enabled', { usdc: BALANCE, enabled: [SESSION] }, { removeIds: [] }],
+  ] as const)('%s: refused (BUILD_MISMATCH), nothing to sign', async (_why, chainState, o) => {
+    const w = world((home) => offer(input(home, o as Partial<ReturnHomeInput>)), { usdc: chainState.usdc, enabled: [...chainState.enabled] })
+    const { call } = await w.owner()
+    const res = await call('/return-home/prepare')
+    expect(res.status).toBe(502)
+    expect(((await res.json()) as { code: string }).code).toBe('BUILD_MISMATCH')
+  })
+
+  test("the owner's Base Safe is in another environment: refused (BUILD_MISMATCH)", async () => {
+    const w = world((home) => offer(input(home)))
+    const { call } = await w.owner()
+    const env = (w.h.db.raw.query('SELECT env FROM accounts WHERE chain_id = 8453').get() as { env: string }).env
+    w.h.db.raw.query('UPDATE accounts SET env = ? WHERE chain_id = 8453').run(env === 'prod' ? 'beta' : 'prod')
+    const res = await call('/return-home/prepare')
+    expect(res.status).toBe(502)
+    expect(((await res.json()) as { code: string }).code).toBe('BUILD_MISMATCH')
+  })
+
+  test('a send-only step (no session left on the Safe) passes with an empty removeIds', async () => {
+    const w = world((home) => offer(input(home, { removeIds: [] })), { usdc: BALANCE, enabled: [] })
+    const { call } = await w.owner()
+    expect((await call('/return-home/prepare')).status).toBe(200)
+  })
+
+  test('a revoke-only step (no USDC) passes with amount 0', async () => {
+    const w = world((home) => offer(input(home, { amountUsdc: '0' })), { usdc: 0n, enabled: [SESSION] })
+    const { call } = await w.owner()
+    expect((await call('/return-home/prepare')).status).toBe(200)
+  })
+
+  test('the chain cannot be read: 503 RETURN_HOME_CHECK_UNAVAILABLE, nothing to sign', async () => {
+    const w = world((home) => offer(input(home)), { usdc: null, enabled: [] })
+    const { call } = await w.owner()
+    const res = await call('/return-home/prepare')
+    expect(res.status).toBe(503)
+    const body = (await res.json()) as { code: string; returnHome?: unknown }
+    expect(body.code).toBe('RETURN_HOME_CHECK_UNAVAILABLE')
+    expect(body.returnHome).toBeUndefined()
   })
 })

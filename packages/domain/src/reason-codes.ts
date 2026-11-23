@@ -44,6 +44,9 @@ export const REASON_CODES = [
   'BUILD_MISMATCH',
   // otto/mamoru#430 review, #434: the Worker could not read the chain to check a Stop (its sessions, its swaps); nothing signed, retryable.
   'STOP_CHECK_UNAVAILABLE',
+  // otto/mamoru#428 (spec 014, RH-03): the Worker could not read the remote chain to check a return home (the Safe's USDC, its
+  // sessions, the sale's quote); nothing signed, retryable.
+  'RETURN_HOME_CHECK_UNAVAILABLE',
   // T7: basefee leaves no room under a v4 session's MamoruGasPolicy maxFeePerGas cap; the engine waits.
   'GAS_PRICE_OVER_CAP',
   // Pre-chequeo de política en el motor

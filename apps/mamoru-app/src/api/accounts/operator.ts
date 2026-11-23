@@ -10,6 +10,7 @@ import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
 import { ownersOf, type AccountRow } from './store.ts'
 import { readStopChain } from './stop-reads.ts'
+import { readReturnHomeChain, sessionSetMismatch } from './return-home-reads.ts'
 import { BASE, ownedSleeve } from '../sleeves.ts'
 import { defaultRemoteRegistry, remoteOf, upsertRemoteSleeve, verifyRemote, type RemoteRegistry } from '../remote.ts'
 import { chainFundingResponse, fundingRpcUrls, type ChainFunding } from './chain-funding.ts'
@@ -200,8 +201,10 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
   /**
    * otto/mamoru#428 (spec 014, step 1 of leaving Monad): a return home is passed on only when the Worker, with the same
    * builder (buildReturnHome), gets the same Safe tx from the operator's `returnHome` input, and that input burns from this
-   * row's own Safe on its own (remote) chain to the owner's own Base Safe in the same environment. Anything else: 502
-   * BUILD_MISMATCH, nothing signed.
+   * row's own Safe on its own (remote) chain to the owner's own Base Safe in the same environment. Read from the Worker's own
+   * RPC providers of that chain (RH-03): the amount burned is the Safe's whole USDC balance, and the sessions removed are
+   * exactly the ones SmartSession lists as enabled on it. Anything else: 502 BUILD_MISMATCH, nothing signed. Those reads
+   * unavailable: 503 RETURN_HOME_CHECK_UNAVAILABLE, retryable.
    */
   const checkReturnHome = async (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Promise<Response | null> => {
     let body: { safe?: string; chainId?: number; safeTxHash?: string; returnHome?: ReturnHomeInput }
@@ -222,7 +225,16 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     } catch (e) {
       return refusedBuild(c, row, `build: ${e instanceof Error ? e.message : String(e)}`)
     }
-    return hash.toLowerCase() === (body.safeTxHash ?? '').toLowerCase() ? null : refusedBuild(c, row, 'hash')
+    if (hash.toLowerCase() !== (body.safeTxHash ?? '').toLowerCase()) return refusedBuild(c, row, 'hash')
+    const read = chain ? await readReturnHomeChain(chain.fetch, fundingRpcUrls(c.env, row.chain_id), registryOf(row.chain_id), row.address as Address) : null
+    if (!read) {
+      console.error(`return-home prepare for ${row.account_key} not checked: no chain read`)
+      return apiError(c, 503, 'Mamoru could not check this transfer against the chain just now. Nothing was signed. Try again in a minute.', 'RETURN_HOME_CHECK_UNAVAILABLE')
+    }
+    // Equality at the block read: a balance that moved since the prepare is a stale prepare, built again on the next try.
+    if (!/^[0-9]+$/.test(input.amountUsdc) || BigInt(input.amountUsdc) !== read.usdc) return refusedBuild(c, row, 'amount is not the Safe\'s USDC balance')
+    const sessions = sessionSetMismatch(input.removeIds, read.enabled)
+    return sessions ? refusedBuild(c, row, sessions) : null
   }
   /**
    * otto/mamoru#430: a Stop is passed on only when the Worker, with the same builder (buildStop, every target from the
