@@ -291,6 +291,15 @@ export function labelProviders(providers: string[]): Map<string, string> {
 /** otto/mamoru#459: HyperSync's label in /metrics (rpc counters, log ranges), beside the providers' host labels. */
 export const HYPERSYNC_LABEL = 'hypersync'
 
+/** `p`, or a throw when `deadline` (ms since the epoch) comes first. */
+function withDeadline<T>(p: Promise<T>, deadline: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('no answer within the request deadline')), Math.max(0, deadline - Date.now()))
+  })
+  return Promise.race([p, late]).finally(() => clearTimeout(timer))
+}
+
 /** A whole number from `name`, or `fallback` when unset or not one. */
 function wholeFromEnv(name: string, fallback: number, env: Env = process.env): number {
   const v = env[name]
@@ -369,6 +378,12 @@ export type RpcProxyOptions = {
    * as every range is); default MAMORU_HYPERSYNC_SPOT_BLOCKS or 10. 0: no comparison when HyperSync covers the range.
    */
   hypersyncSpotBlocks?: number
+  /**
+   * otto/mamoru#459: HyperSync never reads the last blocks of a range, this many under its end: the providers do. A
+   * reorg does not reach that deep, so what HyperSync answered and the block hash compared afterwards are of one chain.
+   * Default MAMORU_HYPERSYNC_DEPTH or 64.
+   */
+  hypersyncDepth?: number
   /** Tests: the upstream transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
@@ -593,6 +608,7 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const hyper = local ? null : opts.hypersync === undefined ? hypersyncFromEnv(opts.chainId) : opts.hypersync
   const hyperMinBlocks = opts.hypersyncMinBlocks ?? wholeFromEnv('MAMORU_HYPERSYNC_MIN_BLOCKS', 100)
   const hyperSpotBlocks = opts.hypersyncSpotBlocks ?? wholeFromEnv('MAMORU_HYPERSYNC_SPOT_BLOCKS', 10)
+  const hyperDepth = BigInt(opts.hypersyncDepth ?? wholeFromEnv('MAMORU_HYPERSYNC_DEPTH', 64))
   // The upstream keeps its setting (Alchemy or MAMORU_LOG_RANGE: chunks of maxLogRange); every other provider has its own range.
   const logProviders = providers.map((url, i) => ({ url, logRange: i === 0 && chunkLogs ? maxLogRange : logRangeOf(url, logRanges) }))
   async function post(url: string, body: unknown, timeoutMs = providerTimeoutMs): Promise<{ status: number; json: any; retryAfter: string | null }> {
@@ -895,9 +911,12 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   async function hyperRange(filter: any, from: bigint, to: bigint, seen: Witnessed, deadline: number): Promise<unknown[] | null> {
     const component = caller.getStore()
     let read: Awaited<ReturnType<typeof hypersyncLogs>>
+    // The blocks near the range's end, where a reorg can still land, are the providers' only.
+    const hyperTo = to - hyperDepth
+    if (hyperTo < from) return null
     try {
       // At most a third of the request's time: the providers keep enough of it when HyperSync fails.
-      read = await hypersyncLogs(hyper!, filter, from, to, {
+      read = await hypersyncLogs(hyper!, filter, from, hyperTo, {
         deadline: Math.min(deadline, Date.now() + Math.floor((deadline - Date.now()) / 3)),
         onRequest: (page) => {
           if (metrics) safeMetrics(() => metrics.recordRequest(HYPERSYNC_LABEL, 'eth_getLogs', page > 0, Date.now(), component))
@@ -930,7 +949,8 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
               if (metrics) safeMetrics(() => metrics.recordRequest(HYPERSYNC_LABEL, 'eth_getLogs', true, Date.now(), component))
             },
           }),
-          one('eth_getBlockByNumber', [hex(read.covered), false]).then((b: any) => (typeof b?.hash === 'string' ? b.hash.toLowerCase() : null)),
+          // Within the request's deadline: a slow provider leaves time for the providers' read of the range.
+          withDeadline(one('eth_getBlockByNumber', [hex(read.covered), false]), deadline).then((b: any) => (typeof b?.hash === 'string' ? b.hash.toLowerCase() : null)),
         ])
         same = theirs !== null && ours !== null && theirs === ours
       } catch (e) {

@@ -196,9 +196,9 @@ const newMetrics = () => {
   return new RpcMetrics(d)
 }
 
-async function scan(w: ReturnType<typeof proxyWorld>, from: number, to: number, o: { hypersync?: HyperSyncConfig | null; metrics?: RpcMetrics } = {}) {
+async function scan(w: ReturnType<typeof proxyWorld>, from: number, to: number, o: { hypersync?: HyperSyncConfig | null; metrics?: RpcMetrics; depth?: number } = {}) {
   const hypersync = o.hypersync === undefined ? cfg(w.fetch) : o.hypersync
-  const proxy = startRpcProxy(UPSTREAM, { fetch: w.fetch, fallbacks: [WITNESS], logRanges: {}, chunkLogs: false, hypersync, hypersyncMinBlocks: 100, hypersyncSpotBlocks: 10, metrics: o.metrics })
+  const proxy = startRpcProxy(UPSTREAM, { fetch: w.fetch, fallbacks: [WITNESS], logRanges: {}, chunkLogs: false, hypersync, hypersyncMinBlocks: 100, hypersyncSpotBlocks: 10, hypersyncDepth: o.depth ?? 0, metrics: o.metrics })
   try {
     const res = await fetch(`${proxy.url}c/deposits`, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ address: ADDR, topics: [TOPIC], fromBlock: hex(from), toBlock: hex(to) }] }) })
     return (await res.json()) as { result?: unknown[]; error?: unknown }
@@ -282,6 +282,14 @@ describe('eth_getLogs through the proxy with HyperSync', () => {
     const r = await scan(w, 1_000, 4_999)
     expect(r.result).toEqual(expected(1_000, 4_999))
     expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 1_000, to: 4_999 }])
+  })
+
+  test('the last blocks of a range, where a reorg can land, are read from the providers only', async () => {
+    const w = proxyWorld(LOGS)
+    const r = await scan(w, 1_000, 4_999, { depth: 64 })
+    expect(r.result).toEqual(expected(1_000, 4_999))
+    expect(w.hs.bodies[0].to_block).toBe(4_936)
+    expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 4_926, to: 4_999 }])
   })
 
   test('HyperSync behind the range: the providers read what its archive does not have, from the spot blocks on', async () => {
