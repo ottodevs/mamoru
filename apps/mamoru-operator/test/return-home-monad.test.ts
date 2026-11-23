@@ -291,7 +291,11 @@ describe('monad-sell (step A0) on the Monad operator', () => {
     const h = m.held[0]!
     expect(h.kind).toBe('transfer')
     const input = (h.extra.monadSell as { input: MonadSellInput; safeTxHash: string }).input
-    expect(input).toEqual({ chainId: 143, safe: SAFE, safeNonce: '5', amountIn: W.toString(), amountOutMinimum: monadSellMinOut(WORTH).toString() })
+    expect(input).toEqual({ chainId: 143, safe: SAFE, safeNonce: '5', amountIn: W.toString(), amountOutMinimum: monadSellMinOut(WORTH).toString(), deadline: input.deadline })
+    // Review r1: the batch carries a deadline 15 minutes ahead, so the signature is worth nothing later.
+    const ahead = Number(input.deadline) - Math.floor(Date.now() / 1000)
+    expect(ahead).toBeGreaterThan(14 * 60)
+    expect(ahead).toBeLessThanOrEqual(15 * 60)
     const built = buildMonadSell(input, registry)
     expect(h.calls.map((c) => c.data)).toEqual(built.calls.map((c) => c.data))
     expect((h.extra.monadSell as { safeTxHash: string }).safeTxHash).toBe(built.safeTxHash)

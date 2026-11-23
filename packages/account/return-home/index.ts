@@ -12,6 +12,7 @@ import { encodeFunctionData, getAddress, hashTypedData, isAddressEqual, pad, typ
 import type { Address, MonadSellInput, ReturnHomeInput } from '@mamoru/domain'
 import { liveWmonUsdcMonadV6 } from '@mamoru/policy'
 import { address, entry, erc20Abi, tokenMessengerV2Abi, type Registry } from '@mamoru/registry'
+import { uniswapV3 } from '@mamoru/uniswap-v3'
 import { sqrtRatioAtTick, token0InToken1, token1InToken0 } from '@mamoru/uniswap-v3/quote'
 import { ownerSafeTx } from '../live/index.ts'
 import { safeTxTypedData } from '../safe/index.ts'
@@ -82,6 +83,7 @@ export function buildReturnHome(input: ReturnHomeInput, registry: Registry): { s
 // MamoruActionPolicyV3 refuses every swap of a session whose daily budget is over the pool's depth (#410), so on such a Safe
 // the WMON the unwind left can only be sold by the owner. One owner Safe tx, nothing revoked and nothing sent:
 //
+//   SwapRouter02.multicall(deadline, [])     reverts past `deadline`: a signature kept back cannot run at an old minimum
 //   WMON.approve(SwapRouter02, w)
 //   SwapRouter02.exactInputSingle(WMON -> USDC, the growth pool's fee, recipient = this Safe, amountIn = w, amountOutMinimum = m)
 //   WMON.approve(SwapRouter02, 0)
@@ -102,6 +104,22 @@ export const MONAD_SELL_SLIPPAGE_BPS = 30n
 export const MONAD_SELL_MAX_UNDER_TWAP_BPS = 300n
 /** The TWAP window the sale is judged at: the Monad policy's own. */
 export const MONAD_SELL_TWAP_WINDOW_SECONDS = liveWmonUsdcMonadV6.execution.twapWindowSeconds
+
+/** A sale is signed with a deadline at most this far ahead (the operator sets MONAD_SELL_LIFETIME_SECONDS). */
+export const MONAD_SELL_MAX_LIFETIME_SECONDS = 20 * 60
+export const MONAD_SELL_LIFETIME_SECONDS = 15 * 60
+
+/**
+ * Why a sale's `deadline` may not be signed at `nowSeconds`, or null: it must be a decimal integer, still ahead, and no
+ * further than MONAD_SELL_MAX_LIFETIME_SECONDS. Past its deadline the batch reverts whole, so a signature the operator
+ * kept cannot be run later against a minimum the market has left behind.
+ */
+export function monadSellDeadlineMismatch(deadline: unknown, nowSeconds: number): string | null {
+  if (typeof deadline !== 'string' || !/^[0-9]{1,12}$/.test(deadline)) return 'deadline is not a unix time'
+  const d = Number(deadline)
+  if (d <= nowSeconds) return 'deadline already passed'
+  return d > nowSeconds + MONAD_SELL_MAX_LIFETIME_SECONDS ? 'deadline too far ahead' : null
+}
 
 /** The least a sale quoted at `quote` may return: the quote less MONAD_SELL_SLIPPAGE_BPS. */
 export function monadSellMinOut(quote: bigint): bigint {
@@ -137,9 +155,12 @@ export function monadSellCalls(input: MonadSellInput, registry: Registry): { to:
   const amountOutMinimum = dec(input.amountOutMinimum, 'amountOutMinimum')
   if (amountIn === 0n) throw new Error('buildMonadSell: nothing to sell')
   if (amountOutMinimum === 0n) throw new Error('buildMonadSell: a sale without a minimum is never built')
+  const deadline = dec(input.deadline, 'deadline')
+  if (deadline === 0n) throw new Error('buildMonadSell: a sale without a deadline is never built')
   const safe = getAddress(input.safe)
   if (BigInt(safe) === 0n) throw new Error('buildMonadSell: no Safe')
-  return swapBackCalls(safe, [{ token: MONAD_SELL_TOKEN, pool: MONAD_SELL_POOL, amountIn, amountOutMinimum }], registry).map((c) => ({ to: c.to as Address, value: c.value, data: c.data as Hex }))
+  const check = uniswapV3(registry).deadlineCheck(deadline)
+  return [{ to: check.to as Address, value: check.value, data: check.data as Hex }, ...swapBackCalls(safe, [{ token: MONAD_SELL_TOKEN, pool: MONAD_SELL_POOL, amountIn, amountOutMinimum }], registry).map((c) => ({ to: c.to as Address, value: c.value, data: c.data as Hex }))]
 }
 
 /** Step A0's Safe transaction and its hash (the passkey's challenge). No refund: Mamoru pays. */
@@ -150,4 +171,51 @@ export function buildMonadSell(input: MonadSellInput, registry: Registry): { saf
   const safeTx: WireSafeTx = { to: tx.to, value: '0', data: tx.data, operation: tx.operation as 0 | 1, safeTxGas: '0', baseGas: '0', gasPrice: '0', gasToken: ZERO, refundReceiver: ZERO, nonce: nonce.toString() }
   const safeTxHash = hashTypedData(safeTxTypedData(getAddress(input.safe), input.chainId, tx))
   return { safeTx, safeTxHash, calls }
+}
+
+// ---- what the owner reads (spec 014, copy C4) ---------------------------------------------------------------------------
+//
+// One function per step for the operator that prepares it and the Worker that checks it: the Worker passes a prepare on
+// only when its summary is exactly these lines for the input it rebuilt and the balances it read itself, so the text on
+// screen cannot describe another transaction than the one the passkey signs.
+
+/** WMON a return home leaves behind without a word (0.01 WMON); above it, the summary says the WMON stays. */
+export const RETURN_HOME_WMON_DUST = 10n ** 16n
+
+/** USDC base units as dollars and cents, cut (never rounded up): "at least" amounts are never overstated. */
+export function fmtUsdc2(v: bigint): string {
+  const t = v.toString().padStart(7, '0')
+  return `${t.slice(0, -6)}.${t.slice(-6, -4)}`
+}
+/** An 18-decimal amount with up to 6 decimals, cut. */
+export function fmtUnits18(v: bigint): string {
+  const t = v.toString().padStart(19, '0')
+  const frac = t.slice(-18).slice(0, 6).replace(/0+$/, '')
+  return frac ? `${t.slice(0, -18)}.${frac}` : t.slice(0, -18)
+}
+
+/**
+ * Every line of a return home (step A), in the order of its calls. `wmonStays`: WMON above dust that this transaction
+ * leaves on the Safe. `afterSale`: a preview before the owner sale, the amount being what the Safe will hold at least.
+ */
+export function returnHomeLines(p: { sessions: number; usdc: bigint; home: string; wmonStays?: bigint; afterSale?: boolean }): string[] {
+  const amount = p.afterSale ? `your USDC after the sale (at least ${fmtUsdc2(p.usdc)} USDC)` : `${fmtUsdc2(p.usdc)} USDC`
+  return [
+    ...(p.sessions ? [`Revoke the engine's ${p.sessions} session grant(s) on your Safe on Monad: Mamoru stops working there`] : []),
+    ...(p.usdc > 0n ? [`Send ${amount} from your Safe on Monad to your Safe on Base ${p.home}, through Circle's CCTP (about 15-20 minutes, no fee)`, 'On Base, Mamoru puts it to work in your positions there'] : ['There is no USDC to send']),
+    ...(p.wmonStays ? [`Your ${fmtUnits18(p.wmonStays)} WMON stays in this Safe: it cannot be sold at a fair price right now. You can withdraw it`] : []),
+    'The MON left for gas stays in this Safe',
+  ]
+}
+
+/** The line of the owner sale (step A0). */
+export function monadSellLines(wmon: bigint, amountOutMinimum: bigint): string[] {
+  return [`Sell ${fmtUnits18(wmon)} WMON in your Safe on Monad for at least ${fmtUsdc2(amountOutMinimum)} USDC, so all of it can come home`]
+}
+
+/** Null when `summary` is exactly `expected`, line for line; else why not. */
+export function summaryMismatch(summary: unknown, expected: readonly string[]): string | null {
+  if (!Array.isArray(summary) || summary.length !== expected.length) return 'summary has other lines'
+  const i = expected.findIndex((l, n) => summary[n] !== l)
+  return i < 0 ? null : `summary line ${i + 1} is not the transaction's`
 }

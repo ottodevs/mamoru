@@ -41,9 +41,13 @@ export async function fromOneProvider<T>(urls: readonly string[], chainId: numbe
   return null
 }
 
-/** The Safe's USDC and its enabled sessions, from one provider; null when no provider answers both. */
-export function readReturnHomeChain(fetcher: ChainFetch, urls: readonly string[], registry: Registry, safe: Address): Promise<{ usdc: bigint; enabled: Hex[] } | null> {
-  return fromOneProvider(urls, registry.chainId, async (url) => ({ usdc: await balanceOf(fetcher, url, address('USDC', registry), safe), enabled: await enabledSessions(fetcher, url, registry, safe) }))
+/** The Safe's USDC, its WMON and its enabled sessions, from one provider; null when no provider answers all three. */
+export function readReturnHomeChain(fetcher: ChainFetch, urls: readonly string[], registry: Registry, safe: Address): Promise<{ usdc: bigint; wmon: bigint; enabled: Hex[] } | null> {
+  return fromOneProvider(urls, registry.chainId, async (url) => ({
+    usdc: await balanceOf(fetcher, url, address('USDC', registry), safe),
+    wmon: await balanceOf(fetcher, url, address(MONAD_SELL_TOKEN, registry), safe),
+    enabled: await enabledSessions(fetcher, url, registry, safe),
+  }))
 }
 
 /**

@@ -32,7 +32,7 @@ import {
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
 import { buildStop, stopCalls } from '@mamoru/account/stop'
-import { buildMonadSell, MONAD_SELL_POOL, MONAD_SELL_TWAP_WINDOW_SECONDS, monadSellMinOut, monadSellPrice, monadSellTwapValue, buildReturnHome, RETURN_HOME_DOMAIN, RETURN_HOME_FINALITY, returnReleaseId, TOKEN_MESSENGER_V2 as RETURN_TOKEN_MESSENGER } from '@mamoru/account/return-home'
+import { buildMonadSell, MONAD_SELL_LIFETIME_SECONDS, MONAD_SELL_POOL, MONAD_SELL_TWAP_WINDOW_SECONDS, monadSellLines, monadSellMinOut, monadSellPrice, monadSellTwapValue, returnHomeLines, RETURN_HOME_WMON_DUST, buildReturnHome, RETURN_HOME_DOMAIN, RETURN_HOME_FINALITY, returnReleaseId, TOKEN_MESSENGER_V2 as RETURN_TOKEN_MESSENGER } from '@mamoru/account/return-home'
 import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReportedRelease, ReturnHome } from './return-home.ts'
@@ -834,26 +834,6 @@ export function returnBurnMismatch(receipt: Pick<TransactionReceipt, 'status' | 
 const RETURN_RECEIPT_READS = 5
 
 /**
- * otto/mamoru#428 (spec 014, copy C4): every line the owner reads for a return home (step A), in the order of its calls.
- * One function for the prepare and for the status the "What's new" view shows, so both say the same.
- * `afterSale`: the amount is what the Safe will hold after the owner sale that comes first, so it is a minimum (RH-01).
- */
-export function returnHomeLines(p: { sessions: number; usdc: bigint; home: string; wmonStays?: bigint; afterSale?: boolean }): string[] {
-  const amount = p.afterSale ? `your USDC after the sale (at least ${fmtUsdc(p.usdc)} USDC)` : `${fmtUsdc(p.usdc)} USDC`
-  return [
-    ...(p.sessions ? [`Revoke the engine's ${p.sessions} session grant(s) on your Safe on Monad: Mamoru stops working there`] : []),
-    ...(p.usdc > 0n ? [`Send ${amount} from your Safe on Monad to your Safe on Base ${p.home}, through Circle's CCTP (about 15-20 minutes, no fee)`, 'On Base, Mamoru puts it to work in your positions there'] : ['There is no USDC to send']),
-    ...(p.wmonStays ? [`Your ${fmtUnits(p.wmonStays, 18)} WMON stays in this Safe: it cannot be sold at a fair price right now. You can withdraw it`] : []),
-    'The MON left for gas stays in this Safe',
-  ]
-}
-
-/** otto/mamoru#428 (spec 014, copy C4): the line of the owner sale (step A0). */
-export function monadSellLines(wmon: bigint, amountOutMinimum: bigint): string[] {
-  return [`Sell ${fmtUnits(wmon, 18)} WMON in your Safe on Monad for at least ${fmtUsdc(amountOutMinimum)} USDC, so all of it can come home`]
-}
-
-/**
  * otto/mamoru#428 (spec 014, copy C2 and C4): what the move to the Base-only policy says about Monad, for the renewal's
  * summary and the "What's new" view alike. `monadSafe`: the account has a Safe on Monad whose USDC comes home in the
  * other step of the same screen.
@@ -875,8 +855,6 @@ export function leaveMonadPoints(target: PolicyVersion, steps: number): string[]
   ]
 }
 
-/** otto/mamoru#428: WMON a return home leaves behind (0.01 WMON); above it, #427 has not finished selling it. */
-const RETURN_HOME_WMON_DUST = 10n ** 16n
 /** otto/mamoru#428 (spec 014 RH-07): how long this operator's refusal of the owner sale lets a return home leave the WMON behind. */
 const RETURN_SELL_REFUSAL_MS = 60 * 60_000
 /** otto/mamoru#428: the Base operator asks its Monad peer for a Safe's return-home status at most this often. */
@@ -7766,7 +7744,8 @@ export class Operator {
       this.store.save()
     }
     const { nonce } = await readSafeNonce(this.client, live.safe)
-    const input: MonadSellInput = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: nonce.toString(), amountIn: wmon.toString(), amountOutMinimum: amountOutMinimum.toString() }
+    // A deadline in the batch itself: a signature that is not sent now cannot be run later at this minimum.
+    const input: MonadSellInput = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: nonce.toString(), amountIn: wmon.toString(), amountOutMinimum: amountOutMinimum.toString(), deadline: (Math.floor(Date.now() / 1000) + MONAD_SELL_LIFETIME_SECONDS).toString() }
     const tx = buildMonadSell(input, reg)
     const summary = monadSellLines(wmon, amountOutMinimum)
     return this.hold(acc, live, 'transfer', tx.calls, summary, { monadSell: { input, safeTxHash: tx.safeTxHash } })

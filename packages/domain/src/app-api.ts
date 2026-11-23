@@ -417,7 +417,7 @@ export type ReturnHomeInput = { chainId: number; safe: Hex0x; safeNonce: string;
 // engine cannot sell (packages/account/return-home, `buildMonadSell`), JSON-safe. The router, the tokens (WMON to USDC), the
 // pool fee and the recipient (the Safe itself) are the builder's own: nothing here can point the sale elsewhere.
 // `amountIn`: the Safe's whole WMON balance; `amountOutMinimum`: the full sale's quote less 30 bps.
-export type MonadSellInput = { chainId: number; safe: Hex0x; safeNonce: string; amountIn: string; amountOutMinimum: string }
+export type MonadSellInput = { chainId: number; safe: Hex0x; safeNonce: string; amountIn: string; amountOutMinimum: string; /** Unix seconds after which the sale reverts (the router's own deadline check, first call of the batch). */ deadline: string }
 // otto/mamoru#293 x #295: every input of a migrate-v4 Safe tx, explicit and JSON-safe (integers as decimal strings). The
 // operator builds what it prepares with `buildMigrateV4` (packages/account/one-auth) and returns this as `input`; the
 // Worker rebuilds the tx from it with the same function and compares hashes.

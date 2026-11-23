@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters, hashTypedData, toFunctionSelector, type Hex } from 'viem'
 import type { MonadSellInput } from '@mamoru/domain'
 import { ownerSafeTx } from '@mamoru/account/live'
-import { buildMonadSell, MONAD_SELL_TWAP_WINDOW_SECONDS, monadSellCalls, monadSellMinOut, monadSellTwapValue } from '@mamoru/account/return-home'
+import { buildMonadSell, MONAD_SELL_TWAP_WINDOW_SECONDS, monadSellCalls, monadSellLines, monadSellMinOut, monadSellTwapValue } from '@mamoru/account/return-home'
 import { safeTxTypedData } from '@mamoru/account/safe'
 import { address, monadRegistry } from '@mamoru/registry'
 import { resetOperatorHealth } from '../../src/api/sleeves.ts'
@@ -70,8 +70,11 @@ function world(prepare: () => unknown, st: Partial<Chain> = {}) {
   }
 }
 
-const input = (o: Partial<MonadSellInput> = {}): MonadSellInput => ({ chainId: 143, safe: SLEEVE, safeNonce: '2', amountIn: W.toString(), amountOutMinimum: monadSellMinOut(WORTH).toString(), ...o })
-const offer = (i: MonadSellInput, hash?: string) => ({ safe: i.safe, chainId: i.chainId, safeTxHash: hash ?? buildMonadSell(i, monadRegistry).safeTxHash, summary: [], expiresAt: 'x', prepareId: 'p1', monadSell: i })
+/** The Worker's clock in these tests (helpers.ts harness), in unix seconds. */
+const NOW = Math.floor(Date.parse('2026-09-26T18:00:00Z') / 1000)
+const input = (o: Partial<MonadSellInput> = {}): MonadSellInput => ({ chainId: 143, safe: SLEEVE, safeNonce: '2', amountIn: W.toString(), amountOutMinimum: monadSellMinOut(WORTH).toString(), deadline: String(NOW + 900), ...o })
+const linesOf = (i: MonadSellInput) => monadSellLines(BigInt(i.amountIn), BigInt(i.amountOutMinimum))
+const offer = (i: MonadSellInput, hash?: string, summary: unknown = linesOf(i)) => ({ safe: i.safe, chainId: i.chainId, safeTxHash: hash ?? buildMonadSell(i, monadRegistry).safeTxHash, summary, expiresAt: 'x', prepareId: 'p1', monadSell: i })
 const refused = async (res: Response, status = 502, code = 'BUILD_MISMATCH') => {
   expect(res.status).toBe(status)
   const body = (await res.json()) as { code: string; monadSell?: unknown; safeTxHash?: unknown }
@@ -103,11 +106,19 @@ describe('monad-sell/prepare is rebuilt and priced by the Worker (#428, RH-07)',
     ['another chain named by the prepare', () => ({ ...offer(input()), chainId: 8453 })],
     ['a hash the input does not give', () => offer(input(), `0x${'12'.repeat(32)}`)],
     ['no input', () => ({ ...offer(input()), monadSell: undefined })],
-    ['the proceeds paid to another recipient', () => offer(input(), tamperedHash(input(), (c) => [c[0]!, { ...c[1]!, data: c[1]!.data.replace(SLEEVE.slice(2), ATTACKER.slice(2)) as Hex }, c[2]!]))],
-    ['another router', () => offer(input(), tamperedHash(input(), (c) => [c[0]!, { ...c[1]!, to: ATTACKER }, c[2]!]))],
-    ['another token sold', () => offer(input(), tamperedHash(input(), (c) => [{ ...c[0]!, to: address('USDC', monadRegistry) }, c[1]!, c[2]!]))],
+    ['the proceeds paid to another recipient', () => offer(input(), tamperedHash(input(), (c) => [c[0]!, c[1]!, { ...c[2]!, data: c[2]!.data.replace(SLEEVE.slice(2), ATTACKER.slice(2)) as Hex }, c[3]!]))],
+    ['another router', () => offer(input(), tamperedHash(input(), (c) => [c[0]!, c[1]!, { ...c[2]!, to: ATTACKER }, c[3]!]))],
+    ['another token sold', () => offer(input(), tamperedHash(input(), (c) => [c[0]!, { ...c[1]!, to: address('USDC', monadRegistry) }, c[2]!, c[3]!]))],
     ['an extra call in the batch', () => offer(input(), tamperedHash(input(), (c) => [...c, { to: ATTACKER, value: 0n, data: '0x' as Hex }]))],
     ['no minimum', () => offer(input({ amountOutMinimum: '0' }), `0x${'12'.repeat(32)}`)],
+    ['the deadline check dropped from the batch', () => offer(input(), tamperedHash(input(), (c) => c.slice(1)))],
+    ['a deadline already passed', () => offer(input({ deadline: String(NOW) }))],
+    ['a deadline more than 20 minutes ahead', () => offer(input({ deadline: String(NOW + 1201) }))],
+    ['no deadline', () => offer({ ...input(), deadline: undefined } as unknown as MonadSellInput, `0x${'12'.repeat(32)}`)],
+    ['a summary that names a smaller sale', () => offer(input(), undefined, monadSellLines(W / 10n, monadSellMinOut(WORTH)))],
+    ['a summary that names a higher minimum than the transaction carries', () => offer(input(), undefined, monadSellLines(W, WORTH * 2n))],
+    ['the summary of another kind of approval', () => offer(input(), undefined, ["Renew Mamoru's approval on your Safe"])],
+    ['no summary', () => offer(input(), undefined, null)],
   ])('%s: refused (BUILD_MISMATCH), nothing to sign', async (_why, prepare) => {
     const w = world(prepare)
     const { call } = await w.owner()

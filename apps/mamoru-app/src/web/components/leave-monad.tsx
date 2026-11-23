@@ -43,11 +43,12 @@ export function LeaveMonadFlow({ baseKey, monadKey, home, view, steps, open, set
           </ol>
           {steps.map((s) => {
             const done = flow.isDone(s)
+            const sent = flow.isSent(s)
             const h = flow.held[s.kind]
             const lines = h?.tx?.summary ?? s.summary
-            const busy = flow.signing === s.kind ? leaveMonadCopy.signing : h?.preparing ? leaveMonadCopy.preparing : null
+            const busy = sent ? leaveMonadCopy.sending : flow.signing === s.kind ? leaveMonadCopy.signing : h?.preparing ? leaveMonadCopy.preparing : null
             // The return home waits for the sale before it; any step waits while another one is at the passkey.
-            const blocked = flow.signing !== null || !!h?.preparing || (s.kind === 'return-home' && steps.some((x) => x.kind === 'monad-sell' && !flow.isDone(x)))
+            const blocked = sent || flow.signing !== null || !!h?.preparing || (s.kind === 'return-home' && steps.some((x) => x.kind === 'monad-sell' && !flow.isDone(x)))
             return (
               <section key={s.kind} className="grid gap-2 border-t border-wash pt-2" data-testid={`leave-step-${s.kind}`} data-done={done}>
                 <span className="flex items-baseline justify-between gap-2">

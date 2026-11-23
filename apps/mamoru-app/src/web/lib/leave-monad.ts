@@ -2,7 +2,7 @@ import type { OpView, OwnerTxToSign, WhatsNew } from '@mamoru/domain'
 import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiRequestError, useApi } from '../api/client.ts'
-import { queryKeys } from '../api/queries.ts'
+import { queryKeys, useOps } from '../api/queries.ts'
 import { errorText } from './owner-flow.ts'
 import { signOwnerTx, storedCredential } from './passkey-sign.ts'
 
@@ -39,11 +39,31 @@ export const leaveMonadCopy = {
   approved: 'Approved',
   preparing: 'Preparing',
   signing: 'Waiting for passkey',
+  sending: 'Sending',
+  failed: 'That step did not go through. Nothing moved. You can approve it again.',
   // C3, progress and done.
   stepDone: (n: number, of: number) => (n === 1 && of === 2 ? 'Step 1 of 2 done. Your USDC is on its way to Base' : `Step ${n} of ${of} done`),
   done: 'Done. Mamoru will put it to work when it arrives',
   unwinding: 'Mamoru is still moving your Monad position to USDC. Try again in a few minutes',
   expired: 'That approval expired. Tap again to refresh it.',
+}
+
+/** A prepared approval past its time, or one whose time cannot be read: never signed, prepared again. */
+export function expired(tx: Pick<OwnerTxToSign, 'expiresAt'>, now = Date.now()): boolean {
+  const at = Date.parse(tx.expiresAt)
+  return !(at > now)
+}
+
+/**
+ * Where a step stands. `done` only on the chain's word: the operator's view marks it, or the operation this screen sent
+ * for it is confirmed. A signature that was sent is `sent` until then, and open again if its operation failed.
+ */
+export type StepState = 'open' | 'sent' | 'done'
+export function stepState(step: Pick<LeaveStep, 'done'>, sent: Pick<OpView, 'opId' | 'state'> | undefined, ops: readonly Pick<OpView, 'opId' | 'state'>[]): StepState | 'failed' {
+  if (step.done) return 'done'
+  if (!sent) return 'open'
+  const now = ops.find((o) => o.opId === sent.opId) ?? sent
+  return now.state === 'confirmed' ? 'done' : now.state === 'failed' ? 'failed' : 'sent'
 }
 
 /** Codes that mean the Monad position is not all USDC yet (or its transaction is on its way): the step waits. */
@@ -61,10 +81,13 @@ export function useLeaveMonad(baseKey: string, monadKey: string, home: string, s
   const api = useApi()
   const qc = useQueryClient()
   const [held, setHeld] = useState<Partial<Record<LeaveKind, Held>>>({})
-  const [signed, setSigned] = useState<LeaveKind[]>([])
+  /** The operation each signature became, as the operator answered the submit. */
+  const [sent, setSent] = useState<Partial<Record<LeaveKind, OpView>>>({})
   const [signing, setSigning] = useState<LeaveKind | null>(null)
-  const [result, setResult] = useState<OpView | null>(null)
   const asking = useRef(new Set<LeaveKind>())
+  const monadOps = useOps(monadKey, open).data?.ops
+  const baseOps = useOps(baseKey, open).data?.ops
+  const stateOf = useCallback((s: LeaveStep) => stepState(s, sent[s.kind], (s.chain === 'monad' ? monadOps : baseOps) ?? []), [baseOps, monadOps, sent])
 
   const refresh = useCallback(() => {
     void Promise.all([baseKey, monadKey].flatMap((k) => [qc.invalidateQueries({ queryKey: queryKeys.funding(k) }), qc.invalidateQueries({ queryKey: queryKeys.ops(k) })]))
@@ -87,13 +110,23 @@ export function useLeaveMonad(baseKey: string, monadKey: string, home: string, s
     [api, baseKey, home, monadKey],
   )
 
-  const isDone = useCallback((s: LeaveStep) => s.done === true || signed.includes(s.kind), [signed])
-  /** The steps that can be prepared now: the first Monad step still to do (the return waits for the sale) and the Base one. */
+  const isDone = useCallback((s: LeaveStep) => stateOf(s) === 'done', [stateOf])
+  const isSent = useCallback((s: LeaveStep) => stateOf(s) === 'sent', [stateOf])
+  /** The steps that can be prepared now: the first Monad step still to do (the return waits for the sale) and the Base one; none that is on its way. */
   const preparable = useCallback((): LeaveKind[] => {
     const monad = steps.find((s) => s.chain === 'monad' && !isDone(s))
     const base = steps.find((s) => s.chain === 'base' && !isDone(s))
-    return [...(monad && !monad.waiting ? [monad.kind] : []), ...(base ? [base.kind] : [])]
-  }, [isDone, steps])
+    return [...(monad && !monad.waiting && stateOf(monad) === 'open' ? [monad.kind] : []), ...(base && stateOf(base) === 'open' ? [base.kind] : [])]
+  }, [isDone, stateOf, steps])
+
+  // An operation that failed after it was sent: the step is open again and says so; nothing is counted as done.
+  const failed = steps.filter((s) => stateOf(s) === 'failed').map((s) => s.kind).join(',')
+  useEffect(() => {
+    if (!failed) return
+    const kinds = failed.split(',') as LeaveKind[]
+    setSent((x) => Object.fromEntries(Object.entries(x).filter(([k]) => !kinds.includes(k as LeaveKind))))
+    setHeld((h) => ({ ...h, ...Object.fromEntries(kinds.map((k) => [k, { tx: null, preparing: false, error: leaveMonadCopy.failed }])) }))
+  }, [failed])
 
   // Prepared as soon as the screen is open and whenever a step becomes the next one: never from a tap that must sign.
   const wanted = open ? preparable().join(',') : ''
@@ -107,9 +140,9 @@ export function useLeaveMonad(baseKey: string, monadKey: string, home: string, s
   const approve = useCallback(
     async (kind: LeaveKind) => {
       const cur = held[kind]
-      if (signing || cur?.preparing) return
+      if (signing || cur?.preparing || sent[kind]) return
       if (!cur?.tx) return void prepare(kind)
-      if (Date.parse(cur.tx.expiresAt) < Date.now()) {
+      if (expired(cur.tx)) {
         setHeld((h) => ({ ...h, [kind]: { ...EMPTY } }))
         await prepare(kind)
         setHeld((h) => ({ ...h, [kind]: { tx: h[kind]?.tx ?? null, preparing: false, error: h[kind]?.error ?? leaveMonadCopy.expired } }))
@@ -119,8 +152,7 @@ export function useLeaveMonad(baseKey: string, monadKey: string, home: string, s
       try {
         const sig = await signOwnerTx(cur.tx, storedCredential(baseKey))
         const op = kind === 'monad-sell' ? await api.monadSell(monadKey, sig) : kind === 'return-home' ? await api.returnHome(monadKey, sig) : await api.renew(baseKey, sig)
-        if (kind === 'renew') setResult(op)
-        setSigned((s) => [...s, kind])
+        setSent((x) => ({ ...x, [kind]: op }))
         setHeld((h) => ({ ...h, [kind]: { ...EMPTY } }))
       } catch (e) {
         setHeld((h) => ({ ...h, [kind]: { tx: cur.tx, preparing: false, error: said(e) } }))
@@ -129,12 +161,12 @@ export function useLeaveMonad(baseKey: string, monadKey: string, home: string, s
         refresh()
       }
     },
-    [api, baseKey, held, monadKey, prepare, refresh, signing],
+    [api, baseKey, held, monadKey, prepare, refresh, sent, signing],
   )
 
   const total = steps.length
   const doneCount = steps.filter(isDone).length
-  return { held, signed, signing, result, approve, isDone, total, doneCount, finished: doneCount === total }
+  return { held, signing, approve, isDone, isSent, total, doneCount, finished: doneCount === total }
 }
 
 export type LeaveMonad = ReturnType<typeof useLeaveMonad>

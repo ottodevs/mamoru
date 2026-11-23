@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono'
 import type { AccountContext, Address, MigrateV4Input, MonadSellInput, RemoteSpec, ReturnHomeInput, StopInput } from '@mamoru/domain'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
-import { buildMonadSell, buildReturnHome, monadSellPrice } from '@mamoru/account/return-home'
+import { buildMonadSell, buildReturnHome, monadSellDeadlineMismatch, monadSellLines, monadSellPrice, RETURN_HOME_WMON_DUST, returnHomeLines, summaryMismatch } from '@mamoru/account/return-home'
 import { buildStop, parseRefundPolicy, quoteFloorMismatch, refundMismatch, stopQuotes, stopSummaryMismatch, uncoveredSessions } from '@mamoru/account/stop'
 import { registryFor, type Registry } from '@mamoru/registry'
 import type { AppEnv } from '../context.ts'
@@ -208,7 +208,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
    * unavailable: 503 RETURN_HOME_CHECK_UNAVAILABLE, retryable.
    */
   const checkReturnHome = async (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Promise<Response | null> => {
-    let body: { safe?: string; chainId?: number; safeTxHash?: string; returnHome?: ReturnHomeInput }
+    let body: { safe?: string; chainId?: number; safeTxHash?: string; summary?: unknown; returnHome?: ReturnHomeInput }
     try {
       body = JSON.parse(text)
     } catch {
@@ -235,7 +235,11 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     // Equality at the block read: a balance that moved since the prepare is a stale prepare, built again on the next try.
     if (!/^[0-9]+$/.test(input.amountUsdc) || BigInt(input.amountUsdc) !== read.usdc) return refusedBuild(c, row, 'amount is not the Safe\'s USDC balance')
     const sessions = sessionSetMismatch(input.removeIds, read.enabled)
-    return sessions ? refusedBuild(c, row, sessions) : null
+    if (sessions) return refusedBuild(c, row, sessions)
+    // What the owner reads is exactly what this transaction does (threats S3, S17): the lines the shared function gives
+    // for the rebuilt input and the balances read here, the WMON it leaves on the Safe included. Any other text: refused.
+    const said = summaryMismatch(body.summary, returnHomeLines({ sessions: input.removeIds.length, usdc: read.usdc, home: input.home, ...(read.wmon > RETURN_HOME_WMON_DUST ? { wmonStays: read.wmon } : {}) }))
+    return said ? refusedBuild(c, row, said) : null
   }
   /**
    * otto/mamoru#428 (spec 014 RH-07, threats S8 and S8a): the owner sale before a return home (step A0) is passed on only
@@ -243,12 +247,13 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
    * this row's own Safe on its own (remote) chain. The builder fixes the router, the tokens, the pool fee and the recipient
    * (the Safe itself), so any other trade or destination is another hash. Read from the Worker's own RPC providers of that
    * chain: the amount sold is the Safe's whole WMON balance, the minimum out is within 30 bps of QuoterV2's answer for it,
-   * and that answer is within 300 bps of the WMON's value at the pool's TWAP (monadSellPrice). The owner path is not under
+   * and that answer is within 300 bps of the WMON's value at the pool's TWAP (monadSellPrice); the batch carries a deadline
+   * at most 20 minutes ahead; and the summary is the sale's own line. The owner path is not under
    * the action policy: this is the only price guard besides the amount the owner reads. Anything else: 502 BUILD_MISMATCH,
    * nothing signed. Those reads unavailable: 503 RETURN_HOME_CHECK_UNAVAILABLE, retryable.
    */
   const checkMonadSell = async (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Promise<Response | null> => {
-    let body: { safe?: unknown; chainId?: unknown; safeTxHash?: unknown; monadSell?: MonadSellInput } | null
+    let body: { safe?: unknown; chainId?: unknown; safeTxHash?: unknown; summary?: unknown; monadSell?: MonadSellInput } | null
     try {
       body = JSON.parse(text)
     } catch {
@@ -266,7 +271,12 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
       return refusedBuild(c, row, `build: ${e instanceof Error ? e.message : String(e)}`)
     }
     if (typeof body.safeTxHash !== 'string' || hash.toLowerCase() !== body.safeTxHash.toLowerCase()) return refusedBuild(c, row, 'hash')
+    // The batch reverts past its deadline, and that deadline is near: a signature kept back is worth nothing later.
+    const late = monadSellDeadlineMismatch(input.deadline, Math.floor(c.var.now().getTime() / 1000))
+    if (late) return refusedBuild(c, row, late)
     const amountIn = BigInt(input.amountIn)
+    const said = summaryMismatch(body.summary, monadSellLines(amountIn, BigInt(input.amountOutMinimum)))
+    if (said) return refusedBuild(c, row, said)
     const read = chain ? await readMonadSellChain(chain.fetch, fundingRpcUrls(c.env, row.chain_id), registryOf(row.chain_id), row.address as Address, amountIn) : null
     if (!read) {
       console.error(`monad-sell prepare for ${row.account_key} not checked: no chain read`)

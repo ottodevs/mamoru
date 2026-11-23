@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, pad, type Hex } from 'viem'
 import { address, baseRegistry, entry, erc20Abi, monadRegistry, multiSendCallOnlyAbi, smartSessionAbi, swapRouter02Abi, tokenMessengerV2Abi } from '@mamoru/registry'
-import { buildMonadSell, buildReturnHome, MONAD_SELL_TWAP_WINDOW_SECONDS, monadSellCalls, monadSellMinOut, monadSellPrice, monadSellTwapValue, returnHomeCalls, RETURN_HOME_DOMAIN, RETURN_HOME_FINALITY, TOKEN_MESSENGER_V2, type MonadSellInput, type ReturnHomeInput } from './index.ts'
+import { buildMonadSell, buildReturnHome, MONAD_SELL_MAX_LIFETIME_SECONDS, MONAD_SELL_TWAP_WINDOW_SECONDS, monadSellCalls, monadSellDeadlineMismatch, monadSellLines, monadSellMinOut, monadSellPrice, monadSellTwapValue, returnHomeCalls, returnHomeLines, summaryMismatch, RETURN_HOME_DOMAIN, RETURN_HOME_FINALITY, TOKEN_MESSENGER_V2, type MonadSellInput, type ReturnHomeInput } from './index.ts'
 
 const SAFE = '0x1DCE307bc77EFdd434b431DD1698A502c20479c5'
 const HOME = '0x8654FA14122595f2960Cf0Bf1cC28a2750AFDA49'
@@ -58,13 +58,17 @@ describe('buildReturnHome (otto/mamoru#428, spec 014 step 1)', () => {
 
 describe('buildMonadSell (otto/mamoru#428, spec 014 RH-07: step A0)', () => {
   const W = 120n * 10n ** 18n
-  const sell = (o: Partial<MonadSellInput> = {}): MonadSellInput => ({ chainId: 143, safe: SAFE, safeNonce: '3', amountIn: W.toString(), amountOutMinimum: '3500000', ...o })
+  const sell = (o: Partial<MonadSellInput> = {}): MonadSellInput => ({ chainId: 143, safe: SAFE, safeNonce: '3', amountIn: W.toString(), amountOutMinimum: '3500000', deadline: '1790000000', ...o })
   const WMON = address('WMON', monadRegistry)
   const ROUTER = address('SwapRouter02', monadRegistry)
 
-  test('approve exactly w to SwapRouter02, sell all of it to USDC on the growth pool paid to this Safe, approve back to 0: nothing else', () => {
-    const calls = monadSellCalls(sell(), monadRegistry)
-    expect(calls).toHaveLength(3)
+  test('the router\'s deadline check first, then approve exactly w to SwapRouter02, sell all of it to USDC on the growth pool paid to this Safe, approve back to 0: nothing else', () => {
+    const all = monadSellCalls(sell(), monadRegistry)
+    expect(all).toHaveLength(4)
+    // Past the deadline this call reverts and the whole batch with it: a signature kept back cannot run at an old minimum.
+    expect(all[0]!.to).toBe(ROUTER)
+    expect(decodeFunctionData({ abi: swapRouter02Abi, data: all[0]!.data })).toMatchObject({ functionName: 'multicall', args: [1_790_000_000n, []] })
+    const calls = all.slice(1)
     expect(calls.every((c) => c.value === 0n)).toBe(true)
     expect(calls[0]!.to).toBe(WMON)
     expect(decodeFunctionData({ abi: erc20Abi, data: calls[0]!.data })).toMatchObject({ functionName: 'approve', args: [ROUTER, W] })
@@ -84,7 +88,7 @@ describe('buildMonadSell (otto/mamoru#428, spec 014 RH-07: step A0)', () => {
     expect(BigInt(a.safeTx.refundReceiver)).toBe(0n)
     expect(decodeFunctionData({ abi: multiSendCallOnlyAbi, data: a.safeTx.data as Hex }).functionName).toBe('multiSend')
     expect(buildMonadSell(sell(), monadRegistry).safeTxHash).toBe(a.safeTxHash)
-    for (const o of [{ safeNonce: '4' }, { amountIn: (W - 1n).toString() }, { amountOutMinimum: '3499999' }, { safe: HOME }] as Partial<MonadSellInput>[]) {
+    for (const o of [{ safeNonce: '4' }, { amountIn: (W - 1n).toString() }, { amountOutMinimum: '3499999' }, { safe: HOME }, { deadline: '1790000001' }] as Partial<MonadSellInput>[]) {
       expect(buildMonadSell(sell(o), monadRegistry).safeTxHash, JSON.stringify(o)).not.toBe(a.safeTxHash)
     }
   })
@@ -92,6 +96,8 @@ describe('buildMonadSell (otto/mamoru#428, spec 014 RH-07: step A0)', () => {
   test('refuses what is not this sale: nothing to sell, no minimum, another chain, a registry of another chain, amounts that are not integers', () => {
     expect(() => buildMonadSell(sell({ amountIn: '0' }), monadRegistry)).toThrow('nothing to sell')
     expect(() => buildMonadSell(sell({ amountOutMinimum: '0' }), monadRegistry)).toThrow('without a minimum')
+    expect(() => buildMonadSell(sell({ deadline: '0' }), monadRegistry)).toThrow('without a deadline')
+    expect(() => buildMonadSell({ ...sell(), deadline: undefined } as unknown as MonadSellInput, monadRegistry)).toThrow('not a decimal integer')
     expect(() => buildMonadSell(sell({ chainId: 8453 }), baseRegistry)).toThrow('Monad only')
     expect(() => buildMonadSell(sell(), baseRegistry)).toThrow('registry of chain')
     expect(() => buildMonadSell(sell({ amountIn: '1e18' }), monadRegistry)).toThrow('not a decimal integer')
@@ -132,5 +138,36 @@ describe('monadSellPrice: the price guard of step A0 (threats S8)', () => {
     const quote = worth
     expect(monadSellPrice({ amountIn: W, amountOutMinimum: monadSellMinOut(quote) - 1n, quote, twapTick: TICK }, monadRegistry)).toBe('MIN_OUT_TOO_LOW')
     expect(monadSellPrice({ amountIn: W, amountOutMinimum: 0n, quote, twapTick: TICK }, monadRegistry)).toBe('MIN_OUT_TOO_LOW')
+  })
+})
+
+describe('the sale\'s deadline and what the owner reads (review r1)', () => {
+  const NOW = 1_790_000_000
+  test('a deadline is signed only when it is ahead and at most 20 minutes away', () => {
+    expect(monadSellDeadlineMismatch(String(NOW + 1), NOW)).toBeNull()
+    expect(monadSellDeadlineMismatch(String(NOW + MONAD_SELL_MAX_LIFETIME_SECONDS), NOW)).toBeNull()
+    expect(monadSellDeadlineMismatch(String(NOW), NOW)).toBe('deadline already passed')
+    expect(monadSellDeadlineMismatch(String(NOW + MONAD_SELL_MAX_LIFETIME_SECONDS + 1), NOW)).toBe('deadline too far ahead')
+    for (const bad of [undefined, null, 1790000600, '', '1e9', '-1', '0x10', '9'.repeat(13)]) expect(monadSellDeadlineMismatch(bad, NOW)).toBe('deadline is not a unix time')
+  })
+
+  test('the lines of each step, and a summary is accepted only when it is exactly them', () => {
+    const home = returnHomeLines({ sessions: 2, usdc: 28_850_000n, home: HOME })
+    expect(home).toEqual([
+      "Revoke the engine's 2 session grant(s) on your Safe on Monad: Mamoru stops working there",
+      `Send 28.85 USDC from your Safe on Monad to your Safe on Base ${HOME}, through Circle's CCTP (about 15-20 minutes, no fee)`,
+      'On Base, Mamoru puts it to work in your positions there',
+      'The MON left for gas stays in this Safe',
+    ])
+    expect(returnHomeLines({ sessions: 0, usdc: 0n, home: HOME, wmonStays: 120n * 10n ** 18n })).toEqual(['There is no USDC to send', 'Your 120 WMON stays in this Safe: it cannot be sold at a fair price right now. You can withdraw it', 'The MON left for gas stays in this Safe'])
+    // Amounts are cut, never rounded up: "at least 3.58" for 3.589999.
+    expect(monadSellLines(120_500_000_000_000_000_000n, 3_589_999n)).toEqual(['Sell 120.5 WMON in your Safe on Monad for at least 3.58 USDC, so all of it can come home'])
+    expect(summaryMismatch(home, home)).toBeNull()
+    expect(summaryMismatch([...home], home)).toBeNull()
+    expect(summaryMismatch(home.slice(1), home)).toBe('summary has other lines')
+    expect(summaryMismatch([...home, 'One more line'], home)).toBe('summary has other lines')
+    expect(summaryMismatch([home[0]!, home[1]!.replace('28.85', '2.88'), home[2]!, home[3]!], home)).toBe("summary line 2 is not the transaction's")
+    expect(summaryMismatch(undefined, home)).toBe('summary has other lines')
+    expect(summaryMismatch('x', home)).toBe('summary has other lines')
   })
 })

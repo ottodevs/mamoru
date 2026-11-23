@@ -10,7 +10,7 @@ import { LeaveMonadFlow } from '../../src/web/components/leave-monad.tsx'
 import { fixtureClient, fixtureConfig, fixtureFunding, fixtureSession } from '../../src/web/fixtures/client.ts'
 import { FIXTURE_ACCOUNT_KEY, FIXTURE_ADDRESS } from '../../src/web/fixtures/empty-account.ts'
 import { poolsResponse } from '../../src/web/fixtures/pools.ts'
-import { leaveMonadCopy, leaveSteps } from '../../src/web/lib/leave-monad.ts'
+import { expired, leaveMonadCopy, leaveSteps, stepState } from '../../src/web/lib/leave-monad.ts'
 import { buildRouter } from '../../src/web/router.tsx'
 import { count, render } from './render.ts'
 
@@ -166,5 +166,33 @@ describe('leaveSteps: only a base-v8 offer that names a Monad step is this scree
     expect(leaveSteps({ ...two, steps: [two.steps[1]!] })).toBeNull()
     // A step this app does not know is never rendered as something else.
     expect(leaveSteps({ ...two, steps: [...two.steps, { chain: 'monad', summary: ['x'] }] })).toBeNull()
+  })
+})
+
+describe('review r1: a step is done only on the chain\'s word', () => {
+  const op = (state: 'proposed' | 'submitted' | 'confirmed' | 'failed') => ({ opId: 'own-7-exit', state })
+  test('sent is not done: a submitted signature waits; confirmed is done; failed is open again', () => {
+    expect(stepState({}, undefined, [])).toBe('open')
+    expect(stepState({}, op('submitted'), [])).toBe('sent')
+    expect(stepState({}, op('submitted'), [op('submitted')])).toBe('sent')
+    expect(stepState({}, op('submitted'), [op('confirmed')])).toBe('done')
+    // The operation failed after it was sent (STOP_STALE, a revert): never counted as done.
+    expect(stepState({}, op('submitted'), [op('failed')])).toBe('failed')
+    expect(stepState({}, op('failed'), [])).toBe('failed')
+    // Another account's or another step's operations say nothing about this one.
+    expect(stepState({}, op('submitted'), [{ opId: 'own-8-renew', state: 'confirmed' }])).toBe('sent')
+    // The operator's view is the last word.
+    expect(stepState({ done: true }, undefined, [])).toBe('done')
+    expect(stepState({ done: true }, op('failed'), [op('failed')])).toBe('done')
+  })
+
+  test('a prepared approval whose expiry is past, or cannot be read, is never signed', () => {
+    const now = Date.parse('2026-11-23T10:00:00Z')
+    expect(expired({ expiresAt: '2026-11-23T10:05:00Z' }, now)).toBe(false)
+    expect(expired({ expiresAt: '2026-11-23T10:00:00Z' }, now)).toBe(true)
+    expect(expired({ expiresAt: '2026-11-23T09:59:59Z' }, now)).toBe(true)
+    expect(expired({ expiresAt: 'x' }, now)).toBe(true)
+    expect(expired({ expiresAt: '' }, now)).toBe(true)
+    expect(expired({} as { expiresAt: string }, now)).toBe(true)
   })
 })

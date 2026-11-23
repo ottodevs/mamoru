@@ -2,9 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters, encodeFunctionData, hashTypedData, pad, toFunctionSelector, type Hex } from 'viem'
 import type { ReturnHomeInput } from '@mamoru/domain'
 import { ownerSafeTx } from '@mamoru/account/live'
-import { buildReturnHome, returnHomeCalls, TOKEN_MESSENGER_V2 } from '@mamoru/account/return-home'
+import { buildReturnHome, returnHomeCalls, returnHomeLines, TOKEN_MESSENGER_V2 } from '@mamoru/account/return-home'
 import { safeTxTypedData } from '@mamoru/account/safe'
-import { monadRegistry, tokenMessengerV2Abi } from '@mamoru/registry'
+import { address, monadRegistry, tokenMessengerV2Abi } from '@mamoru/registry'
 import { resetOperatorHealth } from '../../src/api/sleeves.ts'
 import { harness, ORIGIN, PASSKEY_A, register, sessionCookie } from './helpers.ts'
 
@@ -19,17 +19,18 @@ const SESSION = `0x${'01'.repeat(32)}` as Hex
 const BALANCE = 28_850_000n
 const GET_PERMISSION_IDS = toFunctionSelector('getPermissionIDs(address)')
 /** A Monad provider: SmartSession.getPermissionIDs answers `enabled`, any other eth_call (USDC.balanceOf) `usdc`; down when `usdc` is null. */
-const node = (usdc: bigint | null, enabled: Hex[]) => async (_url: string, init: RequestInit) => {
+const WMON = address('WMON', monadRegistry).toLowerCase()
+const node = (usdc: bigint | null, enabled: Hex[], wmon = 0n) => async (_url: string, init: RequestInit) => {
   if (usdc === null) throw new TypeError('connect ECONNREFUSED')
-  const { params } = JSON.parse(String(init.body)) as { params: [{ data: Hex }] }
-  const result = params[0].data.startsWith(GET_PERMISSION_IDS) ? encodeAbiParameters([{ type: 'bytes32[]' }], [enabled]) : encodeAbiParameters([{ type: 'uint256' }], [usdc])
+  const { params } = JSON.parse(String(init.body)) as { params: [{ to: Hex; data: Hex }] }
+  const result = params[0].data.startsWith(GET_PERMISSION_IDS) ? encodeAbiParameters([{ type: 'bytes32[]' }], [enabled]) : encodeAbiParameters([{ type: 'uint256' }], [params[0].to.toLowerCase() === WMON ? wmon : usdc])
   return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), { headers: { 'content-type': 'application/json' } })
 }
 
 type Fence = () => Response | Promise<Response>
 const jsonRes = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } })
 
-function world(prepare: (home: Hex) => unknown, chainState: { usdc: bigint | null; enabled: Hex[] } = { usdc: BALANCE, enabled: [SESSION] }, fence: Fence = () => jsonRes({ fenced: true, at: 't' })) {
+function world(prepare: (home: Hex) => unknown, chainState: { usdc: bigint | null; enabled: Hex[]; wmon?: bigint } = { usdc: BALANCE, enabled: [SESSION] }, fence: Fence = () => jsonRes({ fenced: true, at: 't' })) {
   resetOperatorHealth()
   let home: Hex = '0x0000000000000000000000000000000000000000'
   /** Every operator request, in order: `base` or `monad`, and its path after the account key. */
@@ -43,7 +44,7 @@ function world(prepare: (home: Hex) => unknown, chainState: { usdc: bigint | nul
     if (url.endsWith('/return-home/prepare')) return json(prepare(home))
     return json({ ok: true })
   }
-  const h = harness(undefined, { env: { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET, OPERATOR_URL_143: `${MONAD_OPERATOR}/`, MONAD_RPC_URLS: 'https://monad-rpc.test' }, operatorFetch, chainFetch: node(chainState.usdc, chainState.enabled) })
+  const h = harness(undefined, { env: { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET, OPERATOR_URL_143: `${MONAD_OPERATOR}/`, MONAD_RPC_URLS: 'https://monad-rpc.test' }, operatorFetch, chainFetch: node(chainState.usdc, chainState.enabled, chainState.wmon) })
   h.db.raw.query(`INSERT INTO ops_flag_changes (flag, enabled, author, reason, created_at) VALUES ('monad_sleeves', 1, 'ot', 'test', '2026-10-23T00:00:00Z')`).run()
   return {
     h,
@@ -65,7 +66,9 @@ function world(prepare: (home: Hex) => unknown, chainState: { usdc: bigint | nul
 }
 
 const input = (home: Hex, o: Partial<ReturnHomeInput> = {}): ReturnHomeInput => ({ chainId: 143, safe: SLEEVE, safeNonce: '2', home, amountUsdc: BALANCE.toString(), removeIds: [SESSION], ...o })
-const offer = (i: ReturnHomeInput, hash?: string) => ({ safe: i.safe, chainId: i.chainId, safeTxHash: hash ?? buildReturnHome(i, monadRegistry).safeTxHash, summary: [], expiresAt: 'x', prepareId: 'p1', returnHome: i })
+/** The lines the operator writes for `i` on a Safe holding `wmon` (planReturnHome). */
+const linesOf = (i: ReturnHomeInput, wmon = 0n) => returnHomeLines({ sessions: i.removeIds.length, usdc: BigInt(i.amountUsdc), home: i.home, ...(wmon > 10n ** 16n ? { wmonStays: wmon } : {}) })
+const offer = (i: ReturnHomeInput, hash?: string, summary: unknown = linesOf(i)) => ({ safe: i.safe, chainId: i.chainId, safeTxHash: hash ?? buildReturnHome(i, monadRegistry).safeTxHash, summary, expiresAt: 'x', prepareId: 'p1', returnHome: i })
 
 describe('return-home/prepare is rebuilt by the Worker (#428)', () => {
   test("the builder's tx, from the row's own Monad Safe to the owner's Base Safe: passed on", async () => {
@@ -160,6 +163,38 @@ describe('return-home/prepare is checked against the chain by the Worker (#428, 
     const body = (await res.json()) as { code: string; returnHome?: unknown }
     expect(body.code).toBe('RETURN_HOME_CHECK_UNAVAILABLE')
     expect(body.returnHome).toBeUndefined()
+  })
+})
+
+describe('what the owner reads is the transaction the Worker checked (#428, review r1)', () => {
+  const expectRefused = async (res: Response) => {
+    expect(res.status).toBe(502)
+    expect(((await res.json()) as { code: string }).code).toBe('BUILD_MISMATCH')
+  }
+  test.each([
+    ['a smaller amount in the text than the burn', (i: ReturnHomeInput) => linesOf({ ...i, amountUsdc: '2885000' })],
+    ['another destination in the text', (i: ReturnHomeInput) => linesOf({ ...i, home: `0x${'99'.repeat(20)}` })],
+    ['the revocation left out of the text', (i: ReturnHomeInput) => linesOf(i).slice(1)],
+    ['an extra line', (i: ReturnHomeInput) => [...linesOf(i), 'Nothing else changes']],
+    ['the text of another kind of approval', () => ["Renew Mamoru's approval on your Safe"]],
+    ['no summary', () => null],
+  ])('%s: refused (BUILD_MISMATCH), nothing to sign', async (_why, summary) => {
+    const w = world((home) => offer(input(home), undefined, summary(input(home))))
+    const { call } = await w.owner()
+    await expectRefused(await call('/return-home/prepare'))
+  })
+
+  test('WMON above dust stays on the Safe: passed on only when the summary says so', async () => {
+    const W = 120n * 10n ** 18n
+    const silent = world((home) => offer(input(home)), { usdc: BALANCE, enabled: [SESSION], wmon: W })
+    await expectRefused(await (await silent.owner()).call('/return-home/prepare'))
+    const said = world((home) => offer(input(home), undefined, linesOf(input(home), W)), { usdc: BALANCE, enabled: [SESSION], wmon: W })
+    const res = await (await said.owner()).call('/return-home/prepare')
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { summary: string[] }).summary).toContain('Your 120 WMON stays in this Safe: it cannot be sold at a fair price right now. You can withdraw it')
+    // And the line is refused where no WMON stays.
+    const lied = world((home) => offer(input(home), undefined, linesOf(input(home), W)))
+    await expectRefused(await (await lied.owner()).call('/return-home/prepare'))
   })
 })
 
