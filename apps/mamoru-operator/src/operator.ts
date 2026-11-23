@@ -280,6 +280,39 @@ const BUDGET_RESUME_MS = 1_800_000
 const RESTART_FLOOR_MARGIN = 30n
 export const FOLLOW_UP_MS = 5_000
 export const FOLLOW_UP_MAX = 12
+/**
+ * otto/mamoru#454: at boot every engine's first review is spread over this long (or one review period when shorter),
+ * evenly, so a provider is not asked for every account's reads in the same second.
+ */
+export const BOOT_REVIEW_SPREAD_MS = 20_000
+
+/** The delay of the `i`-th of `n` engines' first review after a boot: evenly over min(BOOT_REVIEW_SPREAD_MS, reviewMs). */
+export function bootReviewDelay(i: number, n: number, reviewMs: number): number {
+  return n > 1 ? Math.floor((i * Math.min(BOOT_REVIEW_SPREAD_MS, reviewMs)) / n) : 0
+}
+
+/** otto/mamoru#454: whether a review that threw `e` gets its one quick follow-up; marks it given. */
+export function quickRetry(e: unknown, runner: { transientRetried?: boolean }): boolean {
+  if (runner.transientRetried || !transientRpcError(e)) return false
+  runner.transientRetried = true
+  return true
+}
+
+/**
+ * otto/mamoru#454: a review that threw on a provider's transient JSON-RPC error (-32603 internal, -32005 limit exceeded,
+ * -32002 resource unavailable, HTTP 429) or a request timeout, anywhere in its cause chain. Such a review is still a
+ * REVIEW_ERROR; it only earns one quick follow-up instead of waiting a whole review period. Any other error (a revert,
+ * invalid params, a bug) waits as before.
+ */
+export function transientRpcError(e: unknown): boolean {
+  let cur = e as { code?: unknown; status?: unknown; name?: unknown; cause?: unknown } | undefined
+  for (let i = 0; i < 8 && cur && typeof cur === 'object'; i++) {
+    if (cur.code === -32603 || cur.code === -32005 || cur.code === -32002 || cur.code === 429 || cur.status === 429) return true
+    if (cur.name === 'TimeoutError') return true
+    cur = cur.cause as typeof cur
+  }
+  return false
+}
 /** Quick reviews still granted after one that did nothing: the provider may not show the last operation's effect yet. */
 export const FOLLOW_UP_GRACE = 2
 
@@ -931,7 +964,7 @@ type Prepared = {
 /** otto/mamoru#430: the part of a Stop's builder input its plan chooses. */
 type StopPlan = Pick<StopInput, 'revokes' | 'positions' | 'deadline' | 'vaultExits' | 'swaps'>
 
-type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** otto/mamoru#223: out-of-range positions the last decision does not re-range, with the re-range code. */ rangeHolds?: { tokenId: string; code: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
+type Runner = { engine: Engine; timer: ReturnType<typeof setTimeout> | null; stopped: boolean; /** Quick follow-up reviews in a row (see FOLLOW_UP_MS), and how many of the last did nothing. */ followUps?: number; grace?: number; /** An engine op was unsettled when this loop started: the first tick sets the observation floor past the head. */ floorPending?: boolean; /** When (ms) the next review is due. */ nextAt?: number; /** otto/mamoru#454: a quick follow-up was given for a transient RPC error since the last review that decided. */ transientRetried?: boolean; /** The provider's head was seen past the account's activation block. */ pastActivation?: boolean; /** When the last review that reached a decision started (ms); absent before the first. */ reviewedAt?: number; /** otto/mamoru#127, #128: buckets of the last decision whose savings wait, with why. */ waiting?: { bucket: string; pool: string | null; code: string; amountUsdc: string }[]; /** otto/mamoru#223: out-of-range positions the last decision does not re-range, with the re-range code. */ rangeHolds?: { tokenId: string; code: string }[]; /** Since when the journal has had an operation left `included` (ms); absent when it has none. */ includedAt?: number; epoch: number; run: number; seen: Map<string, string>; alias: Map<string, string> }
 
 const ENGINE_STATE: Record<OpRecord['state'], OpView['state'] | null> = {
   proposed: 'proposed',
@@ -1458,7 +1491,8 @@ export class Operator {
       return
     }
     void this.scanRevertedExposure().catch((e) => logErr('[exposure#163] scan failed:', e))
-    for (const acc of Object.values(this.store.state.accounts)) if (acc.active) this.startLoop(acc)
+    const active = Object.values(this.store.state.accounts).filter((a) => a.active)
+    active.forEach((acc, i) => this.startLoop(acc, bootReviewDelay(i, active.length, this.cfg.reviewMs)))
     for (const acc of Object.values(this.store.state.accounts)) {
       if (acc.trusted && !acc.admittedTokenIds) void this.lock(acc.accountKey).run(() => this.seedAdmitted(acc)).catch((e) => logErr(`[admitted] ${acc.accountKey} not seeded:`, e))
     }
@@ -8384,7 +8418,8 @@ export class Operator {
     ]
   }
 
-  private startLoop(acc: AccountState): void {
+  /** `firstMs`: when the first review comes (otto/mamoru#454: spread at boot; at once otherwise). */
+  private startLoop(acc: AccountState, firstMs = 0): void {
     const refusal = this.writeRefusal()
     if (refusal) throw new ReasonError('CHAIN_UNSUPPORTED', `${acc.accountKey} engine not started: ${refusal}`)
     this.stopLoop(acc.accountKey)
@@ -8655,6 +8690,7 @@ export class Operator {
             // Only a review that reached a decision counts, from when it started (it may then wait minutes on its
             // operation): one that was held, failed to observe or threw is tried again on the next tick.
             runner.reviewedAt = startedAt
+            runner.transientRetried = false
             // Its operation landed: the next step of the entry (the mint after the swap, the next pool) is decided now.
             if (o?.state === 'confirmed') more = true
           }
@@ -8663,6 +8699,10 @@ export class Operator {
           // otto/mamoru#358: with the JSON-RPC methods of a request that failed (a Monad harvest timed out on an unknown read).
           logErr(`[engine ${acc.accountKey}] review error:`, thrownSummary(e))
           safeMetrics(() => this.engineHealth.record(acc.accountKey, false, 'REVIEW_ERROR', classifyEngineError('REVIEW_ERROR', e)))
+          // otto/mamoru#454: a provider's transient error gets one quick follow-up (FOLLOW_UP_MS) instead of a whole review
+          // period (5 min on Monad, past the redeploy's 4 min watch). Once per streak: a provider that keeps failing goes
+          // back to the review period, and the error stays recorded either way.
+          if (quickRetry(e, runner)) more = true
         }
         // otto/mamoru#340: the history's own look for deposits, rarely (DEPOSIT_IDLE_SCAN_MS), so its cursor never falls
         // a day behind while no app is open; the engine finds deposits for its own use from its observation.
@@ -8693,8 +8733,9 @@ export class Operator {
         }
       }
     }
-    runner.timer = setTimeout(tick, 0)
-    console.log(`[engine ${acc.accountKey}] loop started for ${acc.ctx.address} every ${this.cfg.reviewMs}ms`)
+    runner.nextAt = Date.now() + firstMs
+    runner.timer = setTimeout(tick, firstMs)
+    console.log(`[engine ${acc.accountKey}] loop started for ${acc.ctx.address} every ${this.cfg.reviewMs}ms${firstMs ? ` (first review in ${Math.round(firstMs / 1000)} s)` : ''}`)
   }
 
   /**
