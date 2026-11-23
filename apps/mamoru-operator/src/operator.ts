@@ -6165,8 +6165,8 @@ export class Operator {
     // A Stop revokes what it was prepared with: a grant enabled since (a renewal that landed meanwhile) would stay on
     // the Safe with the account shown stopped. Prepare again (Sol review #2).
     if (p.kind === 'stop') {
-      const signed = new Set((p.revokes ?? []).map((id) => id.toLowerCase()))
-      if (this.stopRevokes(acc).some((id) => !signed.has(id.toLowerCase()))) return this.failOwner(acc, op, 'STOP_STALE')
+      const stale = await this.stopStale(acc, live, p)
+      if (stale) return this.failOwner(acc, op, stale)
     }
     // part2 #6: a sponsored transaction is counted against the limits in one synchronous step (no await between the
     // check and the record) before anything is sent, deploy included; the reservation goes if nothing is spent after all.
@@ -6195,6 +6195,21 @@ export class Operator {
       // maxFeePerGas it was signed with when it was sent (round 4), not the SafeTx's earlier price.
       if (!sponsored && p.tx.refund && spent.deploySent && !spent.exec) this.recordSponsor(acc, p.kind as SponsoredKind, {} as TransactionReceipt, spent.deployWei ?? spent.deployMaxWei ?? DEPLOY_GAS * p.tx.refund.gasPrice)
     }
+  }
+
+  /**
+   * Why a signed Stop is not sent, or null. A Stop revokes what it was prepared with: a grant this account records that it
+   * does not revoke is STOP_STALE. otto/mamoru#428 (spec 014 RH-02): a return home is prepared from the sessions enabled
+   * on chain, not from this account's record (which may name grants no longer enabled, never removed by it), so it is
+   * judged against the chain again: any session SmartSession lists now that the signature does not remove is STOP_STALE;
+   * the list unreadable, nothing is sent (GRANT_CHECK_UNAVAILABLE).
+   */
+  private async stopStale(acc: AccountState, live: LiveAccount, p: Pick<Prepared, 'revokes' | 'returnHome'>): Promise<'STOP_STALE' | 'GRANT_CHECK_UNAVAILABLE' | null> {
+    const signed = new Set((p.revokes ?? []).map((id) => id.toLowerCase()))
+    if (!p.returnHome) return this.stopRevokes(acc).some((id) => !signed.has(id.toLowerCase())) ? 'STOP_STALE' : null
+    const listed = await this.listedEnabled(live)
+    if (!listed) return 'GRANT_CHECK_UNAVAILABLE'
+    return listed.some((id) => !signed.has(id.toLowerCase())) ? 'STOP_STALE' : null
   }
 
   private async executeCharged(acc: AccountState, live: LiveAccount, p: Prepared, signature: Hex, op: OpView, sponsored: SponsorEntry | null, spent: { any: boolean; deployWei?: bigint; deploySent?: boolean; deployMaxWei?: bigint; exec?: boolean }): Promise<void> {

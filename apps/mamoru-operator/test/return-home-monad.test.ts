@@ -226,3 +226,29 @@ describe('spec 014 plan: the sessions are read back once the return home confirm
     expect(s.op.returnLeft).toBe(0)
   })
 })
+
+describe('spec 014 RH-02: a signed return home is judged against the chain before it is sent', () => {
+  const stale = (m: ReturnType<typeof monad>, revokes: Hex[], returnHome = true) =>
+    (m.op as unknown as { stopStale(a: AccountState, l: unknown, p: unknown): Promise<string | null> }).stopStale(m.state.accounts[rctx.accountKey]!, { safe: SAFE }, { revokes, ...(returnHome ? { returnHome: { input: RH, safeTxHash: '0x' } } : {}) })
+
+  test('it removes every session enabled now: sent, even when this account records a grant that is no longer enabled', async () => {
+    // The account records GRANTS[0] and GRANTS[1]; only GRANTS[0] is enabled on chain, and that is what was signed.
+    const m = monad({}, [GRANTS[0]!])
+    expect(await stale(m, [GRANTS[0]!])).toBeNull()
+  })
+
+  test('a session enabled since the prepare is not removed by it: STOP_STALE, prepare again', async () => {
+    const m = monad({}, [GRANTS[0]!, `0x${'0c'.repeat(32)}`])
+    expect(await stale(m, [GRANTS[0]!])).toBe('STOP_STALE')
+  })
+
+  test('the enabled sessions unreadable: not sent', async () => {
+    expect(await quiet(() => stale(monad({}, null), GRANTS)).then((r) => r.out)).toBe('GRANT_CHECK_UNAVAILABLE')
+  })
+
+  test('a plain Stop keeps its rule: every grant the account records is revoked by it', async () => {
+    const m = monad({}, [])
+    expect(await stale(m, GRANTS, false)).toBeNull()
+    expect(await stale(m, [GRANTS[0]!], false)).toBe('STOP_STALE')
+  })
+})
