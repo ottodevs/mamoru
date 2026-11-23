@@ -16,15 +16,15 @@ export async function signedCall<T>(
 ): Promise<{ status: number; json: T }> {
   const raw = body === undefined ? '' : JSON.stringify(body)
   const header = { 'x-mamoru-account': accountHeader, 'content-type': 'application/json' }
-  // A prepare on a cold fork over a public RPC can outlast the operator's 120 s idle timeout; the client then re-sends the
-  // request with its old `x-mamoru-ts`, which is stale by then (401: refused, nothing done). Sign again and ask again. A
-  // request that failed in transit is asked again only for a GET: a POST the operator may have handled is never replayed.
+  // A prepare on a cold fork over a public RPC can run for minutes: the e2e operator has no idle timeout (#449), and the
+  // client waits as long (Bun's `timeout: false`). A 401 (a stale `x-mamoru-ts`) is signed and asked again. A request
+  // that failed in transit is asked again only for a GET: a POST the operator may have handled is never replayed.
   for (let attempt = 1; ; attempt++) {
     const ts = String(Math.floor(Date.now() / 1000))
     const sig = operatorSignature(secret, method, path, accountHeader, raw, ts)
     let res: Response
     try {
-      res = await fetchFn(baseUrl + path, { method, headers: { ...header, 'x-mamoru-ts': ts, 'x-mamoru-sig': sig }, body: method === 'POST' ? raw : undefined })
+      res = await fetchFn(baseUrl + path, { method, headers: { ...header, 'x-mamoru-ts': ts, 'x-mamoru-sig': sig }, body: method === 'POST' ? raw : undefined, timeout: false } as RequestInit)
     } catch (e) {
       if (method === 'POST' || attempt >= RETRIES) throw e
       continue
@@ -37,9 +37,9 @@ export async function signedCall<T>(
 /**
  * Runs a prepare on the operator object first, never signed, and drops it, so the signed HTTP prepare after it reads a
  * warm fork. A cold prepare reads thousands of slots through a rate-limited upstream (anvil's 330 CU/s; the keyed
- * provider answers 429 past ~30 req/s) and outlasts the operator's 120 s idle timeout: the request dies with a 401 on the
- * re-sent stale ts or a closed socket (multipool, overcap, rerange on 4 Nov). Dropped because an unsigned non-activate
- * prepare holds the account's engine review for up to REVIEW_HOLD_MAX_MS.
+ * provider answers 429 past ~30 req/s). It only shortens the signed one: each prepare draws its own session key, so the
+ * slots of its new permission ids are read again (#449). Dropped because an unsigned non-activate prepare holds the
+ * account's engine review for up to REVIEW_HOLD_MAX_MS.
  */
 export async function warmPrepare(operator: object, prepare: () => Promise<{ prepareId: string }>): Promise<void> {
   const o = operator as unknown as { prepared: Map<string, unknown>; store: { state: { accounts: Record<string, { sponsored?: unknown[] }> } } }

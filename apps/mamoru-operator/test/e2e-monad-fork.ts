@@ -59,7 +59,7 @@ try {
     lines.push(a.map(String).join(' '))
     origLog(...a)
   }
-  const op = await bootOperator({ rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, policyId: m.policy })
+  const op = await bootOperator({ httpIdleTimeoutSec: 0, rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, policyId: m.policy })
   console.log = origLog
   stopOperator = op.stop
   check(op.operator.cfg.registry === monadRegistry, `operator reads the Monad registry (chain ${op.operator.cfg.registry.chainId}) on lab chain ${op.operator.cfg.chainId}`)

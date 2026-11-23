@@ -93,7 +93,7 @@ try {
   // anvil is one node: no head lag to absorb (live default 3 blocks, see rpc-proxy.ts)
   process.env.MAMORU_HEAD_LAG = '0'
   const secret = randomBytes(32).toString('hex')
-  const op = await bootOperator({ blockTimeMs: 1_000, rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v2' })
+  const op = await bootOperator({ httpIdleTimeoutSec: 0, blockTimeMs: 1_000, rpcUrl: enginePort.url, secret, stateDir: join(dir, 'state'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'conservador-live-v2' })
   stopOperator = op.stop
   check(op.operator.cfg.live, 'operator is live on chain 8453 with MAMORU_LIVE=1')
   await lab.setBalance(op.operator.relayer.address, 10n ** 18n)
@@ -144,6 +144,8 @@ try {
     }
   }
   let lastPlan: TransferPlan | undefined
+  /** otto/mamoru#449: the USDC the activation converts to the Safe's ETH gas reserve, read from the summary the owner signs. */
+  let reserveUsdc = 0n
   async function ownerAction(kind: 'activate' | 'transfer' | 'stop', prepareBody?: unknown): Promise<OpView> {
     const prep = await call<OwnerTxToSign | TransferPlan>('POST', `${base}/${kind}/prepare`, prepareBody)
     if (prep.status !== 200) throw new Error(`E2E FAILED: ${kind}/prepare ${prep.status} ${JSON.stringify(prep.json)}`)
@@ -153,6 +155,11 @@ try {
       log(`transfer plan reduce ${JSON.stringify(prep.json.reduce)} receive ${JSON.stringify(prep.json.receive)}`)
     }
     log(`${kind} to sign: ${tx.summary.join(' | ')}`)
+    if (kind === 'activate') {
+      // fmtUnitsExact: whole units, then up to 6 decimals without trailing zeros.
+      const r = tx.summary.map((l) => /^Convert ([0-9]+)(?:\.([0-9]{1,6}))? USDC to at least .* gas reserve$/.exec(l)).find(Boolean)
+      if (r) reserveUsdc = BigInt(r[1]!) * 1_000_000n + BigInt((r[2] ?? '').padEnd(6, '0'))
+    }
     const res = await call<OpView>('POST', `${base}/${kind}`, browserSign(tx))
     if (res.status !== 200) throw new Error(`E2E FAILED: ${kind} ${res.status} ${JSON.stringify(res.json)}`)
     return waitOp(res.json.opId, `owner ${kind}`)
@@ -237,7 +244,8 @@ try {
   const volatileDust = end.per.every((x) => x.value < 20_000n)
   check(!f3.active && f3.positions.length === 0 && volatileDust, `after stop: inactive, no positions, volatile left ${end.per.map((x) => `${x.b} ${x.value}`).join(', ')} USDC units; USDC ${f3.usdc} (${stop.txHash})`)
   const usdcAfter = BigInt(f3.usdc)
-  check(usdcAfter > DEPOSIT - WITHDRAW - 200_000n, `Safe holds ${usdcAfter} USDC units after the round trip (deposit ${DEPOSIT} - withdraw ${WITHDRAW}, costs within 0.2 USDC)`)
+  // The activation's gas reserve swap leaves as ETH, not a cost of the round trip: counted out by the amount it names.
+  check(usdcAfter > DEPOSIT - WITHDRAW - reserveUsdc - 200_000n, `Safe holds ${usdcAfter} USDC units after the round trip (deposit ${DEPOSIT} - withdraw ${WITHDRAW} - gas reserve ${reserveUsdc}, costs within 0.2 USDC)`)
   const stats = enginePort.stats()
   check(stats.rejectedLabMethods === 0, `operator made ${stats.forwarded} RPC calls, 0 anvil_/evm_ methods`)
   log(`RESULT PASS: ${m.text}`)

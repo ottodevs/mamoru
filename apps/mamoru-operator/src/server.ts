@@ -143,13 +143,13 @@ async function buildMetricsPayload(op: Operator, rpcMetrics: RpcMetrics, gitSha:
 const STOP_BODY_BYTES = 4 * 1024
 const STOP_BODY_MS = 2_000
 
-export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; /** otto/mamoru#418 */ quota?: QuotaBook | null; /** otto/mamoru#419 */ rpcCache?: () => Record<string, ReadCacheStats | null>; gitSha: string; bootedAt: number; snapshot?: SnapshotLoop | null; /** Ethereum → Base moves (#133); routes answer 404 without it. */ bridgeOut?: BridgeOut | null; admission?: Partial<AdmissionLimits>; /** Tests only: the legacy cutoff (default LEGACY_HMAC_UNTIL). */ legacyHmacUntil?: number }): Server<undefined> {
+export function startServer(op: Operator, opts: { secret: string; hostname: string; port: number; rpcMetrics: RpcMetrics; /** otto/mamoru#418 */ quota?: QuotaBook | null; /** otto/mamoru#419 */ rpcCache?: () => Record<string, ReadCacheStats | null>; gitSha: string; bootedAt: number; snapshot?: SnapshotLoop | null; /** Ethereum → Base moves (#133); routes answer 404 without it. */ bridgeOut?: BridgeOut | null; admission?: Partial<AdmissionLimits>; /** Tests only: the legacy cutoff (default LEGACY_HMAC_UNTIL). */ legacyHmacUntil?: number; /** otto/mamoru#449: Bun's idle timeout in seconds (default 120; 0 none). */ idleTimeoutSec?: number }): Server<undefined> {
   const legacyUntil = opts.legacyHmacUntil ?? LEGACY_HMAC_UNTIL
   const admission = new Admission({ ...DEFAULT_ADMISSION, ...opts.admission })
   return Bun.serve({
     hostname: opts.hostname,
     port: opts.port,
-    idleTimeout: 120,
+    idleTimeout: opts.idleTimeoutSec ?? 120,
     // otto/mamoru#140 (part2 #7): Bun's own ceiling, under the 128 MB default; account routes are held to a far smaller one below.
     maxRequestBodySize: 256 * 1024,
     async fetch(req) {

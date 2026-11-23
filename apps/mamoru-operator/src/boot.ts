@@ -326,6 +326,11 @@ export async function gitShaOnce(cwd: string, fromEnv = process.env.MAMORU_GIT_S
 
 export type BootOptions = {
   rpcUrl: string
+  /**
+   * otto/mamoru#449: the HTTP server's idle timeout in seconds (default 120). The e2e scripts pass 0 (none): a prepare on
+   * a fork of a public node reads every new slot through a rate-limited upstream and can run for minutes.
+   */
+  httpIdleTimeoutSec?: number
   /** Ethereum Mainnet RPC for bridge-out (#133). Unset: bridge-out off. */
   l1RpcUrl?: string
   /**
@@ -994,7 +999,7 @@ export async function bootOperator(o: BootOptions) {
     if (bo.pendingCctp() > 0) console.log(`[operator] bridge-out: ${bo.pendingCctp()} CCTP move(s) to finish on Base`)
     console.log(`[operator] bridge-out from Ethereum available (on per account from /ops), relayer ${relayer.address} (${wei ?? 'unknown'} wei on Ethereum)`)
   }
-  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, quota, rpcCache: () => ({ chain: proxy.cacheStats(), monad: monadProxy?.cacheStats() ?? null, l1: l1Proxy?.cacheStats() ?? null }), gitSha, bootedAt, snapshot: snapshot ?? monadSnapshot, bridgeOut })
+  const server = startServer(operator, { secret: o.secret, hostname: o.hostname ?? '127.0.0.1', port: o.port ?? 8787, rpcMetrics, quota, rpcCache: () => ({ chain: proxy.cacheStats(), monad: monadProxy?.cacheStats() ?? null, l1: l1Proxy?.cacheStats() ?? null }), gitSha, bootedAt, snapshot: snapshot ?? monadSnapshot, bridgeOut, ...(o.httpIdleTimeoutSec !== undefined ? { idleTimeoutSec: o.httpIdleTimeoutSec } : {}) })
   const eth = await client.getBalance({ address: relayer.address })
   console.log(`[operator] chain ${chainId} live=${live} policy ${policy.policyId} relayer ${relayer.address} (${eth} wei) sha ${gitSha} on http://${server.hostname}:${server.port}`)
   // Base keeps its boot line byte for byte; any other chain says whose contracts it reads and the relayer's unit.

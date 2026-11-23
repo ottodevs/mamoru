@@ -240,7 +240,7 @@ try {
   // --- the Monad operator: live-wmon-usdc-monad-v6, chain writes on 143 (its production env after #251) -------------------
   for (const k of ['MAMORU_ONCHAIN_POLICY_V4', 'MAMORU_ACTION_POLICY_ADDRESS', 'MAMORU_GAS_POLICY_ADDRESS', 'MAMORU_ACTION_POLICY_V2_ADDRESS', 'MAMORU_PAUSE_GATE_ADDRESS', 'MAMORU_SOURCE_CHAIN_ID']) delete process.env[k]
   Object.assign(process.env, { MAMORU_LIVE: '1', MAMORU_CHAIN_WRITES: '143', MAMORU_HEAD_LAG: '0' })
-  const monadOp = await bootOperator({ blockTimeMs: 1_000, rpcUrl: M.port.url, secret, stateDir: join(dir, 'state-monad'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'live-wmon-usdc-monad-v6' })
+  const monadOp = await bootOperator({ httpIdleTimeoutSec: 0, blockTimeMs: 1_000, rpcUrl: M.port.url, secret, stateDir: join(dir, 'state-monad'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, policyId: 'live-wmon-usdc-monad-v6' })
   stops.unshift(() => monadOp.stop())
   check(monadOp.operator.cfg.chainId === 143 && monadOp.operator.cfg.policy.policyId === 'live-wmon-usdc-monad-v6', 'Monad operator: live on 143 with live-wmon-usdc-monad-v6')
   const monadRelayer = monadOp.operator.relayer.address
@@ -249,7 +249,7 @@ try {
   // --- the Base operator: conservador-live-v2 default, V1/V2/gas from its live env, the bridge leg and the Monad peer ----
   delete process.env.MAMORU_CHAIN_WRITES
   Object.assign(process.env, { MAMORU_LIVE: '1', MAMORU_HEAD_LAG: '0', MAMORU_ONCHAIN_POLICY_V4: '1', MAMORU_ACTION_POLICY_ADDRESS: V1_BASE, MAMORU_GAS_POLICY_ADDRESS: GAS_POLICY_BASE, MAMORU_ACTION_POLICY_V2_ADDRESS: V2_BASE })
-  const baseOp = await bootOperator({ blockTimeMs: 1_000, rpcUrl: B.port.url, monadRpcUrl: M.port.url, secret, stateDir: join(dir, 'state-base'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, peerOperators: `143=${monadOp.url}` })
+  const baseOp = await bootOperator({ httpIdleTimeoutSec: 0, blockTimeMs: 1_000, rpcUrl: B.port.url, monadRpcUrl: M.port.url, secret, stateDir: join(dir, 'state-base'), port: 0, reviewMs: 2_000, waitBlockMs: 1_100, peerOperators: `143=${monadOp.url}` })
   stops.unshift(() => baseOp.stop())
   // Both operators share this process's env, and the Monad engine's signBlocker reads MAMORU_CHAIN_WRITES when it signs:
   // without it every Monad op was discarded SIGN_CHAIN_NOT_ALLOWED (the harness, not prod, which runs one per process).
