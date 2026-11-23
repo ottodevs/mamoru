@@ -664,7 +664,7 @@ describe('after a confirmed v6 approval the account\'s own Safe on Monad is prov
     const acc = w.state.accounts.k!
     const seen: (readonly Hex[] | undefined)[] = []
     const o = w.op as unknown as { cfg: { bridgeMonad?: unknown }; remoteOf(a: AccountState): { remote?: (b: bigint) => Promise<unknown> } }
-    o.cfg.bridgeMonad = { remote: async (...a: unknown[]) => (seen.push(a[4] as readonly Hex[]), { value: 0n, inFlight: 0n, ready: true }) }
+    o.cfg.bridgeMonad = { fenced: () => false, remote: async (...a: unknown[]) => (seen.push(a[4] as readonly Hex[]), { value: 0n, inFlight: 0n, ready: true }) }
     // One engine's `remote`, kept across reviews: the cutoff is judged at each call, not when the engine was built.
     const remote = o.remoteOf(acc).remote!
     await remote(1n)
@@ -690,7 +690,7 @@ describe('after a confirmed v6 approval the account\'s own Safe on Monad is prov
     expect(p.provisioned).toEqual([])
     // The engine sees it empty with no room: its share is placed on Base (decide's remoteSpill).
     const o = w.op as unknown as { cfg: { bridgeMonad?: unknown }; remoteOf(a: AccountState): { remote?: (b: bigint) => Promise<unknown> } }
-    o.cfg.bridgeMonad = { remote: async () => Promise.reject(new Error('never read')) }
+    o.cfg.bridgeMonad = { fenced: () => false, remote: async () => Promise.reject(new Error('never read')) }
     expect(await o.remoteOf(acc).remote!(1n)).toEqual({ value: 0n, inFlight: 0n, ready: false, cap: 0n })
     expect(w.op.remoteStuck()).toEqual([])
   })

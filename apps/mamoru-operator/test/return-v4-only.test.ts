@@ -101,7 +101,7 @@ describe("the home's view of a design-C sleeve carries its idle USDC and its own
     const asked: unknown[][] = []
     const policy = { minEntry: 3_000_000n, remoteBuckets: [{ id: 'growth', chainId: 143 }], execution: { twapWindowSeconds: 1_800 } }
     const self = {
-      cfg: { bridgeMonad: { remote: async (...a: unknown[]) => (asked.push(a), { value: 10n, inFlight: 0n, ready: true, idle: 10n }) } },
+      cfg: { bridgeMonad: { fenced: () => false, remote: async (...a: unknown[]) => (asked.push(a), { value: 10n, inFlight: 0n, ready: true, idle: 10n }) } },
       enginePolicyOf: () => policy,
       onV4: () => false,
       idleMinOf: (Operator.prototype as unknown as { idleMinOf: unknown }).idleMinOf,
