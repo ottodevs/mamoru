@@ -142,22 +142,38 @@ describe('otto/mamoru#456: background reconciliation that concludes nothing back
 
   test('a timer that fires just short of the hold keeps the backoff step and waits out only the rest', async () => {
     const s = await setup()
+    const realSetTimeout = globalThis.setTimeout
     try {
       await s.pass()
       const t = s.r.reconcileTimers.get('k')!
       expect(t.delay).toBe(30_000)
-      // The retry timer fires while the hold still has 3 ms to go (Date.now rounding): no pass, no doubling.
+      // The retry timer fires while the hold still has a minute to go (as Date.now rounding can leave 1 ms): no pass,
+      // no doubling, and the next timer is set for the rest of the hold. The timer is captured, not left to run.
       clearTimeout(t.timer as never)
       t.timer = null
-      s.r.reconcileQuiet.get('k')!.until = Date.now() + 3
+      s.r.reconcileQuiet.get('k')!.until = Date.now() + 60_000
+      const waits: number[] = []
+      let fire: (() => void) | undefined
+      globalThis.setTimeout = ((fn: () => void, ms: number) => {
+        waits.push(ms)
+        fire = fn
+        return realSetTimeout(() => {}, 0)
+      }) as never
       await s.pass()
+      globalThis.setTimeout = realSetTimeout
       expect(s.passes()).toBe(1)
       expect(s.r.reconcileTimers.get('k')!.delay).toBe(30_000)
-      // The rescheduled timer runs the pass as the hold ends, and only that pass doubles the wait.
-      for (let i = 0; i < 50 && s.passes() < 2; i++) await Bun.sleep(5)
+      expect(waits).toHaveLength(1)
+      expect(waits[0]).toBeGreaterThan(59_000)
+      expect(waits[0]).toBeLessThanOrEqual(60_000)
+      // The hold ends and that timer fires: the pass runs, and only it doubles the wait.
+      s.r.reconcileQuiet.get('k')!.until = Date.now() - 1
+      fire!()
+      for (let i = 0; i < 5; i++) await Bun.sleep(0)
       expect(s.passes()).toBe(2)
       expect(s.r.reconcileTimers.get('k')!.delay).toBe(60_000)
     } finally {
+      globalThis.setTimeout = realSetTimeout
       s.stop()
     }
   })
