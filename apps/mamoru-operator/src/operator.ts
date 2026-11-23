@@ -240,6 +240,14 @@ const ARM_CAP_HOLD_MS = 300_000
 const ARM_BUDGET_HOLD_MS = 600_000
 /** Minimum gap between two receipt reconciliation passes of one account. */
 const RECONCILE_EVERY_MS = 20_000
+/**
+ * otto/mamoru#456: a background pass that concluded nothing (the same unresolved owner ops before and after) holds the
+ * next one, from the retry wait (RECONCILE_RETRY_MS) doubling up to RECONCILE_QUIET_MAX_MS while nothing concludes; an
+ * owner op changing state ends the hold. Old ops with no transaction or Safe tx hash kept are searched in the same past
+ * window on every pass, and GET /ops (the app polling) asked for one every 20 s whatever the retry timer's backoff.
+ * Owner prepares settle their own ops directly, never held.
+ */
+const RECONCILE_QUIET_MAX_MS = 3_600_000
 /** Chain time added before the handover time when looking for the block an activation executed in (clock and block-time slack; 60 blocks on Base, otto/mamoru#417). */
 const ACTIVATION_SEARCH_MARGIN_SECONDS = 120
 /**
@@ -1138,6 +1146,8 @@ export class Operator {
   private readonly locks = new Map<string, Lock>()
   private readonly runners = new Map<string, Runner>()
   private readonly reconciled = new Map<string, number>()
+  /** otto/mamoru#456: per account, the hold after background passes that concluded nothing (RECONCILE_QUIET_MS). */
+  private readonly reconcileQuiet = new Map<string, { sig: string; delay: number; until: number }>()
   /** Per account: the pending reconciliation timer and its current backoff (reconcileLater). */
   private readonly reconcileTimers = new Map<string, { timer: ReturnType<typeof setTimeout> | null; delay: number }>()
   private reconcileRetryMs = RECONCILE_RETRY_MS
@@ -1825,8 +1835,18 @@ export class Operator {
   }
 
   /** otto/mamoru#212: a Safe no account here uses (an owner's other Safe, a peer's question), read from the chain, kept nowhere. */
-  private readUnowned(safe: Address): Promise<SafeRead> {
-    return readSafe(this.client, safe, this.cfg.registry)
+  private async readUnowned(safe: Address): Promise<SafeRead> {
+    // otto/mamoru#456: the other chain's operator asks for its remote Safe's exposure on every review, an address with no
+    // code here: found without code, it is not asked for its code again for NO_CODE_KEEP_MS (balances and positions are
+    // read every time; exposure never reads `deployed`). No account here moves it, so the mark only ages out.
+    const codeKey = `unowned:${safe.toLowerCase()}`
+    const startedAt = Date.now()
+    const noCode = this.noCodeAt.get(codeKey)
+    const undeployed = noCode !== undefined && startedAt >= noCode && startedAt - noCode < NO_CODE_KEEP_MS
+    const r = await readSafe(this.client, safe, this.cfg.registry, undeployed ? { undeployed: true } : {})
+    if (r.deployed) this.noCodeAt.delete(codeKey)
+    else if (!undeployed) this.noCodeAt.set(codeKey, startedAt)
+    return r
   }
 
   /** otto/mamoru#212: what this chain holds for the account now (a live read), for the Start checks after prepare. */
@@ -6102,6 +6122,8 @@ export class Operator {
     const op = acc.ops.find((o) => o.opId === opId)
     if (!op) return
     Object.assign(op, patch, { updatedAt: now() })
+    // otto/mamoru#456: an owner op changing state may settle the unresolved ones (a Safe nonce moved): no hold on the next pass.
+    if (opId.startsWith('own-') && patch.state !== undefined) this.reconcileQuiet.delete(acc.accountKey)
     if (patch.state === 'failed' || patch.state === 'confirmed') {
       this.execTried.delete(opKey(acc, op))
       this.retried.delete(opKey(acc, op))
@@ -6492,11 +6514,42 @@ export class Operator {
     if (!this.unresolved(acc)) return
     const last = this.reconciled.get(acc.accountKey) ?? 0
     if (Date.now() - last < RECONCILE_EVERY_MS) return this.reconcileLater(acc)
+    if (this.reconcileHeld(acc)) return this.reconcileLater(acc)
     this.reconciled.set(acc.accountKey, Date.now())
+    const before = this.unresolvedSig(acc)
     this.lock(acc.accountKey)
       .run(() => scoped('reconcile', () => this.reconcileOwner(acc)))
       .catch((e) => logErr(`[reconcile] ${acc.accountKey}`, e))
-      .finally(() => this.reconcileLater(acc))
+      .finally(() => {
+        // A pass that threw concluded nothing either.
+        this.noteReconciled(acc, before)
+        this.reconcileLater(acc)
+      })
+  }
+
+  /** otto/mamoru#456: the unresolved owner ops as they stand (ids and codes): a pass that leaves it unchanged concluded nothing. */
+  private unresolvedSig(acc: AccountState): string {
+    return acc.ops
+      .filter((o) => o.opId.startsWith('own-') && o.state === 'failed' && (o.code === RECEIPT_UNKNOWN || (o.kind === 'renew' && o.code === 'RENEWAL_UNPROVEN')))
+      .map((o) => `${o.opId}:${o.code}`)
+      .join(',')
+  }
+
+  /** otto/mamoru#456: a pass that concluded nothing doubles the hold (from the retry wait, at most RECONCILE_QUIET_MAX_MS); one that did ends it. */
+  private noteReconciled(acc: AccountState, before: string): void {
+    const sig = this.unresolvedSig(acc)
+    if (!sig || sig !== before) return void this.reconcileQuiet.delete(acc.accountKey)
+    const had = this.reconcileQuiet.get(acc.accountKey)
+    const delay = had?.sig === sig ? Math.min(had.delay * 2, RECONCILE_QUIET_MAX_MS) : this.reconcileRetryMs
+    this.reconcileQuiet.set(acc.accountKey, { sig, delay, until: Date.now() + delay })
+  }
+
+  /** otto/mamoru#456: held after passes that concluded nothing, for these same ops. A hold further away than the longest one is a clock set back: not held. */
+  private reconcileHeld(acc: AccountState): boolean {
+    const q = this.reconcileQuiet.get(acc.accountKey)
+    if (!q || q.sig !== this.unresolvedSig(acc)) return false
+    const left = q.until - Date.now()
+    return left > 0 && left <= RECONCILE_QUIET_MAX_MS
   }
 
   /** Owner ops whose outcome is still being asked: unread receipts, and renewals not proven yet. */
@@ -6519,12 +6572,15 @@ export class Operator {
     }
     if (t?.timer) return
     const delay = t ? Math.min(t.delay * 2, this.reconcileRetryMaxMs) : this.reconcileRetryMs
+    // otto/mamoru#456: never before a hold ends (the timer would only find it held).
+    const q = this.reconcileHeld(acc) ? this.reconcileQuiet.get(key)! : undefined
+    const wait = q ? Math.max(delay, q.until - Date.now()) : delay
     const timer = setTimeout(() => {
       const e = this.reconcileTimers.get(key)
       if (e) e.timer = null
       this.reconciled.delete(key)
       this.reconcileSoon(acc)
-    }, delay)
+    }, wait)
     ;(timer as { unref?: () => void }).unref?.()
     this.reconcileTimers.set(key, { timer, delay })
   }

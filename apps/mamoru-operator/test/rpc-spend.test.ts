@@ -71,3 +71,110 @@ describe('otto/mamoru#456: an undeployed Safe is not asked for its code on every
     expect(p.noCodeAt.size).toBe(0)
   })
 })
+
+describe('otto/mamoru#456: background reconciliation that concludes nothing backs off', () => {
+  type R = { reconcileSoon(a: AccountState): void; reconcileOwner(a: AccountState): Promise<void>; reconciled: Map<string, number>; reconcileQuiet: Map<string, { until: number; delay: number }>; reconcileTimers: Map<string, { timer: unknown }>; patchOp(a: AccountState, id: string, p: object): void }
+  async function setup(conclude = () => false, fail = false) {
+    const w = world(0n)
+    await w.op.submit(ctx, 'activate', sign(await w.op.prepareActivate(ctx)))
+    const acc = w.state.accounts.k!
+    acc.ops.push({ opId: 'own-9-activate', kind: 'activate', state: 'failed', code: 'OWNER_TX_ERROR', updatedAt: '2026-09-27T00:00:00.000Z' } as never)
+    const r = w.op as unknown as R
+    let passes = 0
+    r.reconcileOwner = async (a) => {
+      passes++
+      if (fail) throw new Error('rpc down')
+      if (conclude()) Object.assign(a.ops.find((o) => o.opId === 'own-9-activate')!, { state: 'confirmed', code: 'EXEC_OK' })
+    }
+    // One pass: the 20 s gap is waived (as reconcileLater's timer does), then the lock and the bookkeeping settle.
+    const pass = async () => {
+      r.reconciled.delete('k')
+      r.reconcileSoon(acc)
+      for (let i = 0; i < 5; i++) await Bun.sleep(0)
+    }
+    const stop = () => {
+      for (const t of r.reconcileTimers.values()) clearTimeout(t.timer as never)
+    }
+    return { acc, r, pass, stop, passes: () => passes }
+  }
+
+  test('held 30 s after a pass that concluded nothing, then 1, 2, 4 min… up to an hour; a clock set back is not held', async () => {
+    const s = await setup()
+    try {
+      await s.pass()
+      expect(s.passes()).toBe(1)
+      await s.pass()
+      await s.pass()
+      expect(s.passes()).toBe(1)
+      expect(s.r.reconcileQuiet.get('k')!.delay).toBe(30_000)
+      s.r.reconcileQuiet.get('k')!.until = Date.now() - 1
+      await s.pass()
+      expect(s.passes()).toBe(2)
+      expect(s.r.reconcileQuiet.get('k')!.delay).toBe(60_000)
+      for (let i = 0; i < 12; i++) {
+        s.r.reconcileQuiet.get('k')!.until = Date.now() - 1
+        await s.pass()
+      }
+      expect(s.r.reconcileQuiet.get('k')!.delay).toBe(3_600_000)
+      s.r.reconcileQuiet.get('k')!.until = Date.now() + 2 * 3_600_000
+      const n = s.passes()
+      await s.pass()
+      expect(s.passes()).toBe(n + 1)
+    } finally {
+      s.stop()
+    }
+  })
+
+  test('a pass that throws is held too; an owner op changing state ends the hold', async () => {
+    const s = await setup(() => false, true)
+    try {
+      await s.pass()
+      await s.pass()
+      expect(s.passes()).toBe(1)
+      const own = s.acc.ops.find((o) => o.opId.startsWith('own-') && o.opId !== 'own-9-activate')!
+      s.r.patchOp(s.acc, own.opId, { state: own.state })
+      await s.pass()
+      expect(s.passes()).toBe(2)
+    } finally {
+      s.stop()
+    }
+  })
+
+  test('a pass that concludes ends the hold and nothing is left to reconcile', async () => {
+    let go = false
+    const s = await setup(() => go)
+    try {
+      await s.pass()
+      expect(s.r.reconcileQuiet.has('k')).toBe(true)
+      s.r.reconcileQuiet.get('k')!.until = Date.now() - 1
+      go = true
+      await s.pass()
+      expect(s.passes()).toBe(2)
+      expect(s.r.reconcileQuiet.has('k')).toBe(false)
+    } finally {
+      s.stop()
+    }
+  })
+})
+
+describe('otto/mamoru#456: a peer asking for the exposure of a Safe with no code here asks eth_getCode once per 10 min', () => {
+  test('unowned reads: one eth_getCode, then none until the mark ages out; code found clears it', async () => {
+    const w = world(0n)
+    const p = w.op as unknown as Priv & { readUnowned(s: Address): Promise<SafeRead> }
+    let codes = 0
+    const real = p.client.getCode.bind(p.client)
+    p.client.getCode = async (a) => (codes++, real(a))
+    const other = `0x${'9'.repeat(40)}` as Address
+    await p.readUnowned(other)
+    await p.readUnowned(other)
+    await p.readUnowned(other)
+    expect(codes).toBe(1)
+    p.noCodeAt.set(`unowned:${other.toLowerCase()}`, Date.now() - 10 * 60_000 - 1)
+    await p.readUnowned(other)
+    expect(codes).toBe(2)
+    w.chain.deployed = true
+    p.noCodeAt.delete(`unowned:${other.toLowerCase()}`)
+    expect((await p.readUnowned(other)).deployed).toBe(true)
+    expect(p.noCodeAt.has(`unowned:${other.toLowerCase()}`)).toBe(false)
+  })
+})
