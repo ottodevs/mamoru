@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { concat, decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, pad, parseAbi, parseAbiItem, parseEventLogs, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type AccountSavings, type Address, type MonadSellInput, type RemoteSpec, type ReturnHomeInput, type StopInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type AccountSavings, type Address, type MonadSellInput, type RemoteSpec, type ReturnHomeInput, type ReturnHomeStatus, type StopInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, baseRegistry, tokenMessengerV2Abi, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
@@ -721,7 +721,7 @@ export type OperatorConfig = {
    * (remote-peer.ts), by chain id. A v6 approval asks the remote one for its session key, commits to the Safe that gives,
    * and once it lands asks it to provision that Safe. Absent for a chain: no v6 approval is built for it.
    */
-  remotePeers?: Partial<Record<number, Pick<RemotePeer, 'key' | 'provision'> & Partial<Pick<RemotePeer, 'migrateV4' | 'release' | 'releaseStatus' | 'announce'>>>>
+  remotePeers?: Partial<Record<number, Pick<RemotePeer, 'key' | 'provision'> & Partial<Pick<RemotePeer, 'migrateV4' | 'release' | 'releaseStatus' | 'announce' | 'returnHomeStatus'>>>>
   /**
    * otto/mamoru#401, Base side: MamoruActionPolicyV3's depth (`_depthIn`) of `pool` on `chainId` over `bandTicks`, in its
    * budget token (token1 when `in1`), as the remote Safe's first swap will check it. A new remote Safe's cap is sized so
@@ -833,10 +833,54 @@ export function returnBurnMismatch(receipt: Pick<TransactionReceipt, 'status' | 
 /** otto/mamoru#428: reads of a return's receipt that shows no burn log before that is taken as final. */
 const RETURN_RECEIPT_READS = 5
 
+/**
+ * otto/mamoru#428 (spec 014, copy C4): every line the owner reads for a return home (step A), in the order of its calls.
+ * One function for the prepare and for the status the "What's new" view shows, so both say the same.
+ * `afterSale`: the amount is what the Safe will hold after the owner sale that comes first, so it is a minimum (RH-01).
+ */
+export function returnHomeLines(p: { sessions: number; usdc: bigint; home: string; wmonStays?: bigint; afterSale?: boolean }): string[] {
+  const amount = p.afterSale ? `your USDC after the sale (at least ${fmtUsdc(p.usdc)} USDC)` : `${fmtUsdc(p.usdc)} USDC`
+  return [
+    ...(p.sessions ? [`Revoke the engine's ${p.sessions} session grant(s) on your Safe on Monad: Mamoru stops working there`] : []),
+    ...(p.usdc > 0n ? [`Send ${amount} from your Safe on Monad to your Safe on Base ${p.home}, through Circle's CCTP (about 15-20 minutes, no fee)`, 'On Base, Mamoru puts it to work in your positions there'] : ['There is no USDC to send']),
+    ...(p.wmonStays ? [`Your ${fmtUnits(p.wmonStays, 18)} WMON stays in this Safe: it cannot be sold at a fair price right now. You can withdraw it`] : []),
+    'The MON left for gas stays in this Safe',
+  ]
+}
+
+/** otto/mamoru#428 (spec 014, copy C4): the line of the owner sale (step A0). */
+export function monadSellLines(wmon: bigint, amountOutMinimum: bigint): string[] {
+  return [`Sell ${fmtUnits(wmon, 18)} WMON in your Safe on Monad for at least ${fmtUsdc(amountOutMinimum)} USDC, so all of it can come home`]
+}
+
+/**
+ * otto/mamoru#428 (spec 014, copy C2 and C4): what the move to the Base-only policy says about Monad, for the renewal's
+ * summary and the "What's new" view alike. `monadSafe`: the account has a Safe on Monad whose USDC comes home in the
+ * other step of the same screen.
+ */
+export function v8MoveLines(target: PolicyVersion, monadSafe: boolean): string[] {
+  const mix = target.buckets.filter((b) => b.preference > 0).map((b) => `${(b.preference / 100).toFixed(0)}% in ${b.vaults?.length ? 'Stable' : b.pools.map((p) => p.split(':')[1]!.split('/').slice(0, 2).join('/')).join(' + ')}`).join(', ')
+  return [`Mamoru stops sending money to Monad: on Base it aims for ${mix}`, ...(monadSafe ? ['Your USDC on Monad comes here with the other step'] : [])]
+}
+
+/** otto/mamoru#428 (spec 014, copy C2): the points of the "Leave Monad" screen; the mix is the target policy's own. */
+export function leaveMonadPoints(target: PolicyVersion, steps: number): string[] {
+  const mix = target.buckets.filter((b) => b.preference > 0).map((b) => `${(b.preference / 100).toFixed(0)} % ${b.vaults?.length ? 'Stable' : b.pools.map((p) => p.split(':')[1]!.split('/').slice(0, 2).join('/')).join(' + ')}`)
+  const said = mix.length > 1 ? `${mix.slice(0, -1).join(', ')} and ${mix[mix.length - 1]}` : mix.join('')
+  return [
+    'Your USDC on Monad comes back to your Safe on Base, through Circle (about 15-20 minutes, no fee)',
+    'Mamoru stops working on Monad: no more money goes there',
+    `On Base, Mamoru aims for ${said}`,
+    steps === 3 ? 'Three confirmations with your passkey: two on Monad, one on Base' : 'Two confirmations with your passkey, one per network',
+  ]
+}
+
 /** otto/mamoru#428: WMON a return home leaves behind (0.01 WMON); above it, #427 has not finished selling it. */
 const RETURN_HOME_WMON_DUST = 10n ** 16n
 /** otto/mamoru#428 (spec 014 RH-07): how long this operator's refusal of the owner sale lets a return home leave the WMON behind. */
 const RETURN_SELL_REFUSAL_MS = 60 * 60_000
+/** otto/mamoru#428: the Base operator asks its Monad peer for a Safe's return-home status at most this often. */
+const RETURN_STATUS_MS = 20_000
 const ZERO_HASH: Hex = `0x${'00'.repeat(32)}`
 
 /** POST migrate-v4/prepare of a step 1, as the Base operator sends it to the Monad operator. */
@@ -3561,7 +3605,7 @@ export class Operator {
         ...this.remoteLines(policy, remote),
         ...(target?.remoteBuckets?.length ? ['USDC/cbBTC is only wound down, nothing new goes into it'] : []),
         // otto/mamoru#428: the move to v8 ends the bridge to Monad; what the Safe there holds comes home in the next step.
-        ...(target && this.policyOf(acc).remoteBuckets?.length && V8_MIGRATES_FROM.has(this.policyOf(acc).policyId) && !target.remoteBuckets?.length ? [`Mamoru stops sending money to Monad: on Base it aims for ${target.buckets.filter((b) => b.preference > 0).map((b) => `${(b.preference / 100).toFixed(0)}% in ${b.vaults?.length ? 'Stable' : b.pools.map((p) => p.split(':')[1]!.split('/').slice(0, 2).join('/')).join(' + ')}`).join(', ')}`, ...(acc.remote ? [`Your Safe on Monad ${acc.remote.address} keeps what it holds until you approve sending it to this Safe, the next step`] : [])] : []),
+        ...(target && this.policyOf(acc).remoteBuckets?.length && V8_MIGRATES_FROM.has(this.policyOf(acc).policyId) && !target.remoteBuckets?.length ? v8MoveLines(target, !!acc.remote) : []),
         // otto/mamoru#210: v7 moves Stable to lending; the old USDC/USDT positions stay until the owner opts in to their exit.
         ...(target?.buckets.some((b) => b.vaults?.length) ? [`Stable (${(target.buckets.find((b) => b.vaults?.length)!.preference / 100).toFixed(0)}%) is now USDC lent through ${target.buckets.flatMap((b) => b.vaults ?? []).map((v) => vaultLabel(v, this.cfg.registry)).join(', then ')}; nothing new goes into USDC/USDT, and positions you hold there stay as they are until you ask Mamoru to move them`] : []),
         ...(toV5 ? ['It can add to a position it already holds instead of opening another one', 'A guardian key can pause it at any time; that key can never move your funds, and your next renewal ends a pause'] : []),
@@ -7181,6 +7225,9 @@ export class Operator {
    * closed). For a V4 account with a design-C Safe on Monad still to move: step 1 (`currentStep` 1).
    */
   private whatsNewView(acc: AccountState): WhatsNew | null {
+    // otto/mamoru#428 (spec 014): leaving Monad for the Base-only policy, where that is what the account is offered.
+    const leave = this.baseV8View(acc)
+    if (leave) return leave
     if (!this.cfg.oneAuth || this.pausedNow(acc)) return null
     const done = this.v4StepsDone(acc)
     const c = this.designC(acc)
@@ -7559,6 +7606,111 @@ export class Operator {
     return this.lock(ctx.accountKey).run(() => this.planMonadSell(ctx))
   }
 
+  /**
+   * otto/mamoru#428 (spec 014), Monad side (`POST return-home/status {home}`, from the Base operator): where this design-C
+   * Safe stands on its way out, read from the chain now, with the lines the next prepare would show. Signs and records
+   * nothing. `done`: no session enabled and no USDC left. A read that fails is a 503: the caller keeps its last answer.
+   */
+  async returnHomeStatus(ctx: AccountContext, body: unknown): Promise<ReturnHomeStatus> {
+    if (this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID || !ctx.remote || isOneAuthV4(ctx.remote.policyId)) throw new HttpError(409, 'NOT_A_REMOTE', 'this Safe has nothing to send home')
+    const h = (body as { home?: unknown } | null)?.home
+    if (typeof h !== 'string' || !isAddress(h) || BigInt(h) === 0n) throw new HttpError(400, 'BAD_REQUEST', 'home must be the address of your Safe on Base')
+    const home = getAddress(h)
+    const { acc, live } = this.account(ctx, { readOnly: true })
+    const unavailable = () => new HttpError(503, 'REMOTE_UNAVAILABLE', 'the Safe on Monad could not be read just now')
+    const r = await this.readOf(acc, live.safe).catch(() => null)
+    if (!r) throw unavailable()
+    const base = { usdc: r.usdc.toString(), wmon: (r.tokens.WMON ?? 0n).toString(), block: r.block.toString() }
+    if (!r.deployed) return { next: 'done', sessions: 0, openPositions: 0, ...base, home: [] }
+    const listed = await this.listedEnabled(live)
+    if (!listed) throw unavailable()
+    const open = r.positions.filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n).length
+    const wmon = r.tokens.WMON ?? 0n
+    const facts = { sessions: listed.length, openPositions: open, ...base }
+    if (!listed.length && r.usdc === 0n) return { next: 'done', ...facts, home: [] }
+    const plain = returnHomeLines({ sessions: listed.length, usdc: r.usdc, home })
+    const moving = this.stopInFlight(acc) || acc.ops.some((o) => o.opId.startsWith('own-') && !!(o as StoredOp).monadSell && o.state !== 'confirmed' && o.state !== 'failed')
+    if (moving) return { next: 'in-flight', ...facts, home: plain }
+    if (open) return { next: 'unwinding', ...facts, home: plain }
+    if (wmon <= RETURN_HOME_WMON_DUST) return { next: 'return-home', ...facts, home: plain }
+    if (this.sellRefusalStands(acc, wmon)) return { next: 'return-home', ...facts, home: returnHomeLines({ sessions: listed.length, usdc: r.usdc, home, wmonStays: wmon }) }
+    // WMON held: the engine's to sell, unless the action policy refuses its swaps for the pool's depth (then the owner's).
+    const reg = this.cfg.registry
+    const pool = entry(MONAD_SELL_POOL, reg)
+    const ap = this.enginePolicyOf(acc).actionPolicy
+    if (!ap || ap.contractVersion !== 3) return { next: 'unwinding', ...facts, home: plain }
+    try {
+      const held = (await depthShortOf(this.client as never, ap.address, live.safe, [{ name: MONAD_SELL_POOL, address: pool.address as Address, token0: address(pool.token0!, reg), token1: address(pool.token1!, reg) }], r.block)).length > 0
+      if (!held) return { next: 'unwinding', ...facts, home: plain }
+      const quote = await this.v3.quoteExactInputSingle(this.client, { tokenIn: address('WMON', reg), tokenOut: address('USDC', reg), fee: pool.fee!, amountIn: wmon, blockNumber: r.block })
+      const min = monadSellMinOut(quote)
+      return { next: 'monad-sell', ...facts, sell: monadSellLines(wmon, min), home: returnHomeLines({ sessions: listed.length, usdc: r.usdc + min, home, afterSale: true }) }
+    } catch (e) {
+      logErr(`[return] ${acc.accountKey} status: the pool could not be read:`, e)
+      throw unavailable()
+    }
+  }
+
+  /** otto/mamoru#428 (Base): the last status each account's Monad peer gave (returnHomeStatus), and when it was asked. */
+  private readonly returnPeer = new Map<string, { at: number; asking: boolean; status?: ReturnHomeStatus }>()
+
+  /**
+   * The Monad peer's last answer for the account's design-C Safe, never older than it can help: asked again in the
+   * background once RETURN_STATUS_MS old (the view is read on every funding poll and must not wait on Monad). Undefined
+   * until the peer has answered once.
+   */
+  private returnPeerStatus(acc: AccountState, rs: RemoteSafeRecord): ReturnHomeStatus | undefined {
+    const ask = this.cfg.remotePeers?.[rs.chainId]?.returnHomeStatus
+    const peer = this.cfg.remotePeers?.[rs.chainId]
+    if (!peer || !ask) return undefined
+    let e = this.returnPeer.get(acc.accountKey)
+    if (!e) this.returnPeer.set(acc.accountKey, (e = { at: 0, asking: false }))
+    if (!e.asking && Date.now() - e.at >= RETURN_STATUS_MS) {
+      const entry = e
+      entry.asking = true
+      void ask
+        .call(peer, this.remoteContext(acc, rs), acc.ctx.address as Address)
+        .then((status) => {
+          if (status) entry.status = status
+        })
+        .catch(() => {})
+        .finally(() => {
+          entry.at = Date.now()
+          entry.asking = false
+        })
+    }
+    return e.status
+  }
+
+  /**
+   * otto/mamoru#428 (spec 014 RH-01, RH-06, RH-10): the "What's new" view of leaving Monad (`policy: 'base-v8'`), or null:
+   * for an account in the `base_v8` scope, here on Base, that still has the renewal to v8 to sign or a design-C Safe on
+   * Monad with a session or USDC left. Steps in order: the owner sale (only where the Monad peer says the engine cannot
+   * sell), the return home, the renewal to v8. An account with a Safe on Monad is offered nothing until its peer has
+   * answered (fail closed: the Monad step is never left out of the screen).
+   */
+  private baseV8View(acc: AccountState): WhatsNew | null {
+    const v8 = this.cfg.v8Policy
+    if (!v8 || this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID || !this.inScope(acc, 'base_v8') || this.onV4(acc)) return null
+    const target = this.v4Target(acc)
+    const renewLeft = !!target && target.policyId === v8.policyId
+    const onV8 = acc.policyId === v8.policyId
+    if (!renewLeft && !onV8) return null
+    const rs = this.designC(acc)
+    const steps: WhatsNew['steps'] = []
+    if (rs && rs.chainId === BRIDGE_MONAD_CHAIN_ID) {
+      const st = this.returnPeerStatus(acc, rs)
+      if (!st) return null
+      const waiting = st.next === 'unwinding' || st.next === 'in-flight' ? { waiting: st.next } : {}
+      if (st.next === 'monad-sell') steps.push({ chain: 'monad', kind: 'monad-sell', summary: st.sell ?? [] })
+      steps.push({ chain: 'monad', kind: 'return-home', summary: st.home, ...(st.next === 'done' ? { done: true } : {}), ...waiting })
+    }
+    steps.push({ chain: 'base', kind: 'renew', summary: v8MoveLines(v8, !!rs), ...(renewLeft ? {} : { done: true }) })
+    const currentStep = steps.findIndex((x) => !x.done)
+    if (currentStep < 0) return null
+    return { policy: 'base-v8', points: steps.length > 1 ? leaveMonadPoints(v8, steps.length) : [v8MoveLines(v8, false)[0]!], signatures: steps.length as 1 | 2 | 3, currentStep, steps }
+  }
+
   /** The signed step A0: only a prepare of prepareMonadSell is sent through here; it runs and settles as a transfer does. */
   submitMonadSell(ctx: AccountContext, body: OwnerSignature): Promise<OpView> {
     const p = body && typeof body.prepareId === 'string' ? this.prepared.get(body.prepareId) : undefined
@@ -7616,7 +7768,7 @@ export class Operator {
     const { nonce } = await readSafeNonce(this.client, live.safe)
     const input: MonadSellInput = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: nonce.toString(), amountIn: wmon.toString(), amountOutMinimum: amountOutMinimum.toString() }
     const tx = buildMonadSell(input, reg)
-    const summary = [`Sell ${fmtUnits(wmon, 18)} WMON in your Safe on Monad for at least ${fmtUsdc(amountOutMinimum)} USDC, so all of it can come home`]
+    const summary = monadSellLines(wmon, amountOutMinimum)
     return this.hold(acc, live, 'transfer', tx.calls, summary, { monadSell: { input, safeTxHash: tx.safeTxHash } })
   }
 
@@ -7675,14 +7827,7 @@ export class Operator {
     const { nonce } = await readSafeNonce(this.client, live.safe)
     const input: ReturnHomeInput = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: nonce.toString(), home, amountUsdc: r.usdc.toString(), removeIds: revokes }
     const tx = buildReturnHome(input, this.cfg.registry)
-    const summary = [
-      ...(revokes.length ? [`Revoke the engine's ${revokes.length} session grant(s) on your Safe on Monad: Mamoru stops working there`] : []),
-      ...(r.usdc > 0n
-        ? [`Send ${fmtUsdc(r.usdc)} USDC from your Safe on Monad to your Safe on Base ${home}, through Circle's CCTP (about 15-20 minutes, no fee)`, 'On Base, Mamoru puts it to work in your positions there']
-        : ['There is no USDC to send']),
-      ...(wmonStays ? [`Your ${fmtUnits(wmon, 18)} WMON stays in this Safe: it cannot be sold at a fair price right now. You can withdraw it`] : []),
-      'The MON left for gas stays in this Safe',
-    ]
+    const summary = returnHomeLines({ sessions: revokes.length, usdc: r.usdc, home, ...(wmonStays ? { wmonStays: wmon } : {}) })
     return this.hold(acc, live, 'stop', tx.calls, summary, { revokes, returnHome: { input, safeTxHash: tx.safeTxHash } })
   }
 

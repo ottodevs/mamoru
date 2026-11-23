@@ -378,6 +378,56 @@ describe('monad-sell (step A0) on the Monad operator', () => {
     expect(m.held[0]!.summary.join('\n')).not.toContain('WMON stays')
   })
 
+  // SCN-RH-06 (Monad side): return-home/status, what the Base operator's "What's new" view is built from.
+  describe('return-home/status says the next step, with the lines its prepare shows', () => {
+    test('a depth-held Safe: the sale next, its line the prepare\'s own, and the return home named as a minimum after it', async () => {
+      const m = sellWorld()
+      const st = await m.op.returnHomeStatus(rctx, { home: HOME })
+      expect(st).toMatchObject({ next: 'monad-sell', sessions: 2, usdc: '300000000', wmon: W.toString(), openPositions: 0, block: '500' })
+      await m.op.prepareMonadSell(rctx)
+      expect(st.sell).toEqual(m.held[0]!.summary)
+      const floor = (Math.floor(Number(300_000_000n + monadSellMinOut(WORTH)) / 1e4) / 100).toFixed(2)
+      expect(st.home.join('\n')).toContain(`Send your USDC after the sale (at least ${floor} USDC) from your Safe on Monad to your Safe on Base ${HOME}`)
+    })
+
+    test('no WMON left: the return home next, its lines equal to the prepare\'s', async () => {
+      const m = sellWorld({ wmon: 0n })
+      const st = await m.op.returnHomeStatus(rctx, { home: HOME })
+      expect(st.next).toBe('return-home')
+      await m.op.prepareReturnHome(rctx, { home: HOME })
+      expect(st.home).toEqual(m.held[0]!.summary)
+    })
+
+    test('the sale was refused for depth: the return home next, saying the WMON stays, as its prepare does', async () => {
+      const m = sellWorld({ quote: 1n })
+      await code(m.op.prepareMonadSell(rctx))
+      const st = await m.op.returnHomeStatus(rctx, { home: HOME })
+      expect(st.next).toBe('return-home')
+      await m.op.prepareReturnHome(rctx, { home: HOME })
+      expect(st.home).toEqual(m.held[0]!.summary)
+    })
+
+    test('an open position, or WMON the engine can sell itself: unwinding', async () => {
+      expect((await sellWorld({ positions: [{ tokenId: 1n, liquidity: 5n, tokensOwed0: 0n, tokensOwed1: 0n }] }).op.returnHomeStatus(rctx, { home: HOME })).next).toBe('unwinding')
+      expect((await sellWorld({ held: false }).op.returnHomeStatus(rctx, { home: HOME })).next).toBe('unwinding')
+    })
+
+    test('no session and no USDC: done, whatever WMON stays; a Stop or a sale on its way: in-flight', async () => {
+      const done = monad({ usdc: 0n, tokens: { WMON: W } }, [])
+      expect(await done.op.returnHomeStatus(rctx, { home: HOME })).toMatchObject({ next: 'done', sessions: 0, home: [] })
+      const m = sellWorld()
+      m.state.accounts[rctx.accountKey]!.ops.push({ opId: 'own-1-reduce', kind: 'reduce', state: 'submitted', monadSell: {}, updatedAt: new Date().toISOString() } as never)
+      expect((await m.op.returnHomeStatus(rctx, { home: HOME })).next).toBe('in-flight')
+    })
+
+    test('unreadable sessions or pool: 503, nothing guessed; no home, or not a design-C Safe: refused', async () => {
+      expect(await code(monad({}, null).op.returnHomeStatus(rctx, { home: HOME }))).toBe('REMOTE_UNAVAILABLE')
+      expect(await code(sellWorld({ poolDown: true }).op.returnHomeStatus(rctx, { home: HOME }))).toBe('REMOTE_UNAVAILABLE')
+      expect(await code(monad().op.returnHomeStatus(rctx, {}))).toBe('BAD_REQUEST')
+      expect(await code(monad().op.returnHomeStatus({ ...rctx, remote: { ...SPEC, policyId: 'one-auth-v4-remote' } }, { home: HOME }))).toBe('NOT_A_REMOTE')
+    })
+  })
+
   test('only a sale prepare is sent through the monad-sell submit', async () => {
     const m = sellWorld()
     expect(await code(m.op.submitMonadSell(rctx, { prepareId: 'nope' } as never))).toBe('PREPARE_UNKNOWN')

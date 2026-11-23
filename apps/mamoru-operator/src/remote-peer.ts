@@ -1,4 +1,4 @@
-import type { AccountContext, Address } from '@mamoru/domain'
+import type { AccountContext, Address, ReturnHomeStatus } from '@mamoru/domain'
 import { getAddress, type Hex } from 'viem'
 import { operatorSignature } from './server.ts'
 import type { ReleaseView } from './release.ts'
@@ -83,6 +83,21 @@ export class RemotePeer {
       throw Object.assign(new Error(`remote operator of chain ${this.chainId}: ${status}`), { status, code: typeof b?.code === 'string' ? b.code : `HTTP_${status}`, error: typeof b?.error === 'string' ? b.error : '' })
     }
     return res
+  }
+
+  /**
+   * otto/mamoru#428 (spec 014): where the design-C Safe of `remote` stands on its way out of Monad, read by the peer from
+   * the chain; `home` is the Base Safe its USDC goes to (for the lines). Null when the peer cannot say now.
+   */
+  async returnHomeStatus(remote: AccountContext, home: Address): Promise<ReturnHomeStatus | null> {
+    try {
+      const { status, body } = await this.post(remote, 'return-home/status', { home })
+      const b = body as Partial<ReturnHomeStatus> | null
+      if (status !== 200 || !b || typeof b.next !== 'string' || !Array.isArray(b.home)) return null
+      return b as ReturnHomeStatus
+    } catch {
+      return null
+    }
   }
 
   /**

@@ -5,12 +5,12 @@
 import { describe, expect, test } from 'bun:test'
 import { decodeFunctionData, pad, parseAbi, slice, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import type { AccountContext, Address } from '@mamoru/domain'
+import type { AccountContext, Address, ReturnHomeStatus, WhatsNew } from '@mamoru/domain'
 import { address as registryAddress, baseRegistry, smartSessionAbi } from '@mamoru/registry'
 import { encodeVaultFamilyInit, grantKey } from '@mamoru/policy'
 import { remoteInput, remoteSafe } from '@mamoru/account/remote'
 import { resolveV4Policy, resolveV5Policy, resolveV6Policy, resolveV7Policy, resolveV8Policy } from '../src/boot.ts'
-import { type Operator, type OperatorConfig } from '../src/operator.ts'
+import { leaveMonadPoints, monadSellLines, returnHomeLines, v8MoveLines, type Operator, type OperatorConfig } from '../src/operator.ts'
 import type { RemoteProvision } from '../src/remote-peer.ts'
 import type { AccountState, StoredGrant } from '../src/state.ts'
 import { FIXTURE_SESSION_KEY, GATE_V3_BASE_PINNED, V3_BASE_PINNED, withPinnedV3, withPinnedV6Base } from '../../../packages/account/remote/fixture.ts'
@@ -187,7 +187,9 @@ describe('owner transaction of the move to v8', () => {
     expect(held.revokes!.length).toBe(a.grants.length)
     const text = t.summary.join('\n')
     expect(text).toContain('Mamoru stops sending money to Monad: on Base it aims for 50% in Stable, 25% in WETH/USDC, 25% in USDC/cbBTC')
-    expect(text).toContain(`Your Safe on Monad 0x${'cd'.repeat(20)} keeps what it holds`)
+    // Spec 014 r2 (copy C4): with the Monad step on the same screen, the line says the USDC comes with it.
+    expect(text).toContain('Your USDC on Monad comes here with the other step')
+    expect(text).not.toContain('keeps what it holds')
   })
 })
 
@@ -209,7 +211,8 @@ describe('review r1: the move waits for a bridge to Monad still in flight', () =
 describe('review r2: nothing is bridged to Monad for an account in base_v8 scope', () => {
   test('the remote read gets no bridge permission in scope, its permission ids out of scope', async () => {
     const asked: (readonly Hex[])[] = []
-    const bridgeMonad = { pending: () => undefined, remote: async (_k: string, _s: string, _t: number, _b: bigint, ids: readonly Hex[]) => (asked.push(ids), { value: 0n, inFlight: 0n, ready: true }) } as unknown as OperatorConfig['bridgeMonad']
+    const fence = { on: false }
+    const bridgeMonad = { pending: () => undefined, fenced: () => fence.on, remote: async (_k: string, _s: string, _t: number, _b: bigint, ids: readonly Hex[]) => (asked.push(ids), { value: 0n, inFlight: 0n, ready: true }) } as unknown as OperatorConfig['bridgeMonad']
     const read = async (scoped: Scoped) => {
       const w = world(0n, cfg7({}, scoped, { bridgeMonad }))
       const a = running(w, v7)
@@ -219,7 +222,10 @@ describe('review r2: nothing is bridged to Monad for an account in base_v8 scope
     }
     await read({})
     await read({ base_v8: ['k'] })
-    expect(asked).toEqual([[`0x${'0e'.repeat(32)}`], []])
+    // Spec 014 RH-11: nor behind the fence of a return home, whatever the scope.
+    fence.on = true
+    await read({})
+    expect(asked).toEqual([[`0x${'0e'.repeat(32)}`], [], []])
   })
 })
 
@@ -261,5 +267,115 @@ describe('a Start activates on v8 wherever base_v8 is in scope', () => {
   test('out of scope: v7 as before (#368)', async () => {
     const r = await start({}, { base_v8: ['someone-else'] })
     expect(r.policyIds).toEqual(new Set([v5.policyId]))
+  })
+})
+
+// SCN-RH-05, SCN-RH-06 (spec 014 RH-01, RH-06, RH-10): the "What's new" view of leaving Monad.
+describe("the What's new view of leaving Monad (policy 'base-v8')", () => {
+  const HOME = ctx.address as Address
+  const MONAD_SAFE = `0x${'cd'.repeat(20)}`
+  const homeLines = returnHomeLines({ sessions: 1, usdc: 449_550_000n, home: HOME })
+  const status = (o: Partial<ReturnHomeStatus> = {}): ReturnHomeStatus => ({ next: 'return-home', sessions: 1, usdc: '449550000', wmon: '0', openPositions: 0, block: '500', home: homeLines, ...o })
+  /** A Base account on `from` in the base_v8 scope; `monad`: what its Monad peer answers about its Safe there (absent: no Safe on Monad; null: the peer cannot say). */
+  function leaving(from = v7, monad?: ReturnHomeStatus | null, scoped: Scoped = { base_v8: ['k'] }) {
+    const asked: { ctx: AccountContext; home: string }[] = []
+    const answer = { status: monad }
+    const peer = { ...fakePeer().peer, returnHomeStatus: async (c: AccountContext, home: Address) => (asked.push({ ctx: c, home }), answer.status ?? null) }
+    const w = world(0n, cfg7({}, scoped, { remotePeers: { 143: peer } }))
+    const a = running(w, from)
+    if (monad !== undefined) (a as unknown as { remote: unknown }).remote = { chainId: 143, address: MONAD_SAFE, spec: { chainId: 143, policyId: 'live-wmon-usdc-monad-v6' }, permissionIds: [], ready: true }
+    const view = async (): Promise<WhatsNew | null> => {
+      const read = () => (priv(w.op) as unknown as { whatsNewView(a: AccountState): WhatsNew | null }).whatsNewView(a)
+      read()
+      await new Promise((r) => setTimeout(r, 5))
+      return read()
+    }
+    return { w, a, view, asked, answer }
+  }
+
+  test('a v7 account with a Safe on Monad: two steps, Monad first, then Base; the lines are the prepares\' own', async () => {
+    const l = leaving(v7, status())
+    const v = (await l.view())!
+    expect(v).toMatchObject({ policy: 'base-v8', signatures: 2, currentStep: 0 })
+    expect(v.steps).toEqual([
+      { chain: 'monad', kind: 'return-home', summary: homeLines },
+      { chain: 'base', kind: 'renew', summary: v8MoveLines(v8, true) },
+    ])
+    expect(v.points).toEqual(leaveMonadPoints(v8, 2))
+    expect(v.points).toEqual([
+      'Your USDC on Monad comes back to your Safe on Base, through Circle (about 15-20 minutes, no fee)',
+      'Mamoru stops working on Monad: no more money goes there',
+      'On Base, Mamoru aims for 50 % Stable, 25 % WETH/USDC and 25 % USDC/cbBTC',
+      'Two confirmations with your passkey, one per network',
+    ])
+    // The peer was asked about this account's own Safe on Monad, with this Safe as its home.
+    expect(l.asked[0]).toMatchObject({ home: HOME, ctx: { chainId: 143, address: MONAD_SAFE } })
+    // Threats S15: the percentages the screen and the Base step name are the target policy's own preferences.
+    expect(v8.buckets.filter((b) => b.preference > 0).map((b) => b.preference)).toEqual([5000, 2500, 2500])
+    expect(v.steps[1]!.summary[0]).toBe('Mamoru stops sending money to Monad: on Base it aims for 50% in Stable, 25% in WETH/USDC, 25% in USDC/cbBTC')
+  })
+
+  test('a depth-held Safe: three steps, the owner sale first, and the return home names its amount as a minimum', async () => {
+    const sell = monadSellLines(120n * 10n ** 18n, 3_580_000n)
+    const home = returnHomeLines({ sessions: 1, usdc: 303_580_000n, home: HOME, afterSale: true })
+    const v = (await leaving(v7, status({ next: 'monad-sell', wmon: (120n * 10n ** 18n).toString(), usdc: '300000000', sell, home })).view())!
+    expect(v).toMatchObject({ policy: 'base-v8', signatures: 3, currentStep: 0 })
+    expect(v.steps.map((x) => `${x.chain}:${x.kind}`)).toEqual(['monad:monad-sell', 'monad:return-home', 'base:renew'])
+    expect(v.steps[0]!.summary).toEqual(['Sell 120 WMON in your Safe on Monad for at least 3.58 USDC, so all of it can come home'])
+    expect(v.steps[1]!.summary.join('\n')).toContain('Send your USDC after the sale (at least 303.58 USDC) from your Safe on Monad to your Safe on Base')
+    expect(v.points[3]).toBe('Three confirmations with your passkey: two on Monad, one on Base')
+  })
+
+  test('an account with no Safe on Monad (v2): one step, the renewal to v8, and no Monad wording', async () => {
+    const l = leaving(v4)
+    const v = (await l.view())!
+    expect(v).toMatchObject({ policy: 'base-v8', signatures: 1, currentStep: 0 })
+    expect(v.steps).toEqual([{ chain: 'base', kind: 'renew', summary: v8MoveLines(v8, false) }])
+    expect(v.steps[0]!.summary).toHaveLength(1)
+    expect(l.asked).toHaveLength(0)
+  })
+
+  test('the Monad peer has not answered: nothing is offered (the Monad step is never left out)', async () => {
+    expect(await leaving(v7, null).view()).toBeNull()
+  })
+
+  test('SCN-RH-05: step A done, step B not: the Monad step is marked done and the Base step is the current one', async () => {
+    const v = (await leaving(v7, status({ next: 'done', sessions: 0, usdc: '0', home: [] })).view())!
+    expect(v.steps).toEqual([
+      { chain: 'monad', kind: 'return-home', summary: [], done: true },
+      { chain: 'base', kind: 'renew', summary: v8MoveLines(v8, true) },
+    ])
+    expect(v.currentStep).toBe(1)
+    expect(v.signatures).toBe(2)
+  })
+
+  test('step B done, step A not (RH-06): the account is on v8, the Monad step is still offered', async () => {
+    const v = (await leaving(v8, status()).view())!
+    expect(v.steps.map((x) => [x.kind, x.done ?? false])).toEqual([['return-home', false], ['renew', true]])
+    expect(v.currentStep).toBe(0)
+  })
+
+  test('both done, or on v8 with no Safe on Monad: nothing to offer', async () => {
+    expect(await leaving(v8, status({ next: 'done', sessions: 0, usdc: '0', home: [] })).view()).toBeNull()
+    expect(await leaving(v8).view()).toBeNull()
+  })
+
+  test('still unwinding, or a step on its way: the Monad step says why it waits', async () => {
+    expect((await leaving(v7, status({ next: 'unwinding', openPositions: 1 })).view())!.steps[0]).toMatchObject({ kind: 'return-home', waiting: 'unwinding' })
+    expect((await leaving(v7, status({ next: 'in-flight' })).view())!.steps[0]).toMatchObject({ kind: 'return-home', waiting: 'in-flight' })
+  })
+
+  test('out of the base_v8 scope: not offered, and the peer is not asked', async () => {
+    const l = leaving(v7, status(), { base_v8: ['other'] })
+    expect(await l.view()).toBeNull()
+    expect(l.asked).toHaveLength(0)
+  })
+
+  test('the peer is asked at most once per interval, however often the view is read', async () => {
+    const l = leaving(v7, status())
+    await l.view()
+    await l.view()
+    await l.view()
+    expect(l.asked).toHaveLength(1)
   })
 })

@@ -638,12 +638,36 @@ export type RemoteSpec = {
 // `steps[i].summary`: every line the owner signs in that step, plain language; `moveTo`: the full destination Safe when
 // the step moves funds (the Monad step: the account's new V4 Safe there). Prepared and submitted through
 // POST migrate-v4/prepare {step} and POST migrate-v4 {step, ...signature}. Absent: not offered.
+//
+// otto/mamoru#428 (spec 014): `policy: 'base-v8'` is the offer to leave Monad and move to the Base-only policy. Its steps
+// are, in order: `monad-sell` (only a Safe whose engine cannot sell its WMON: the owner sale, POST monad-sell/prepare and
+// monad-sell on the Monad account), `return-home` (the Monad Safe: revoke and send its USDC home, POST return-home/prepare
+// and return-home on the Monad account) and `renew` (Base: the renewal that moves to v8, POST renew/prepare and renew).
+// One passkey prompt per step. `done` marks a step already finished on chain; `currentStep` is the first one that is not.
+// `waiting`: why the step cannot be prepared yet ('unwinding': Mamoru is still turning the Monad position into USDC;
+// 'in-flight': its transaction is on its way). An account with no Safe on Monad has the `renew` step alone.
 export type WhatsNew = {
-  policy: 'one-auth-v4'
+  policy: 'one-auth-v4' | 'base-v8'
   points: string[]
-  signatures: 1 | 2
+  signatures: 1 | 2 | 3
   currentStep: number
-  steps: { chain: 'base' | 'monad'; summary: string[]; moveTo?: string }[]
+  steps: { chain: 'base' | 'monad'; summary: string[]; moveTo?: string; kind?: 'monad-sell' | 'return-home' | 'renew'; done?: boolean; waiting?: 'unwinding' | 'in-flight' }[]
+}
+
+// otto/mamoru#428 (spec 014): what the Monad operator answers its Base peer about a design-C Safe leaving Monad (POST
+// return-home/status {home}), read from the chain: the sessions SmartSession lists, the Safe's USDC and WMON (base units),
+// open positions, and the step that comes next with the lines its prepare would show now.
+export type ReturnHomeStatus = {
+  next: 'monad-sell' | 'return-home' | 'unwinding' | 'in-flight' | 'done'
+  sessions: number
+  usdc: string
+  wmon: string
+  openPositions: number
+  block: string
+  /** `next` 'monad-sell': the sale's lines. */
+  sell?: string[]
+  /** The return home's lines for the Safe as read (after the sale, where one comes first: its amount is a minimum). */
+  home: string[]
 }
 
 // One current and one monthly APY for the account (public, no session). Until positions earn
