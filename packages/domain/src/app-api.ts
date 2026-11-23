@@ -390,6 +390,9 @@ export type OwnerTxToSign = {
   // otto/mamoru#428 (spec 014, step 1 of leaving Monad): the exact input `buildReturnHome` built `safeTx` from. The
   // Worker rebuilds it, and checks the Safe is the row's own and `home` the owner's Base Safe, before the owner signs.
   returnHome?: ReturnHomeInput
+  // otto/mamoru#428 (spec 014 RH-07): step A0's exact input to `buildMonadSell`. The Worker rebuilds it on the row's own Safe
+  // and checks its amount and price against the chain before the owner signs.
+  monadSell?: MonadSellInput
   // otto/mamoru#430: a Stop's exact input to `buildStop` (packages/account/stop). The Worker rebuilds the Stop from it on the
   // row's own Safe and chain, and passes the prepare on only when the hash is the one the owner is asked to sign.
   stop?: StopInput
@@ -410,6 +413,11 @@ export type StopInput = {
 // otto/mamoru#428: every input of a return-home Safe tx on a design-C Safe (packages/account/return-home), JSON-safe.
 // `amountUsdc` "0" is a revoke only. `removeIds`: the sessions removed (the same set as Stop).
 export type ReturnHomeInput = { chainId: number; safe: Hex0x; safeNonce: string; home: Hex0x; amountUsdc: string; removeIds: Hex0x[] }
+// otto/mamoru#428 (spec 014 RH-07, step A0): every input of the owner sale that precedes a return home on a Safe whose
+// engine cannot sell (packages/account/return-home, `buildMonadSell`), JSON-safe. The router, the tokens (WMON to USDC), the
+// pool fee and the recipient (the Safe itself) are the builder's own: nothing here can point the sale elsewhere.
+// `amountIn`: the Safe's whole WMON balance; `amountOutMinimum`: the full sale's quote less 30 bps.
+export type MonadSellInput = { chainId: number; safe: Hex0x; safeNonce: string; amountIn: string; amountOutMinimum: string }
 // otto/mamoru#293 x #295: every input of a migrate-v4 Safe tx, explicit and JSON-safe (integers as decimal strings). The
 // operator builds what it prepares with `buildMigrateV4` (packages/account/one-auth) and returns this as `input`; the
 // Worker rebuilds the tx from it with the same function and compares hashes.

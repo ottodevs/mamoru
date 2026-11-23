@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { concat, decodeErrorResult, decodeFunctionData, decodeFunctionResult, encodeAbiParameters, encodeFunctionData, pad, parseAbi, parseAbiItem, parseEventLogs, getAddress, isAddress, keccak256, stringToHex, toFunctionSelector, toHex, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type AccountSavings, type Address, type RemoteSpec, type ReturnHomeInput, type StopInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
+import { BASE_CHAIN_ID, chainOf, isChainId, overCap, ReasonError, type AccountContext, type AccountSavings, type Address, type MonadSellInput, type RemoteSpec, type ReturnHomeInput, type StopInput, type WhatsNew, type FundingView, type MoneyChain, type MoneyInFlight, type MoneyMap, type OpView, type OwnerSignature, type OwnerTxToSign, type PriceDivergenceLeg, type PriceDivergenceWarning, type TransferPlan, type TransferRequest, type WithdrawAsset } from '@mamoru/domain'
 import { address, baseRegistry, tokenMessengerV2Abi, entry, entryPointV07Abi, isDeployed, erc20Abi, mamoruActionPolicyV2Abi, monadRegistry, moduleRegistryAbi, nonfungiblePositionManagerAbi, registryFor, safeAbi, safe7579Abi, smartSessionAbi, type Registry, type RegistryName } from '@mamoru/registry'
 import { uniswapV3, type UniswapV3 } from '@mamoru/uniswap-v3'
 import type { SnapshotTarget } from './snapshot.ts'
@@ -32,7 +32,7 @@ import {
 import { multiSendCallOnly } from '@mamoru/account/safe'
 import { baseKeyOf, isV4RemoteSpec, remoteAccountKey, remoteInput, remoteSafe, v4RemoteAccountKey, v4RemoteFromSpec } from '@mamoru/account/remote'
 import { buildStop, stopCalls } from '@mamoru/account/stop'
-import { buildReturnHome, RETURN_HOME_DOMAIN, RETURN_HOME_FINALITY, returnReleaseId, TOKEN_MESSENGER_V2 as RETURN_TOKEN_MESSENGER } from '@mamoru/account/return-home'
+import { buildMonadSell, MONAD_SELL_POOL, MONAD_SELL_TWAP_WINDOW_SECONDS, monadSellMinOut, monadSellPrice, monadSellTwapValue, buildReturnHome, RETURN_HOME_DOMAIN, RETURN_HOME_FINALITY, returnReleaseId, TOKEN_MESSENGER_V2 as RETURN_TOKEN_MESSENGER } from '@mamoru/account/return-home'
 import { a1ExpiresAt, buildA1CallData, buildMigrateV4, inventoryOf, mamoruActionPolicyV4Abi, mamoruV4HelperAbi, smartSessionV4Abi, v4Children, readSessionState, sessionCreatedIds, v4HomeSession, v4HomeSessionSalt, V4_REMOTE_SESSION_SALT, type A1Intent, type MigrateV4Input } from '@mamoru/account/one-auth'
 import { BundlerClient } from '@mamoru/erc4337'
 import type { ReportedRelease, ReturnHome } from './return-home.ts'
@@ -835,6 +835,8 @@ const RETURN_RECEIPT_READS = 5
 
 /** otto/mamoru#428: WMON a return home leaves behind (0.01 WMON); above it, #427 has not finished selling it. */
 const RETURN_HOME_WMON_DUST = 10n ** 16n
+/** otto/mamoru#428 (spec 014 RH-07): how long this operator's refusal of the owner sale lets a return home leave the WMON behind. */
+const RETURN_SELL_REFUSAL_MS = 60 * 60_000
 const ZERO_HASH: Hex = `0x${'00'.repeat(32)}`
 
 /** POST migrate-v4/prepare of a step 1, as the Base operator sends it to the Monad operator. */
@@ -970,6 +972,8 @@ type Prepared = {
   built?: { input: MigrateV4Input; safeTxHash: Hex }
   /** otto/mamoru#428: a Stop that sends the Safe's USDC home (return-home): what buildReturnHome built from, and its hash. */
   returnHome?: { input: ReturnHomeInput; safeTxHash: Hex }
+  /** otto/mamoru#428 (spec 014 RH-07): a transfer that is the owner sale before a return home (step A0): what buildMonadSell built from, and its hash. */
+  monadSell?: { input: MonadSellInput; safeTxHash: Hex }
   /** otto/mamoru#430: what a Stop's calls were built from (buildStop's input without the nonce and the fee); hold completes it and returns it as `stop`. */
   stopPlan?: StopPlan
 }
@@ -3030,6 +3034,10 @@ export class Operator {
     if (extra.returnHome && (fee.refund || extra.returnHome.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.returnHome.input.safeNonce !== nonce.toString())) {
       throw new HttpError(fee.refund ? 503 : 409, fee.refund ? 'SPONSOR_UNAVAILABLE' : 'RETURN_HOME_STALE', fee.refund ? 'Mamoru cannot pay for this right now: nothing was changed, try again later' : 'your Safe on Monad changed while this was prepared: prepare it again')
     }
+    // Spec 014 RH-07: the owner sale (step A0) is exactly the builder's tx as well, and never Safe-paid.
+    if (extra.monadSell && (fee.refund || extra.monadSell.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase() || extra.monadSell.input.safeNonce !== nonce.toString())) {
+      throw new HttpError(fee.refund ? 503 : 409, fee.refund ? 'SPONSOR_UNAVAILABLE' : 'RETURN_HOME_STALE', fee.refund ? 'Mamoru cannot pay for this right now: nothing was changed, try again later' : 'your Safe on Monad changed while this was prepared: prepare it again')
+    }
     // otto/mamoru#430: a Stop is exactly what buildStop gives for its input, the fee included (the Worker rebuilds it).
     let stopInput: StopInput | undefined
     if (extra.stopPlan) {
@@ -3060,7 +3068,7 @@ export class Operator {
     // otto/mamoru#151: a renewal's grants are all of one policy, the one its summary was built from (renewPolicyOf).
     const policyId = kind === 'renew' ? renewPolicyOf(extra.grants ?? []) : undefined
     this.prepared.set(prepareId, { prepareId, accountKey: acc.accountKey, kind, tx, safeTxHash, expires, ...extra, ...(policyId ? { policyId } : {}), safe, ...(fee.sponsorKind ? { sponsorKind: fee.sponsorKind } : {}), ...(fee.feeWei ? { feeWei: fee.feeWei.toString() } : {}) })
-    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}), ...(kind === 'activate' && extra.built ? { input: extra.built.input } : {}), ...(extra.returnHome ? { returnHome: extra.returnHome.input } : {}), ...(stopInput ? { stop: stopInput } : {}) }
+    return { safe: live.safe, chainId: this.cfg.chainId, safeTxHash, summary: fee.line ? [...summary, fee.line] : summary, expiresAt: new Date(expires).toISOString(), prepareId, ...(policyId ? { policyId } : {}), ...(kind === 'renew' ? { move: extra.move === true } : {}), ...(extra.remote ? { remote: { chainId: extra.remote.chainId, address: extra.remote.address, spec: extra.remote.spec } } : {}), ...(kind === 'migrate-v4' ? { ...migrateFields(tx, extra.step ?? 0, movedTo(calls)), ...(extra.built ? { input: extra.built.input } : {}) } : {}), ...(kind === 'activate' && extra.built ? { input: extra.built.input } : {}), ...(extra.returnHome ? { returnHome: extra.returnHome.input } : {}), ...(extra.monadSell ? { monadSell: extra.monadSell.input } : {}), ...(stopInput ? { stop: stopInput } : {}) }
   }
 
   /** The policy a renewal of `acc` targets now: the move's target when one is offered, else the account's own. */
@@ -5284,7 +5292,8 @@ export class Operator {
       this.assertFresh(acc, p)
       this.disarm(acc, 'ARMED_SUPERSEDED')
     }
-    const op = this.newOp(acc, kind === 'stop' ? 'exit' : kind)
+    // Spec 014 RH-07: the owner sale is no withdrawal: its history row is a sale in the pool ('reduce'), never a transfer out.
+    const op = this.newOp(acc, kind === 'stop' ? 'exit' : p.monadSell ? 'reduce' : kind)
     this.stash(acc, op, p)
     const run = this.lock(acc.accountKey).run(() => this.execute(acc, live, p, signature, op))
     run.catch((e) => {
@@ -6045,6 +6054,10 @@ export class Operator {
     if ((p.kind === 'activate' || p.kind === 'renew') && p.capUsdc) o.capUsdc = p.capUsdc
     if ((p.kind === 'stop' || p.kind === 'renew') && p.revokes) o.revokes = p.revokes
     if (p.kind === 'stop' && p.returnHome) o.returnHome = p.returnHome.input
+    if (p.kind === 'transfer' && p.monadSell) {
+      o.monadSell = p.monadSell.input
+      o.pool = MONAD_SELL_POOL
+    }
     if (p.kind === 'renew' && p.extend) o.extend = true
     // otto/mamoru#293: what a late receipt of a migration needs to apply it.
     if (p.kind === 'migrate-v4') {
@@ -7525,6 +7538,89 @@ export class Operator {
   }
 
   /**
+   * otto/mamoru#428 (spec 014 RH-07): whether this operator's own refusal of the owner sale still stands for a Safe holding
+   * `wmon`: recorded for exactly this balance, at most RETURN_SELL_REFUSAL_MS ago.
+   */
+  private sellRefusalStands(acc: AccountState, wmon: bigint): boolean {
+    const x = acc.monadSellRefused
+    return !!x && x.code === 'MONAD_DEPTH_TOO_LOW' && x.wmon === wmon.toString() && Date.now() - Date.parse(x.at) < RETURN_SELL_REFUSAL_MS
+  }
+
+  /**
+   * otto/mamoru#428 (spec 014 RH-07), step A0 on a design-C Safe here whose engine cannot sell: ONE owner Safe tx
+   * (buildMonadSell) that sells the Safe's whole WMON to USDC on the growth pool, paid to the Safe itself. It revokes
+   * nothing, sends nothing and is not a Stop: the account stays active. Only for a Safe with no open position, WMON above
+   * dust, and whose session's swaps the action policy refuses for the pool's depth (#410): any other Safe's WMON is the
+   * engine's to sell, with no signature. The minimum out is the full sale's QuoterV2 quote less 30 bps; a quote more than
+   * 300 bps under the TWAP value is refused (MONAD_DEPTH_TOO_LOW) and that refusal is kept on the account, which is what
+   * lets the USDC go home alone. The Worker rebuilds the tx and checks the amount and the price from its own reads.
+   */
+  prepareMonadSell(ctx: AccountContext): Promise<OwnerTxToSign> {
+    return this.lock(ctx.accountKey).run(() => this.planMonadSell(ctx))
+  }
+
+  /** The signed step A0: only a prepare of prepareMonadSell is sent through here; it runs and settles as a transfer does. */
+  submitMonadSell(ctx: AccountContext, body: OwnerSignature): Promise<OpView> {
+    const p = body && typeof body.prepareId === 'string' ? this.prepared.get(body.prepareId) : undefined
+    if (!p || p.accountKey !== ctx.accountKey || p.kind !== 'transfer' || !p.monadSell) return Promise.reject(new HttpError(404, 'PREPARE_UNKNOWN', 'no such prepared transaction for this account'))
+    return this.submit(ctx, 'transfer', body)
+  }
+
+  private async planMonadSell(ctx: AccountContext): Promise<OwnerTxToSign> {
+    this.assertLive()
+    if (this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID || !ctx.remote || isOneAuthV4(ctx.remote.policyId)) throw new HttpError(409, 'NOT_A_REMOTE', 'this Safe has nothing to sell')
+    const { acc, live } = this.account(ctx, { readOnly: true })
+    if (this.stopInFlight(acc)) throw new HttpError(409, 'STOP_IN_FLIGHT', 'a stop of this Safe is already on its way')
+    this.assertEngineSettled(acc)
+    const r = await this.readOf(acc, live.safe)
+    if (!r.deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
+    const pending = () => new HttpError(409, 'MONAD_UNWIND_PENDING', 'Mamoru is still moving your Monad position to USDC: try again in a few minutes')
+    if (r.positions.some((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n)) throw pending()
+    const wmon = r.tokens.WMON ?? 0n
+    if (wmon <= RETURN_HOME_WMON_DUST) throw new HttpError(409, 'NOTHING_TO_SELL', 'there is no WMON to sell in this Safe')
+    const reg = this.cfg.registry
+    const pool = entry(MONAD_SELL_POOL, reg)
+    const unavailable = () => new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru could not read the pool on Monad just now: nothing was prepared, try again in a minute')
+    // Held by the depth check (#410)? Read as the contract reads it. Not held: the engine sells it itself.
+    const ap = this.enginePolicyOf(acc).actionPolicy
+    if (!ap || ap.contractVersion !== 3) throw pending()
+    let held: boolean
+    let quote: bigint
+    let twapTick: number
+    try {
+      held = (await depthShortOf(this.client as never, ap.address, live.safe, [{ name: MONAD_SELL_POOL, address: pool.address as Address, token0: address(pool.token0!, reg), token1: address(pool.token1!, reg) }], r.block)).length > 0
+      if (!held) throw pending()
+      quote = await this.v3.quoteExactInputSingle(this.client, { tokenIn: address('WMON', reg), tokenOut: address('USDC', reg), fee: pool.fee!, amountIn: wmon, blockNumber: r.block })
+      twapTick = await twapTickAt(this.client, pool.address as Address, MONAD_SELL_TWAP_WINDOW_SECONDS, r.block)
+    } catch (e) {
+      if (e instanceof HttpError) throw e
+      logErr(`[return] ${acc.accountKey} sale: the pool could not be read:`, e)
+      throw unavailable()
+    }
+    const amountOutMinimum = monadSellMinOut(quote)
+    const refusal = monadSellPrice({ amountIn: wmon, amountOutMinimum, quote, twapTick }, reg)
+    const stored = this.store.state.accounts[acc.accountKey]
+    if (refusal) {
+      // Kept with what was read: the only thing that lets a return home leave the WMON behind (planReturnHome).
+      if (stored) {
+        stored.monadSellRefused = { code: 'MONAD_DEPTH_TOO_LOW', wmon: wmon.toString(), quote: quote.toString(), twapValue: monadSellTwapValue(wmon, twapTick, reg).toString(), block: r.block.toString(), at: new Date().toISOString() }
+        this.store.save()
+      }
+      console.log(`[return] ${acc.accountKey} sale of ${fmtUnits(wmon, 18)} WMON refused (${refusal}): quote ${fmtUsdc(quote)} USDC against ${fmtUsdc(monadSellTwapValue(wmon, twapTick, reg))} at the TWAP, block ${r.block}`)
+      throw new HttpError(409, 'MONAD_DEPTH_TOO_LOW', 'the pool on Monad is too shallow to sell your WMON at a fair price right now: your USDC can still come home')
+    }
+    if (stored?.monadSellRefused) {
+      delete stored.monadSellRefused
+      this.store.save()
+    }
+    const { nonce } = await readSafeNonce(this.client, live.safe)
+    const input: MonadSellInput = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: nonce.toString(), amountIn: wmon.toString(), amountOutMinimum: amountOutMinimum.toString() }
+    const tx = buildMonadSell(input, reg)
+    const summary = [`Sell ${fmtUnits(wmon, 18)} WMON in your Safe on Monad for at least ${fmtUsdc(amountOutMinimum)} USDC, so all of it can come home`]
+    return this.hold(acc, live, 'transfer', tx.calls, summary, { monadSell: { input, safeTxHash: tx.safeTxHash } })
+  }
+
+  /**
    * otto/mamoru#428 (spec 014 RH-11), on Base, asked by the Worker before the Monad operator prepares the return home: the
    * account's fence. Taken under the account lock, the one an engine review signs and sends its bridges under, and on disk
    * before this answers: from then on no bridge to Monad is signed for the account, and every one signed before is in the
@@ -7565,7 +7661,12 @@ export class Operator {
     const r = await this.readOf(acc, live.safe)
     if (!r.deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
     const open = r.positions.filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n)
-    if (open.length || (r.tokens.WMON ?? 0n) > RETURN_HOME_WMON_DUST) throw new HttpError(409, 'MONAD_UNWIND_PENDING', 'Mamoru is still moving your Monad position to USDC: try again in a few minutes')
+    const wmon = r.tokens.WMON ?? 0n
+    // Spec 014 RH-07: WMON still held goes first (the engine's sale, or the owner's step A0 where the engine cannot sell).
+    // Only this operator's own refusal of that sale for the pool's depth, of this very balance and recent, lets the USDC go
+    // home alone: the WMON then stays the owner's on Monad, and the summary says so.
+    const wmonStays = wmon > RETURN_HOME_WMON_DUST && !open.length && this.sellRefusalStands(acc, wmon)
+    if (open.length || (wmon > RETURN_HOME_WMON_DUST && !wmonStays)) throw new HttpError(409, 'MONAD_UNWIND_PENDING', 'Mamoru is still moving your Monad position to USDC: try again in a few minutes')
     // Spec 014 RH-02 (threats S5): the sessions removed are the ones SmartSession lists as enabled on the Safe now, whether
     // this account knows them or not, and no other (the Worker reads the same list and refuses any other set).
     const revokes = await this.listedEnabled(live)
@@ -7579,6 +7680,7 @@ export class Operator {
       ...(r.usdc > 0n
         ? [`Send ${fmtUsdc(r.usdc)} USDC from your Safe on Monad to your Safe on Base ${home}, through Circle's CCTP (about 15-20 minutes, no fee)`, 'On Base, Mamoru puts it to work in your positions there']
         : ['There is no USDC to send']),
+      ...(wmonStays ? [`Your ${fmtUnits(wmon, 18)} WMON stays in this Safe: it cannot be sold at a fair price right now. You can withdraw it`] : []),
       'The MON left for gas stays in this Safe',
     ]
     return this.hold(acc, live, 'stop', tx.calls, summary, { revokes, returnHome: { input, safeTxHash: tx.safeTxHash } })

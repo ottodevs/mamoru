@@ -1,7 +1,7 @@
 import type { StoredHistoryCursor } from '@mamoru/rpc'
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { AccountContext, Hex, OpView, RemoteSpec, ReturnHomeInput } from '@mamoru/domain'
+import type { AccountContext, Hex, MonadSellInput, OpView, RemoteSpec, ReturnHomeInput } from '@mamoru/domain'
 import type { SessionGrant } from '@mamoru/policy'
 import type { SafeTx } from '@mamoru/account/live'
 import type { Execution } from '@mamoru/account/safe'
@@ -44,6 +44,8 @@ export type StoredOp = OpView & {
    */
   returnHome?: ReturnHomeInput
   returnRecorded?: string
+  /** otto/mamoru#428 (spec 014 RH-07): the owner sale before a return home (step A0): its builder input. Changes no grant; the account stays active. */
+  monadSell?: MonadSellInput
   /** otto/mamoru#428: reads of its receipt that showed no burn log yet (a provider's incomplete answer is read again). */
   returnReads?: number
   /**
@@ -248,6 +250,12 @@ export type AccountState = {
   release?: ReleaseState
   /** otto/mamoru#278: the last finished requests (burned, cancelled), newest first, for status by id. */
   releasesDone?: ReleaseState[]
+  /**
+   * otto/mamoru#428 (spec 014 RH-07): on a design-C Safe on Monad, the operator's own last refusal of the owner sale (step A0)
+   * for the pool's depth, with what it read. While it stands (same WMON balance, recent), a return home is built on the USDC
+   * alone and the WMON stays the owner's. Cleared by the next sale prepare that passes.
+   */
+  monadSellRefused?: { code: 'MONAD_DEPTH_TOO_LOW'; wmon: string; quote: string; twapValue: string; block: string; at: string }
   /** otto/mamoru#348: on a V4 remote Safe, its announceReady to its home's chain (readiness.ts peerAnnounce). */
   readyAnnounce?: AnnounceRecord
   /** otto/mamoru#348 (review r1 of #253): the last lane-1 V4 session op signed (its nonce and A1 window end, seconds), on disk before it is sent. */

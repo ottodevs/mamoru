@@ -1,7 +1,10 @@
 import { decodeFunctionResult, encodeFunctionData, type Hex } from 'viem'
 import type { Address } from '@mamoru/domain'
 import { smartSessionV4Abi } from '@mamoru/account/one-auth'
-import { address, erc20Abi, type Registry } from '@mamoru/registry'
+import { MONAD_SELL_POOL, MONAD_SELL_TOKEN, MONAD_SELL_TWAP_WINDOW_SECONDS } from '@mamoru/account/return-home'
+import { quoteExactInputSingleAbi } from '@mamoru/account/stop'
+import { address, entry, erc20Abi, type Registry } from '@mamoru/registry'
+import { poolObserveAbi, twapTickOf } from '@mamoru/uniswap-v3/twap'
 import { rpc } from './chain-funding.ts'
 import { MAX_PROVIDERS, type ChainFetch } from './other-chains.ts'
 
@@ -55,4 +58,22 @@ export function sessionSetMismatch(removeIds: readonly string[], enabled: readon
   if (left) return `${left} enabled session(s) not revoked`
   const extra = [...removed].filter((id) => !on.has(id)).length
   return extra ? `${extra} session(s) revoked that the Safe does not have enabled` : null
+}
+
+/**
+ * Spec 014 RH-07 (threats S8, S8a): what the Worker reads before the owner sale (step A0) may be signed, all from one
+ * provider: the Safe's WMON balance, QuoterV2's answer for selling `amountIn` of it to USDC on the growth pool, and that
+ * pool's TWAP tick over the sale's window. Null when no provider answers all three.
+ */
+export function readMonadSellChain(fetcher: ChainFetch, urls: readonly string[], registry: Registry, safe: Address, amountIn: bigint): Promise<{ wmon: bigint; quote: bigint; twapTick: number } | null> {
+  return fromOneProvider(urls, registry.chainId, async (url) => {
+    const pool = entry(MONAD_SELL_POOL, registry)
+    const wmon = await balanceOf(fetcher, url, address(MONAD_SELL_TOKEN, registry), safe)
+    const quoted = await call(fetcher, url, address('QuoterV2', registry), encodeFunctionData({ abi: quoteExactInputSingleAbi, functionName: 'quoteExactInputSingle', args: [{ tokenIn: address(MONAD_SELL_TOKEN, registry), tokenOut: address('USDC', registry), amountIn, fee: pool.fee!, sqrtPriceLimitX96: 0n }] }))
+    const quote = decodeFunctionResult({ abi: quoteExactInputSingleAbi, functionName: 'quoteExactInputSingle', data: quoted })[0]
+    const observed = await call(fetcher, url, pool.address as Address, encodeFunctionData({ abi: poolObserveAbi, functionName: 'observe', args: [[MONAD_SELL_TWAP_WINDOW_SECONDS, 0]] }))
+    const twapTick = twapTickOf(decodeFunctionResult({ abi: poolObserveAbi, functionName: 'observe', data: observed })[0], MONAD_SELL_TWAP_WINDOW_SECONDS)
+    if (twapTick === null) throw new Error('no TWAP')
+    return { wmon, quote, twapTick }
+  })
 }

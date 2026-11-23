@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono'
-import type { AccountContext, Address, MigrateV4Input, RemoteSpec, ReturnHomeInput, StopInput } from '@mamoru/domain'
+import type { AccountContext, Address, MigrateV4Input, MonadSellInput, RemoteSpec, ReturnHomeInput, StopInput } from '@mamoru/domain'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
-import { buildReturnHome } from '@mamoru/account/return-home'
+import { buildMonadSell, buildReturnHome, monadSellPrice } from '@mamoru/account/return-home'
 import { buildStop, parseRefundPolicy, quoteFloorMismatch, refundMismatch, stopQuotes, stopSummaryMismatch, uncoveredSessions } from '@mamoru/account/stop'
 import { registryFor, type Registry } from '@mamoru/registry'
 import type { AppEnv } from '../context.ts'
@@ -10,7 +10,7 @@ import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
 import { ownersOf, type AccountRow } from './store.ts'
 import { readStopChain } from './stop-reads.ts'
-import { readReturnHomeChain, sessionSetMismatch } from './return-home-reads.ts'
+import { readMonadSellChain, readReturnHomeChain, sessionSetMismatch } from './return-home-reads.ts'
 import { BASE, ownedSleeve } from '../sleeves.ts'
 import { defaultRemoteRegistry, remoteOf, upsertRemoteSleeve, verifyRemote, type RemoteRegistry } from '../remote.ts'
 import { chainFundingResponse, fundingRpcUrls, type ChainFunding } from './chain-funding.ts'
@@ -144,6 +144,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
    */
   const checkBuilt = async (c: Context<AppEnv>, row: AccountRow, path: string, text: string, registryOf: (chainId: number) => Registry = registryFor): Promise<Response | null> => {
     if (path.endsWith('/return-home/prepare')) return checkReturnHome(c, row, text, registryOf)
+    if (path.endsWith('/monad-sell/prepare')) return checkMonadSell(c, row, text, registryOf)
     if (path.endsWith('/stop/prepare')) return checkStop(c, row, text, registryOf)
     const sibling = path.endsWith('/ethereum-sibling/prepare')
     const migrate = path.endsWith('/migrate-v4/prepare')
@@ -235,6 +236,45 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     if (!/^[0-9]+$/.test(input.amountUsdc) || BigInt(input.amountUsdc) !== read.usdc) return refusedBuild(c, row, 'amount is not the Safe\'s USDC balance')
     const sessions = sessionSetMismatch(input.removeIds, read.enabled)
     return sessions ? refusedBuild(c, row, sessions) : null
+  }
+  /**
+   * otto/mamoru#428 (spec 014 RH-07, threats S8 and S8a): the owner sale before a return home (step A0) is passed on only
+   * when the Worker, with the same builder (buildMonadSell), gets the same Safe tx from the operator's `monadSell` input on
+   * this row's own Safe on its own (remote) chain. The builder fixes the router, the tokens, the pool fee and the recipient
+   * (the Safe itself), so any other trade or destination is another hash. Read from the Worker's own RPC providers of that
+   * chain: the amount sold is the Safe's whole WMON balance, the minimum out is within 30 bps of QuoterV2's answer for it,
+   * and that answer is within 300 bps of the WMON's value at the pool's TWAP (monadSellPrice). The owner path is not under
+   * the action policy: this is the only price guard besides the amount the owner reads. Anything else: 502 BUILD_MISMATCH,
+   * nothing signed. Those reads unavailable: 503 RETURN_HOME_CHECK_UNAVAILABLE, retryable.
+   */
+  const checkMonadSell = async (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Promise<Response | null> => {
+    let body: { safe?: unknown; chainId?: unknown; safeTxHash?: unknown; monadSell?: MonadSellInput } | null
+    try {
+      body = JSON.parse(text)
+    } catch {
+      return refusedBuild(c, row, 'not JSON')
+    }
+    const input = body && typeof body === 'object' ? body.monadSell : undefined
+    if (!body || !input || typeof input !== 'object') return refusedBuild(c, row, 'no input')
+    if (row.chain_id === BASE || input.chainId !== row.chain_id || body.chainId !== row.chain_id) return refusedBuild(c, row, 'chain')
+    const me = row.address.toLowerCase()
+    if (typeof input.safe !== 'string' || input.safe.toLowerCase() !== me || typeof body.safe !== 'string' || body.safe.toLowerCase() !== me) return refusedBuild(c, row, 'safe')
+    let hash: string
+    try {
+      hash = buildMonadSell(input, registryOf(row.chain_id)).safeTxHash
+    } catch (e) {
+      return refusedBuild(c, row, `build: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    if (typeof body.safeTxHash !== 'string' || hash.toLowerCase() !== body.safeTxHash.toLowerCase()) return refusedBuild(c, row, 'hash')
+    const amountIn = BigInt(input.amountIn)
+    const read = chain ? await readMonadSellChain(chain.fetch, fundingRpcUrls(c.env, row.chain_id), registryOf(row.chain_id), row.address as Address, amountIn) : null
+    if (!read) {
+      console.error(`monad-sell prepare for ${row.account_key} not checked: no chain read`)
+      return apiError(c, 503, 'Mamoru could not check this sale against the chain just now. Nothing was signed. Try again in a minute.', 'RETURN_HOME_CHECK_UNAVAILABLE')
+    }
+    if (read.wmon !== amountIn) return refusedBuild(c, row, 'amount is not the Safe\'s WMON balance')
+    const price = monadSellPrice({ amountIn, amountOutMinimum: BigInt(input.amountOutMinimum), quote: read.quote, twapTick: read.twapTick }, registryOf(row.chain_id))
+    return price ? refusedBuild(c, row, `sale price: ${price}`) : null
   }
   /**
    * otto/mamoru#430: a Stop is passed on only when the Worker, with the same builder (buildStop, every target from the
@@ -401,7 +441,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
   routes.get('/:accountKey/withdraw-assets', forward)
   routes.get('/:accountKey/bridge-out', forward)
   routes.get('/:accountKey/ethereum-sibling', forward)
-  for (const action of ['activate', 'transfer', 'stop', 'renew', 'bridge-out', 'eth-convert', 'migrate-v4', 'ethereum-sibling', 'return-home']) {
+  for (const action of ['activate', 'transfer', 'stop', 'renew', 'bridge-out', 'eth-convert', 'migrate-v4', 'ethereum-sibling', 'return-home', 'monad-sell']) {
     routes.post(`/:accountKey/${action}/prepare`, forward)
     routes.post(`/:accountKey/${action}`, forward)
   }

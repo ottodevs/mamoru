@@ -4,7 +4,7 @@
 import { describe, expect, test } from 'bun:test'
 import { encodeAbiParameters, encodeEventTopics, pad, type Hex, type PublicClient } from 'viem'
 import type { AccountContext, Address, RemoteSpec } from '@mamoru/domain'
-import { buildReturnHome, TOKEN_MESSENGER_V2 } from '@mamoru/account/return-home'
+import { buildMonadSell, buildReturnHome, MONAD_SELL_TWAP_WINDOW_SECONDS, monadSellMinOut, monadSellTwapValue, TOKEN_MESSENGER_V2, type MonadSellInput } from '@mamoru/account/return-home'
 import { address, monadRegistry, tokenMessengerV2Abi } from '@mamoru/registry'
 import { liveWmonUsdcMonadV6 } from '@mamoru/policy'
 import { monadV6Deployed, remoteAccountKey, remoteInput, remoteSafe } from '@mamoru/account/remote'
@@ -250,5 +250,136 @@ describe('spec 014 RH-02: a signed return home is judged against the chain befor
     const m = monad({}, [])
     expect(await stale(m, GRANTS, false)).toBeNull()
     expect(await stale(m, [GRANTS[0]!], false)).toBe('STOP_STALE')
+  })
+})
+
+// SCN-RH-02 (spec 014 RH-07): step A0, the owner sale on a Safe whose engine cannot sell.
+describe('monad-sell (step A0) on the Monad operator', () => {
+  const W = 120n * 10n ** 18n
+  // WMON (token0, 18 decimals) at about 0.03 USDC (token1, 6 decimals).
+  const TICK = Math.floor(Math.log(0.03e6 / 1e18) / Math.log(1.0001))
+  const WORTH = monadSellTwapValue(W, TICK, registry)
+  /**
+   * A Safe with `wmon` and 300 USDC. `held`: the action policy's deferred depth check is still owed and the pool is under the
+   * session's daily budget (#410), so the engine's own sale is refused. `quote`: QuoterV2's answer for the whole sale.
+   */
+  function sellWorld(o: { wmon?: bigint; held?: boolean; quote?: bigint; positions?: Read['positions']; poolDown?: boolean } = {}) {
+    const m = monad({ usdc: 300_000_000n, tokens: { USDC: 300_000_000n, WMON: o.wmon ?? W }, positions: o.positions ?? [] })
+    const knobs = { quote: o.quote ?? WORTH, held: o.held ?? true, poolDown: o.poolDown ?? false }
+    const p = m.op as unknown as { client: Record<string, unknown>; v3: Record<string, unknown> }
+    p.client.readContract = async ({ functionName }: { functionName: string }) => {
+      if (knobs.poolDown && functionName !== 'nonce') throw new Error('rpc down')
+      switch (functionName) {
+        case 'nonce': return 5n
+        case 'configOf': return { twapWindow: 1800, twapShortWindow: 300, bandTicks: 500, generation: 1n, budgetIn1: true, budgetWindow: 86_400, anchorTick: 0, anchorBand: 0, perWindow: 10n ** 30n, total: 10n ** 31n, initHash: `0x${'00'.repeat(32)}` }
+        case 'spendOf': return { generation: 1n, updatedAt: knobs.held ? 0n : 1_790_000_000n, in1: true, debt: 0n, total: 0n }
+        case 'slot0': return [2n ** 96n, 0, 0, 0, 0, 0, true]
+        case 'liquidity': return 10n ** 12n
+        case 'tickSpacing': return 60
+        case 'ticks': return [0n, 0n, 0n, 0n, 0n, 0n, 0, false]
+        case 'observe': return [[0n, BigInt(TICK) * BigInt(MONAD_SELL_TWAP_WINDOW_SECONDS)], [0n, 0n]]
+        default: return 0n
+      }
+    }
+    p.v3 = { ...p.v3, quoteExactInputSingle: async () => knobs.quote }
+    return { ...m, knobs }
+  }
+
+  test('a depth-held Safe with 0 positions, 120 WMON and 300 USDC: one transfer-kind owner tx of the builder, nothing revoked, not a Stop', async () => {
+    const m = sellWorld()
+    await m.op.prepareMonadSell(rctx)
+    const h = m.held[0]!
+    expect(h.kind).toBe('transfer')
+    const input = (h.extra.monadSell as { input: MonadSellInput; safeTxHash: string }).input
+    expect(input).toEqual({ chainId: 143, safe: SAFE, safeNonce: '5', amountIn: W.toString(), amountOutMinimum: monadSellMinOut(WORTH).toString() })
+    const built = buildMonadSell(input, registry)
+    expect(h.calls.map((c) => c.data)).toEqual(built.calls.map((c) => c.data))
+    expect((h.extra.monadSell as { safeTxHash: string }).safeTxHash).toBe(built.safeTxHash)
+    expect(h.extra.revokes).toBeUndefined()
+    expect(h.extra.returnHome).toBeUndefined()
+    expect(h.calls.some((c) => c.to.toLowerCase() === address('SmartSession', registry).toLowerCase() || c.to.toLowerCase() === TOKEN_MESSENGER_V2.toLowerCase())).toBe(false)
+    expect(h.summary).toEqual([`Sell 120 WMON in your Safe on Monad for at least ${(Math.floor(Number(monadSellMinOut(WORTH)) / 1e4) / 100).toFixed(2)} USDC, so all of it can come home`])
+    // The account is as it was: active, its grants untouched.
+    expect(m.state.accounts[rctx.accountKey]).toMatchObject({ active: true })
+    expect(m.state.accounts[rctx.accountKey]!.grants).toHaveLength(2)
+  })
+
+  test('while WMON is held, step A is refused (MONAD_UNWIND_PENDING): the sale comes first', async () => {
+    expect(await code(sellWorld().op.prepareReturnHome(rctx, { home: HOME }))).toBe('MONAD_UNWIND_PENDING')
+  })
+
+  test('refused: an open position, WMON at dust, a Safe the engine can sell for itself (not depth-held), off Monad', async () => {
+    expect(await code(sellWorld({ positions: [{ tokenId: 1n, liquidity: 5n, tokensOwed0: 0n, tokensOwed1: 0n }] }).op.prepareMonadSell(rctx))).toBe('MONAD_UNWIND_PENDING')
+    expect(await code(sellWorld({ wmon: 10n ** 16n }).op.prepareMonadSell(rctx))).toBe('NOTHING_TO_SELL')
+    expect(await code(sellWorld({ held: false }).op.prepareMonadSell(rctx))).toBe('MONAD_UNWIND_PENDING')
+    expect(await code(sellWorld().op.prepareMonadSell({ ...rctx, remote: { ...SPEC, policyId: 'one-auth-v4-remote' } }))).toBe('NOT_A_REMOTE')
+  })
+
+  test('the pool cannot be read: nothing prepared, nothing recorded (REMOTE_UNAVAILABLE)', async () => {
+    const m = sellWorld({ poolDown: true })
+    expect(await code(m.op.prepareMonadSell(rctx))).toBe('REMOTE_UNAVAILABLE')
+    expect(m.held).toHaveLength(0)
+    expect(m.state.accounts[rctx.accountKey]!.monadSellRefused).toBeUndefined()
+  })
+
+  test('a quote more than 300 bps under the TWAP value: MONAD_DEPTH_TOO_LOW, kept on the account with what was read', async () => {
+    const quote = (WORTH * 9_700n) / 10_000n - 1n
+    const m = sellWorld({ quote })
+    expect(await code(m.op.prepareMonadSell(rctx))).toBe('MONAD_DEPTH_TOO_LOW')
+    expect(m.held).toHaveLength(0)
+    expect(m.state.accounts[rctx.accountKey]!.monadSellRefused).toMatchObject({ code: 'MONAD_DEPTH_TOO_LOW', wmon: W.toString(), quote: quote.toString(), twapValue: WORTH.toString(), block: '500' })
+  })
+
+  test("only the operator's own refusal lets the USDC go home alone, and the summary says the WMON stays", async () => {
+    const m = sellWorld({ quote: 1n })
+    expect(await code(m.op.prepareReturnHome(rctx, { home: HOME }))).toBe('MONAD_UNWIND_PENDING')
+    expect(await code(m.op.prepareMonadSell(rctx))).toBe('MONAD_DEPTH_TOO_LOW')
+    await m.op.prepareReturnHome(rctx, { home: HOME })
+    const h = m.held[0]!
+    expect(h.kind).toBe('stop')
+    expect((h.extra.returnHome as { input: { amountUsdc: string; removeIds: Hex[] } }).input).toMatchObject({ amountUsdc: '300000000', removeIds: GRANTS })
+    expect(h.summary).toContain('Your 120 WMON stays in this Safe: it cannot be sold at a fair price right now. You can withdraw it')
+  })
+
+  test('the refusal stands only for that WMON balance, for an hour, and until a sale prepare passes', async () => {
+    const refused = (m: ReturnType<typeof sellWorld>) => m.state.accounts[rctx.accountKey]!
+    // Another balance.
+    const a = sellWorld({ quote: 1n })
+    await code(a.op.prepareMonadSell(rctx))
+    refused(a).monadSellRefused!.wmon = (W - 1n).toString()
+    expect(await code(a.op.prepareReturnHome(rctx, { home: HOME }))).toBe('MONAD_UNWIND_PENDING')
+    // Older than an hour.
+    const b = sellWorld({ quote: 1n })
+    await code(b.op.prepareMonadSell(rctx))
+    refused(b).monadSellRefused!.at = new Date(Date.now() - 61 * 60_000).toISOString()
+    expect(await code(b.op.prepareReturnHome(rctx, { home: HOME }))).toBe('MONAD_UNWIND_PENDING')
+    // The pool recovered: the next sale prepare passes and clears it, so step A waits for the sale again.
+    const c = sellWorld({ quote: 1n })
+    await code(c.op.prepareMonadSell(rctx))
+    c.knobs.quote = WORTH
+    await c.op.prepareMonadSell(rctx)
+    expect(refused(c).monadSellRefused).toBeUndefined()
+    expect(await code(c.op.prepareReturnHome(rctx, { home: HOME }))).toBe('MONAD_UNWIND_PENDING')
+  })
+
+  test('with an open position the refusal unlocks nothing', async () => {
+    const m = sellWorld({ quote: 1n })
+    await code(m.op.prepareMonadSell(rctx))
+    ;(m.op as unknown as { readOf: () => Promise<unknown> }).readOf = async () => ({ deployed: true, usdc: 300_000_000n, tokens: { USDC: 300_000_000n, WMON: W }, positions: [{ tokenId: 1n, liquidity: 5n, tokensOwed0: 0n, tokensOwed1: 0n }], block: 500n })
+    expect(await code(m.op.prepareReturnHome(rctx, { home: HOME }))).toBe('MONAD_UNWIND_PENDING')
+  })
+
+  test('after the sale confirms, step A burns the exact new balance: nothing is left behind', async () => {
+    const m = sellWorld()
+    const after = 300_000_000n + monadSellMinOut(WORTH) + 1_234n
+    ;(m.op as unknown as { readOf: () => Promise<unknown> }).readOf = async () => ({ deployed: true, usdc: after, tokens: { USDC: after, WMON: 0n }, positions: [], block: 501n })
+    await m.op.prepareReturnHome(rctx, { home: HOME })
+    expect((m.held[0]!.extra.returnHome as { input: { amountUsdc: string } }).input.amountUsdc).toBe(after.toString())
+    expect(m.held[0]!.summary.join('\n')).not.toContain('WMON stays')
+  })
+
+  test('only a sale prepare is sent through the monad-sell submit', async () => {
+    const m = sellWorld()
+    expect(await code(m.op.submitMonadSell(rctx, { prepareId: 'nope' } as never))).toBe('PREPARE_UNKNOWN')
   })
 })
