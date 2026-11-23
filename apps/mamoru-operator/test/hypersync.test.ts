@@ -37,7 +37,7 @@ const hsLog = (l: Chain) => {
 
 type HsAnswer = (body: any) => Response | Promise<Response>
 /** HyperSync over `logs`, `page` blocks per answer, archive up to `archive`; `override` answers a request instead. */
-function hyperWorld(logs: Chain[], o: { page?: number; archive?: number; override?: HsAnswer } = {}) {
+function hyperWorld(logs: Chain[], o: { page?: number; archive?: number; override?: HsAnswer; forkHash?: boolean } = {}) {
   const bodies: any[] = []
   const headers: Record<string, string>[] = []
   const fetch = async (url: string, init: RequestInit) => {
@@ -46,6 +46,7 @@ function hyperWorld(logs: Chain[], o: { page?: number; archive?: number; overrid
     bodies.push(body)
     headers.push(init.headers as Record<string, string>)
     if (o.override) return o.override(body)
+    if (body.include_all_blocks) return Response.json({ data: [{ blocks: [{ number: body.from_block, hash: o.forkHash ? `0x${'f'.repeat(64)}` : blockHash(body.from_block) }] }], archive_height: o.archive ?? 1_000_000, next_block: body.to_block })
     const archive = o.archive ?? 1_000_000
     const end = Math.min(body.to_block, body.from_block + (o.page ?? 1_000_000), archive + 1)
     const rows = logs.filter((l) => l.block >= body.from_block && l.block < end).map(hsLog)
@@ -84,6 +85,24 @@ describe('HyperSync client', () => {
     expect(r.covered).toBe(80n)
     expect(r.logs).toEqual([rpcLog({ block: 10, index: 0 })])
     expect(w.bodies.length).toBe(1)
+  })
+
+  test('next_block past the archive height: covered stops at the archive', async () => {
+    const w = hyperWorld([], { override: () => Response.json({ data: [{ logs: [hsLog({ block: 1_500, index: 0 })] }], archive_height: 2_000, next_block: 5_000 }) })
+    const r = await hypersyncLogs(cfg(w.fetch), { address: ADDR }, 1_000n, 4_999n)
+    expect(r.covered).toBe(2_000n)
+  })
+
+  test('malformed logs, a non-object chunk or a removed log is no answer', async () => {
+    const answers = [
+      { data: [{ logs: 'corrupt' }], archive_height: 9_000, next_block: 5_000 },
+      { data: ['corrupt'], archive_height: 9_000, next_block: 5_000 },
+      { data: [{ logs: [{ ...hsLog({ block: 1_100, index: 0 }), removed: true }] }], archive_height: 9_000, next_block: 5_000 },
+    ]
+    for (const a of answers) {
+      const w = hyperWorld([], { override: () => Response.json(a) })
+      await expect(hypersyncLogs(cfg(w.fetch), { address: ADDR }, 1_000n, 4_999n)).rejects.toBeInstanceOf(HyperSyncError)
+    }
   })
 
   test('more pages than allowed is no answer', async () => {
@@ -141,6 +160,8 @@ describe('HyperSync client', () => {
     expect(sameLogs(a, [...a].reverse())).toBe(true)
     expect(sameLogs(a, [a[0]!, rpcLog({ block: 2, index: 0, data: '0xff' })])).toBe(false)
     expect(sameLogs(a, [a[0]!])).toBe(false)
+    expect(sameLogs(a, [a[0]!, { ...a[1]!, transactionIndex: '0x5' }])).toBe(false)
+    expect(sameLogs(a, [a[0]!, { ...a[1]!, removed: true }])).toBe(false)
     expect(toRpcLog(hsLog({ block: 7, index: 1 }))).toEqual(rpcLog({ block: 7, index: 1 }))
   })
 })
@@ -148,7 +169,7 @@ describe('HyperSync client', () => {
 // ---- Through the RPC proxy ---------------------------------------------------------------------
 
 /** Two RPC providers (upstream and a witness) over `logs`; HyperSync over `hsLogs` (default the same). */
-function proxyWorld(logs: Chain[], o: { hsLogs?: Chain[]; archive?: number; override?: HsAnswer } = {}) {
+function proxyWorld(logs: Chain[], o: { hsLogs?: Chain[]; archive?: number; override?: HsAnswer; forkHash?: boolean } = {}) {
   const hs = hyperWorld(o.hsLogs ?? logs, o)
   const rpcCalls: { url: string; from: number; to: number }[] = []
   const fetch = async (url: string, init: RequestInit) => {
@@ -234,6 +255,33 @@ describe('eth_getLogs through the proxy with HyperSync', () => {
     expect(r.result).toEqual(expected(1_000, 4_999))
     expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 4_990, to: 4_999 }, { url: UPSTREAM, from: 1_000, to: 4_989 }])
     expect(metrics.snapshot().logRanges[HYPERSYNC_LABEL]?.hash_mismatch).toBe(1)
+  })
+
+  test('no logs in the compared blocks: HyperSync\'s hash of its last block matches the providers\' and the range is accepted', async () => {
+    const logs = [{ block: 1_000, index: 0 }, { block: 3_000, index: 1 }]
+    const w = proxyWorld(logs)
+    const r = await scan(w, 1_000, 4_999)
+    expect(r.result).toEqual(logs.map(rpcLog))
+    expect(w.hs.bodies.length).toBe(2)
+    expect(w.hs.bodies[1].from_block).toBe(4_999)
+    expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 4_990, to: 4_999 }])
+  })
+
+  test('no logs in the compared blocks and HyperSync on another fork: its orphan logs are dropped, the providers read the range', async () => {
+    const canonical = [{ block: 1_000, index: 0 }]
+    const w = proxyWorld(canonical, { hsLogs: [...canonical, { block: 4_988, index: 0 }], forkHash: true })
+    const metrics = newMetrics()
+    const r = await scan(w, 1_000, 4_999, { metrics })
+    expect(r.result).toEqual(canonical.map(rpcLog))
+    expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 4_990, to: 4_999 }, { url: UPSTREAM, from: 1_000, to: 4_989 }])
+    expect(metrics.snapshot().logRanges[HYPERSYNC_LABEL]?.hash_mismatch).toBe(1)
+  })
+
+  test('malformed HyperSync logs: the providers read the whole range, a deposit is not lost', async () => {
+    const w = proxyWorld(LOGS, { override: () => Response.json({ data: [{ logs: 'corrupt' }], archive_height: 9_000, next_block: 5_000 }) })
+    const r = await scan(w, 1_000, 4_999)
+    expect(r.result).toEqual(expected(1_000, 4_999))
+    expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 1_000, to: 4_999 }])
   })
 
   test('HyperSync behind the range: the providers read what its archive does not have, from the spot blocks on', async () => {

@@ -160,6 +160,8 @@ const hexField = (v: unknown): string => {
 /** One HyperSync log in the shape eth_getLogs gives it. */
 export function toRpcLog(l: any): RpcLog {
   if (!l || typeof l !== 'object') throw new HyperSyncError('answer', 'HyperSync answered a log that is not an object')
+  // A log of a block no longer on the chain is no answer for a range: the providers read it instead.
+  if (l.removed !== undefined && l.removed !== null && l.removed !== false) throw new HyperSyncError('answer', 'HyperSync answered a removed log')
   const topics: string[] = []
   for (const k of ['topic0', 'topic1', 'topic2', 'topic3']) {
     if (l[k] === null || l[k] === undefined) break
@@ -217,6 +219,7 @@ export async function hypersyncLogs(
   const logs: RpcLog[] = []
   let next = from
   let page = 0
+  let lastArchive: bigint | null = null
   while (next < end) {
     if (page >= maxPages) throw new HyperSyncError('answer', `HyperSync needs more than ${maxPages} pages for this range`)
     if (!cfg.limiter.take(now())) throw new HyperSyncError('rate', 'HyperSync budget of this minute is spent')
@@ -255,12 +258,17 @@ export async function hypersyncLogs(
     } catch {
       throw new HyperSyncError('answer', 'HyperSync answered no JSON')
     }
-    const chunks = Array.isArray(j?.data) ? j.data : j?.data && typeof j.data === 'object' ? [j.data] : null
-    if (!chunks) throw new HyperSyncError('answer', 'HyperSync answered no data')
-    for (const c of chunks) for (const l of Array.isArray(c?.logs) ? c.logs : []) logs.push(toRpcLog(l))
+    for (const c of chunksOf(j)) {
+      // A chunk without logs leaves the table out; one with something else than a list there is no answer.
+      if (c.logs === undefined || c.logs === null) continue
+      if (!Array.isArray(c.logs)) throw new HyperSyncError('answer', 'HyperSync answered logs that are not a list')
+      for (const l of c.logs) logs.push(toRpcLog(l))
+    }
     const nb = j?.next_block
     if (typeof nb !== 'number' || !Number.isSafeInteger(nb)) throw new HyperSyncError('answer', 'HyperSync answered no next block')
     const archive = typeof j?.archive_height === 'number' && Number.isSafeInteger(j.archive_height) ? BigInt(j.archive_height) : null
+    // Nothing past the archive is read, whatever next_block says: those blocks go to the providers.
+    if (archive !== null && (lastArchive === null || archive < lastArchive)) lastArchive = archive
     if (BigInt(nb) <= next) {
       // No progress is only an answer when the archive ends before the block asked for: what was read is all there is.
       if (archive !== null && archive < next) break
@@ -270,7 +278,8 @@ export async function hypersyncLogs(
     // The archive ends before the range: the rest is not there yet (the caller reads it from the RPC providers).
     if (archive !== null && next > archive) break
   }
-  const covered = next - 1n < to ? next - 1n : to
+  let covered = next - 1n < to ? next - 1n : to
+  if (lastArchive !== null && lastArchive < covered) covered = lastArchive
   // A log past what the archive covers (or past the range) is not counted: the caller reads those blocks elsewhere.
   const kept = logs.filter((l) => {
     const b = BigInt(l.blockNumber)
@@ -283,6 +292,57 @@ export async function hypersyncLogs(
   return { logs: kept, covered, requests: page }
 }
 
+/** The chunks of a HyperSync answer: a list of objects (or one object), anything else is no answer. */
+function chunksOf(j: any): any[] {
+  const chunks = Array.isArray(j?.data) ? j.data : j?.data && typeof j.data === 'object' ? [j.data] : null
+  if (!chunks || !chunks.every((c: unknown) => !!c && typeof c === 'object' && !Array.isArray(c))) throw new HyperSyncError('answer', 'HyperSync answered no data')
+  return chunks
+}
+
+/**
+ * The hash HyperSync has for block `n`, or null when its archive does not have that block. One request of the
+ * minute's budget. The caller compares it with the providers' hash of the same block: an indexer on another fork, or
+ * behind a reorg, has another one, and every block under a matching one is the same chain.
+ */
+export async function hypersyncBlockHash(cfg: HyperSyncConfig, n: bigint, o: { deadline?: number; onRequest?: () => void; now?: () => number } = {}): Promise<string | null> {
+  const send = cfg.fetch ?? fetch
+  const now = o.now ?? Date.now
+  if (!cfg.limiter.take(now())) throw new HyperSyncError('rate', 'HyperSync budget of this minute is spent')
+  const left = o.deadline === undefined ? Number.POSITIVE_INFINITY : o.deadline - now()
+  const timeout = Math.min(cfg.requestMs ?? HYPERSYNC_REQUEST_MS, left)
+  if (!(timeout > 0)) throw new HyperSyncError('timeout', 'no time left for HyperSync in this request')
+  o.onRequest?.()
+  let res: Response
+  try {
+    res = await send(`${cfg.url}/query`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.token}` },
+      body: JSON.stringify({ from_block: Number(n), to_block: Number(n + 1n), include_all_blocks: true, field_selection: { block: ['number', 'hash'] } }),
+      signal: AbortSignal.timeout(timeout),
+    })
+  } catch (e) {
+    const name = (e as Error)?.name
+    throw new HyperSyncError(name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'http', 'HyperSync did not answer the block')
+  }
+  if (res.status === 429) {
+    cfg.limiter.pause(now() + (waitOf(res) ?? RATE_PAUSE_MS))
+    throw new HyperSyncError('rate', 'HyperSync refused for rate', 429)
+  }
+  if (!res.ok) throw new HyperSyncError('http', `HyperSync answered HTTP ${res.status}`, res.status)
+  let j: any
+  try {
+    j = await res.json()
+  } catch {
+    throw new HyperSyncError('answer', 'HyperSync answered no JSON')
+  }
+  for (const c of chunksOf(j)) {
+    if (c.blocks === undefined || c.blocks === null) continue
+    if (!Array.isArray(c.blocks)) throw new HyperSyncError('answer', 'HyperSync answered blocks that are not a list')
+    for (const b of c.blocks) if (b && BigInt(quantity(b.number)) === n) return hexField(b.hash)
+  }
+  return null
+}
+
 /** The identity of a log for comparing two sources: every field eth_getLogs gives, numbers as numbers, hex in lower case. */
 export function logKey(l: any): string {
   const n = (v: unknown) => {
@@ -293,7 +353,7 @@ export function logKey(l: any): string {
     }
   }
   const s = (v: unknown) => String(v ?? '').toLowerCase()
-  return [n(l?.blockNumber), n(l?.logIndex), s(l?.blockHash), s(l?.transactionHash), s(l?.address), (Array.isArray(l?.topics) ? l.topics : []).map(s).join(','), s(l?.data)].join('|')
+  return [n(l?.blockNumber), n(l?.logIndex), s(l?.blockHash), s(l?.transactionHash), n(l?.transactionIndex), String(l?.removed === true), s(l?.address), (Array.isArray(l?.topics) ? l.topics : []).map(s).join(','), s(l?.data)].join('|')
 }
 
 /** Whether two lists hold the same logs (order aside). */

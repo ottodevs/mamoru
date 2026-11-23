@@ -4,7 +4,7 @@ import { LATEST_QUIET_MS, ReadCache, blockParam as pinnedBlockParam, isRead, pin
 
 const TRACE_TAGS = new Set(['latest', 'pending', 'safe', 'finalized', 'earliest'])
 import { classifyRpcError, componentOf, redactSecrets, safeMetrics, type Component, type LogRangeOutcome, type RpcMetrics } from './metrics.ts'
-import { HyperSyncError, hypersyncFromEnv, hypersyncLogs, sameLogs, type HyperSyncConfig } from './hypersync.ts'
+import { HyperSyncError, hypersyncBlockHash, hypersyncFromEnv, hypersyncLogs, sameLogs, type HyperSyncConfig } from './hypersync.ts'
 import { domainOfLabel, nextReset, QuotaBook, quotaExhausted, resetDaysFromEnv, resetFromAnswer } from './quota.ts'
 
 type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
@@ -917,8 +917,32 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const tailFrom = spotFrom > from ? spotFrom : from
     const tail = tailFrom <= to ? await providerLogs(filter, tailFrom, to, seen, deadline) : []
     const inOverlap = (l: any) => BigInt(l.blockNumber) >= tailFrom && BigInt(l.blockNumber) <= read.covered
-    if (!sameLogs(read.logs.filter(inOverlap), tail.filter(inOverlap))) {
-      console.warn(`[rpc] eth_getLogs hypersync: logs of blocks ${tailFrom} to ${read.covered} differ from the RPC providers'; this range is read from them`)
+    const mine = read.logs.filter(inOverlap)
+    let same = sameLogs(mine, tail.filter(inOverlap))
+    // Logs compared carry their block hash, so a match proves HyperSync's chain there. With none to compare, the hash
+    // of the last block it covered is compared with a trusted provider's: a match is the same chain under it too.
+    if (same && !mine.length) {
+      try {
+        const [theirs, ours] = await Promise.all([
+          hypersyncBlockHash(hyper!, read.covered, {
+            deadline,
+            onRequest: () => {
+              if (metrics) safeMetrics(() => metrics.recordRequest(HYPERSYNC_LABEL, 'eth_getLogs', true, Date.now(), component))
+            },
+          }),
+          one('eth_getBlockByNumber', [hex(read.covered), false]).then((b: any) => (typeof b?.hash === 'string' ? b.hash.toLowerCase() : null)),
+        ])
+        same = theirs !== null && ours !== null && theirs === ours
+      } catch (e) {
+        // HyperSync's view could not be proven (its budget, a refusal): the providers read the range.
+        if (process.env.MAMORU_RPC_LOG) console.log(`[rpc] eth_getLogs hypersync: block ${read.covered} not compared (${e instanceof HyperSyncError ? e.message : 'failed'}); read from the RPC providers`)
+        if (metrics) safeMetrics(() => (metrics.recordLogRange(HYPERSYNC_LABEL, 'provider_error'), metrics.recordFallback(HYPERSYNC_LABEL, 'eth_getLogs')))
+        const head = tailFrom > from ? await providerLogs(filter, from, tailFrom - 1n, seen, deadline) : []
+        return [...head, ...tail]
+      }
+    }
+    if (!same) {
+      console.warn(`[rpc] eth_getLogs hypersync: logs or the block hash of blocks ${tailFrom} to ${read.covered} differ from the RPC providers'; this range is read from them`)
       if (metrics) safeMetrics(() => (metrics.recordLogRange(HYPERSYNC_LABEL, 'hash_mismatch'), metrics.recordFallback(HYPERSYNC_LABEL, 'eth_getLogs')))
       const head = tailFrom > from ? await providerLogs(filter, from, tailFrom - 1n, seen, deadline) : []
       return [...head, ...tail]
