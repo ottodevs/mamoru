@@ -54,12 +54,13 @@ function world(prepare: (home: Hex) => unknown, chainState: { usdc: bigint | nul
       const cookie = sessionCookie(res)
       const base = (await res.json()) as { accountKey: string; address: Hex }
       home = base.address
-      const sleeveKey = crypto.randomUUID()
+      // otto/mamoru#458: the key a Monad row really has (`remoteAccountKey`), sent encoded as the SPA sends it.
+      const sleeveKey = `${base.accountKey}@143`
       h.db.raw
         .query(`INSERT INTO accounts (account_key, user_id, chain_id, address, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, preset, policy_version, created_at, env, is_test, remote_json)
           SELECT ?, user_id, 143, ?, owners_json, passkey_credential_id, passkey_x, passkey_y, salt_nonce, preset, policy_version, created_at, env, is_test, '{"chainId":143}' FROM accounts WHERE account_key = ?`)
         .run(sleeveKey, SLEEVE, base.accountKey)
-      const call = (path: string) => h.app.request(`${ORIGIN}/api/accounts/${sleeveKey}${path}`, { method: 'POST', body: JSON.stringify({ home }), headers: { cookie, origin: ORIGIN, 'content-type': 'application/json' } }, h.env)
+      const call = (path: string) => h.app.request(`${ORIGIN}/api/accounts/${encodeURIComponent(sleeveKey)}${path}`, { method: 'POST', body: JSON.stringify({ home }), headers: { cookie, origin: ORIGIN, 'content-type': 'application/json' } }, h.env)
       return { call, home: base.address }
     },
   }

@@ -7,7 +7,7 @@ import { registryFor, type Registry } from '@mamoru/registry'
 import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
 import { accountNotFound, apiError } from '../errors.ts'
-import { ACCOUNT_KEY } from '../onboarding/account.ts'
+import { SLEEVE_KEY } from '../onboarding/account.ts'
 import { ownersOf, type AccountRow } from './store.ts'
 import { readStopChain } from './stop-reads.ts'
 import { readMonadSellChain, readReturnHomeChain, sessionSetMismatch } from './return-home-reads.ts'
@@ -381,7 +381,7 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     const session = await c.var.auth.current(c)
     if (!session) return apiError(c, 401, 'Sign in first.', 'AUTH_REQUIRED')
     const accountKey = c.req.param('accountKey') ?? ''
-    if (!ACCOUNT_KEY.test(accountKey)) return accountNotFound(c)
+    if (!SLEEVE_KEY.test(accountKey)) return accountNotFound(c)
     // Review of PR #115 (P1 1): a chain-143 account is forwarded only while its chain is ready (beta host, flag,
     // OPERATOR_URL_143, a healthy operator of 143); otherwise it is the same 404 as a foreign key.
     const row = await ownedSleeve(c, session.userId, accountKey)
