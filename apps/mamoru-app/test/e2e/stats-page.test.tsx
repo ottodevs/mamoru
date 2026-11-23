@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { StatsView } from '@mamoru/domain'
 import { fixtureStats } from '../../src/web/fixtures/stats.ts'
-import { StatsBody } from '../../src/web/routes/stats.tsx'
+import { resolveSplit, StatsBody } from '../../src/web/routes/stats.tsx'
 import { render } from './render.ts'
 
 // Spec 013 amendment A1: the approved Stats page, in Ot's order, and nothing the API did not send.
@@ -35,5 +35,12 @@ describe('Stats page', () => {
     const { text } = render(<StatsBody v={v} />)
     expect(text).toContain('Base $3,973')
     expect(text).not.toContain('By asset')
+  })
+  test('a refresh that withholds the split on screen falls back to the other one, the bar stays', () => {
+    const { byToken, byChain } = fixtureStats.distributions
+    expect(resolveSplit('asset', byToken, byChain)).toBe('asset')
+    expect(resolveSplit('asset', undefined, byChain)).toBe('chain')
+    expect(resolveSplit('chain', byToken, byChain)).toBe('chain')
+    expect(resolveSplit('chain', byToken, [])).toBe('asset')
   })
 })

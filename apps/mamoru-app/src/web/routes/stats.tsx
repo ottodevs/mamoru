@@ -88,9 +88,17 @@ function Lab({ children, tip }: { children: ReactNode; tip: string }) {
 
 type Split = 'asset' | 'chain'
 
+/** The split to draw, on every render: a refresh can withhold the one picked (By asset has stricter completeness
+ * checks than By chain) without a remount, and then the bar shows the other instead of disappearing. */
+export function resolveSplit(picked: Split, byToken?: StatsSlice[], byChain?: StatsSlice[]): Split {
+  if (picked === 'asset') return byToken?.length ? 'asset' : 'chain'
+  return byChain?.length ? 'chain' : 'asset'
+}
+
 /** The hero bar (Brais, 23 Nov, #455): the split by asset by default, or by chain, in one horizontal bar. */
 function Alloc({ byToken, byChain }: { byToken?: StatsSlice[]; byChain?: StatsSlice[] }) {
-  const [split, setSplit] = useState<Split>(byToken?.length ? 'asset' : 'chain')
+  const [picked, setSplit] = useState<Split>('asset')
+  const split = resolveSplit(picked, byToken, byChain)
   const options: { v: Split; label: string }[] = []
   if (byToken?.length) options.push({ v: 'asset', label: statsCopy.byAsset })
   if (byChain?.length) options.push({ v: 'chain', label: statsCopy.byChain })
