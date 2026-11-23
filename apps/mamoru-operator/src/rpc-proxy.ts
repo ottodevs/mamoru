@@ -4,6 +4,7 @@ import { LATEST_QUIET_MS, ReadCache, blockParam as pinnedBlockParam, isRead, pin
 
 const TRACE_TAGS = new Set(['latest', 'pending', 'safe', 'finalized', 'earliest'])
 import { classifyRpcError, componentOf, redactSecrets, safeMetrics, type Component, type LogRangeOutcome, type RpcMetrics } from './metrics.ts'
+import { HyperSyncError, hypersyncFromEnv, hypersyncLogs, sameLogs, type HyperSyncConfig } from './hypersync.ts'
 import { domainOfLabel, nextReset, QuotaBook, quotaExhausted, resetDaysFromEnv, resetFromAnswer } from './quota.ts'
 
 type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
@@ -287,6 +288,16 @@ export function labelProviders(providers: string[]): Map<string, string> {
   return labels
 }
 
+/** otto/mamoru#459: HyperSync's label in /metrics (rpc counters, log ranges), beside the providers' host labels. */
+export const HYPERSYNC_LABEL = 'hypersync'
+
+/** A whole number from `name`, or `fallback` when unset or not one. */
+function wholeFromEnv(name: string, fallback: number, env: Env = process.env): number {
+  const v = env[name]
+  const n = Number(v)
+  return v !== undefined && v.trim() !== '' && Number.isInteger(n) && n >= 0 ? n : fallback
+}
+
 export type RpcProxyOptions = {
   /** otto/mamoru#444: tests only; the outage page window (default ALL_DOWN_ALERT_MS). */
   allDownAlertMs?: number
@@ -346,6 +357,18 @@ export type RpcProxyOptions = {
   readCache?: boolean
   /** otto/mamoru#419: with readCache, how long one tip read serves every head the proxy needs; default HEAD_TTL_MS. */
   headTtlMs?: number
+  /**
+   * otto/mamoru#459: HyperSync for eth_getLogs ranges, the providers above being the fallback. Default: ENVIO_API_TOKEN
+   * and `chainId` (Base, Monad), read now; null turns it off. Never for a loopback upstream (a fork is not mainnet).
+   */
+  hypersync?: HyperSyncConfig | null
+  /** otto/mamoru#459: a range is asked of HyperSync only when it spans more blocks than this; default MAMORU_HYPERSYNC_MIN_BLOCKS or 100. */
+  hypersyncMinBlocks?: number
+  /**
+   * otto/mamoru#459: the last blocks of a HyperSync range read again from the providers and compared (one page, witnessed
+   * as every range is); default MAMORU_HYPERSYNC_SPOT_BLOCKS or 10. 0: no comparison when HyperSync covers the range.
+   */
+  hypersyncSpotBlocks?: number
   /** Tests: the upstream transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
@@ -566,6 +589,10 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     if (missing && (tips.get(url) ?? -1n) >= at) tips.set(url, at - 1n)
   }
   const logRanges = opts.logRanges ?? logRangesFromEnv()
+  // otto/mamoru#459: HyperSync first for wide log ranges on Base and Monad. A loopback upstream is a fork: never.
+  const hyper = local ? null : opts.hypersync === undefined ? hypersyncFromEnv(opts.chainId) : opts.hypersync
+  const hyperMinBlocks = opts.hypersyncMinBlocks ?? wholeFromEnv('MAMORU_HYPERSYNC_MIN_BLOCKS', 100)
+  const hyperSpotBlocks = opts.hypersyncSpotBlocks ?? wholeFromEnv('MAMORU_HYPERSYNC_SPOT_BLOCKS', 10)
   // The upstream keeps its setting (Alchemy or MAMORU_LOG_RANGE: chunks of maxLogRange); every other provider has its own range.
   const logProviders = providers.map((url, i) => ({ url, logRange: i === 0 && chunkLogs ? maxLogRange : logRangeOf(url, logRanges) }))
   async function post(url: string, body: unknown, timeoutMs = providerTimeoutMs): Promise<{ status: number; json: any; retryAfter: string | null }> {
@@ -849,14 +876,63 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     const from = await toNum(filter.fromBlock ?? 'latest')
     const to = await toNum(filter.toBlock ?? 'latest')
     if (from > to) return []
+    // Review of #398: the whole request answers within LOGS_REQUEST_MS, every ask in it bounded by what is left (the caller
+    // times out at 60 s; before, sequential provider asks of up to 30 s each could outlast it). HyperSync's share included.
+    const deadline = Date.now() + (opts.logsRequestMs ?? LOGS_REQUEST_MS)
+    if (hyper && to - from + 1n > BigInt(hyperMinBlocks)) {
+      const logs = await hyperRange(filter, from, to, seen, deadline)
+      if (logs) return logs
+    }
+    return providerLogs(filter, from, to, seen, deadline)
+  }
+  /**
+   * otto/mamoru#459: the range from HyperSync, its last `hyperSpotBlocks` (and whatever HyperSync's archive does not
+   * have yet) from the providers, witnessed as every range is. The blocks read from both must hold the same logs:
+   * otherwise HyperSync is not believed for this request and the whole range comes from the providers. Null when
+   * HyperSync gave nothing usable (refused, over this minute's budget, timed out): the caller asks the providers.
+   * A provider failure throws as it would without HyperSync.
+   */
+  async function hyperRange(filter: any, from: bigint, to: bigint, seen: Witnessed, deadline: number): Promise<unknown[] | null> {
+    const component = caller.getStore()
+    let read: Awaited<ReturnType<typeof hypersyncLogs>>
+    try {
+      // At most a third of the request's time: the providers keep enough of it when HyperSync fails.
+      read = await hypersyncLogs(hyper!, filter, from, to, {
+        deadline: Math.min(deadline, Date.now() + Math.floor((deadline - Date.now()) / 3)),
+        onRequest: (page) => {
+          if (metrics) safeMetrics(() => metrics.recordRequest(HYPERSYNC_LABEL, 'eth_getLogs', page > 0, Date.now(), component))
+        },
+      })
+    } catch (e) {
+      const kind = e instanceof HyperSyncError ? e.kind : 'http'
+      // A spent budget or an unsupported filter sent nothing: there is no error of HyperSync's to count.
+      const asked = !(e instanceof HyperSyncError) || e.status !== undefined || kind === 'timeout' || kind === 'answer' || kind === 'http'
+      if (metrics && asked) safeMetrics(() => (metrics.recordError(HYPERSYNC_LABEL, 'eth_getLogs', kind === 'rate' ? 'rateCapacity' : kind === 'timeout' ? 'timeout' : 'other'), metrics.recordLogRange(HYPERSYNC_LABEL, 'provider_error'), metrics.recordFallback(HYPERSYNC_LABEL, 'eth_getLogs')))
+      if (process.env.MAMORU_RPC_LOG || (e instanceof HyperSyncError && e.status === 429)) console.log(`[rpc] eth_getLogs hypersync: ${e instanceof HyperSyncError ? e.message : 'failed'}; read from the RPC providers`)
+      return null
+    }
+    if (read.covered < from) return null
+    // The providers read the blocks HyperSync does not have yet, and the last ones it has, to compare.
+    const spotFrom = read.covered + 1n - BigInt(hyperSpotBlocks)
+    const tailFrom = spotFrom > from ? spotFrom : from
+    const tail = tailFrom <= to ? await providerLogs(filter, tailFrom, to, seen, deadline) : []
+    const inOverlap = (l: any) => BigInt(l.blockNumber) >= tailFrom && BigInt(l.blockNumber) <= read.covered
+    if (!sameLogs(read.logs.filter(inOverlap), tail.filter(inOverlap))) {
+      console.warn(`[rpc] eth_getLogs hypersync: logs of blocks ${tailFrom} to ${read.covered} differ from the RPC providers'; this range is read from them`)
+      if (metrics) safeMetrics(() => (metrics.recordLogRange(HYPERSYNC_LABEL, 'hash_mismatch'), metrics.recordFallback(HYPERSYNC_LABEL, 'eth_getLogs')))
+      const head = tailFrom > from ? await providerLogs(filter, from, tailFrom - 1n, seen, deadline) : []
+      return [...head, ...tail]
+    }
+    if (metrics) safeMetrics(() => metrics.recordLogRange(HYPERSYNC_LABEL, 'accepted'))
+    return [...read.logs.filter((l) => BigInt(l.blockNumber) < tailFrom), ...tail]
+  }
+  /** The range from the RPC providers, witnessed (the path every range took before HyperSync). */
+  async function providerLogs(filter: any, from: bigint, to: bigint, seen: Witnessed, deadline: number): Promise<unknown[]> {
     // A trusted provider that serves the range in a few requests goes first. Then the fewest requests, the
     // configured order breaking ties: a public provider (witnessed) serves logs only after those, or when the
     // trusted ones would need many small requests (Alchemy free: 10 blocks each). Two passes, as for every other call.
     // otto/mamoru#398: rate-limited upstream chunks are asked again only this early in the request.
     const retryUntil = Date.now() + RATE_RETRY_WINDOW_MS
-    // Review of #398: the whole request answers within LOGS_REQUEST_MS, every ask in it bounded by what is left (the caller
-    // times out at 60 s; before, sequential provider asks of up to 30 s each could outlast it).
-    const deadline = Date.now() + (opts.logsRequestMs ?? LOGS_REQUEST_MS)
     // Retries end before the deadline does, whatever the two are set to.
     const retryWindow = retryUntil < deadline ? retryUntil : deadline
     const span = to - from + 1n
