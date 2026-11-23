@@ -43,11 +43,11 @@ describe('askReturn is V4-only (spec 011 SCN-CAP-13)', () => {
 describe('a V3 sleeve whose idle USDC is due home is recorded as needing a renewal (otto/mamoru#401)', () => {
   type Note = (acc: unknown, due: { bucket: string; chainId: number; amount: bigint } | undefined) => void
   function harness(v4: boolean) {
-    const self = { onV4: () => v4, returnBlocked: new Map() }
+    const self = { onV4: () => v4, returnBlocked: new Map(), store: { save: () => {} } }
     const note = (Operator.prototype as unknown as { noteReturnBlocked: Note }).noteReturnBlocked.bind(self)
     const list = (Operator.prototype as unknown as { remoteReturnBlocked: () => unknown[] }).remoteReturnBlocked.bind(self)
-    const acc = { accountKey: '3e4d1d49-7487-4d6a-b247-8bbddc637937', remote: { chainId: 143, address: '0x0003d8021BBeC02291b7F0001e05d56BeC3734Cc' } }
-    return { note: (due?: { bucket: string; chainId: number; amount: bigint }) => note(acc, due), list }
+    const acc: { accountKey: string; remote: unknown; returnBlockedPagedAt?: number } = { accountKey: '3e4d1d49-7487-4d6a-b247-8bbddc637937', remote: { chainId: 143, address: '0x0003d8021BBeC02291b7F0001e05d56BeC3734Cc' } }
+    return { note: (due?: { bucket: string; chainId: number; amount: bigint }) => note(acc, due), list, acc, self }
   }
   const due = { bucket: 'growth', chainId: 143, amount: 449_550_202n }
 
@@ -69,6 +69,29 @@ describe('a V3 sleeve whose idle USDC is due home is recorded as needing a renew
     const v4 = harness(true)
     v4.note(due)
     expect(v4.list()).toEqual([])
+  })
+
+  test('otto/mamoru#453: a restart (in-memory list empty) pages again only a day after the last page, which is stored', () => {
+    const h = harness(false)
+    const pages = () => {
+      const lines: string[] = []
+      const error = console.error
+      console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '))
+      try {
+        h.note(due)
+      } finally {
+        console.error = error
+      }
+      return lines.filter((l) => l.includes('needs a renewal')).length
+    }
+    expect(pages()).toBe(1)
+    expect(h.acc.returnBlockedPagedAt).toBeGreaterThan(0)
+    h.self.returnBlocked.clear() // a restart
+    expect(pages()).toBe(0)
+    expect(h.list()).toHaveLength(1) // still listed on /metrics
+    h.self.returnBlocked.clear()
+    h.acc.returnBlockedPagedAt = Date.now() - 24 * 60 * 60 * 1000
+    expect(pages()).toBe(1)
   })
 })
 

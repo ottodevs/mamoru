@@ -222,6 +222,8 @@ export type AccountState = {
    * bridge checks on chain before it sends anything. `ready`: the remote operator reported it deployed, checked and running.
    */
   remote?: RemoteSafeRecord
+  /** otto/mamoru#453: when the "due home, needs a renewal" page last went out (ms), so restarts page it at most daily. */
+  returnBlockedPagedAt?: number
   /** otto/mamoru#293: the account's move to MamoruActionPolicyV4 (inventory, the remote V4 registered). Absent: never offered. */
   oneAuth?: OneAuthState
   /** otto/mamoru#278: on a V4 remote Safe, the return home its home account asked for (release.ts). */

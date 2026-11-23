@@ -1015,6 +1015,9 @@ const ACTIVATION_OVERHEAD_GAS = 600_000n
 const STATIC_GAS_PER_SESSION = 2_100_000n
 /** otto/mamoru#15: static bound for a self-funded activation's reserve swap (approve, exactInputSingle + unwrapWETH9, approve 0). */
 const STATIC_GAS_RESERVE_SWAP = 300_000n
+/** otto/mamoru#453: the shortest time between two "due home, needs a renewal" pages of one account. */
+const RETURN_BLOCKED_PAGE_MS = 24 * 60 * 60 * 1000
+
 /** otto/mamoru#15: an activation whose gas reserve swap reached its deadline: it never ran and never can, the owner approves again. */
 const RESERVE_SWAP_EXPIRED = 'RESERVE_SWAP_EXPIRED'
 /** otto/mamoru#360: an armed activation over the cap it signed but within the current one: the owner approves again. */
@@ -6740,7 +6743,13 @@ export class Operator {
       return
     }
     const had = this.returnBlocked.get(acc.accountKey)
-    if (!had) logErr(`[alert] account ${acc.accountKey.slice(0, 8)}: ${fmtUsdc(due.amount)} USDC idle on its Safe ${acc.remote.address} on chain ${due.chainId} is due home (spec 012 HRV-R4), and that Safe's signed policy cannot bridge it back: needs a renewal`, undefined)
+    // otto/mamoru#453: the page goes out at most once a day per account, across restarts (each deploy re-paged it).
+    const paged = !had && Date.now() - (acc.returnBlockedPagedAt ?? 0) >= RETURN_BLOCKED_PAGE_MS
+    if (paged) {
+      acc.returnBlockedPagedAt = Date.now()
+      this.store.save()
+      logErr(`[alert] account ${acc.accountKey.slice(0, 8)}: ${fmtUsdc(due.amount)} USDC idle on its Safe ${acc.remote.address} on chain ${due.chainId} is due home (spec 012 HRV-R4), and that Safe's signed policy cannot bridge it back: needs a renewal`, undefined)
+    }
     this.returnBlocked.set(acc.accountKey, { amount: due.amount, since: had?.since ?? Date.now() })
   }
 
