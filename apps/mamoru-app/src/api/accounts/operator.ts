@@ -2,13 +2,14 @@ import { Hono, type Context } from 'hono'
 import type { AccountContext, MigrateV4Input, RemoteSpec, ReturnHomeInput, StopInput } from '@mamoru/domain'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
 import { buildReturnHome } from '@mamoru/account/return-home'
-import { buildStop, parseRefundPolicy, refundMismatch, stopSummaryMismatch } from '@mamoru/account/stop'
+import { buildStop, parseRefundPolicy, quoteFloorMismatch, refundMismatch, stopQuotes, stopSummaryMismatch } from '@mamoru/account/stop'
 import { registryFor, type Registry } from '@mamoru/registry'
 import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
 import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
 import { ownersOf, type AccountRow } from './store.ts'
+import { readStopQuotes } from './stop-reads.ts'
 import { BASE, ownedSleeve } from '../sleeves.ts'
 import { defaultRemoteRegistry, remoteOf, upsertRemoteSleeve, verifyRemote, type RemoteRegistry } from '../remote.ts'
 import { chainFundingResponse, fundingRpcUrls, type ChainFunding } from './chain-funding.ts'
@@ -229,9 +230,11 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
    * builder only revokes sessions, closes positions, takes vault shares out and swaps back to USDC, all paid to the Safe
    * itself; any other call, target, Safe, chain or value gives another hash. A refund (a Safe-paid Stop) goes only to the
    * relayer STOP_REFUND_POLICY names for the chain, at no more than its gas price; and the summary the owner reads must say
-   * exactly what the input builds (stopSummaryMismatch). Anything else: 502 BUILD_MISMATCH, nothing signed.
+   * exactly what the input builds (stopSummaryMismatch). Each swap's minimum out is at least STOP_MIN_OUT_BPS of what
+   * QuoterV2 answers the Worker's own RPC providers for it (quoteFloorMismatch). Anything else: 502 BUILD_MISMATCH,
+   * nothing signed. QuoterV2 unreadable: 503 STOP_CHECK_UNAVAILABLE, retryable. A Stop with no swap needs no read.
    */
-  const checkStop = (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Response | null => {
+  const checkStop = async (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Promise<Response | null> => {
     let body: { safe?: unknown; chainId?: unknown; safeTxHash?: unknown; summary?: unknown; stop?: StopInput } | null
     try {
       body = JSON.parse(text)
@@ -258,7 +261,15 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     } catch (e) {
       said = `summary: ${e instanceof Error ? e.message : String(e)}`
     }
-    return said ? refusedBuild(c, row, `summary: ${said}`) : null
+    if (said) return refusedBuild(c, row, `summary: ${said}`)
+    const swaps = stopQuotes(input, registryOf(row.chain_id))
+    const quotes = chain ? await readStopQuotes(chain.fetch, fundingRpcUrls(c.env, row.chain_id), registryOf(row.chain_id), swaps) : swaps.length ? null : []
+    if (!quotes) {
+      console.error(`stop prepare for ${row.account_key} not checked: no QuoterV2 read`)
+      return apiError(c, 503, 'Mamoru could not check this Stop against the chain just now. Nothing was signed. Try again in a minute.', 'STOP_CHECK_UNAVAILABLE')
+    }
+    const floor = quoteFloorMismatch(swaps, quotes)
+    return floor ? refusedBuild(c, row, floor) : null
   }
   const refusedBuild = (c: Context<AppEnv>, row: AccountRow, why: string) => {
     console.error(`one-authorization prepare refused for ${row.account_key}: ${why}`)

@@ -42,6 +42,8 @@ export const REASON_CODES = [
   'REMOTE_SAFE_MISMATCH',
   // otto/mamoru#311: a one-authorization prepare whose Safe tx the Worker does not rebuild the same (buildMigrateV4).
   'BUILD_MISMATCH',
+  // otto/mamoru#430 review: the Worker could not read QuoterV2 to check a Stop's swaps; nothing signed, retryable.
+  'STOP_CHECK_UNAVAILABLE',
   // T7: basefee leaves no room under a v4 session's MamoruGasPolicy maxFeePerGas cap; the engine waits.
   'GAS_PRICE_OVER_CAP',
   // Pre-chequeo de política en el motor

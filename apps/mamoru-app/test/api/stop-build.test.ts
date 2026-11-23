@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { encodeFunctionData, getAddress, hashTypedData, type Hex } from 'viem'
+import { encodeAbiParameters, encodeFunctionData, getAddress, hashTypedData, type Hex } from 'viem'
 import type { StopInput } from '@mamoru/domain'
 import { ownerSafeTx } from '@mamoru/account/live'
 import { safeTxTypedData, type MultiSendCall } from '@mamoru/account/safe'
@@ -16,7 +16,18 @@ const ATTACKER = '0x9999999999999999999999999999999999999999' as Hex
 const RELAYER = `0x${'ab'.repeat(20)}` as Hex
 const POLICY = `8453:${RELAYER}:1000000000`
 
-function world(prepare: (safe: Hex) => unknown, status = 200, policy: string | undefined = POLICY) {
+/** What QuoterV2 answers the Worker for a swap: 1,440,000 units, so input()'s minimum out (1,400,000) is over 97 % of it. */
+const QUOTE = 1_440_000n
+/** A provider that answers every eth_call as QuoterV2 with `quote`, or is down; `calls` counts what it was asked. */
+const node = (quote: bigint | null, calls: string[] = []) => async (_url: string, init: RequestInit) => {
+  calls.push(String(init.body))
+  if (quote === null) throw new TypeError('connect ECONNREFUSED')
+  const result = encodeAbiParameters([{ type: 'uint256' }, { type: 'uint160' }, { type: 'uint32' }, { type: 'uint256' }], [quote, 1n, 1, 1n])
+  return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), { headers: { 'content-type': 'application/json' } })
+}
+
+function world(prepare: (safe: Hex) => unknown, status = 200, policy: string | undefined = POLICY, quote: bigint | null = QUOTE) {
+  const reads: string[] = []
   let safe: Hex = '0x0000000000000000000000000000000000000000'
   const seen: string[] = []
   const operatorFetch = async (url: string) => {
@@ -25,9 +36,10 @@ function world(prepare: (safe: Hex) => unknown, status = 200, policy: string | u
     if (url.endsWith('/stop/prepare')) return new Response(JSON.stringify(prepare(safe)), { status, headers: { 'content-type': 'application/json' } })
     return json({ ok: true })
   }
-  const h = harness(undefined, { env: { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET, ...(policy ? { STOP_REFUND_POLICY: policy } : {}) }, operatorFetch })
+  const h = harness(undefined, { env: { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET, BASE_RPC_URLS: 'https://rpc.test', ...(policy ? { STOP_REFUND_POLICY: policy } : {}) }, operatorFetch, chainFetch: node(quote, reads) })
   return {
     seen,
+    reads,
     async owner() {
       const res = await register(h, PASSKEY_A)
       const cookie = sessionCookie(res)
@@ -150,6 +162,28 @@ describe('stop/prepare is rebuilt by the Worker (#430)', () => {
     expect(((await (await call('/stop/prepare')).json()) as { code: string }).code).toBe('BUILD_MISMATCH')
     const free = world((safe) => offer(input(safe)), 200, '')
     expect((await (await free.owner())('/stop/prepare')).status).toBe(200)
+  })
+
+  test("each swap's minimum out against QuoterV2: at 97 % of the Worker's quote passed on; far under it (a sandwich) refused", async () => {
+    const near = world((safe) => offer(input(safe)))
+    expect((await (await near.owner())('/stop/prepare')).status).toBe(200)
+    expect(near.reads.some((b) => b.includes('eth_call'))).toBe(true)
+    const low = world((safe) => offer(input(safe)), 200, POLICY, QUOTE * 2n)
+    const res = await (await low.owner())('/stop/prepare')
+    expect(res.status).toBe(502)
+    expect(((await res.json()) as { code: string; safeTxHash?: string }).code).toBe('BUILD_MISMATCH')
+  })
+
+  test('QuoterV2 unreadable: 503 STOP_CHECK_UNAVAILABLE, nothing to sign; a Stop with no swap needs no read', async () => {
+    const down = world((safe) => offer(input(safe)), 200, POLICY, null)
+    const res = await (await down.owner())('/stop/prepare')
+    expect(res.status).toBe(503)
+    const body = (await res.json()) as { code: string; safeTxHash?: string }
+    expect(body.code).toBe('STOP_CHECK_UNAVAILABLE')
+    expect(body.safeTxHash).toBeUndefined()
+    const none = world((safe) => offer(input(safe, { swaps: [] })), 200, POLICY, null)
+    expect((await (await none.owner())('/stop/prepare')).status).toBe(200)
+    expect(none.reads).toEqual([])
   })
 
   test('a refusal of the operator (nothing to sign) and the Stop submit itself are passed on as they are', async () => {

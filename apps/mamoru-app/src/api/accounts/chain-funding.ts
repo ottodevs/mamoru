@@ -108,7 +108,7 @@ class ReadError extends Error {}
 const HEX = /^0x([0-9a-f]{2})*$/i
 const WORD = /^0x[0-9a-f]{64}$/i
 
-async function rpc(fetcher: ChainFetch, url: string, method: string, params: unknown[]): Promise<string> {
+export async function rpc(fetcher: ChainFetch, url: string, method: string, params: unknown[]): Promise<string> {
   let res: Response
   let body: unknown
   try {

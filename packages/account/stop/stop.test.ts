@@ -3,7 +3,7 @@ import { decodeFunctionData, getAddress, type Hex } from 'viem'
 import type { StopInput } from '@mamoru/domain'
 import { address, baseRegistry, erc4626Abi, monadRegistry } from '@mamoru/registry'
 import { stopBatch } from '../live/index.ts'
-import { buildStop, parseRefundPolicy, refundMismatch, stopCalls, stopSummaryMismatch, swapBackCalls, vaultExitCalls } from './index.ts'
+import { buildStop, parseRefundPolicy, quoteFloorMismatch, refundMismatch, STOP_MIN_OUT_BPS, stopCalls, stopQuotes, stopSummaryMismatch, swapBackCalls, vaultExitCalls } from './index.ts'
 
 // otto/mamoru#430: the one Stop builder of the operator and the Worker.
 
@@ -105,5 +105,22 @@ describe('what the Worker checks besides the hash', () => {
     expect(refundMismatch(paid({ gasPrice: '1000000001' }), policy.get(8453))).toBe('refund gas price')
     expect(refundMismatch(paid({ refundReceiver: `0x${'cd'.repeat(20)}` }), policy.get(8453))).toBe('refund receiver')
     expect(refundMismatch(paid({}), policy.get(10))).toBe('a refund on a chain with no refund policy')
+  })
+})
+
+describe('each swap against QuoterV2 (#430 review)', () => {
+  test('the swaps QuoterV2 is asked about are the ones the Safe tx makes, with the registry addresses and fee', () => {
+    const i = input({ swaps: [{ token: 'cbBTC', pool: 'pool:USDC/cbBTC/500', amountIn: '1500', amountOutMinimum: '1400000' }, { token: 'cbBTC', pool: 'pool:USDC/cbBTC/500', amountIn: '0', amountOutMinimum: '0' }] })
+    expect(stopQuotes(i, baseRegistry)).toEqual([{ tokenIn: address('cbBTC', baseRegistry), tokenOut: address('USDC', baseRegistry), fee: 500, amountIn: 1500n, amountOutMinimum: 1_400_000n }])
+    expect(stopQuotes(input({ swaps: [] }), baseRegistry)).toEqual([])
+  })
+  test('a minimum out at 97 % of the quote passes; a cent under it, or a missing quote, does not', () => {
+    const [q] = stopQuotes(input(), baseRegistry)
+    const floor = (q!.amountOutMinimum * 10_000n) / STOP_MIN_OUT_BPS
+    expect(quoteFloorMismatch([q!], [floor])).toBeNull()
+    expect(quoteFloorMismatch([q!], [floor + 1n])).toBe('swap 0 minimum out')
+    expect(quoteFloorMismatch([q!], [q!.amountOutMinimum * 2n])).toBe('swap 0 minimum out')
+    expect(quoteFloorMismatch([q!], [])).toBe('quotes')
+    expect(quoteFloorMismatch([], [])).toBeNull()
   })
 })

@@ -8,7 +8,7 @@
 //
 // Every call is the Safe acting on its own funds: nothing a Stop builds pays anyone but the Safe. The operator chooses the
 // amounts (minimums, shares) from its chain reads; the targets come from the chain's pinned registry.
-import { encodeFunctionData, getAddress, hashTypedData, type Hex } from 'viem'
+import { encodeFunctionData, getAddress, hashTypedData, parseAbi, type Hex } from 'viem'
 import { chainOf, isChainId, type Address, type StopInput } from '@mamoru/domain'
 import { address, entry, erc4626Abi, type Registry } from '@mamoru/registry'
 import { uniswapV3 } from '@mamoru/uniswap-v3'
@@ -121,6 +121,36 @@ export function buildStop(input: StopInput, registry: Registry): { safeTx: WireS
   }
   const safeTxHash = hashTypedData(safeTxTypedData(getAddress(input.safe), input.chainId, tx))
   return { safeTx, safeTxHash, calls }
+}
+
+// ---- each swap's minimum out against QuoterV2 (otto/mamoru#430 review) ------------------------------------------------
+
+/**
+ * A swap's minimum out, at least this share (bps) of what QuoterV2 answers the Worker for the same swap. The operator asks
+ * its own quote less the policy's slippage (50 bps); the rest is room for the price to move between the two reads.
+ */
+export const STOP_MIN_OUT_BPS = 9_700n
+
+export const quoteExactInputSingleAbi = parseAbi([
+  'struct QuoteExactInputSingleParams { address tokenIn; address tokenOut; uint256 amountIn; uint24 fee; uint160 sqrtPriceLimitX96; }',
+  'function quoteExactInputSingle(QuoteExactInputSingleParams params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
+])
+
+/** A swap back to USDC the Stop of `input` makes, as QuoterV2 is asked about it. */
+export type StopQuote = { tokenIn: Address; tokenOut: Address; fee: number; amountIn: bigint; amountOutMinimum: bigint }
+
+/** The swaps of `input` that buildStop puts in the Safe tx (amountIn > 0), in order, with the registry's addresses. */
+export function stopQuotes(input: StopInput, registry: Registry): StopQuote[] {
+  return input.swaps
+    .map((s) => ({ tokenIn: address(s.token, registry), tokenOut: address('USDC', registry), fee: entry(s.pool, registry).fee!, amountIn: dec(s.amountIn, 'amountIn'), amountOutMinimum: dec(s.amountOutMinimum, 'amountOutMinimum') }))
+    .filter((q) => q.amountIn > 0n)
+}
+
+/** Null when each swap's minimum out is at least STOP_MIN_OUT_BPS of `quotes` (QuoterV2's answer for it, in order); else which. */
+export function quoteFloorMismatch(swaps: readonly StopQuote[], quotes: readonly bigint[]): string | null {
+  if (quotes.length !== swaps.length) return 'quotes'
+  for (const [i, sw] of swaps.entries()) if (sw.amountOutMinimum * 10_000n < quotes[i]! * STOP_MIN_OUT_BPS) return `swap ${i} minimum out`
+  return null
 }
 
 // ---- what the owner reads before signing a Stop (otto/mamoru#430 review) ---------------------------------------------
