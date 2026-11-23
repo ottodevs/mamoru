@@ -382,6 +382,8 @@ export type BridgeSigning = {
   userOpHash: Hex
   nonceKey: bigint
   nonce: bigint
+  /** otto/mamoru#428: the unix time the signing session stops validating userOps (its grant's validUntil; 0: no bound). */
+  validUntil?: bigint
   prepareBlock: bigint
 }
 /** Bounded waits for the bundler receipt and for `safe`, in blocks the lab lets pass. */
@@ -1362,7 +1364,7 @@ export class Engine {
     // otto/mamoru#215: a bridge-out is in the operator's bridge journal (on disk, counted in flight) before it is signed;
     // without the journal it is never signed.
     if (proposal.kind === 'bridge_out') {
-      const refusal = this.journalBridge(op.opId, proposal, hash, nonce, block.number)
+      const refusal = this.journalBridge(op.opId, proposal, hash, nonce, block.number, BigInt(session.grant.userOp.validUntil))
       if (refusal) return void j.move(op.opId, 'discarded', 'BRIDGE_JOURNAL_UNAVAILABLE', {}, refusal)
     }
     const signed = await this.signUserOp(proposal, userOp, hash, session.permissionId)
@@ -1444,12 +1446,12 @@ export class Engine {
    * otto/mamoru#215: hands a bridge-out about to be signed to the operator's bridge journal (`beforeBridgeSign`). Returns
    * why it may not be signed (no journal, or the journal refused or failed to write it), or null once it is recorded.
    */
-  private journalBridge(opId: string, p: Extract<Proposal, { kind: 'bridge_out' }>, hash: Hex, nonce: bigint, prepareBlock: bigint): string | null {
+  private journalBridge(opId: string, p: Extract<Proposal, { kind: 'bridge_out' }>, hash: Hex, nonce: bigint, prepareBlock: bigint, validUntil: bigint): string | null {
     if (!this.hooks.beforeBridgeSign) return 'no bridge journal: a bridge-out is never signed without one'
     const destinationDomain = CCTP_DOMAIN_BY_CHAIN[p.chainId]
     if (destinationDomain === undefined) return `no CCTP domain for chain ${p.chainId}`
     try {
-      this.hooks.beforeBridgeSign({ opId, account: this.cfg.account, recipient: this.bridgeRecipient(), depositor: this.bridgeDepositor(), chainId: p.chainId, pool: p.pool, bucket: p.bucket, amount: p.amount, destinationDomain, userOpHash: hash, nonceKey: this.nonceKey, nonce, prepareBlock })
+      this.hooks.beforeBridgeSign({ opId, account: this.cfg.account, recipient: this.bridgeRecipient(), depositor: this.bridgeDepositor(), chainId: p.chainId, pool: p.pool, bucket: p.bucket, amount: p.amount, destinationDomain, userOpHash: hash, nonceKey: this.nonceKey, nonce, validUntil, prepareBlock })
       return null
     } catch (e) {
       return `bridge journal: ${(e as Error).message?.split('\n')[0] ?? String(e)}`

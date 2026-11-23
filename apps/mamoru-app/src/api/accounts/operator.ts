@@ -284,6 +284,44 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     const why = uncoveredSessions(input, read.enabled) ?? quoteFloorMismatch(swaps, read.quotes)
     return why ? refusedBuild(c, row, why) : null
   }
+  /**
+   * otto/mamoru#428 (spec 014 RH-11): before the Monad operator prepares a return home, the Base operator fences the
+   * owner's Base account (same user, same environment): from then on it signs no bridge to Monad for it, and it answers
+   * 409 BRIDGE_IN_FLIGHT while one signed earlier may still mint on the Monad Safe. Null only when the fence is set and
+   * nothing is in flight. A refusal of the Base operator is passed on as it is; no answer, or any other, is 503: nothing is
+   * prepared without the fence.
+   */
+  const fenceFirst = async (c: Context<AppEnv>, row: AccountRow): Promise<Response | null> => {
+    const env = c.env
+    const home = await env.DB.prepare('SELECT * FROM accounts WHERE user_id = ? AND chain_id = ? AND env = ?').bind(row.user_id, BASE, row.env).first<AccountRow>()
+    if (!home) return refusedBuild(c, row, 'home')
+    const operatorUrl = operatorUrlFor(env, BASE)
+    if (!liveFunds(env) || !env.OPERATOR_SECRET || !operatorUrl) return unavailable(c)
+    const path = `/api/accounts/${home.account_key}/return-home/fence`
+    const header = base64url(JSON.stringify(accountContext(home)))
+    const ts = Math.floor(Date.now() / 1000).toString()
+    const body = '{}'
+    const sig = await operatorSignature(env.OPERATOR_SECRET, 'POST', path, header, body, ts)
+    let res: Response
+    let text: string
+    try {
+      res = await operatorFetch(operatorUrl + path, { method: 'POST', headers: { 'x-mamoru-account': header, 'x-mamoru-sig': sig, 'x-mamoru-ts': ts, accept: 'application/json', 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(OPERATOR_TIMEOUT_MS) })
+      text = await res.text()
+    } catch (e) {
+      console.error('operator unreachable (return-home fence)', e instanceof Error ? e.message : String(e))
+      return unavailable(c)
+    }
+    if (res.status === 409) return new Response(text, { status: 409, headers: { 'content-type': res.headers.get('content-type') ?? 'application/json', 'cache-control': 'no-store' } })
+    let fenced = false
+    try {
+      fenced = res.ok && (JSON.parse(text) as { fenced?: unknown } | null)?.fenced === true
+    } catch {}
+    if (!fenced) {
+      console.error(`return-home fence for ${row.account_key} not confirmed: status ${res.status}`)
+      return unavailable(c)
+    }
+    return null
+  }
   const refusedBuild = (c: Context<AppEnv>, row: AccountRow, why: string) => {
     console.error(`one-authorization prepare refused for ${row.account_key}: ${why}`)
     return apiError(c, 502, 'Mamoru could not confirm what you are about to approve. Nothing was signed.', 'BUILD_MISMATCH')
@@ -312,6 +350,11 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     const env = c.env
     const operatorUrl = operatorUrlFor(env, row.chain_id)
     if (!liveFunds(env) || !env.OPERATOR_SECRET || !operatorUrl) return unavailable(c)
+    // Spec 014 RH-11: the Base fence first; the Monad operator is asked to prepare only behind it.
+    if (method === 'POST' && row.chain_id !== BASE && c.req.path.endsWith('/return-home/prepare')) {
+      const refused = await fenceFirst(c, row)
+      if (refused) return refused
+    }
     const url = new URL(c.req.url)
     const path = url.pathname + url.search
     const header = base64url(JSON.stringify(accountContext(row)))

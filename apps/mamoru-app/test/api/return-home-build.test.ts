@@ -26,12 +26,20 @@ const node = (usdc: bigint | null, enabled: Hex[]) => async (_url: string, init:
   return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), { headers: { 'content-type': 'application/json' } })
 }
 
-function world(prepare: (home: Hex) => unknown, chainState: { usdc: bigint | null; enabled: Hex[] } = { usdc: BALANCE, enabled: [SESSION] }) {
+type Fence = () => Response | Promise<Response>
+const jsonRes = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } })
+
+function world(prepare: (home: Hex) => unknown, chainState: { usdc: bigint | null; enabled: Hex[] } = { usdc: BALANCE, enabled: [SESSION] }, fence: Fence = () => jsonRes({ fenced: true, at: 't' })) {
   resetOperatorHealth()
   let home: Hex = '0x0000000000000000000000000000000000000000'
-  const operatorFetch = async (url: string) => {
-    const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { 'content-type': 'application/json' } })
-    if (url.endsWith('/health')) return json({ ok: true, chainId: url.startsWith(MONAD_OPERATOR) ? 143 : 8453 })
+  /** Every operator request, in order: `base` or `monad`, and its path after the account key. */
+  const seen: string[] = []
+  const operatorFetch = async (url: string, init?: RequestInit) => {
+    const json = (b: unknown) => jsonRes(b)
+    const who = url.startsWith(MONAD_OPERATOR) ? 'monad' : 'base'
+    if (url.endsWith('/health')) return json({ ok: true, chainId: who === 'monad' ? 143 : 8453 })
+    seen.push(`${who} ${init?.method ?? 'GET'} ${url.slice(url.indexOf('/return-home'))}`)
+    if (url.endsWith('/return-home/fence')) return fence()
     if (url.endsWith('/return-home/prepare')) return json(prepare(home))
     return json({ ok: true })
   }
@@ -39,6 +47,7 @@ function world(prepare: (home: Hex) => unknown, chainState: { usdc: bigint | nul
   h.db.raw.query(`INSERT INTO ops_flag_changes (flag, enabled, author, reason, created_at) VALUES ('monad_sleeves', 1, 'ot', 'test', '2026-10-23T00:00:00Z')`).run()
   return {
     h,
+    seen,
     async owner() {
       const res = await register(h, PASSKEY_A)
       const cookie = sessionCookie(res)
@@ -151,5 +160,55 @@ describe('return-home/prepare is checked against the chain by the Worker (#428, 
     const body = (await res.json()) as { code: string; returnHome?: unknown }
     expect(body.code).toBe('RETURN_HOME_CHECK_UNAVAILABLE')
     expect(body.returnHome).toBeUndefined()
+  })
+})
+
+describe('the Base fence comes before the Monad prepare (#428, RH-11)', () => {
+  test('fence on the Base operator for the owner\'s Base account, then the Monad prepare', async () => {
+    const w = world((home) => offer(input(home)))
+    const { call } = await w.owner()
+    expect((await call('/return-home/prepare')).status).toBe(200)
+    expect(w.seen).toEqual(['base POST /return-home/fence', 'monad POST /return-home/prepare'])
+  })
+
+  test('a bridge to Monad still in flight: the Base operator\'s 409 BRIDGE_IN_FLIGHT is passed on and Monad is never asked', async () => {
+    const w = world((home) => offer(input(home)), undefined, () => jsonRes({ error: 'a transfer to your Safe on Monad is still on its way', code: 'BRIDGE_IN_FLIGHT' }, 409))
+    const { call } = await w.owner()
+    const res = await call('/return-home/prepare')
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { code: string }).code).toBe('BRIDGE_IN_FLIGHT')
+    expect(w.seen).toEqual(['base POST /return-home/fence'])
+  })
+
+  test.each([
+    ['the Base operator is down', () => { throw new TypeError('connect ECONNREFUSED') }],
+    ['the Base operator does not know the route (an older one)', () => jsonRes({ error: 'not found' }, 404)],
+    ['the Base operator fails', () => jsonRes({ error: 'x', code: 'REMOTE_UNAVAILABLE' }, 503)],
+    ['an answer that does not say fenced', () => jsonRes({ ok: true })],
+    ['an answer that is not JSON', () => new Response('ok')],
+  ] as [string, Fence][])('%s: 503, nothing prepared', async (_why, fence) => {
+    const w = world((home) => offer(input(home)), undefined, fence)
+    const { call } = await w.owner()
+    const res = await call('/return-home/prepare')
+    expect(res.status).toBe(503)
+    expect(((await res.json()) as { code: string }).code).toBe('OPERATOR_UNAVAILABLE')
+    expect(w.seen).toEqual(['base POST /return-home/fence'])
+  })
+
+  test('no Base account of this owner in the same environment: refused before any operator is asked', async () => {
+    const w = world((home) => offer(input(home)))
+    const { call } = await w.owner()
+    const env = (w.h.db.raw.query('SELECT env FROM accounts WHERE chain_id = 8453').get() as { env: string }).env
+    w.h.db.raw.query('UPDATE accounts SET env = ? WHERE chain_id = 8453').run(env === 'prod' ? 'beta' : 'prod')
+    const res = await call('/return-home/prepare')
+    expect(res.status).toBe(502)
+    expect(w.seen).toEqual([])
+  })
+
+  test('the signed submit is not fenced again: it goes to the Monad operator alone', async () => {
+    const w = world((home) => offer(input(home)))
+    const { call } = await w.owner()
+    expect((await call('/return-home')).status).toBe(200)
+    expect(w.seen).toEqual(['monad POST /return-home'])
   })
 })

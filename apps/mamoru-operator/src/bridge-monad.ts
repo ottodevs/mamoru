@@ -93,6 +93,11 @@ export type BridgeBurn = {
   updatedAt: string
   nonceKey: string
   nonce: string
+  /**
+   * otto/mamoru#428 (spec 014 RH-11): the unix time its session stops validating userOps (the grant's validUntil; absent or
+   * '0': no such bound known). Past it at a safe block with its nonce unspent, the userOp can never land.
+   */
+  validUntil?: string
   /** Base block the op was prepared at: its UserOperationEvent is looked for from here. */
   fromBlock: string
   /** Review of #144: the first Base block not yet known to be without this userOp's event (the settle cursor). */
@@ -141,6 +146,11 @@ type Journal = {
   shown: Record<string, { totalUsdc: string; block: string; at: string }>
   /** otto/mamoru#269: every Safe a burn of the account went to, kept until a read shows it empty (not pruned with the burns). */
   pastRecipients: Record<string, Address[]>
+  /**
+   * otto/mamoru#428 (spec 014 RH-11): accounts whose owner is taking their Monad funds home. Permanent: no bridge to Monad is
+   * journaled (so none is signed) for a fenced account, ever again.
+   */
+  fences: Record<string, { at: string }>
 }
 
 /** What the ops view shows of a bridge. */
@@ -301,7 +311,7 @@ export class MonadBridge {
   }
 
   private load(): Journal {
-    const empty: Journal = { burns: {}, mintDays: {}, sleeves: {}, cooldowns: {}, shown: {}, pastRecipients: {} }
+    const empty: Journal = { burns: {}, mintDays: {}, sleeves: {}, cooldowns: {}, shown: {}, pastRecipients: {}, fences: {} }
     if (!existsSync(this.file)) return empty
     // An unreadable journal stops the operator: starting empty would forget burns in flight and bridge them again.
     const j = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Journal>
@@ -328,7 +338,7 @@ export class MonadBridge {
       if (typeof was === 'string') b.stuckAlertedAt = b.state === 'sending' ? { sending: was } : { burned: was }
       else if (was !== undefined && (was === null || typeof was !== 'object')) delete b.stuckAlertedAt
     }
-    return { burns: j.burns ?? {}, mintDays: j.mintDays ?? {}, sleeves: j.sleeves ?? {}, cooldowns: j.cooldowns ?? {}, shown: j.shown ?? {}, pastRecipients: past }
+    return { burns: j.burns ?? {}, mintDays: j.mintDays ?? {}, sleeves: j.sleeves ?? {}, cooldowns: j.cooldowns ?? {}, shown: j.shown ?? {}, pastRecipients: past, fences: j.fences ?? {} }
   }
 
   private save(): void {
@@ -351,6 +361,8 @@ export class MonadBridge {
    * then discards the op unsigned) when it cannot be written, or when the burn is not one this journal can follow.
    */
   recordSending(accountKey: string, b: BridgeSigning): void {
+    // otto/mamoru#428 (spec 014 RH-11): behind the fence nothing is journaled, so nothing is signed or signed again.
+    if (this.journal.fences[accountKey]) throw new Error('the owner is taking this account\'s Monad funds home: no bridge to Monad is signed for it')
     if (b.chainId !== BRIDGE_MONAD_CHAIN_ID || b.destinationDomain !== CCTP_DOMAIN_MONAD) throw new Error(`bridge to chain ${b.chainId} (domain ${b.destinationDomain}): only Monad is followed`)
     const id = b.userOpHash.toLowerCase() as Hex
     const existing = this.journal.burns[id]
@@ -393,6 +405,7 @@ export class MonadBridge {
       updatedAt: at,
       nonceKey: b.nonceKey.toString(),
       nonce: b.nonce.toString(),
+      ...(b.validUntil !== undefined && b.validUntil > 0n ? { validUntil: b.validUntil.toString() } : {}),
       fromBlock: b.prepareBlock.toString(),
     }
     const kept = this.journal.pastRecipients[accountKey]
@@ -421,6 +434,41 @@ export class MonadBridge {
     if (!b || b.state !== 'sending' || !this.unsigned.has(id)) return
     this.unsigned.delete(id)
     this.update(b, { state: 'dropped', note: 'never signed: nothing can burn' })
+  }
+
+  /** otto/mamoru#428 (spec 014 RH-11): whether the account is fenced (no bridge to Monad is signed for it). */
+  fenced(accountKey: string): boolean {
+    return !!this.journal.fences[accountKey]
+  }
+
+  /**
+   * otto/mamoru#428 (spec 014 RH-11): the account's bridges to Monad that are not terminal: 'sending' (its userOp may still
+   * land), 'burned' (not minted yet), or 'minted' with no read of the recipient Safe at or after the mint recorded yet.
+   * Terminal are only 'failed' (its UserOperationEvent says it reverted), 'dropped' (never signed, or its nonce spent at a
+   * safe block without it, or its session over with the nonce unspent: it can never land) and a mint that was read.
+   */
+  openBridges(accountKey: string): BridgeBurn[] {
+    return this.burns().filter((b) => b.accountKey === accountKey && (IN_FLIGHT.has(b.state) || (b.state === 'minted' && !this.confirmed(b))))
+  }
+
+  /**
+   * otto/mamoru#428 (spec 014 RH-11): sets the account's fence, on disk before this returns (throws when it cannot be
+   * written: then nothing is fenced and the caller prepares nothing), and lists its bridges that are not terminal. The
+   * caller holds the account lock the bridge sender holds, so every bridge is either journaled before this (and listed) or
+   * refused after it. Calling it again keeps the first fence.
+   */
+  fence(accountKey: string): { at: string; open: BridgeBurn[] } {
+    let f = this.journal.fences[accountKey]
+    if (!f) {
+      f = this.journal.fences[accountKey] = { at: this.iso() }
+      try {
+        this.save()
+      } catch (e) {
+        delete this.journal.fences[accountKey]
+        throw e
+      }
+    }
+    return { at: f.at, open: this.openBridges(accountKey) }
   }
 
   /** In flight for the account against a sleeve read at `sleeveBlock` (see inFlightOf). */
@@ -1009,7 +1057,15 @@ export class MonadBridge {
     let cursor = BigInt(b.scanFrom ?? b.fromBlock)
     if (safe.number < cursor) return
     const nonceAtSafe = await this.base.readContract({ address: ep, abi: entryPointV07Abi, functionName: 'getNonce', args: [b.account, BigInt(b.nonceKey)], blockNumber: safe.number })
-    if (nonceAtSafe <= BigInt(b.nonce)) return void this.update(b, { scanFrom: (safe.number + 1n).toString() })
+    if (nonceAtSafe <= BigInt(b.nonce)) {
+      // otto/mamoru#428 (spec 014 RH-11, SCN-RH-12): behind the fence, a burn whose nonce is still unspent at a safe block
+      // past its session's end can never land (the EntryPoint refuses it from then on): dead, out of flight. Without this
+      // a userOp that never reached a block would hold the owner's return home for good.
+      if (this.journal.fences[b.accountKey] && b.validUntil !== undefined && BigInt(b.validUntil) > 0n && safe.timestamp > BigInt(b.validUntil)) {
+        return void this.update(b, { state: 'dropped', note: `nonce ${b.nonce} unspent at safe block ${safe.number}, past its session's end ${b.validUntil}: nothing can burn` })
+      }
+      return void this.update(b, { scanFrom: (safe.number + 1n).toString() })
+    }
     for (let i = 0; i < SETTLE_CHUNKS_PER_TICK && cursor <= safe.number; i++) {
       const to = cursor + SETTLE_LOG_CHUNK - 1n < safe.number ? cursor + SETTLE_LOG_CHUNK - 1n : safe.number
       const logs = await this.base.getLogs({ address: ep, event: userOperationEvent, args: { userOpHash: b.id }, fromBlock: cursor, toBlock: to })

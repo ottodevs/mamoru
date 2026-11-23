@@ -713,7 +713,7 @@ export type OperatorConfig = {
    * account's engine reads its remote value from it and records every bridge-out in it before signing. Absent: no
    * account has a remote value, and no bridge-out is ever signed.
    */
-  bridgeMonad?: Pick<MonadBridge, 'remote' | 'burns' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs' | 'capUsdc' | 'metrics' | 'tickRelayer' | 'relayers'>
+  bridgeMonad?: Pick<MonadBridge, 'remote' | 'burns' | 'recordSending' | 'discardUnsigned' | 'bridgeFailed' | 'view' | 'pending' | 'sleeveLeg' | 'moneyInFlight' | 'recipients' | 'releaseRecipient' | 'legBudgetMs' | 'capUsdc' | 'metrics' | 'tickRelayer' | 'relayers' | 'fence' | 'fenced' | 'openBridges'>
   /** otto/mamoru#278 (Base): a V4 home's returns from its remote Safe, followed to the mint here. Absent: none asked. */
   returnHome?: Pick<ReturnHome, 'tick' | 'busy' | 'inFlight' | 'floor' | 'open' | 'request' | 'lastClosedAt' | 'capUsdc' | 'returns' | 'holds' | 'noteReported'>
   /**
@@ -2035,7 +2035,7 @@ export class Operator {
     // otto/mamoru#355 (home): the returns to this Safe not in this very read, as idle USDC on its way, and the ids this
     // answer holds (on their way or in the read): the remote operator stops counting exactly those.
     // otto/mamoru#428: a return home whose burn is not recorded yet is read from its receipt first, so it is reported now.
-    if (acc && this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID) await this.recordReturnBurns(acc).catch((e: unknown) => logErr(`[return] ${acc.accountKey} burn not recorded yet:`, e))
+    if (acc && this.cfg.chainId === BRIDGE_MONAD_CHAIN_ID) await this.afterReturnHome(acc).catch((e: unknown) => logErr(`[return] ${acc.accountKey} burn not recorded yet:`, e))
     const returns = this.cfg.returnHome?.capUsdc([safe], (home) => (home.toLowerCase() === safe.toLowerCase() ? r.block : undefined))
     // otto/mamoru#355 (remote): this Safe's releases sending or burned, not in `idleUsdc`: the home counts those it does not hold.
     // A sending one whose nonce is used at this read's block has landed by then: that block, so a display can tell
@@ -6385,7 +6385,7 @@ export class Operator {
       this.stopLoop(acc.accountKey)
       this.disarm(acc, 'STOPPED')
       // otto/mamoru#428: a return home's burn is recorded from its own receipt (recordReturnBurns), whichever path settled it.
-      queueMicrotask(() => void this.recordReturnBurns(acc).catch((e: unknown) => logErr(`[return] ${acc.accountKey} burn not recorded yet:`, e)))
+      queueMicrotask(() => void this.afterReturnHome(acc).catch((e: unknown) => logErr(`[return] ${acc.accountKey} burn not recorded yet:`, e)))
       acc.active = false
       acc.revoked.push(...(p.revokes ?? []))
       acc.superseded = unrevoked(acc, p.revokes ?? [])
@@ -6729,7 +6729,9 @@ export class Operator {
         // otto/mamoru#428 (review r2): no new capital to Monad for an account in the `base_v8` scope, from the moment the
         // flag applies: nothing is bridged while it waits to move to v8, so no burn can start between that move's prepare
         // and its landing (what it holds there stays counted).
-        const open = Math.floor(Date.now() / 1000) < rs.spec.validUntil - REMOTE_BRIDGE_STOP_SECONDS && !this.inScope(acc, 'base_v8')
+        // Spec 014 RH-11: nor for an account whose owner is taking its Monad funds home (the fence; the journal refuses the
+        // signature too).
+        const open = Math.floor(Date.now() / 1000) < rs.spec.validUntil - REMOTE_BRIDGE_STOP_SECONDS && !this.inScope(acc, 'base_v8') && !bridge.fenced(acc.accountKey)
         // otto/mamoru#401: with its idle USDC (spec 012 HRV-R4) and its own signed cap (nothing is bridged past it).
         const r = await bridge.remote(acc.accountKey, rs.address as Address, this.enginePolicyOf(acc).execution.twapWindowSeconds, block, open ? rs.permissionIds : [], this.idleMinOf(acc, local))
         return /^[0-9]+$/.test(rs.spec.capUsdc) ? { ...r, cap: BigInt(rs.spec.capUsdc) } : r
@@ -7507,6 +7509,34 @@ export class Operator {
     return this.lock(ctx.accountKey).run(() => this.planReturnHome(ctx, body))
   }
 
+  /**
+   * otto/mamoru#428 (spec 014 RH-11), on Base, asked by the Worker before the Monad operator prepares the return home: the
+   * account's fence. Taken under the account lock, the one an engine review signs and sends its bridges under, and on disk
+   * before this answers: from then on no bridge to Monad is signed for the account, and every one signed before is in the
+   * bridge journal. While any of those is not terminal (it may still mint USDC on the Monad Safe after the owner's burn):
+   * 409 BRIDGE_IN_FLIGHT, nothing prepared; the fence stays, so the wait ends. Without a bridge journal nothing is answered
+   * (503): a fence that is not on disk fences nothing.
+   */
+  returnHomeFence(ctx: AccountContext): Promise<{ fenced: true; at: string }> {
+    if (this.cfg.chainId !== BASE_CHAIN_ID && this.cfg.policy.chain !== 'fork') return Promise.reject(new HttpError(409, 'NOT_A_HOME', 'the fence of a return home is taken on Base'))
+    const bridge = this.cfg.bridgeMonad
+    if (!bridge) return Promise.reject(new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru could not check the transfers to your Safe on Monad just now: nothing was prepared, try again in a minute'))
+    return this.lock(ctx.accountKey).run(async () => {
+      let f: ReturnType<MonadBridge['fence']>
+      try {
+        f = bridge.fence(ctx.accountKey)
+      } catch (e) {
+        logErr(`[return] ${ctx.accountKey} fence not written:`, e)
+        throw new HttpError(503, 'REMOTE_UNAVAILABLE', 'Mamoru could not check the transfers to your Safe on Monad just now: nothing was prepared, try again in a minute')
+      }
+      if (f.open.length) {
+        console.log(`[return] ${ctx.accountKey} fenced at ${f.at}; ${f.open.length} bridge(s) to Monad not terminal (${f.open.map((b) => `${b.id.slice(0, 10)} ${b.state}`).join(', ')})`)
+        throw new HttpError(409, 'BRIDGE_IN_FLIGHT', 'a transfer to your Safe on Monad is still on its way: try again once it lands, in about 20 minutes')
+      }
+      return { fenced: true as const, at: f.at }
+    })
+  }
+
   private async planReturnHome(ctx: AccountContext, body: unknown): Promise<OwnerTxToSign> {
     this.assertLive()
     if (this.cfg.chainId !== BRIDGE_MONAD_CHAIN_ID || !ctx.remote || isOneAuthV4(ctx.remote.policyId)) throw new HttpError(409, 'NOT_A_REMOTE', 'this Safe has nothing to send home')
@@ -7521,7 +7551,10 @@ export class Operator {
     if (!r.deployed) throw new HttpError(409, 'NOT_DEPLOYED', 'the Safe is not deployed yet')
     const open = r.positions.filter((p) => p.liquidity > 0n || p.tokensOwed0 > 0n || p.tokensOwed1 > 0n)
     if (open.length || (r.tokens.WMON ?? 0n) > RETURN_HOME_WMON_DUST) throw new HttpError(409, 'MONAD_UNWIND_PENDING', 'Mamoru is still moving your Monad position to USDC: try again in a few minutes')
-    const revokes = this.stopRevokes(acc)
+    // Spec 014 RH-02 (threats S5): the sessions removed are the ones SmartSession lists as enabled on the Safe now, whether
+    // this account knows them or not, and no other (the Worker reads the same list and refuses any other set).
+    const revokes = await this.listedEnabled(live)
+    if (!revokes) throw new HttpError(503, 'GRANT_CHECK_UNAVAILABLE', 'the approvals on your Safe could not be read just now: nothing was changed, try again in a minute')
     if (!revokes.length && r.usdc === 0n) throw new HttpError(409, 'NOTHING_TO_STOP', 'nothing to send home and no approval to revoke')
     const { nonce } = await readSafeNonce(this.client, live.safe)
     const input: ReturnHomeInput = { chainId: this.cfg.chainId, safe: live.safe, safeNonce: nonce.toString(), home, amountUsdc: r.usdc.toString(), removeIds: revokes }
@@ -7585,6 +7618,37 @@ export class Operator {
 
   /** otto/mamoru#428: return-home ops whose receipt is being read now (recordReturnBurns). */
   private readonly returnRecording = new Set<string>()
+
+  /**
+   * otto/mamoru#428 (spec 014, plan "Session found after settle"): once a return home is confirmed, the Safe's enabled
+   * sessions are read back from SmartSession. Any left (enabled by a transaction this operator never saw) is alerted and
+   * kept on the op: the Monad step is then offered again and removes it. Read once per op; an unreadable chain is read
+   * again on the next pass.
+   */
+  private async returnReadBack(acc: AccountState): Promise<void> {
+    for (const op of acc.ops as StoredOp[]) {
+      const rh = op.returnHome
+      if (!rh || op.returnLeft !== undefined || op.state !== 'confirmed' || this.returnReading.has(op.opId)) continue
+      this.returnReading.add(op.opId)
+      try {
+        const left = await this.listedEnabled({ safe: getAddress(rh.safe) } as LiveAccount)
+        if (!left || op.returnLeft !== undefined) continue
+        op.returnLeft = left.length
+        this.store.save()
+        if (left.length) logErr(`[alert] ${acc.accountKey} return home ${op.opId}: ${left.length} session(s) still enabled on ${rh.safe} after it confirmed (${left.join(', ')}); the Monad step is offered again`, undefined)
+      } finally {
+        this.returnReading.delete(op.opId)
+      }
+    }
+  }
+
+  private readonly returnReading = new Set<string>()
+
+  /** otto/mamoru#428: what follows a confirmed return home, from the chain: its burn recorded, its sessions read back. */
+  private async afterReturnHome(acc: AccountState): Promise<void> {
+    await this.recordReturnBurns(acc)
+    await this.returnReadBack(acc)
+  }
 
   /** Monad side (`POST migrate-v4/status`, from the Base operator): whether step 1 is confirmed on this Safe. */
   migrateV4Status(ctx: AccountContext): { done: boolean; failed: boolean; code?: string } {

@@ -46,6 +46,11 @@ export type StoredOp = OpView & {
   returnRecorded?: string
   /** otto/mamoru#428: reads of its receipt that showed no burn log yet (a provider's incomplete answer is read again). */
   returnReads?: number
+  /**
+   * otto/mamoru#428 (spec 014, plan "Session found after settle"): how many sessions SmartSession still lists on the Safe once the
+   * return home confirmed (0: none, the expected outcome). Above 0 it was alerted and the Monad step is offered again.
+   */
+  returnLeft?: number
   /** otto/mamoru#293, migrate-v4: the old ids it removed (revokes: every id it revoked; OpView.migrateStep its step). */
   removes?: Hex[]
   /** migrate-v4: the C the signed InitV4 carries (applied by a late receipt). */

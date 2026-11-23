@@ -24,7 +24,7 @@ const GRANTS: Hex[] = [`0x${'0a'.repeat(32)}`, `0x${'0b'.repeat(32)}`]
 
 type Read = { deployed: boolean; usdc: bigint; tokens: Record<string, bigint>; positions: { tokenId: bigint; liquidity: bigint; tokensOwed0: bigint; tokensOwed1: bigint }[]; block: bigint }
 
-function monad(read: Partial<Read> = {}) {
+function monad(read: Partial<Read> = {}, listed: Hex[] | null = GRANTS) {
   const client = { getBlockNumber: async () => 500n, getCode: async () => '0x01', readContract: async ({ functionName }: { functionName: string }) => (functionName === 'nonce' ? 5n : 0n) } as unknown as PublicClient
   const state = { accounts: {} as Record<string, AccountState> }
   const store = { state, save: () => {} } as unknown as StateStore
@@ -33,9 +33,12 @@ function monad(read: Partial<Read> = {}) {
   const held: { kind: string; calls: { to: string; data: Hex }[]; summary: string[]; extra: Record<string, unknown> }[] = []
   const p = op as unknown as Record<string, unknown>
   p.enforceGrants = async () => true
+  // SmartSession.getPermissionIDs(safe): the sessions enabled on the Safe now (null: unreadable).
+  const chain = { listed }
+  p.listedEnabled = async () => chain.listed
   p.readOf = async () => ({ deployed: true, usdc: 28_850_000n, tokens: { USDC: 28_850_000n }, positions: [], block: 500n, ...read })
   p.hold = async (_a: AccountState, _l: unknown, kind: string, calls: { to: string; data: Hex }[], summary: string[], extra: Record<string, unknown>) => (held.push({ kind, calls, summary, extra }), { safeTxHash: '0x' })
-  return { op, held, state }
+  return { op, held, state, chain }
 }
 
 const code = async (p: Promise<unknown>) => {
@@ -64,6 +67,31 @@ describe('return-home on the Monad operator', () => {
     expect(await code(monad().op.prepareReturnHome(rctx, {}))).toBe('BAD_REQUEST')
     expect(await code(monad().op.prepareReturnHome(rctx, { home: SAFE }))).toBe('BAD_REQUEST')
     expect(await code(monad().op.prepareReturnHome({ ...rctx, remote: { ...SPEC, policyId: 'one-auth-v4-remote' } }, { home: HOME }))).toBe('NOT_A_REMOTE')
+  })
+
+  test('spec 014 RH-02: the sessions removed are the ones enabled on chain now, known to this account or not, and no other', async () => {
+    const UNKNOWN = `0x${'0c'.repeat(32)}` as Hex
+    // GRANTS[1] is no longer enabled on chain (revoked unseen); UNKNOWN is enabled and this account never recorded it.
+    const m = monad({}, [GRANTS[0]!, UNKNOWN])
+    await m.op.prepareReturnHome(rctx, { home: HOME })
+    const input = (m.held[0]!.extra.returnHome as { input: { removeIds: Hex[] } }).input
+    expect(input.removeIds).toEqual([GRANTS[0]!, UNKNOWN])
+    expect(m.held[0]!.extra.revokes).toEqual([GRANTS[0]!, UNKNOWN])
+    expect(m.held[0]!.summary[0]).toBe("Revoke the engine's 2 session grant(s) on your Safe on Monad: Mamoru stops working there")
+  })
+
+  test('the enabled sessions cannot be read: nothing prepared (GRANT_CHECK_UNAVAILABLE)', async () => {
+    const m = monad({}, null)
+    expect(await code(m.op.prepareReturnHome(rctx, { home: HOME }))).toBe('GRANT_CHECK_UNAVAILABLE')
+    expect(m.held).toHaveLength(0)
+  })
+
+  test('no session left on chain and USDC on the Safe (a late mint): a send-only step; neither: NOTHING_TO_STOP', async () => {
+    const m = monad({}, [])
+    await m.op.prepareReturnHome(rctx, { home: HOME })
+    expect((m.held[0]!.extra.returnHome as { input: { removeIds: Hex[]; amountUsdc: string } }).input).toMatchObject({ removeIds: [], amountUsdc: '28850000' })
+    expect(m.held[0]!.calls).toHaveLength(2)
+    expect(await code(monad({ usdc: 0n, tokens: {} }, []).op.prepareReturnHome(rctx, { home: HOME }))).toBe('NOTHING_TO_STOP')
   })
 
   test('WMON dust and no USDC: a revoke only', async () => {
@@ -158,5 +186,43 @@ describe('review r1: the burn is recorded only from its own receipt', () => {
     await quiet(() => (m.op as unknown as { recordReturnBurns(a: AccountState): Promise<void> }).recordReturnBurns(acc))
     expect(acc.releasesDone ?? []).toHaveLength(0)
     expect((acc.ops[0] as unknown as { returnRecorded: string }).returnRecorded).toBe('RETURN_BURN_MISMATCH')
+  })
+})
+
+describe('spec 014 plan: the sessions are read back once the return home confirmed', () => {
+  const settled = (m: ReturnType<typeof monad>) => {
+    const acc = m.state.accounts[rctx.accountKey]!
+    acc.ops.push({ opId: 'own-1-exit', kind: 'exit', state: 'confirmed', txHash: `0x${'22'.repeat(32)}`, returnHome: RH, returnRecorded: 'burned', updatedAt: 't' } as never)
+    return { acc, op: acc.ops[0] as unknown as { returnLeft?: number }, readBack: () => (m.op as unknown as { returnReadBack(a: AccountState): Promise<void> }).returnReadBack(acc) }
+  }
+
+  test('none left: recorded once, no alert, not read again', async () => {
+    const m = monad({}, [])
+    const s = settled(m)
+    const { logged } = await quiet(() => s.readBack())
+    expect(s.op.returnLeft).toBe(0)
+    expect(logged.join('\n')).not.toContain('[alert]')
+    m.chain.listed = [GRANTS[0]!]
+    await s.readBack()
+    expect(s.op.returnLeft).toBe(0)
+  })
+
+  test('a session still enabled: alerted and kept on the op, so the Monad step is offered again', async () => {
+    const m = monad({}, [GRANTS[1]!])
+    const s = settled(m)
+    const { logged } = await quiet(() => s.readBack())
+    expect(s.op.returnLeft).toBe(1)
+    expect(logged.join('\n')).toContain('[alert]')
+    expect(logged.join('\n')).toContain('1 session(s) still enabled')
+  })
+
+  test('the chain unreadable: nothing recorded, read again on the next pass', async () => {
+    const m = monad({}, null)
+    const s = settled(m)
+    await quiet(() => s.readBack())
+    expect(s.op.returnLeft).toBeUndefined()
+    m.chain.listed = []
+    await s.readBack()
+    expect(s.op.returnLeft).toBe(0)
   })
 })
