@@ -1026,6 +1026,12 @@ function unrevoked(acc: AccountState, revokes: Hex[]): Hex[] {
   return [...new Set([...acc.grants.map((g) => g.permissionId), ...(acc.superseded ?? [])])].filter((id) => !gone.has(id.toLowerCase()))
 }
 
+/** `ids` once each (case-insensitive), first spelling kept, in order. */
+function uniqueIds(ids: readonly Hex[]): Hex[] {
+  const seen = new Set<string>()
+  return ids.filter((id) => !seen.has(id.toLowerCase()) && !!seen.add(id.toLowerCase()))
+}
+
 /** `ids` without those in `gone`. */
 function unrevokedIds(ids: Hex[], gone: Hex[]): Hex[] {
   const g = new Set(gone.map((id) => id.toLowerCase()))
@@ -4868,13 +4874,19 @@ export class Operator {
     // after it was revoked is revoked by this stop too. A full Stop runs under the account lock: the full sweep, which
     // records what it finds. A revoke-only Stop runs outside it: a read that changes nothing, its finds added to this
     // stop's revocations. Unreadable: refused (GRANT_CHECK_UNAVAILABLE), like any read a Stop needs.
+    // otto/mamoru#434: and every id SmartSession lists as enabled on the Safe, whether this account knows it or not: the
+    // Worker reads the same list and refuses a Stop that leaves one of them enabled.
+    const unreadable = () => new HttpError(503, 'GRANT_CHECK_UNAVAILABLE', 'the approvals on your Safe could not be read just now: nothing was changed, try again in a minute')
     if (opts.revokeOnly) {
       const again = await this.enabledElsewhere(acc)
-      if (!again) throw new HttpError(503, 'GRANT_CHECK_UNAVAILABLE', 'the approvals on your Safe could not be read just now: nothing was changed, try again in a minute')
-      return this.planRevokeOnly(acc, live, [...new Set([...this.stopRevokes(acc), ...again])])
+      const listed = again && (await this.listedEnabled(live))
+      if (!again || !listed) throw unreadable()
+      return this.planRevokeOnly(acc, live, uniqueIds([...this.stopRevokes(acc), ...again, ...listed]))
     }
-    if (!(await this.enforceGrants(acc))) throw new HttpError(503, 'GRANT_CHECK_UNAVAILABLE', 'the approvals on your Safe could not be read just now: nothing was changed, try again in a minute')
-    const revokes = this.stopRevokes(acc)
+    if (!(await this.enforceGrants(acc))) throw unreadable()
+    const listed = await this.listedEnabled(live)
+    if (!listed) throw unreadable()
+    const revokes = uniqueIds([...this.stopRevokes(acc), ...listed])
     try {
       return await this.planFullStop(acc, live, revokes)
     } catch (e) {
@@ -4906,6 +4918,16 @@ export class Operator {
     if (block === null) return null
     const on = await this.enabledAt(acc, list, block)
     return on ? list.filter((_, i) => on[i]) : null
+  }
+
+  /** otto/mamoru#434: SmartSession.getPermissionIDs(safe), every id enabled on the Safe now; null when it cannot be read. */
+  private async listedEnabled(live: LiveAccount): Promise<Hex[] | null> {
+    try {
+      return (await this.client.readContract({ address: address('SmartSession', this.cfg.registry), abi: smartSessionV4Abi, functionName: 'getPermissionIDs', args: [live.safe] })) as Hex[]
+    } catch (e) {
+      logErr(`[owner] ${live.safe} stop: the Safe's enabled sessions unreadable:`, e)
+      return null
+    }
   }
 
   private async planRevokeOnly(acc: AccountState, live: LiveAccount, revokes: Hex[], fallback = false): Promise<OwnerTxToSign> {

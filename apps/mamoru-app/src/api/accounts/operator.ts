@@ -1,15 +1,15 @@
 import { Hono, type Context } from 'hono'
-import type { AccountContext, MigrateV4Input, RemoteSpec, ReturnHomeInput, StopInput } from '@mamoru/domain'
+import type { AccountContext, Address, MigrateV4Input, RemoteSpec, ReturnHomeInput, StopInput } from '@mamoru/domain'
 import { buildMigrateV4 } from '@mamoru/account/one-auth'
 import { buildReturnHome } from '@mamoru/account/return-home'
-import { buildStop, parseRefundPolicy, quoteFloorMismatch, refundMismatch, stopQuotes, stopSummaryMismatch } from '@mamoru/account/stop'
+import { buildStop, parseRefundPolicy, quoteFloorMismatch, refundMismatch, stopQuotes, stopSummaryMismatch, uncoveredSessions } from '@mamoru/account/stop'
 import { registryFor, type Registry } from '@mamoru/registry'
 import type { AppEnv } from '../context.ts'
 import { liveFunds, operatorUrlFor } from '../env.ts'
 import { accountNotFound, apiError } from '../errors.ts'
 import { ACCOUNT_KEY } from '../onboarding/account.ts'
 import { ownersOf, type AccountRow } from './store.ts'
-import { readStopQuotes } from './stop-reads.ts'
+import { readStopChain } from './stop-reads.ts'
 import { BASE, ownedSleeve } from '../sleeves.ts'
 import { defaultRemoteRegistry, remoteOf, upsertRemoteSleeve, verifyRemote, type RemoteRegistry } from '../remote.ts'
 import { chainFundingResponse, fundingRpcUrls, type ChainFunding } from './chain-funding.ts'
@@ -230,9 +230,10 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
    * builder only revokes sessions, closes positions, takes vault shares out and swaps back to USDC, all paid to the Safe
    * itself; any other call, target, Safe, chain or value gives another hash. A refund (a Safe-paid Stop) goes only to the
    * relayer STOP_REFUND_POLICY names for the chain, at no more than its gas price; and the summary the owner reads must say
-   * exactly what the input builds (stopSummaryMismatch). Each swap's minimum out is at least STOP_MIN_OUT_BPS of what
-   * QuoterV2 answers the Worker's own RPC providers for it (quoteFloorMismatch). Anything else: 502 BUILD_MISMATCH,
-   * nothing signed. QuoterV2 unreadable: 503 STOP_CHECK_UNAVAILABLE, retryable. A Stop with no swap needs no read.
+   * exactly what the input builds (stopSummaryMismatch). Read from the Worker's own RPC providers: it revokes every
+   * session SmartSession lists as enabled on the Safe (uncoveredSessions, #434), and each swap's minimum out is at least
+   * STOP_MIN_OUT_BPS of what QuoterV2 answers for it (quoteFloorMismatch). Anything else: 502 BUILD_MISMATCH, nothing
+   * signed. Those reads unavailable: 503 STOP_CHECK_UNAVAILABLE, retryable.
    */
   const checkStop = async (c: Context<AppEnv>, row: AccountRow, text: string, registryOf: (chainId: number) => Registry): Promise<Response | null> => {
     let body: { safe?: unknown; chainId?: unknown; safeTxHash?: unknown; summary?: unknown; stop?: StopInput } | null
@@ -263,13 +264,13 @@ export function operatorRoutes(operatorFetch: OperatorFetch, chain?: ChainFundin
     }
     if (said) return refusedBuild(c, row, `summary: ${said}`)
     const swaps = stopQuotes(input, registryOf(row.chain_id))
-    const quotes = chain ? await readStopQuotes(chain.fetch, fundingRpcUrls(c.env, row.chain_id), registryOf(row.chain_id), swaps) : swaps.length ? null : []
-    if (!quotes) {
-      console.error(`stop prepare for ${row.account_key} not checked: no QuoterV2 read`)
+    const read = chain ? await readStopChain(chain.fetch, fundingRpcUrls(c.env, row.chain_id), registryOf(row.chain_id), row.address as Address, swaps) : null
+    if (!read) {
+      console.error(`stop prepare for ${row.account_key} not checked: no chain read`)
       return apiError(c, 503, 'Mamoru could not check this Stop against the chain just now. Nothing was signed. Try again in a minute.', 'STOP_CHECK_UNAVAILABLE')
     }
-    const floor = quoteFloorMismatch(swaps, quotes)
-    return floor ? refusedBuild(c, row, floor) : null
+    const why = uncoveredSessions(input, read.enabled) ?? quoteFloorMismatch(swaps, read.quotes)
+    return why ? refusedBuild(c, row, why) : null
   }
   const refusedBuild = (c: Context<AppEnv>, row: AccountRow, why: string) => {
     console.error(`one-authorization prepare refused for ${row.account_key}: ${why}`)

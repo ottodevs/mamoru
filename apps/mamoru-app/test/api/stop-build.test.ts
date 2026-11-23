@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { encodeAbiParameters, encodeFunctionData, getAddress, hashTypedData, type Hex } from 'viem'
+import { encodeAbiParameters, encodeFunctionData, getAddress, hashTypedData, toFunctionSelector, type Hex } from 'viem'
 import type { StopInput } from '@mamoru/domain'
 import { ownerSafeTx } from '@mamoru/account/live'
 import { safeTxTypedData, type MultiSendCall } from '@mamoru/account/safe'
@@ -18,15 +18,22 @@ const POLICY = `8453:${RELAYER}:1000000000`
 
 /** What QuoterV2 answers the Worker for a swap: 1,440,000 units, so input()'s minimum out (1,400,000) is over 97 % of it. */
 const QUOTE = 1_440_000n
-/** A provider that answers every eth_call as QuoterV2 with `quote`, or is down; `calls` counts what it was asked. */
-const node = (quote: bigint | null, calls: string[] = []) => async (_url: string, init: RequestInit) => {
+const GET_PERMISSION_IDS = toFunctionSelector('getPermissionIDs(address)')
+/**
+ * A provider that answers SmartSession.getPermissionIDs with `enabled` and any other eth_call as QuoterV2 with `quote`,
+ * or is down (`quote` null); `calls` counts what it was asked.
+ */
+const node = (quote: bigint | null, calls: string[] = [], enabled: Hex[] = []) => async (_url: string, init: RequestInit) => {
   calls.push(String(init.body))
   if (quote === null) throw new TypeError('connect ECONNREFUSED')
-  const result = encodeAbiParameters([{ type: 'uint256' }, { type: 'uint160' }, { type: 'uint32' }, { type: 'uint256' }], [quote, 1n, 1, 1n])
+  const { params } = JSON.parse(String(init.body)) as { params: [{ data: Hex }] }
+  const result = params[0].data.startsWith(GET_PERMISSION_IDS)
+    ? encodeAbiParameters([{ type: 'bytes32[]' }], [enabled])
+    : encodeAbiParameters([{ type: 'uint256' }, { type: 'uint160' }, { type: 'uint32' }, { type: 'uint256' }], [quote, 1n, 1, 1n])
   return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), { headers: { 'content-type': 'application/json' } })
 }
 
-function world(prepare: (safe: Hex) => unknown, status = 200, policy: string | undefined = POLICY, quote: bigint | null = QUOTE) {
+function world(prepare: (safe: Hex) => unknown, status = 200, policy: string | undefined = POLICY, quote: bigint | null = QUOTE, enabled: Hex[] = []) {
   const reads: string[] = []
   let safe: Hex = '0x0000000000000000000000000000000000000000'
   const seen: string[] = []
@@ -36,7 +43,7 @@ function world(prepare: (safe: Hex) => unknown, status = 200, policy: string | u
     if (url.endsWith('/stop/prepare')) return new Response(JSON.stringify(prepare(safe)), { status, headers: { 'content-type': 'application/json' } })
     return json({ ok: true })
   }
-  const h = harness(undefined, { env: { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET, BASE_RPC_URLS: 'https://rpc.test', ...(policy ? { STOP_REFUND_POLICY: policy } : {}) }, operatorFetch, chainFetch: node(quote, reads) })
+  const h = harness(undefined, { env: { LIVE_FUNDS: '1', OPERATOR_URL: 'https://operator.test', OPERATOR_SECRET, BASE_RPC_URLS: 'https://rpc.test', ...(policy ? { STOP_REFUND_POLICY: policy } : {}) }, operatorFetch, chainFetch: node(quote, reads, enabled) })
   return {
     seen,
     reads,
@@ -174,7 +181,22 @@ describe('stop/prepare is rebuilt by the Worker (#430)', () => {
     expect(((await res.json()) as { code: string; safeTxHash?: string }).code).toBe('BUILD_MISMATCH')
   })
 
-  test('QuoterV2 unreadable: 503 STOP_CHECK_UNAVAILABLE, nothing to sign; a Stop with no swap needs no read', async () => {
+  test('#434: a Stop that leaves a session SmartSession lists as enabled is refused; one that revokes them all is passed on', async () => {
+    const ids = input('0x0000000000000000000000000000000000000000').revokes as Hex[]
+    const all = world((safe) => offer(input(safe)), 200, POLICY, QUOTE, [ids[1]!.toUpperCase().replace('0X', '0x') as Hex, ids[0]!])
+    expect((await (await all.owner())('/stop/prepare')).status).toBe(200)
+    const extra = world((safe) => offer(input(safe)), 200, POLICY, QUOTE, [...ids, `0x${'ee'.repeat(32)}`])
+    const res = await (await extra.owner())('/stop/prepare')
+    expect(res.status).toBe(502)
+    const body = (await res.json()) as { code: string; safeTxHash?: string }
+    expect(body.code).toBe('BUILD_MISMATCH')
+    expect(body.safeTxHash).toBeUndefined()
+    // A revoke-only Stop that revokes another session than the one enabled: refused all the same.
+    const other = world((safe) => offer(input(safe, { revokes: [ids[1]!], positions: [], deadline: '0', vaultExits: [], swaps: [] })), 200, POLICY, QUOTE, [ids[0]!])
+    expect((await (await other.owner())('/stop/prepare')).status).toBe(502)
+  })
+
+  test('the chain unreadable: 503 STOP_CHECK_UNAVAILABLE, nothing to sign, whether the Stop swaps or not', async () => {
     const down = world((safe) => offer(input(safe)), 200, POLICY, null)
     const res = await (await down.owner())('/stop/prepare')
     expect(res.status).toBe(503)
@@ -182,8 +204,7 @@ describe('stop/prepare is rebuilt by the Worker (#430)', () => {
     expect(body.code).toBe('STOP_CHECK_UNAVAILABLE')
     expect(body.safeTxHash).toBeUndefined()
     const none = world((safe) => offer(input(safe, { swaps: [] })), 200, POLICY, null)
-    expect((await (await none.owner())('/stop/prepare')).status).toBe(200)
-    expect(none.reads).toEqual([])
+    expect((await (await none.owner())('/stop/prepare')).status).toBe(503)
   })
 
   test('a refusal of the operator (nothing to sign) and the Stop submit itself are passed on as they are', async () => {

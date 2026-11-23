@@ -109,6 +109,8 @@ function world(usdc: bigint, policyId: keyof typeof POLICIES = 'conservador-live
         if (knobs.grantsEnabled === null) return knobs.enabled.has(String(args?.[0]).toLowerCase())
         return knobs.grantsEnabled && (blockNumber === undefined || blockNumber >= knobs.enabledFromBlock)
       }
+      // otto/mamoru#434: SmartSession's list of what is enabled: the chain model's set; nothing beyond the record otherwise.
+      if (functionName === 'getPermissionIDs') return knobs.grantsEnabled === null ? [...knobs.enabled] : []
       throw new Error(`unexpected read ${functionName}`)
     },
     request: async ({ method, params }: { method?: string; params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {

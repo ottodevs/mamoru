@@ -153,6 +153,18 @@ export function quoteFloorMismatch(swaps: readonly StopQuote[], quotes: readonly
   return null
 }
 
+// ---- every enabled session revoked (otto/mamoru#434) ------------------------------------------------------------------
+
+/**
+ * Null when `input` revokes every id of `enabled` (SmartSession.getPermissionIDs of the Safe, read by the Worker); else how
+ * many it leaves enabled. A Stop that leaves one enabled would leave its holder acting on the Safe after the owner signs.
+ */
+export function uncoveredSessions(input: StopInput, enabled: readonly Hex[]): string | null {
+  const revoked = new Set(input.revokes.map((id) => id.toLowerCase()))
+  const left = enabled.filter((id) => !revoked.has(id.toLowerCase()))
+  return left.length ? `${left.length} enabled session(s) not revoked` : null
+}
+
 // ---- what the owner reads before signing a Stop (otto/mamoru#430 review) ---------------------------------------------
 
 const usdc = (v: bigint): string => {

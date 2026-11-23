@@ -70,4 +70,19 @@ describe('a prepared Stop carries the builder input it was built from (#430)', (
     expect(out.summary[1]).toContain('could not be read')
     rebuilds(out)
   })
+
+  test('#434: every session SmartSession lists on the Safe is revoked, known or not; the list unreadable: nothing prepared', async () => {
+    const FOREIGN = `0x${'bb'.repeat(32)}` as Hex
+    for (const revokeOnly of [false, true]) {
+      const w = world(5_000_000n)
+      w.chain.deployed = true
+      w.op.account(ctx).acc.grants = [GRANT]
+      w.knobs.listed = [FOREIGN]
+      const tx = await w.op.prepareStop(ctx, { revokeOnly })
+      rebuilds(tx)
+      expect(tx.stop!.revokes.map((id) => id.toLowerCase())).toEqual([GRANT.permissionId, FOREIGN])
+      w.knobs.listDown = true
+      expect(await quiet(() => w.op.prepareStop(ctx, { revokeOnly }).catch((e: unknown) => e))).toMatchObject({ out: { status: 503, code: 'GRANT_CHECK_UNAVAILABLE' } })
+    }
+  })
 })

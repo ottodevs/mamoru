@@ -3,7 +3,7 @@ import { decodeFunctionData, getAddress, type Hex } from 'viem'
 import type { StopInput } from '@mamoru/domain'
 import { address, baseRegistry, erc4626Abi, monadRegistry } from '@mamoru/registry'
 import { stopBatch } from '../live/index.ts'
-import { buildStop, parseRefundPolicy, quoteFloorMismatch, refundMismatch, STOP_MIN_OUT_BPS, stopCalls, stopQuotes, stopSummaryMismatch, swapBackCalls, vaultExitCalls } from './index.ts'
+import { buildStop, parseRefundPolicy, quoteFloorMismatch, refundMismatch, STOP_MIN_OUT_BPS, stopCalls, stopQuotes, stopSummaryMismatch, swapBackCalls, uncoveredSessions, vaultExitCalls } from './index.ts'
 
 // otto/mamoru#430: the one Stop builder of the operator and the Worker.
 
@@ -122,5 +122,16 @@ describe('each swap against QuoterV2 (#430 review)', () => {
     expect(quoteFloorMismatch([q!], [q!.amountOutMinimum * 2n])).toBe('swap 0 minimum out')
     expect(quoteFloorMismatch([q!], [])).toBe('quotes')
     expect(quoteFloorMismatch([], [])).toBeNull()
+  })
+})
+
+describe('every enabled session revoked (#434)', () => {
+  test('passes when the revokes cover every enabled id, in any case; names how many are left otherwise', () => {
+    const a = `0x${'01'.repeat(32)}` as Hex
+    const b = `0x${'0B'.repeat(32)}` as Hex
+    expect(uncoveredSessions(input({ revokes: [a, b.toLowerCase() as Hex] }), [b, a])).toBeNull()
+    expect(uncoveredSessions(input({ revokes: [a] }), [])).toBeNull()
+    expect(uncoveredSessions(input({ revokes: [a] }), [a, b])).toBe('1 enabled session(s) not revoked')
+    expect(uncoveredSessions(input({ revokes: [] }), [a, b])).toBe('2 enabled session(s) not revoked')
   })
 })

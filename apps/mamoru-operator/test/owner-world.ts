@@ -71,6 +71,9 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
     gasPrice: 10_000_000n,
     /** Permissions the owner enabled again outside Mamoru (read enabled on top of the operator's own record). */
     reenabled: new Set<string>(),
+    /** otto/mamoru#434: ids SmartSession lists as enabled beyond the recorded ones; listDown: that list unreadable. */
+    listed: [] as Hex[],
+    listDown: false,
     /** isPermissionEnabled throws (an unreadable chain). */
     grantsDown: false,
     /** otto/mamoru#163: execTransactions revert (GS013: the Safe nonce stays where it was) while false. */
@@ -182,6 +185,8 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
       }
       if (functionName === 'balanceOf') return at.toLowerCase() === address('USDC', baseRegistry).toLowerCase() ? chain.usdc : 0n
       if (functionName === 'isPermissionEnabled') return enabled(args?.[0])
+      // otto/mamoru#434: SmartSession's own list of what is enabled on the Safe.
+      if (functionName === 'getPermissionIDs') return listed()
       throw new Error(`unexpected read ${functionName}`)
     },
     request: async ({ method, params }: { method?: string; params: [{ blockStateCalls: [{ calls: { from?: string; to: string; data: Hex }[] }] }] }) => {
@@ -279,6 +284,12 @@ export function world(usdc: bigint, cfgExtra: Partial<OperatorConfig> = {}) {
   const enabled = (id: unknown) => {
     if (knobs.grantsDown) throw new Error('HTTP request failed. Status: 429')
     return knobs.reenabled.has(String(id).toLowerCase()) || recorded(id)
+  }
+  /** What SmartSession lists: the recorded grants and the re-enabled ids, and any a test adds (`knobs.listed`). */
+  const listed = (): Hex[] => {
+    if (knobs.grantsDown || knobs.listDown) throw new Error('HTTP request failed. Status: 429')
+    const ids = [...Object.values(state.accounts).flatMap((a) => [...a.grants.map((g) => g.permissionId), ...(a.superseded ?? [])]), ...[...knobs.reenabled].map((x) => x as Hex), ...knobs.listed]
+    return [...new Set(ids.map((x) => x.toLowerCase() as Hex))]
   }
   const recorded = (id: unknown) => Object.values(state.accounts).some((a) => [...a.grants.map((g) => g.permissionId), ...(a.superseded ?? [])].some((x) => x.toLowerCase() === String(id).toLowerCase()))
   const relayer = {
