@@ -299,50 +299,6 @@ function chunksOf(j: any): any[] {
   return chunks
 }
 
-/**
- * The hash HyperSync has for block `n`, or null when its archive does not have that block. One request of the
- * minute's budget. The caller compares it with the providers' hash of the same block: an indexer on another fork, or
- * behind a reorg, has another one, and every block under a matching one is the same chain.
- */
-export async function hypersyncBlockHash(cfg: HyperSyncConfig, n: bigint, o: { deadline?: number; onRequest?: () => void; now?: () => number } = {}): Promise<string | null> {
-  const send = cfg.fetch ?? fetch
-  const now = o.now ?? Date.now
-  if (!cfg.limiter.take(now())) throw new HyperSyncError('rate', 'HyperSync budget of this minute is spent')
-  const left = o.deadline === undefined ? Number.POSITIVE_INFINITY : o.deadline - now()
-  const timeout = Math.min(cfg.requestMs ?? HYPERSYNC_REQUEST_MS, left)
-  if (!(timeout > 0)) throw new HyperSyncError('timeout', 'no time left for HyperSync in this request')
-  o.onRequest?.()
-  let res: Response
-  try {
-    res = await send(`${cfg.url}/query`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.token}` },
-      body: JSON.stringify({ from_block: Number(n), to_block: Number(n + 1n), include_all_blocks: true, field_selection: { block: ['number', 'hash'] } }),
-      signal: AbortSignal.timeout(timeout),
-    })
-  } catch (e) {
-    const name = (e as Error)?.name
-    throw new HyperSyncError(name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'http', 'HyperSync did not answer the block')
-  }
-  if (res.status === 429) {
-    cfg.limiter.pause(now() + (waitOf(res) ?? RATE_PAUSE_MS))
-    throw new HyperSyncError('rate', 'HyperSync refused for rate', 429)
-  }
-  if (!res.ok) throw new HyperSyncError('http', `HyperSync answered HTTP ${res.status}`, res.status)
-  let j: any
-  try {
-    j = await res.json()
-  } catch {
-    throw new HyperSyncError('answer', 'HyperSync answered no JSON')
-  }
-  for (const c of chunksOf(j)) {
-    if (c.blocks === undefined || c.blocks === null) continue
-    if (!Array.isArray(c.blocks)) throw new HyperSyncError('answer', 'HyperSync answered blocks that are not a list')
-    for (const b of c.blocks) if (b && BigInt(quantity(b.number)) === n) return hexField(b.hash)
-  }
-  return null
-}
-
 /** The identity of a log for comparing two sources: every field eth_getLogs gives, numbers as numbers, hex in lower case. */
 export function logKey(l: any): string {
   const n = (v: unknown) => {

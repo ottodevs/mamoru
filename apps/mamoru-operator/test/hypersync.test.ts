@@ -37,7 +37,7 @@ const hsLog = (l: Chain) => {
 
 type HsAnswer = (body: any) => Response | Promise<Response>
 /** HyperSync over `logs`, `page` blocks per answer, archive up to `archive`; `override` answers a request instead. */
-function hyperWorld(logs: Chain[], o: { page?: number; archive?: number; override?: HsAnswer; forkHash?: boolean } = {}) {
+function hyperWorld(logs: Chain[], o: { page?: number; archive?: number; override?: HsAnswer } = {}) {
   const bodies: any[] = []
   const headers: Record<string, string>[] = []
   const fetch = async (url: string, init: RequestInit) => {
@@ -46,7 +46,6 @@ function hyperWorld(logs: Chain[], o: { page?: number; archive?: number; overrid
     bodies.push(body)
     headers.push(init.headers as Record<string, string>)
     if (o.override) return o.override(body)
-    if (body.include_all_blocks) return Response.json({ data: [{ blocks: [{ number: body.from_block, hash: o.forkHash ? `0x${'f'.repeat(64)}` : blockHash(body.from_block) }] }], archive_height: o.archive ?? 1_000_000, next_block: body.to_block })
     const archive = o.archive ?? 1_000_000
     const end = Math.min(body.to_block, body.from_block + (o.page ?? 1_000_000), archive + 1)
     const rows = logs.filter((l) => l.block >= body.from_block && l.block < end).map(hsLog)
@@ -168,22 +167,28 @@ describe('HyperSync client', () => {
 
 // ---- Through the RPC proxy ---------------------------------------------------------------------
 
-/** Two RPC providers (upstream and a witness) over `logs`; HyperSync over `hsLogs` (default the same). */
-function proxyWorld(logs: Chain[], o: { hsLogs?: Chain[]; archive?: number; override?: HsAnswer; forkHash?: boolean } = {}) {
+/** Two RPC providers (upstream and a witness) over `logs`, `finalized` their finalized block (null: refused); HyperSync over `hsLogs`. */
+function proxyWorld(logs: Chain[], o: { hsLogs?: Chain[]; archive?: number; override?: HsAnswer; finalized?: number | null } = {}) {
   const hs = hyperWorld(o.hsLogs ?? logs, o)
   const rpcCalls: { url: string; from: number; to: number }[] = []
+  let finalizedReads = 0
   const fetch = async (url: string, init: RequestInit) => {
     if (url.startsWith(HS)) return hs.fetch(url, init)
     const body = JSON.parse(String(init.body))
     const answer = (result: unknown) => Response.json({ jsonrpc: '2.0', id: body.id, result })
     if (body.method === 'eth_chainId') return answer('0x2105')
     if (body.method === 'eth_blockNumber') return answer(hex(10_000))
+    if (body.method === 'eth_getBlockByNumber' && body.params[0] === 'finalized') {
+      finalizedReads++
+      const f = o.finalized === undefined ? 9_000 : o.finalized
+      return f === null ? Response.json({ jsonrpc: '2.0', id: body.id, error: { code: -32000, message: 'finalized not supported' } }) : answer({ number: hex(f), hash: blockHash(f) })
+    }
     if (body.method === 'eth_getBlockByNumber') return answer({ number: body.params[0], hash: blockHash(Number(body.params[0])) })
     const [from, to] = [Number(body.params[0].fromBlock), Number(body.params[0].toBlock)]
     rpcCalls.push({ url, from, to })
     return answer(logs.filter((l) => l.block >= from && l.block <= to).map(rpcLog))
   }
-  return { fetch, hs, rpcCalls }
+  return { fetch, hs, rpcCalls, finalizedReads: () => finalizedReads }
 }
 
 const dirs: string[] = []
@@ -196,9 +201,9 @@ const newMetrics = () => {
   return new RpcMetrics(d)
 }
 
-async function scan(w: ReturnType<typeof proxyWorld>, from: number, to: number, o: { hypersync?: HyperSyncConfig | null; metrics?: RpcMetrics; depth?: number } = {}) {
+async function scan(w: ReturnType<typeof proxyWorld>, from: number, to: number, o: { hypersync?: HyperSyncConfig | null; metrics?: RpcMetrics } = {}) {
   const hypersync = o.hypersync === undefined ? cfg(w.fetch) : o.hypersync
-  const proxy = startRpcProxy(UPSTREAM, { fetch: w.fetch, fallbacks: [WITNESS], logRanges: {}, chunkLogs: false, hypersync, hypersyncMinBlocks: 100, hypersyncSpotBlocks: 10, hypersyncDepth: o.depth ?? 0, metrics: o.metrics })
+  const proxy = startRpcProxy(UPSTREAM, { fetch: w.fetch, fallbacks: [WITNESS], logRanges: {}, chunkLogs: false, hypersync, hypersyncMinBlocks: 100, hypersyncSpotBlocks: 10, metrics: o.metrics })
   try {
     const res = await fetch(`${proxy.url}c/deposits`, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getLogs', params: [{ address: ADDR, topics: [TOPIC], fromBlock: hex(from), toBlock: hex(to) }] }) })
     return (await res.json()) as { result?: unknown[]; error?: unknown }
@@ -257,26 +262,6 @@ describe('eth_getLogs through the proxy with HyperSync', () => {
     expect(metrics.snapshot().logRanges[HYPERSYNC_LABEL]?.hash_mismatch).toBe(1)
   })
 
-  test('no logs in the compared blocks: HyperSync\'s hash of its last block matches the providers\' and the range is accepted', async () => {
-    const logs = [{ block: 1_000, index: 0 }, { block: 3_000, index: 1 }]
-    const w = proxyWorld(logs)
-    const r = await scan(w, 1_000, 4_999)
-    expect(r.result).toEqual(logs.map(rpcLog))
-    expect(w.hs.bodies.length).toBe(2)
-    expect(w.hs.bodies[1].from_block).toBe(4_999)
-    expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 4_990, to: 4_999 }])
-  })
-
-  test('no logs in the compared blocks and HyperSync on another fork: its orphan logs are dropped, the providers read the range', async () => {
-    const canonical = [{ block: 1_000, index: 0 }]
-    const w = proxyWorld(canonical, { hsLogs: [...canonical, { block: 4_988, index: 0 }], forkHash: true })
-    const metrics = newMetrics()
-    const r = await scan(w, 1_000, 4_999, { metrics })
-    expect(r.result).toEqual(canonical.map(rpcLog))
-    expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 4_990, to: 4_999 }, { url: UPSTREAM, from: 1_000, to: 4_989 }])
-    expect(metrics.snapshot().logRanges[HYPERSYNC_LABEL]?.hash_mismatch).toBe(1)
-  })
-
   test('malformed HyperSync logs: the providers read the whole range, a deposit is not lost', async () => {
     const w = proxyWorld(LOGS, { override: () => Response.json({ data: [{ logs: 'corrupt' }], archive_height: 9_000, next_block: 5_000 }) })
     const r = await scan(w, 1_000, 4_999)
@@ -284,12 +269,39 @@ describe('eth_getLogs through the proxy with HyperSync', () => {
     expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 1_000, to: 4_999 }])
   })
 
-  test('the last blocks of a range, where a reorg can land, are read from the providers only', async () => {
-    const w = proxyWorld(LOGS)
-    const r = await scan(w, 1_000, 4_999, { depth: 64 })
+  test('HyperSync reads up to the finalized block; the providers read above it with the spot blocks', async () => {
+    const w = proxyWorld(LOGS, { finalized: 4_500 })
+    const r = await scan(w, 1_000, 4_999)
     expect(r.result).toEqual(expected(1_000, 4_999))
-    expect(w.hs.bodies[0].to_block).toBe(4_936)
-    expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 4_926, to: 4_999 }])
+    expect(w.hs.bodies.length).toBe(1)
+    expect(w.hs.bodies[0].to_block).toBe(4_501)
+    expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 4_491, to: 4_999 }])
+    expect(w.finalizedReads()).toBe(1)
+  })
+
+  test('finalized block unreadable: the providers read the whole range, HyperSync is not asked', async () => {
+    const w = proxyWorld(LOGS, { finalized: null })
+    const r = await scan(w, 1_000, 4_999)
+    expect(r.result).toEqual(expected(1_000, 4_999))
+    expect(w.hs.bodies.length).toBe(0)
+    expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 1_000, to: 4_999 }])
+  })
+
+  test('a range entirely above the finalized block is the providers\' only', async () => {
+    const w = proxyWorld(LOGS, { finalized: 900 })
+    const r = await scan(w, 1_000, 4_999)
+    expect(r.result).toEqual(expected(1_000, 4_999))
+    expect(w.hs.bodies.length).toBe(0)
+    expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 1_000, to: 4_999 }])
+  })
+
+  test('an orphan log in the compared blocks under finalized: mismatch, the providers answer the range', async () => {
+    const w = proxyWorld(LOGS, { finalized: 4_500, hsLogs: [...LOGS, { block: 4_495, index: 7 }] })
+    const metrics = newMetrics()
+    const r = await scan(w, 1_000, 4_999, { metrics })
+    expect(r.result).toEqual(expected(1_000, 4_999))
+    expect(w.rpcCalls).toEqual([{ url: UPSTREAM, from: 4_491, to: 4_999 }, { url: UPSTREAM, from: 1_000, to: 4_490 }])
+    expect(metrics.snapshot().logRanges[HYPERSYNC_LABEL]?.hash_mismatch).toBe(1)
   })
 
   test('HyperSync behind the range: the providers read what its archive does not have, from the spot blocks on', async () => {

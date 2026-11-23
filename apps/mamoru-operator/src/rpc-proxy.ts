@@ -4,7 +4,7 @@ import { LATEST_QUIET_MS, ReadCache, blockParam as pinnedBlockParam, isRead, pin
 
 const TRACE_TAGS = new Set(['latest', 'pending', 'safe', 'finalized', 'earliest'])
 import { classifyRpcError, componentOf, redactSecrets, safeMetrics, type Component, type LogRangeOutcome, type RpcMetrics } from './metrics.ts'
-import { HyperSyncError, hypersyncBlockHash, hypersyncFromEnv, hypersyncLogs, sameLogs, type HyperSyncConfig } from './hypersync.ts'
+import { HyperSyncError, hypersyncFromEnv, hypersyncLogs, sameLogs, type HyperSyncConfig } from './hypersync.ts'
 import { domainOfLabel, nextReset, QuotaBook, quotaExhausted, resetDaysFromEnv, resetFromAnswer } from './quota.ts'
 
 type Req = { jsonrpc: '2.0'; id: unknown; method: string; params?: any[] }
@@ -291,6 +291,9 @@ export function labelProviders(providers: string[]): Map<string, string> {
 /** otto/mamoru#459: HyperSync's label in /metrics (rpc counters, log ranges), beside the providers' host labels. */
 export const HYPERSYNC_LABEL = 'hypersync'
 
+/** otto/mamoru#459: how long one read of the chain's finalized block serves the log ranges of a proxy. */
+const FINALIZED_TTL_MS = 30_000
+
 /** `p`, or a throw when `deadline` (ms since the epoch) comes first. */
 function withDeadline<T>(p: Promise<T>, deadline: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -378,12 +381,6 @@ export type RpcProxyOptions = {
    * as every range is); default MAMORU_HYPERSYNC_SPOT_BLOCKS or 10. 0: no comparison when HyperSync covers the range.
    */
   hypersyncSpotBlocks?: number
-  /**
-   * otto/mamoru#459: HyperSync never reads the last blocks of a range, this many under its end: the providers do. A
-   * reorg does not reach that deep, so what HyperSync answered and the block hash compared afterwards are of one chain.
-   * Default MAMORU_HYPERSYNC_DEPTH or 64.
-   */
-  hypersyncDepth?: number
   /** Tests: the upstream transport. */
   fetch?: (url: string, init: RequestInit) => Promise<Response>
 }
@@ -608,7 +605,6 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
   const hyper = local ? null : opts.hypersync === undefined ? hypersyncFromEnv(opts.chainId) : opts.hypersync
   const hyperMinBlocks = opts.hypersyncMinBlocks ?? wholeFromEnv('MAMORU_HYPERSYNC_MIN_BLOCKS', 100)
   const hyperSpotBlocks = opts.hypersyncSpotBlocks ?? wholeFromEnv('MAMORU_HYPERSYNC_SPOT_BLOCKS', 10)
-  const hyperDepth = BigInt(opts.hypersyncDepth ?? wholeFromEnv('MAMORU_HYPERSYNC_DEPTH', 64))
   // The upstream keeps its setting (Alchemy or MAMORU_LOG_RANGE: chunks of maxLogRange); every other provider has its own range.
   const logProviders = providers.map((url, i) => ({ url, logRange: i === 0 && chunkLogs ? maxLogRange : logRangeOf(url, logRanges) }))
   async function post(url: string, body: unknown, timeoutMs = providerTimeoutMs): Promise<{ status: number; json: any; retryAfter: string | null }> {
@@ -902,18 +898,44 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
     return providerLogs(filter, from, to, seen, deadline)
   }
   /**
-   * otto/mamoru#459: the range from HyperSync, its last `hyperSpotBlocks` (and whatever HyperSync's archive does not
-   * have yet) from the providers, witnessed as every range is. The blocks read from both must hold the same logs:
-   * otherwise HyperSync is not believed for this request and the whole range comes from the providers. Null when
-   * HyperSync gave nothing usable (refused, over this minute's budget, timed out): the caller asks the providers.
-   * A provider failure throws as it would without HyperSync.
+   * otto/mamoru#459: the chain's finalized block, read from the trusted providers and kept FINALIZED_TTL_MS. Null when
+   * it cannot be read (then the whole range is the providers'). A failed read is not kept.
+   */
+  let finalizedRead: { p: Promise<bigint | null>; at: number } | null = null
+  function finalizedBlock(deadline: number): Promise<bigint | null> {
+    const now = Date.now()
+    if (!finalizedRead || now - finalizedRead.at >= FINALIZED_TTL_MS || now < finalizedRead.at) {
+      const mine: { p: Promise<bigint | null>; at: number } = {
+        at: now,
+        p: one('eth_getBlockByNumber', ['finalized', false]).then((b: any) => (typeof b?.number === 'string' && /^0x[0-9a-fA-F]+$/.test(b.number) ? BigInt(b.number) : null)).catch(() => null),
+      }
+      mine.p.then((n) => {
+        if (n === null && finalizedRead === mine) finalizedRead = null
+      })
+      finalizedRead = mine
+    }
+    // Within the request's deadline: a slow provider leaves time for the providers' read of the range.
+    return withDeadline(finalizedRead.p, deadline).catch(() => null)
+  }
+  /**
+   * otto/mamoru#459: HyperSync reads only finalized history, [from, min(finalized, its archive, to)]: no reorg reaches
+   * it, so what it answered there is the chain. The providers read everything above, together with the last
+   * `hyperSpotBlocks` blocks of HyperSync's part, witnessed as every range is; those blocks must hold the same logs,
+   * field by field, or HyperSync is not believed for this request and the whole range comes from the providers. Null
+   * when HyperSync is not used (finalized unknown, too few finalized blocks) or gave nothing usable (refused, over
+   * this minute's budget, timed out): the caller asks the providers. A provider failure throws as it would without HyperSync.
    */
   async function hyperRange(filter: any, from: bigint, to: bigint, seen: Witnessed, deadline: number): Promise<unknown[] | null> {
     const component = caller.getStore()
+    const finalized = await finalizedBlock(deadline)
+    if (finalized === null) {
+      if (process.env.MAMORU_RPC_LOG) console.log('[rpc] eth_getLogs hypersync: finalized block unknown; read from the RPC providers')
+      return null
+    }
+    const hyperTo = finalized < to ? finalized : to
+    // A finalized part the providers read in a page or two is not worth a HyperSync request of the minute's budget.
+    if (hyperTo < from || hyperTo - from + 1n <= BigInt(hyperMinBlocks)) return null
     let read: Awaited<ReturnType<typeof hypersyncLogs>>
-    // The blocks near the range's end, where a reorg can still land, are the providers' only.
-    const hyperTo = to - hyperDepth
-    if (hyperTo < from) return null
     try {
       // At most a third of the request's time: the providers keep enough of it when HyperSync fails.
       read = await hypersyncLogs(hyper!, filter, from, hyperTo, {
@@ -931,38 +953,13 @@ export function startRpcProxy(upstream: string, opts: RpcProxyOptions = {}): { u
       return null
     }
     if (read.covered < from) return null
-    // The providers read the blocks HyperSync does not have yet, and the last ones it has, to compare.
+    // The providers read what HyperSync did not (above finalized, past its archive) and its last blocks, to compare.
     const spotFrom = read.covered + 1n - BigInt(hyperSpotBlocks)
     const tailFrom = spotFrom > from ? spotFrom : from
     const tail = tailFrom <= to ? await providerLogs(filter, tailFrom, to, seen, deadline) : []
     const inOverlap = (l: any) => BigInt(l.blockNumber) >= tailFrom && BigInt(l.blockNumber) <= read.covered
-    const mine = read.logs.filter(inOverlap)
-    let same = sameLogs(mine, tail.filter(inOverlap))
-    // Logs compared carry their block hash, so a match proves HyperSync's chain there. With none to compare, the hash
-    // of the last block it covered is compared with a trusted provider's: a match is the same chain under it too.
-    if (same && !mine.length) {
-      try {
-        const [theirs, ours] = await Promise.all([
-          hypersyncBlockHash(hyper!, read.covered, {
-            deadline,
-            onRequest: () => {
-              if (metrics) safeMetrics(() => metrics.recordRequest(HYPERSYNC_LABEL, 'eth_getLogs', true, Date.now(), component))
-            },
-          }),
-          // Within the request's deadline: a slow provider leaves time for the providers' read of the range.
-          withDeadline(one('eth_getBlockByNumber', [hex(read.covered), false]), deadline).then((b: any) => (typeof b?.hash === 'string' ? b.hash.toLowerCase() : null)),
-        ])
-        same = theirs !== null && ours !== null && theirs === ours
-      } catch (e) {
-        // HyperSync's view could not be proven (its budget, a refusal): the providers read the range.
-        if (process.env.MAMORU_RPC_LOG) console.log(`[rpc] eth_getLogs hypersync: block ${read.covered} not compared (${e instanceof HyperSyncError ? e.message : 'failed'}); read from the RPC providers`)
-        if (metrics) safeMetrics(() => (metrics.recordLogRange(HYPERSYNC_LABEL, 'provider_error'), metrics.recordFallback(HYPERSYNC_LABEL, 'eth_getLogs')))
-        const head = tailFrom > from ? await providerLogs(filter, from, tailFrom - 1n, seen, deadline) : []
-        return [...head, ...tail]
-      }
-    }
-    if (!same) {
-      console.warn(`[rpc] eth_getLogs hypersync: logs or the block hash of blocks ${tailFrom} to ${read.covered} differ from the RPC providers'; this range is read from them`)
+    if (!sameLogs(read.logs.filter(inOverlap), tail.filter(inOverlap))) {
+      console.warn(`[rpc] eth_getLogs hypersync: logs of blocks ${tailFrom} to ${read.covered} differ from the RPC providers'; this range is read from them`)
       if (metrics) safeMetrics(() => (metrics.recordLogRange(HYPERSYNC_LABEL, 'hash_mismatch'), metrics.recordFallback(HYPERSYNC_LABEL, 'eth_getLogs')))
       const head = tailFrom > from ? await providerLogs(filter, from, tailFrom - 1n, seen, deadline) : []
       return [...head, ...tail]
