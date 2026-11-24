@@ -63,6 +63,48 @@ describe('loadValueSeries', () => {
     expect(v.points).toEqual([{ day: '2026-11-06', usd: 500, partial: true }])
   })
 
+  // otto/mamoru#460: Brais, 23-Nov. Leave Monad sent 148.79 home; the Monad Safe's last read (before the burn) stayed.
+  test('a chain left by a minted home transfer stops counting from the mint day and no longer makes the series stale', async () => {
+    const db = seed()
+    const block = (chain: number, key: string, b: number) => db.raw.exec(`UPDATE account_snapshot_latest SET block = ${b} WHERE chain_id = ${chain} AND account_key = '${key}'`)
+    const home = (id: string, amount: number, burnBlock: number, state: string, mintedAt: string | null) =>
+      db.raw.exec(
+        `INSERT INTO yield_ledger_bridges (id, direction, account_key, env, amount_usdc, state, burn_block, burn_at, minted_block, minted_at, updated_at)
+         VALUES ('${id}', 'home', 'base-u1', 'prod', ${amount}, '${state}', ${burnBlock}, NULL, ${mintedAt ? 500 : 'NULL'}, ${mintedAt ? `'${mintedAt}'` : 'NULL'}, '2026-11-06T17:00:00.000Z')`,
+      )
+    daily(db, '2026-11-04', 8453, 'base-u1', 800 * USDC)
+    daily(db, '2026-11-04', 143, 'monad-u1', 148 * USDC)
+    daily(db, '2026-11-05', 8453, 'base-u1', 948 * USDC) // the 148 arrived on Base
+    daily(db, '2026-11-05', 143, 'monad-u1', 148 * USDC) // last read before the burn
+    daily(db, '2026-11-06', 8453, 'base-u1', 950 * USDC) // Monad no longer read
+    latest(db, 8453, 'base-u1', '2026-11-06T17:50:00.000Z')
+    latest(db, 143, 'monad-u1', '2026-11-05T16:18:00.000Z')
+    block(143, 'monad-u1', 100)
+    home('h1', 148 * USDC, 101, 'minted', '2026-11-05T16:29:00.000Z')
+    const v = await loadValueSeries(db, 'u1', NOW)
+    expect(v.points).toEqual([
+      { day: '2026-11-04', usd: 948 },
+      { day: '2026-11-05', usd: 948 },
+      { day: '2026-11-06', usd: 950 },
+    ])
+    expect(v.asOf).toBe('2026-11-06T17:50:00.000Z')
+  })
+
+  test('a home transfer the sleeve read already reflects, or one not minted yet, changes nothing', async () => {
+    const db = seed()
+    daily(db, '2026-11-06', 8453, 'base-u1', 800 * USDC)
+    daily(db, '2026-11-06', 143, 'monad-u1', 100 * USDC)
+    latest(db, 8453, 'base-u1', '2026-11-06T17:50:00.000Z')
+    latest(db, 143, 'monad-u1', '2026-11-06T17:55:00.000Z')
+    db.raw.exec(`UPDATE account_snapshot_latest SET block = 200 WHERE chain_id = 143`)
+    db.raw.exec(
+      `INSERT INTO yield_ledger_bridges (id, direction, account_key, env, amount_usdc, state, burn_block, burn_at, minted_block, minted_at, updated_at) VALUES
+       ('after', 'home', 'base-u1', 'prod', ${50 * USDC}, 'minted', 150, NULL, 500, '2026-11-06T10:00:00.000Z', '2026-11-06T10:00:00.000Z'),
+       ('flying', 'home', 'base-u1', 'prod', ${30 * USDC}, 'burned', 250, NULL, NULL, NULL, '2026-11-06T17:56:00.000Z')`,
+    )
+    expect((await loadValueSeries(db, 'u1', NOW)).points).toEqual([{ day: '2026-11-06', usd: 900 }])
+  })
+
   test('no rows yet: empty series, no asOf', async () => {
     expect(await loadValueSeries(seed(), 'u1', NOW)).toEqual({ asOf: null, points: [], chains: [] })
   })
