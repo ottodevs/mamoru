@@ -8,11 +8,14 @@
 //
 // otto/mamoru#460: transfers between Base and Monad (yield_ledger_bridges). After Leave Monad the operator stops
 // reading the Monad Safe, so its last close (read before the burn) was carried forward while the same USDC already
-// counted on Base. Each day is now placed with the rule Stats uses for now (`inFlightNow`), applied to that day's
-// closing reads (`account_daily.block_close`, carried with the close): a transfer the source read still holds and the
-// destination read already holds is taken out of the source once; one in neither read (in flight) is added on the
-// destination. A chain whose placed value is under a cent is empty: a missing day of it is not partial and its old
-// read does not hold `asOf` back or make the last point stale.
+// counted on Base. Each day compares the transfers with that day's closing reads (`account_daily.block_close`, carried
+// with the close), as Stats `inFlightNow` does for now: a transfer the source read still holds (read before the burn
+// block, which is the burn tx's own block) and the destination read already holds (read at or after `minted_block`) is
+// taken out of the source once. It is never added for a transfer in neither read: `minted_block` can be later than the
+// real mint (an adopted mint records the block it was found at, mamoru-operator return-home.ts), so "not in the
+// destination yet" is not certain and adding would count it twice. Such a day is only marked `partial`. With that
+// upper bound the subtraction stays safe: at or after it the mint has happened. A chain whose placed value is under a
+// cent is empty: a missing day of it is not partial, and its old read does not hold `asOf` back or make the series stale.
 import type { Db } from '../env.ts'
 import { sleevesOfUser } from './store.ts'
 
@@ -36,20 +39,26 @@ type Bridge = { direction: string; amount_usdc: number; state: string; burn_bloc
 
 const usd = (baseUnits: number) => Math.round(baseUnits / 10_000) / 100
 
-/** Per chain, what the bridges change in that day's closes: same placement as Stats `inFlightNow`. */
-export function bridgeMoves(bridges: readonly Bridge[], base: Close | undefined, monad: Close | undefined): Map<number, number> {
-  const moves = new Map<number, number>()
-  if (!base || !monad) return moves
-  const add = (chain: number, v: number) => moves.set(chain, (moves.get(chain) ?? 0) + v)
+/**
+ * What the bridges change in one day's closes: the amount each source chain still holds although its destination
+ * already does (taken out of the source), and whether a transfer may be in neither read (the point is then partial).
+ */
+export function bridgeMoves(bridges: readonly Bridge[], base: Close | undefined, monad: Close | undefined): { out: Map<number, number>; unplaced: boolean } {
+  const out = new Map<number, number>()
+  let unplaced = false
+  if (!base || !monad) return { out, unplaced }
   for (const b of bridges) {
-    if ((b.state === 'burned' && b.burn_block === null) || (b.state === 'minted' && b.minted_block === null)) continue
-    const [src, dst, srcChain, dstChain] = b.direction === 'out' ? [base, monad, BASE, MONAD] : [monad, base, MONAD, BASE]
+    if ((b.state === 'burned' && b.burn_block === null) || (b.state === 'minted' && b.minted_block === null)) {
+      unplaced = true
+      continue
+    }
+    const [src, dst, srcChain] = b.direction === 'out' ? [base, monad, BASE] : [monad, base, MONAD]
     const inSource = b.burn_block === null ? b.state === 'sending' || b.state === 'requested' : src.block < b.burn_block
     const inDest = b.state === 'minted' && dst.block >= b.minted_block!
-    if (inSource && inDest) add(srcChain, -b.amount_usdc)
-    else if (!inSource && !inDest) add(dstChain, b.amount_usdc)
+    if (inSource && inDest) out.set(srcChain, (out.get(srcChain) ?? 0) + b.amount_usdc)
+    else if (!inSource && !inDest) unplaced = true
   }
-  return moves
+  return { out, unplaced }
 }
 
 export async function loadValueSeries(db: Db, userId: string, now: Date): Promise<ValueSeriesView> {
@@ -100,9 +109,9 @@ export async function loadValueSeries(db: Db, userId: string, now: Date): Promis
     }
     const moves = bridgeMoves(bridges, closes.get(BASE)?.close, closes.get(MONAD)?.close)
     let total = 0
-    let partial = false
+    let partial = moves.unplaced
     for (const [chainId, { close, carried }] of closes) {
-      const placed = Math.max(0, close.total + (moves.get(chainId) ?? 0))
+      const placed = Math.max(0, close.total - (moves.out.get(chainId) ?? 0))
       placedOn.set(chainId, placed)
       if (carried && placed >= EMPTY) partial = true
       total += placed

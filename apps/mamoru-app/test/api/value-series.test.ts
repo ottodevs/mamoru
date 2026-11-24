@@ -108,7 +108,7 @@ describe('loadValueSeries', () => {
     expect(v.asOf).toBe('2026-11-06T17:50:00.000Z')
   })
 
-  test('review #426: money Base has not read yet stays counted (on Monad while unburned, in flight after)', async () => {
+  test('review #426: money Base has not read yet stays on Monad while unburned; in flight it is not guessed, only partial', async () => {
     const db = seed()
     daily(db, '2026-11-05', 8453, 'base-u1', 800 * USDC, 450) // Base closed before the mint at 500
     daily(db, '2026-11-05', 143, 'monad-u1', 148 * USDC, 100) // Monad closed before the burn
@@ -119,8 +119,18 @@ describe('loadValueSeries', () => {
     home(db, 'h1', 148 * USDC, 'minted', 101, 500)
     expect((await loadValueSeries(db, 'u1', NOW)).points).toEqual([
       { day: '2026-11-05', usd: 948 },
-      { day: '2026-11-06', usd: 948 },
+      { day: '2026-11-06', usd: 800, partial: true },
     ])
+  })
+
+  test('review #426 r2: an adopted mint (minted_block recorded later than the real mint) never adds the money twice', async () => {
+    const db = seed()
+    daily(db, '2026-11-05', 8453, 'base-u1', 948 * USDC, 600) // real mint at 500: Base holds it
+    daily(db, '2026-11-05', 143, 'monad-u1', 0, 130) // after the burn
+    latest(db, 8453, 'base-u1', '2026-11-06T17:50:00.000Z')
+    latest(db, 143, 'monad-u1', '2026-11-06T17:55:00.000Z')
+    home(db, 'h1', 148 * USDC, 'minted', 101, 700) // adoption found it at 700
+    expect((await loadValueSeries(db, 'u1', NOW)).points).toEqual([{ day: '2026-11-05', usd: 948, partial: true }])
   })
 
   test('a transfer not minted yet, with the source read still holding it, changes nothing', async () => {
