@@ -202,7 +202,9 @@ function AprBlock({ apr, asOf }: { apr: NonNullable<StatsView['series']['apr']>;
   const chains: { v: Chain; label: string }[] = [{ v: 'all', label: 'All' }]
   if (apr.base?.length) chains.push({ v: 'base', label: 'Base' })
   if (apr.monad?.length) chains.push({ v: 'monad', label: 'Monad' })
-  const all = (chain === 'all' ? apr.all : (apr[chain] ?? apr.all)) as StatsAprPoint[]
+  // A refresh can drop the chosen chain's series: fall back to the total, never a blank chart.
+  const shown: Chain = chains.some((c) => c.v === chain) ? chain : 'all'
+  const all = (shown === 'all' ? apr.all : (apr[shown] ?? apr.all)) as StatsAprPoint[]
   const rows = range ? all.slice(-range) : all
   if (!apr.all.length) return null
   const today = asOf?.slice(0, 10)
@@ -214,7 +216,7 @@ function AprBlock({ apr, asOf }: { apr: NonNullable<StatsView['series']['apr']>;
         tip={statsCopy.aprTip}
         side={
           <div className="sx-ctl">
-            {chains.length > 1 ? <Seg label="Chain" value={chain} options={chains} onChange={setChain} /> : null}
+            {chains.length > 1 ? <Seg label="Chain" value={shown} options={chains} onChange={setChain} /> : null}
             <Seg
               label="Range"
               value={range}
