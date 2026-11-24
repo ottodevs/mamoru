@@ -55,8 +55,15 @@ export function bridgeMoves(bridges: readonly Bridge[], base: Close | undefined,
     const [src, dst, srcChain] = b.direction === 'out' ? [base, monad, BASE] : [monad, base, MONAD]
     const inSource = b.burn_block === null ? b.state === 'sending' || b.state === 'requested' : src.block < b.burn_block
     const inDest = b.state === 'minted' && dst.block >= b.minted_block!
-    if (inSource && inDest) out.set(srcChain, (out.get(srcChain) ?? 0) + b.amount_usdc)
-    else if (!inSource && !inDest) unplaced = true
+    if (inSource && inDest) {
+      // The read is before the burn, but it holds the burned money only if nothing arrived on the source chain between
+      // the two (review #426 r3). A transfer into that chain minted after the read and by the burn: not certain, so the
+      // day is partial and nothing is taken out. A deposit from outside the app in that window is not visible here (the
+      // same limit as Stats); the clamp at zero bounds what it can take out.
+      const arrived = bridges.some((a) => a !== b && a.state === 'minted' && a.minted_block !== null && (a.direction === 'out' ? MONAD : BASE) === srcChain && a.minted_block > src.block && a.minted_block <= b.burn_block!)
+      if (arrived) unplaced = true
+      else out.set(srcChain, (out.get(srcChain) ?? 0) + b.amount_usdc)
+    } else if (!inSource && !inDest) unplaced = true
   }
   return { out, unplaced }
 }

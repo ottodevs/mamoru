@@ -133,6 +133,20 @@ describe('loadValueSeries', () => {
     expect((await loadValueSeries(db, 'u1', NOW)).points).toEqual([{ day: '2026-11-05', usd: 948, partial: true }])
   })
 
+  test('review #426 r3: money that reached Monad after its read and went straight home is not taken out of that read', async () => {
+    const db = seed()
+    daily(db, '2026-11-05', 8453, 'base-u1', 148 * USDC, 600) // after the home mint at 500
+    daily(db, '2026-11-05', 143, 'monad-u1', 800 * USDC, 100) // read before the 148 arrived (out mint at 105)
+    latest(db, 8453, 'base-u1', '2026-11-06T17:50:00.000Z')
+    latest(db, 143, 'monad-u1', '2026-11-06T17:55:00.000Z')
+    db.raw.exec(
+      `INSERT INTO yield_ledger_bridges (id, direction, account_key, env, amount_usdc, state, burn_block, burn_at, minted_block, minted_at, updated_at)
+       VALUES ('o1', 'out', 'base-u1', 'prod', ${148 * USDC}, 'minted', 300, NULL, 105, NULL, '2026-11-05T10:00:00.000Z')`,
+    )
+    home(db, 'h1', 148 * USDC, 'minted', 110, 500)
+    expect((await loadValueSeries(db, 'u1', NOW)).points).toEqual([{ day: '2026-11-05', usd: 948, partial: true }])
+  })
+
   test('a transfer not minted yet, with the source read still holding it, changes nothing', async () => {
     const db = seed()
     daily(db, '2026-11-06', 8453, 'base-u1', 800 * USDC, 450)
